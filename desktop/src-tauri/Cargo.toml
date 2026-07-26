@@ -1,0 +1,19 @@
+[package]
+name = "aitest-desktop"
+version = "0.1.0"
+description = "AI Test Desktop shell (Tauri)"
+authors = ["AITest Team"]
+edition = "2021"
+rust-version = "1.70"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "1.6", features = ["dialog-open"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

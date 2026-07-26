@@ -1,0 +1,28 @@
+{
+  "name": "aitest",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AITest — Postgres + Python API + React/Tauri Desktop",
+  "scripts": {
+    "db": "docker compose up -d postgres",
+    "db:down": "docker compose stop postgres",
+    "api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./api/run.ps1",
+    "start": "npm run api",
+    "desktop": "npm run dev --prefix desktop",
+    "desktop:ui": "npm run dev:ui --prefix desktop",
+    "desktop:install": "npm install --prefix desktop",
+    "protocol:install": "npm install --prefix packages/ide-protocol",
+    "extension:compile": "npm run compile --prefix ide-plugins/vscode",
+    "extension:package": "npm run package --prefix ide-plugins/vscode",
+    "extension:antigravity:compile": "npm run compile --prefix ide-plugins/antigravity",
+    "extension:antigravity:package": "npm run package --prefix ide-plugins/antigravity",
+    "extension:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-ide-extension.ps1",
+    "mock-ide": "npm run mock-ide --prefix packages/ide-protocol",
+    "up": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-up.ps1",
+    "dev": "npm run up",
+    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-all.ps1",
+    "test:protocol": "npm test --prefix packages/ide-protocol",
+    "test:desktop": "npm run test:unit --prefix desktop",
+    "test:api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-api.ps1"
+  }
+}

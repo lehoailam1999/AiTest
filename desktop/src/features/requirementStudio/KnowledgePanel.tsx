@@ -1,0 +1,452 @@
+/**
+ * R3 Knowledge — tiêu chí đánh giá SRS sẵn sàng Sinh TC (master–detail).
+ */
+import { useEffect, useMemo, useState } from "react";
+import { Alert, Button, Empty, List, Space, Tag, Typography } from "antd";
+import { ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import type { KnowledgePayload, KnowledgeWorkspaceView } from "../../api/types";
+
+type KnowledgePanelProps = {
+  knowledge: KnowledgeWorkspaceView | null;
+  loading?: boolean;
+  building?: boolean;
+  canBuild: boolean;
+  onBuild: () => void;
+  onRefresh: () => void;
+  /** Navigate to Sinh test case (primary after Phân tích) */
+  onOpenFreeze?: () => void;
+};
+
+type SectionKey =
+  | "summary"
+  | "features"
+  | "actors"
+  | "useCases"
+  | "businessRules"
+  | "validationRules"
+  | "apiSummary"
+  | "exceptions"
+  | "acceptanceCriteria"
+  | "constraints"
+  | "gaps";
+
+const SECTIONS: { key: SectionKey; label: string }[] = [
+  { key: "summary", label: "Tóm tắt & phạm vi" },
+  { key: "features", label: "Chức năng" },
+  { key: "actors", label: "Actors & quyền" },
+  { key: "useCases", label: "Luồng nghiệp vụ" },
+  { key: "businessRules", label: "Business rules" },
+  { key: "validationRules", label: "Validation & dữ liệu" },
+  { key: "apiSummary", label: "API / giao diện" },
+  { key: "exceptions", label: "Xử lý lỗi" },
+  { key: "acceptanceCriteria", label: "Acceptance" },
+  { key: "constraints", label: "Ràng buộc NFR" },
+  { key: "gaps", label: "Thiếu sót" },
+];
+
+/** Criteria that strongly affect Generate TC quality */
+const READINESS_KEYS: { key: SectionKey; label: string }[] = [
+  { key: "features", label: "Chức năng" },
+  { key: "useCases", label: "Luồng nghiệp vụ" },
+  { key: "validationRules", label: "Validation" },
+  { key: "acceptanceCriteria", label: "Acceptance" },
+  { key: "gaps", label: "Thiếu sót" },
+];
+
+function sectionCount(payload: KnowledgePayload, key: SectionKey): number {
+  if (key === "summary") return payload.summary?.trim() ? 1 : 0;
+  if (key === "gaps") {
+    const gaps = payload.gaps;
+    if (Array.isArray(gaps) && gaps.length) return gaps.length;
+    const legacy =
+      (payload.openQuestions?.length ?? 0) + (payload.missingInformation?.length ?? 0);
+    return legacy;
+  }
+  const list = payload[key];
+  return Array.isArray(list) ? list.length : 0;
+}
+
+function gapsList(payload: KnowledgePayload): { text: string }[] {
+  if (Array.isArray(payload.gaps) && payload.gaps.length) return payload.gaps;
+  const out: { text: string }[] = [];
+  for (const row of payload.openQuestions ?? []) {
+    if (row?.text) out.push({ text: row.text });
+  }
+  for (const row of payload.missingInformation ?? []) {
+    if (row?.text) out.push({ text: row.text });
+  }
+  return out;
+}
+
+export default function KnowledgePanel({
+  knowledge,
+  loading,
+  building,
+  canBuild,
+  onBuild,
+  onRefresh,
+  onOpenFreeze,
+}: KnowledgePanelProps) {
+  const status = knowledge?.status ?? "empty";
+  const payload = knowledge?.payload;
+  const [active, setActive] = useState<SectionKey>("summary");
+
+  const nav = useMemo(() => {
+    if (!payload) return [];
+    return SECTIONS.map((s) => ({
+      ...s,
+      count: sectionCount(payload, s.key),
+    }));
+  }, [payload]);
+
+  useEffect(() => {
+    if (!payload) return;
+    const prefer = nav.find((n) => n.key !== "summary" && n.count > 0);
+    if (prefer && sectionCount(payload, "summary") === 0) setActive(prefer.key);
+  }, [knowledge?.version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (status === "empty" || !payload) {
+    return (
+      <div className="knowledge-panel">
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={
+            <span>
+              Chưa có bản Phân tích. Sau khi tài liệu đã tách đoạn, bấm{" "}
+              <strong>Dựng Phân tích</strong>.
+            </span>
+          }
+        >
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={building}
+            disabled={!canBuild}
+            onClick={onBuild}
+          >
+            Dựng Phân tích
+          </Button>
+        </Empty>
+        {!canBuild ? (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="info"
+            showIcon
+            title="Cần ít nhất một tài liệu đã tách đoạn"
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  const gapCount = sectionCount(payload, "gaps");
+  const missingCritical = READINESS_KEYS.filter(
+    (r) => r.key !== "gaps" && sectionCount(payload, r.key) === 0
+  );
+
+  return (
+    <div className={`knowledge-panel knowledge-panel--split${loading ? " is-loading" : ""}`}>
+      <div className="knowledge-toolbar">
+        <Space wrap>
+          <Tag color={status === "ready" ? "success" : status === "stale" ? "warning" : "default"}>
+            {status === "ready" ? "Ready" : status === "stale" ? "Stale" : status}
+          </Tag>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            v{knowledge?.version ?? 0}
+            {knowledge?.builder ? ` · ${knowledge.builder}` : ""}
+            {knowledge?.sourceChunkCount
+              ? ` · ${knowledge.sourceFileCount} file / ${knowledge.sourceChunkCount} đoạn`
+              : ""}
+          </Typography.Text>
+        </Space>
+        <Space wrap>
+          {onOpenFreeze && (status === "ready" || status === "stale") ? (
+            <Button type="primary" onClick={onOpenFreeze}>
+              Sang Sinh test case
+            </Button>
+          ) : null}
+          <Button icon={<ReloadOutlined />} onClick={onRefresh} disabled={building}>
+            Tải lại
+          </Button>
+          <Button
+            type={onOpenFreeze && (status === "ready" || status === "stale") ? "default" : "primary"}
+            icon={<ThunderboltOutlined />}
+            loading={building}
+            disabled={!canBuild}
+            onClick={onBuild}
+          >
+            {status === "stale" || status === "ready" ? "Dựng lại Phân tích" : "Dựng Phân tích"}
+          </Button>
+        </Space>
+      </div>
+
+      {status === "stale" ? (
+        <Alert
+          type="warning"
+          showIcon
+          title="Phân tích đã cũ"
+          description="Tài liệu vừa đổi — dựng lại Phân tích trước khi Sinh test case."
+        />
+      ) : null}
+
+      {gapCount > 0 || missingCritical.length > 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          title={
+            gapCount > 0
+              ? `${gapCount} mục Thiếu sót — xem trước khi Sinh TC`
+              : "Một số tiêu chí Sinh TC còn trống"
+          }
+          description={
+            missingCritical.length
+              ? `Thiếu: ${missingCritical.map((m) => m.label).join(", ")}.`
+              : "Sinh TC vẫn tổng hợp tài liệu + Phân tích; bổ sung SRS sẽ chính xác hơn."
+          }
+        />
+      ) : null}
+
+      <div className="knowledge-split">
+        <nav className="knowledge-nav" aria-label="Tiêu chí Phân tích">
+          {nav.map((item) => {
+            const isActive = item.key === active;
+            const warn =
+              (item.key === "gaps" && item.count > 0) ||
+              (item.key !== "summary" &&
+                item.key !== "gaps" &&
+                item.key !== "constraints" &&
+                item.key !== "apiSummary" &&
+                item.key !== "exceptions" &&
+                item.count === 0 &&
+                ["features", "useCases", "validationRules", "acceptanceCriteria"].includes(
+                  item.key
+                ));
+            return (
+              <button
+                key={item.key}
+                type="button"
+                className={`knowledge-nav-item${isActive ? " is-active" : ""}${
+                  warn ? " is-warn" : ""
+                }`}
+                onClick={() => setActive(item.key)}
+              >
+                <span className="knowledge-nav-label">{item.label}</span>
+                <span className="knowledge-nav-count">{item.count}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="knowledge-detail" aria-live="polite">
+          <header className="knowledge-detail-head">
+            <Typography.Title level={5} style={{ margin: 0 }}>
+              {SECTIONS.find((s) => s.key === active)?.label}
+            </Typography.Title>
+          </header>
+          <div className="knowledge-detail-body">{renderSection(active, payload)}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReadinessStrip({ payload }: { payload: KnowledgePayload }) {
+  return (
+    <div className="knowledge-readiness" style={{ marginBottom: 12 }}>
+      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+        Sẵn sàng Sinh TC
+      </Typography.Text>
+      <Space wrap size={[6, 6]}>
+        {READINESS_KEYS.map((r) => {
+          const n = sectionCount(payload, r.key);
+          const ok = r.key === "gaps" ? n === 0 : n > 0;
+          return (
+            <Tag key={r.key} color={ok ? "success" : "warning"}>
+              {r.label}: {r.key === "gaps" ? (n === 0 ? "OK" : n) : n || "thiếu"}
+            </Tag>
+          );
+        })}
+      </Space>
+    </div>
+  );
+}
+
+function renderSection(key: SectionKey, payload: KnowledgePayload) {
+  if (key === "summary") {
+    const text = payload.summary?.trim();
+    return (
+      <>
+        <ReadinessStrip payload={payload} />
+        {text ? (
+          <Typography.Paragraph className="knowledge-summary-text">{text}</Typography.Paragraph>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Chưa có tóm tắt" />
+        )}
+      </>
+    );
+  }
+
+  if (key === "features") {
+    const features = payload.features ?? [];
+    if (!features.length) return <EmptyHint label="Chưa có Chức năng / Feature" />;
+    return (
+      <List
+        size="small"
+        dataSource={features}
+        renderItem={(f) => (
+          <List.Item>
+            <Space orientation="vertical" size={0}>
+              <Typography.Text strong>{f.name}</Typography.Text>
+              {f.description ? (
+                <Typography.Text type="secondary">{f.description}</Typography.Text>
+              ) : null}
+            </Space>
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "businessRules") {
+    const rules = payload.businessRules ?? [];
+    if (!rules.length) return <EmptyHint />;
+    return (
+      <List
+        size="small"
+        dataSource={rules}
+        renderItem={(r) => (
+          <List.Item>
+            <Space orientation="vertical" size={0}>
+              <Typography.Text code>{r.id || "BR"}</Typography.Text>
+              <span>{r.text}</span>
+            </Space>
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "actors") {
+    const actors = payload.actors ?? [];
+    if (!actors.length) return <EmptyHint />;
+    return (
+      <List
+        size="small"
+        dataSource={actors}
+        renderItem={(a) => (
+          <List.Item>
+            <Space orientation="vertical" size={0}>
+              <strong>{a.name}</strong>
+              {a.description ? (
+                <Typography.Text type="secondary">{a.description}</Typography.Text>
+              ) : null}
+              {a.permissions ? (
+                <Typography.Text type="secondary">Quyền: {a.permissions}</Typography.Text>
+              ) : null}
+            </Space>
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "useCases") {
+    const useCases = payload.useCases ?? [];
+    if (!useCases.length) return <EmptyHint label="Chưa có luồng nghiệp vụ" />;
+    return (
+      <List
+        size="small"
+        dataSource={useCases}
+        renderItem={(u) => (
+          <List.Item>
+            <Space orientation="vertical" size={0} style={{ width: "100%" }}>
+              <Typography.Text strong>{u.name}</Typography.Text>
+              {u.steps ? (
+                <Typography.Text type="secondary" style={{ whiteSpace: "pre-wrap" }}>
+                  {u.steps}
+                </Typography.Text>
+              ) : null}
+            </Space>
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "validationRules") {
+    const rows = payload.validationRules ?? [];
+    if (!rows.length) return <EmptyHint label="Chưa có Validation & dữ liệu" />;
+    return (
+      <List
+        size="small"
+        dataSource={rows}
+        renderItem={(v) => (
+          <List.Item>
+            {v.field ? <Typography.Text code>{v.field}</Typography.Text> : null}
+            <span>{v.field ? ` — ${v.rule}` : v.rule}</span>
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "apiSummary") {
+    const apis = payload.apiSummary ?? [];
+    if (!apis.length) return <EmptyHint />;
+    return (
+      <List
+        size="small"
+        dataSource={apis}
+        renderItem={(a) => (
+          <List.Item>
+            <Tag>{a.method || "?"}</Tag>
+            <Typography.Text code>{a.path}</Typography.Text>
+            {a.note ? <Typography.Text type="secondary"> · {a.note}</Typography.Text> : null}
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "exceptions") {
+    const rows = payload.exceptions ?? [];
+    if (!rows.length) return <EmptyHint />;
+    return (
+      <List size="small" dataSource={rows} renderItem={(e) => <List.Item>{e.text}</List.Item>} />
+    );
+  }
+
+  if (key === "acceptanceCriteria") {
+    const rows = payload.acceptanceCriteria ?? [];
+    if (!rows.length) return <EmptyHint label="Chưa có Acceptance criteria" />;
+    return (
+      <List size="small" dataSource={rows} renderItem={(a) => <List.Item>{a.text}</List.Item>} />
+    );
+  }
+
+  if (key === "constraints") {
+    const constraints = payload.constraints ?? [];
+    if (!constraints.length) return <EmptyHint />;
+    return (
+      <List size="small" dataSource={constraints} renderItem={(c) => <List.Item>{c.text}</List.Item>} />
+    );
+  }
+
+  const missing = gapsList(payload);
+  if (!missing.length) return <EmptyHint label="Không còn thiếu sót — tốt" />;
+  return (
+    <List
+      size="small"
+      dataSource={missing}
+      renderItem={(m) => (
+        <List.Item>
+          <Typography.Text type="warning">{m.text}</Typography.Text>
+        </List.Item>
+      )}
+    />
+  );
+}
+
+function EmptyHint({ label = "Chưa có dữ liệu trong mục này" }: { label?: string }) {
+  return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={label} />;
+}

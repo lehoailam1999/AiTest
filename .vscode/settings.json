@@ -1,0 +1,9 @@
+{
+  "dotnet.defaultSolution": "AITest.sln",
+  "omnisharp.enableEditorConfigSupport": true,
+  "omnisharp.enableRoslynAnalyzers": true,
+  "files.exclude": {
+    "**/bin": true,
+    "**/obj": true
+  }
+}

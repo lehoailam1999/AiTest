@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: AITestDb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d AITestDb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Python FastAPI backend (M0/M1+). Desktop = React + Tauri (chạy native, không đóng gói ở đây).
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8080"
+      DATABASE_URL: "host=postgres user=postgres password=postgres dbname=AITestDb port=5432 sslmode=disable TimeZone=UTC"
+      JWT_KEY: "AITest-Super-Secret-Key-Min-32-Chars-Long!"
+      ENCRYPTION_KEY: "AITest-Encryption-Key-Change-Me-32Chars!"
+      JWT_ISSUER: "AITest.API"
+      JWT_AUDIENCE: "AITest.Client"
+      JWT_ACCESS_HOURS: "8"
+      CORS_ORIGINS: "http://localhost:5173,http://localhost:4200"
+    ports:
+      - "5100:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

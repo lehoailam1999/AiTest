@@ -1,0 +1,73 @@
+{
+  "name": "aitest-ide-antigravity",
+  "displayName": "AITest Antigravity Plugin",
+  "description": "AITest V2 — semantic context bridge & AI agent plugin for Antigravity IDE",
+  "version": "0.1.1",
+  "publisher": "aitest",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Testing"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aitest.startBridge",
+        "title": "AITest: Start IDE Bridge"
+      },
+      {
+        "command": "aitest.stopBridge",
+        "title": "AITest: Stop IDE Bridge"
+      },
+      {
+        "command": "aitest.showBridgeStatus",
+        "title": "AITest: Show Bridge Status"
+      },
+      {
+        "command": "aitest.refreshFocus",
+        "title": "AITest: Refresh Focus Packet"
+      }
+    ],
+    "configuration": {
+      "title": "AITest Antigravity Plugin",
+      "properties": {
+        "aitest.bridge.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the localhost JSON-RPC bridge when the extension activates."
+        },
+        "aitest.bridge.focusDebounceMs": {
+          "type": "number",
+          "default": 250,
+          "minimum": 50,
+          "maximum": 900,
+          "description": "Debounce caret/selection changes before pushing focusChanged (<1s)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "npm run compile && npx @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "@aitest/ide-protocol": "file:../../packages/ide-protocol",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2"
+  }
+}

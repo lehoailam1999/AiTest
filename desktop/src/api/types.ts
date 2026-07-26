@@ -1,0 +1,354 @@
+export type Project = {
+  id: string;
+  name: string;
+  description?: string | null;
+  code?: string | null;
+  language?: string | null;
+  framework?: string | null;
+  meta?: ProjectMeta | null;
+  isActive: boolean;
+  requirementCount: number;
+  testCaseCount: number;
+  createdAt: string;
+};
+
+export type ProjectMeta = {
+  syncedAt?: string;
+  frameworks?: string[];
+  testFrameworks?: string[];
+  stacks?: string[];
+  solutionCount?: number;
+  csprojCount?: number;
+  testProjectCount?: number;
+  sdkVersion?: string | null;
+  scanName?: string;
+  modules?: {
+    name: string;
+    language?: string | null;
+    frameworks?: string[];
+    stacks?: string[];
+  }[];
+  /**
+   * Alias VI/nhãn → token mã nguồn, theo từng dự án.
+   * VD: { "chia sẻ vật chứng": ["EvidenceShare", "ShareEvidence"] }
+   */
+  codeAliases?: Record<string, string[]>;
+};
+
+export type Connection = {
+  id: string;
+  projectId: string;
+  backendType: string;
+  provider: string;
+  modelName?: string | null;
+  baseUrl?: string | null;
+  status: string;
+  hasApiKey: boolean;
+  lastVerifiedAt?: string | null;
+  lastError?: string | null;
+};
+
+export type RequirementTopicItem = {
+  id: string;
+  title: string;
+  notes?: string;
+};
+
+export type RequirementTopic = {
+  id: string;
+  title: string;
+  notes?: string;
+  items: RequirementTopicItem[];
+};
+
+export type Requirement = {
+  id: string;
+  projectId: string;
+  title: string;
+  description?: string | null;
+  inputType: string;
+  status: string;
+  version: number;
+  contentHash?: string | null;
+  contentVersion?: number;
+  changeSummary?: string | null;
+  hasUserStory?: boolean;
+  hasSrs?: boolean;
+  featureCount?: number;
+  fileName?: string | null;
+  topics?: RequirementTopic[];
+  createdAt: string;
+  updatedAt?: string;
+};
+
+export type RequirementSource = {
+  sourceType: string;
+  content: string;
+  fileName?: string | null;
+  title?: string | null;
+  previewHtml?: string | null;
+};
+
+export type ParsedRequirementFile = {
+  fileName: string;
+  text: string;
+  html?: string | null;
+  parser: string;
+  warning?: string;
+  charCount: number;
+};
+
+/** R1 — Requirement Studio workspace (PG) */
+export type RequirementStudioWorkspace = {
+  id: string;
+  projectId: string;
+  title: string;
+  status: string;
+  legacySourceId?: string | null;
+  fileCount?: number;
+  chunkCount?: number;
+  knowledgeStatus?: string;
+  knowledgeVersion?: number;
+  snapshotCount?: number;
+  tcTotal?: number;
+  tcPending?: number;
+  tcApproved?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type RequirementFileRef = {
+  id: string;
+  workspaceId: string;
+  fileName: string;
+  mimeType?: string | null;
+  byteSize: number;
+  contentSha256: string;
+  parseStatus: "pending" | "ready" | "error" | string;
+  parseError?: string | null;
+  parser?: string | null;
+  parseWarning?: string | null;
+  chunkStatus?: "none" | "ready" | "error" | string;
+  chunkCount?: number;
+  storageKind: string;
+  charCount: number;
+  hasPreview: boolean;
+  extractedText?: string | null;
+  previewHtml?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type DocumentChunk = {
+  id: string;
+  fileId: string;
+  workspaceId: string;
+  ordinal: number;
+  text: string;
+  charCount: number;
+  heading?: string | null;
+  createdAt?: string;
+};
+
+export type KnowledgePayload = {
+  summary?: string;
+  features?: { name: string; description?: string }[];
+  actors?: { name: string; description?: string; permissions?: string }[];
+  useCases?: { name: string; steps?: string }[];
+  businessRules?: { id?: string; text: string; priority?: string }[];
+  validationRules?: { field?: string; rule: string }[];
+  apiSummary?: { method?: string; path: string; note?: string }[];
+  exceptions?: { text: string }[];
+  acceptanceCriteria?: { text: string }[];
+  constraints?: { text: string }[];
+  /** Merged open questions + missing — blocks accurate TC gen */
+  gaps?: { text: string }[];
+  /** Legacy dual-write (folded into gaps / validation on normalize) */
+  glossary?: { term: string; definition?: string }[];
+  databaseSummary?: { entity: string; note?: string }[];
+  openQuestions?: { text: string }[];
+  missingInformation?: { text: string }[];
+};
+
+export type CoverageDimensionStatus = "complete" | "partial" | "missing" | string;
+
+export type RequirementCoverageDimension = {
+  dimension: string;
+  status: CoverageDimensionStatus;
+  notes?: string;
+  signals?: string[];
+};
+
+export type RequirementCoverage = {
+  analyzer?: string;
+  analyzedAt?: string;
+  dimensions: RequirementCoverageDimension[];
+  totals: { complete: number; partial: number; missing: number };
+  missingDimensions?: string[];
+  partialDimensions?: string[];
+};
+
+export type KnowledgeWorkspaceView = {
+  id?: string;
+  workspaceId?: string;
+  projectId?: string;
+  status: "empty" | "building" | "ready" | "stale" | "updating" | string;
+  version: number;
+  builder?: string | null;
+  summary?: string | null;
+  payload?: KnowledgePayload | null;
+  coverage?: RequirementCoverage | null;
+  sourceFileCount: number;
+  sourceChunkCount: number;
+  error?: string | null;
+  builtAt?: string | null;
+  updatedAt?: string;
+};
+
+export type FreezeWarning = {
+  code?: string;
+  message?: string;
+  missingDimensions?: string[];
+};
+
+export type RequirementSnapshot = {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  knowledgeId?: string | null;
+  knowledgeVersion: number;
+  title: string;
+  summary?: string | null;
+  payload?: KnowledgePayload | null;
+  coverage?: RequirementCoverage | null;
+  sourceFileCount?: number;
+  sourceChunkCount?: number;
+  frozenBy?: string | null;
+  freezeNote?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type FreezeResult = {
+  snapshot: RequirementSnapshot;
+  warnings: FreezeWarning[];
+  acknowledgedMissing?: boolean;
+};
+
+export type RequirementDetail = Requirement & {
+  sources: RequirementSource[];
+};
+
+export type Job = {
+  id: string;
+  projectId: string;
+  sourceId?: string | null;
+  requirementSnapshotId?: string | null;
+  status: string;
+  backendType?: string | null;
+  generateStrategy?: "append" | "replace" | null;
+  requirementVersion?: number | null;
+  error?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  createdAt: string;
+};
+
+export type FreezeAndGenerateResult = {
+  snapshot: RequirementSnapshot;
+  warnings: FreezeWarning[];
+  job: Job;
+};
+
+export type TestCase = {
+  id: string;
+  projectId: string;
+  sourceId?: string | null;
+  requirementSnapshotId?: string | null;
+  jobId?: string | null;
+  testCaseId: string;
+  title: string;
+  module?: string | null;
+  type: string;
+  priority: string;
+  severity: string;
+  precondition?: string | null;
+  steps: string;
+  expectedResult: string;
+  actualResult?: string | null;
+  testData?: string | null;
+  automationReady: boolean;
+  isAiGenerated: boolean;
+  reviewStatus: "Draft" | "InReview" | "Approved" | "Rejected";
+  reviewComment?: string | null;
+  reviewedAt?: string | null;
+  executionStatus: string;
+  generatedFromHash?: string | null;
+  generatedFromVersion?: number | null;
+  isStale?: boolean;
+  needsReview?: boolean;
+  createdAt: string;
+};
+
+export type Execution = {
+  id: string;
+  projectId: string;
+  command: string;
+  exitCode: number;
+  status: string;
+  passed: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  durationMs: number;
+  logExcerpt: string;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type UnitResult = {
+  code: string;
+  suggestedPath: string;
+  fileName: string;
+  testCaseId: string;
+  projectId: string;
+  provider: string;
+};
+
+export type WorkspaceRunAudit = {
+  id: string;
+  projectId: string;
+  localRunId: string;
+  testType: string;
+  testCaseId?: string | null;
+  module?: string | null;
+  status: string;
+  provider?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  createdAt: string;
+};
+
+export type GenerationTaskAudit = {
+  id: string;
+  campaignId: string;
+  testCaseId?: string | null;
+  localRunId?: string | null;
+  status: string;
+  error?: string | null;
+  sortOrder: number;
+  createdAt: string;
+};
+
+export type GenerationCampaignAudit = {
+  id: string;
+  projectId: string;
+  kind: string;
+  scopeLevel?: string | null;
+  scopeLabel?: string | null;
+  status: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  tasks: GenerationTaskAudit[];
+  createdAt: string;
+};

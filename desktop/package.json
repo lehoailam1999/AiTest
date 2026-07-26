@@ -1,0 +1,42 @@
+{
+  "name": "aitest-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:ui": "vite",
+    "build": "tauri build",
+    "build:ui": "vite build",
+    "preview": "vite preview",
+    "test": "npm run test:unit",
+    "test:unit": "npm run test:p3 && npm run test:p5 && npm run test:p56 && npm run test:p0",
+    "test:p3": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/projectIntelligence/contextBudget.test.ts",
+    "test:p5": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/testOutputLayout.p5.test.ts",
+    "test:p56": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/testRunnerEnsure/resolveTestFramework.test.ts",
+    "test:p0": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/agentRun/buildPacketFromAgentRun.test.ts"
+  },
+  "dependencies": {
+    "@aitest/ide-protocol": "file:../packages/ide-protocol",
+    "@ant-design/icons": "^6.3.2",
+    "@tanstack/react-query": "^5.101.4",
+    "@tauri-apps/api": "^1.6.0",
+    "antd": "^6.5.1",
+    "dompurify": "^3.4.12",
+    "lucide-react": "^1.24.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.6.2",
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}
