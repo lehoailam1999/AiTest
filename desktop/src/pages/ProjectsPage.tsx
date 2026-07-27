@@ -189,7 +189,7 @@ export default function ProjectsPage() {
             Dự án
           </Typography.Title>
           <Typography.Text type="secondary">
-            Tạo dự án trên server → chọn dự án → Connect IDE tại Unit test.
+            Tạo dự án trên server → chọn dự án → gắn project root tại Unit test.
           </Typography.Text>
         </div>
         <Space>

@@ -49,6 +49,7 @@ from app.models.domain import (
     ChatMessage,
     ChatSession,
     DocumentChunk,
+    GenerationTask,
     Job,
     KnowledgeWorkspace,
     Project,
@@ -56,6 +57,7 @@ from app.models.domain import (
     RequirementSnapshot,
     RequirementWorkspace,
     TestCase,
+    WorkspaceRun,
 )
 from app.services.requirement_file_parse import parse_requirement_file
 
@@ -217,6 +219,100 @@ def create_workspace(
     db.commit()
     db.refresh(ws)
     return workspace_dto(ws, file_count=0, chunk_count=0, knowledge_status="empty")
+
+
+def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
+    """Hard-delete Requirement workspace and all related DB rows."""
+    ws = db.get(RequirementWorkspace, workspace_id)
+    if ws is None:
+        return None
+
+    snap_ids = [
+        row.id
+        for row in db.query(RequirementSnapshot.id)
+        .filter(RequirementSnapshot.workspace_id == workspace_id)
+        .all()
+    ]
+
+    tc_ids: list[uuid.UUID] = []
+    if snap_ids:
+        tc_ids = [
+            row.id
+            for row in db.query(TestCase.id)
+            .filter(TestCase.requirement_snapshot_id.in_(snap_ids))
+            .all()
+        ]
+
+    deleted_tc = 0
+    if tc_ids:
+        db.query(GenerationTask).filter(GenerationTask.test_case_id.in_(tc_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(WorkspaceRun).filter(WorkspaceRun.test_case_id.in_(tc_ids)).update(
+            {WorkspaceRun.test_case_id: None},
+            synchronize_session=False,
+        )
+        deleted_tc = (
+            db.query(TestCase)
+            .filter(TestCase.id.in_(tc_ids))
+            .delete(synchronize_session=False)
+        )
+
+    deleted_jobs = 0
+    if snap_ids:
+        deleted_jobs = (
+            db.query(Job)
+            .filter(Job.requirement_snapshot_id.in_(snap_ids))
+            .delete(synchronize_session=False)
+        )
+
+    deleted_snaps = (
+        db.query(RequirementSnapshot)
+        .filter(RequirementSnapshot.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
+
+    deleted_msgs = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
+    deleted_sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
+
+    deleted_chunks = (
+        db.query(DocumentChunk)
+        .filter(DocumentChunk.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
+    deleted_files = (
+        db.query(RequirementFile)
+        .filter(RequirementFile.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
+    deleted_knowledge = (
+        db.query(KnowledgeWorkspace)
+        .filter(KnowledgeWorkspace.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
+
+    db.delete(ws)
+    db.commit()
+    return {
+        "status": "deleted",
+        "id": str(workspace_id),
+        "deletedTestCases": int(deleted_tc or 0),
+        "deletedJobs": int(deleted_jobs or 0),
+        "deletedSnapshots": int(deleted_snaps or 0),
+        "deletedChatMessages": int(deleted_msgs or 0),
+        "deletedChatSessions": int(deleted_sessions or 0),
+        "deletedChunks": int(deleted_chunks or 0),
+        "deletedFiles": int(deleted_files or 0),
+        "deletedKnowledge": int(deleted_knowledge or 0),
+    }
 
 
 def ensure_default_workspace(db: Session, project_id: uuid.UUID) -> dict:
@@ -484,9 +580,9 @@ async def build_knowledge(
 
     if use_llm:
         try:
-            from app.services.connection_service import (
-                connection_api_key,
-                llm_from_connection,
+            from app.services.ai_service import (
+                RUNNER_AI_CLI,
+                chat_for_connection,
             )
 
             conn = db.scalar(
@@ -495,14 +591,14 @@ async def build_knowledge(
                 )
             )
             if conn is not None:
-                api_key = connection_api_key(conn)
-                provider = llm_from_connection(conn)
                 user_prompt = (
                     "Document excerpts:\n\n"
                     + chunks_to_prompt_text(pairs)
                     + "\n\nReturn the Knowledge JSON now."
                 )
-                raw = await provider.chat(api_key, knowledge_system_prompt(), user_prompt)
+                raw, meta = await chat_for_connection(
+                    conn, knowledge_system_prompt(), user_prompt
+                )
                 llm_payload = parse_knowledge_llm_json(raw)
                 if llm_payload and (llm_payload.get("summary") or any(
                     llm_payload.get(k) for k in (
@@ -516,7 +612,11 @@ async def build_knowledge(
                     )
                 )):
                     payload = llm_payload
-                    builder = "llm"
+                    builder = (
+                        "llm-cli"
+                        if meta.get("runnerUsed") == RUNNER_AI_CLI
+                        else "llm"
+                    )
         except Exception as e:
             # Keep heuristic; surface note in gaps
             gaps = list(payload.get("gaps") or [])
@@ -679,10 +779,7 @@ async def post_chat_turn(
 
     if use_llm:
         try:
-            from app.services.connection_service import (
-                connection_api_key,
-                llm_from_connection,
-            )
+            from app.services.ai_service import chat_for_connection
 
             conn = db.scalar(
                 select(AiBackendConnection).where(
@@ -690,8 +787,6 @@ async def post_chat_turn(
                 )
             )
             if conn is not None:
-                api_key = connection_api_key(conn)
-                provider = llm_from_connection(conn)
                 knowledge_snip = json.dumps(payload, ensure_ascii=False)[:18_000]
                 user_prompt = (
                     "Knowledge Workspace JSON (only source of truth):\n"
@@ -699,11 +794,17 @@ async def post_chat_turn(
                     f"User message:\n{text}\n\n"
                     "Return JSON {reply, knowledgeDiff}."
                 )
-                raw = await provider.chat(api_key, chat_system_prompt(), user_prompt)
+                raw, meta = await chat_for_connection(
+                    conn, chat_system_prompt(), user_prompt
+                )
                 parsed = parse_chat_llm_json(raw)
                 if parsed:
                     turn = parsed
-                    source = "llm"
+                    source = (
+                        "llm-cli"
+                        if meta.get("runnerUsed") == "AI_CLI"
+                        else "llm"
+                    )
         except Exception as e:
             # Keep heuristic; note in reply footer if needed
             if not turn.get("reply"):
@@ -1023,6 +1124,7 @@ def enqueue_generate_from_snapshot(
     """R7 — create Job bound to snapshotId only (BR-V2-16)."""
     from app import constants as C
     from app.services.connection_service import connection_api_key
+    from app.services.ai_service import RUNNER_AI_CLI, connection_runner_mode
 
     if mode not in ("append", "replace"):
         raise ValueError("mode must be append or replace")
@@ -1033,11 +1135,14 @@ def enqueue_generate_from_snapshot(
         )
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        raise ValueError("AI chưa Ready — vào Settings cấu hình API Key và Verify")
-    try:
-        connection_api_key(conn)
-    except ValueError as e:
-        raise ValueError(str(e) or "Chưa có API Key") from e
+        raise ValueError(
+            "AI chưa Ready — vào Settings cấu hình API Key hoặc AI CLI và Verify"
+        )
+    if connection_runner_mode(conn) != RUNNER_AI_CLI:
+        try:
+            connection_api_key(conn)
+        except ValueError as e:
+            raise ValueError(str(e) or "Chưa có API Key") from e
 
     content = snapshot_prompt_content(snap)
     if not content.strip():

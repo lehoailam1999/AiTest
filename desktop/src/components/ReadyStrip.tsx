@@ -1,21 +1,18 @@
 /**
- * Ready strip — AI · IDE · Root · Runner in one progressive-disclosure bar (UX redesign).
+ * Ready strip — AI · Project root · Runner (CLI Unit Engine happy path).
+ * IDE bridge đã bỏ khỏi UI test flow — đọc source qua Local FS (Tauri).
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Alert, Button, Collapse, Space, Tag, Typography } from "antd";
 import { DownOutlined, UpOutlined } from "@ant-design/icons";
 import { Link } from "react-router-dom";
-import { IdeConnectPanel } from "./IdeConnectPanel";
 import { SourceRootBar } from "./SourceRootBar";
-import { RootIdeMismatchBanner } from "./RootIdeMismatchBanner";
 import {
   EnsureTestRunnerPanel,
   testRunnerAllowsGenerate,
 } from "./EnsureTestRunnerPanel";
 import type { Project, ProjectMeta } from "../api/types";
 import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
-import { rootsMismatch } from "../lib/ideBridge/rootsMatch";
-import { useIdeBridgeSession } from "../lib/ideBridge/session";
 import { ROUTES } from "../lib/productRoutes";
 import type { ProjectScan } from "../tauri/bridge";
 
@@ -39,11 +36,6 @@ type Props = {
     scan: ProjectScan;
   }) => void;
   onSourceRootSynced: (project: Project) => void;
-  onFocusApplied?: (focus: {
-    file: string;
-    symbol: string;
-    method?: string;
-  }) => void;
   /** Extra alert slots (e.g. OpenAPI) */
   extraAlerts?: ReactNode;
 };
@@ -63,34 +55,21 @@ export function ReadyStrip({
   onTestFwResolved,
   onSourceRootBound,
   onSourceRootSynced,
-  onFocusApplied,
   extraAlerts,
 }: Props) {
-  const ideStatus = useIdeBridgeSession((s) => s.status);
-  const ideRoot = useIdeBridgeSession((s) => s.workspaceRoot);
-  const ideFocus = useIdeBridgeSession((s) => s.focus);
-  const mismatch = rootsMismatch(localPath, ideRoot);
   const runnerOk = testRunnerAllowsGenerate(testFwResolution, skipTestFwInstall);
-
-  const allOk =
-    aiReady &&
-    ideStatus === "connected" &&
-    Boolean(localPath) &&
-    runnerOk &&
-    !mismatch;
+  const allOk = aiReady && Boolean(localPath) && runnerOk;
 
   const [open, setOpen] = useState(!allOk);
-  const [rootKeys, setRootKeys] = useState<string[]>(
-    !localPath || mismatch ? ["root"] : []
-  );
+  const [rootKeys, setRootKeys] = useState<string[]>(!localPath ? ["root"] : []);
 
   useEffect(() => {
-    if (mismatch || !allOk) setOpen(true);
-  }, [mismatch, allOk]);
+    if (!allOk) setOpen(true);
+  }, [allOk]);
 
   useEffect(() => {
-    if (mismatch) setRootKeys((k) => (k.includes("root") ? k : [...k, "root"]));
-  }, [mismatch]);
+    if (!localPath) setRootKeys((k) => (k.includes("root") ? k : [...k, "root"]));
+  }, [localPath]);
 
   const rootLabel = useMemo(() => {
     if (!localPath) return "chưa gắn";
@@ -122,27 +101,12 @@ export function ReadyStrip({
           <Tag color={aiReady ? "success" : "error"}>
             AI {aiReady ? aiProvider || "Ready" : "chưa"}
           </Tag>
-          <Tag color={ideStatus === "connected" ? "success" : "default"}>
-            IDE {ideStatus === "connected" ? "Connected" : "offline"}
-          </Tag>
           <Tag color={localPath ? "success" : "warning"}>
-            Thư mục ghi test · {rootLabel}
+            Project root · {rootLabel}
           </Tag>
           <Tag color={runnerOk ? "success" : "warning"}>
             Runner {runnerOk ? "OK" : "cần cài"}
           </Tag>
-          {mismatch ? <Tag color="error">Lệch thư mục</Tag> : null}
-          {ideFocus?.file && !mismatch ? (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              boost: {ideFocus.symbol}
-              {ideFocus.method ? `.${ideFocus.method}` : ""}
-            </Typography.Text>
-          ) : null}
-          {mismatch && ideStatus === "connected" ? (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              Chưa gắn focus vì lệch thư mục
-            </Typography.Text>
-          ) : null}
         </Space>
         <Button
           type="link"
@@ -153,16 +117,6 @@ export function ReadyStrip({
           {open ? "Thu gọn" : "Chi tiết"}
         </Button>
       </div>
-
-      {mismatch && ideRoot && localPath ? (
-        <RootIdeMismatchBanner
-          ideRoot={ideRoot}
-          localPath={localPath}
-          project={project}
-          existingMeta={meta}
-          onBound={onSourceRootBound}
-        />
-      ) : null}
 
       {!aiReady ? (
         <Alert
@@ -181,11 +135,20 @@ export function ReadyStrip({
         />
       ) : null}
 
+      {!localPath && aiReady ? (
+        <Alert
+          style={{ marginTop: 10 }}
+          type="warning"
+          showIcon
+          title="Chưa gắn project root"
+          description="Gắn thư mục repo để AI CLI đọc source (Local FS), Staging / Apply và chạy Verify."
+        />
+      ) : null}
+
       {extraAlerts}
 
       {open ? (
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-          <IdeConnectPanel compact onFocusApplied={mismatch ? undefined : onFocusApplied} />
           <Collapse
             size="small"
             activeKey={rootKeys}
@@ -196,8 +159,8 @@ export function ReadyStrip({
               {
                 key: "root",
                 label: localPath
-                  ? `Thư mục ghi test · ${rootLabel}`
-                  : "Thư mục ghi test (gắn để Apply / Run / fallback)",
+                  ? `Project root · ${rootLabel}`
+                  : "Project root (bắt buộc để sinh / Apply / Run)",
                 children: project ? (
                   <SourceRootBar
                     project={project}

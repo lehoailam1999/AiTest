@@ -1,5 +1,13 @@
-import type { Project, ProjectMeta } from "../api/types";
+import type { Project, ProjectMeta, StackInspect } from "../api/types";
 import { underGeneratedTestFolder, testFileNameFromSource } from "./testOutputLayout";
+
+/** Join argv from ProjectInspector into a shell string for Verify inputs. */
+export function shellJoinCommand(cmd?: string[] | null): string {
+  if (!cmd?.length) return "";
+  return cmd
+    .map((c) => (/\s/.test(c) && !(c.startsWith('"') && c.endsWith('"'))) ? `"${c}"` : c)
+    .join(" ");
+}
 
 /** Infer primary language from a source path (monorepo-safe). */
 export function languageFromSourcePath(path?: string | null): string | null {
@@ -152,7 +160,7 @@ export function suggestTestCommand(project?: Project | null): string {
   }
   if (stacks.includes("vitest")) return "npx vitest run";
   if (stacks.includes("jest") || lang.includes("typescript") || lang.includes("javascript")) {
-    return "npm test";
+    return "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
   }
   if (lang.includes("python") || stacks.includes("fastapi") || stacks.includes("django")) {
     return "pytest";
@@ -179,6 +187,26 @@ export function runnerLabelFromCommand(command: string): string {
   return "Tự động (đa runner)";
 }
 
+/** Detect invented ``npm -w pkg`` when cwd is already the package (no workspaces). */
+function looksLikeBrokenNpmWorkspaceFilter(cmd: string): boolean {
+  const c = (cmd || "").toLowerCase();
+  if (!c) return false;
+  return /\bnpm\b/.test(c) && (/\s-w(\s|=)/.test(c) || c.includes("--workspace"));
+}
+
+/** Strip workspace filter → package-local AItest Jest (not Nest src-only npm test). */
+function localizeNodeTestCommand(cmd: string): string {
+  const c = (cmd || "").trim();
+  if (!c) return c;
+  if (/vitest/i.test(c)) {
+    return /--coverage/i.test(c) ? "npx vitest run --coverage" : "npx vitest run";
+  }
+  // Nest ``npm test`` only matches src/**/*.spec.ts — always use AItest config.
+  return /--coverage/i.test(c) || /\bcoverage\b/i.test(c)
+    ? "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests --coverage"
+    : "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
+}
+
 export type WorkspaceVerifyCommands = {
   compile: string;
   test: string;
@@ -193,20 +221,64 @@ export function suggestWorkspaceVerifyCommands(opts: {
   targetRelPaths: string[];
   /** Owning package (backend/, …) — empty when Apply root is the package. */
   packagePrefix?: string | null;
+  /** Step 5 — overlay monorepo-targeted commands from ProjectInspector */
+  stackInspect?: StackInspect | null;
 }): WorkspaceVerifyCommands {
+  const stack = opts.stackInspect;
+  const underAitest = opts.targetRelPaths.some((p) =>
+    /(?:^|\/)AItest\//i.test(p.replace(/\\/g, "/"))
+  );
+  const aitestJest = "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
+
+  if (stack?.is_monorepo_package || (stack?.workspace_kind && stack.workspace_kind !== "none")) {
+    let test = shellJoinCommand(stack.run_command);
+    let coverage = shellJoinCommand(stack.coverage_command);
+    const compile = shellJoinCommand(stack.compile_command);
+    const fwEarly = (opts.framework || "").toLowerCase();
+    // Nested node / fake npm -w → local; AItest layout → never Nest npm test
+    if (
+      stack.workspace_kind === "node" ||
+      looksLikeBrokenNpmWorkspaceFilter(test) ||
+      underAitest ||
+      (!fwEarly.includes("vitest") &&
+        (test === "npm test" || /^npm\s+(run\s+)?test\b/.test(test)))
+    ) {
+      if (fwEarly.includes("vitest")) {
+        test = localizeNodeTestCommand(test);
+        coverage = localizeNodeTestCommand(coverage);
+      } else {
+        test = aitestJest;
+        coverage = "";
+      }
+    }
+    if (test) {
+      return { compile, test, coverage };
+    }
+  }
+
   const lang = (opts.language || "").toLowerCase();
   const fw = (opts.framework || "").toLowerCase();
   const stacks = (opts.meta?.stacks ?? []).map((s) => s.toLowerCase()).join(" ");
   const paths = opts.targetRelPaths.map((p) => `"${p.replace(/"/g, "")}"`).join(" ");
-  const underAitest = opts.targetRelPaths.some((p) =>
-    /(?:^|\/)AItest\//i.test(p.replace(/\\/g, "/"))
-  );
+
+  // Prefer inspector commands even for single-package when available
+  if (stack?.run_command?.length && !underAitest) {
+    let test = shellJoinCommand(stack.run_command);
+    const coverage = shellJoinCommand(stack.coverage_command);
+    const compile = shellJoinCommand(stack.compile_command);
+    if (test && (stack.is_monorepo_package || stack.package_root)) {
+      if ((test === "npm test" || test === "npx jest" || test === "jest") && (!fw || fw.includes("jest") || lang.includes("typescript") || lang.includes("javascript"))) {
+        test = "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
+      }
+      return { compile, test, coverage };
+    }
+  }
 
   if (lang.includes("c#") || lang.includes("csharp") || stacks.includes("asp.net")) {
     return {
-      compile: "dotnet build",
-      test: "dotnet test",
-      coverage: "",
+      compile: shellJoinCommand(stack?.compile_command) || "dotnet build",
+      test: shellJoinCommand(stack?.run_command) || "dotnet test",
+      coverage: shellJoinCommand(stack?.coverage_command) || "",
     };
   }
 
@@ -214,10 +286,12 @@ export function suggestWorkspaceVerifyCommands(opts: {
     const test = paths ? `pytest ${paths}` : "pytest";
     return {
       compile: "",
-      test,
-      coverage: paths
-        ? `pytest ${paths} --cov --cov-report=term-missing`
-        : "pytest --cov --cov-report=term-missing",
+      test: shellJoinCommand(stack?.run_command) || test,
+      coverage:
+        shellJoinCommand(stack?.coverage_command) ||
+        (paths
+          ? `pytest ${paths} --cov --cov-report=xml:coverage.xml --junitxml=report.xml`
+          : "pytest --cov --cov-report=xml:coverage.xml --junitxml=report.xml"),
     };
   }
 
@@ -227,16 +301,15 @@ export function suggestWorkspaceVerifyCommands(opts: {
     fw.includes("jest") ||
     fw.includes("vitest")
   ) {
-    if (underAitest && !fw.includes("vitest")) {
-      // Nest default jest only scans src/**/*.spec.ts — use AItest config.
-      // cwd resolves to package (backend/) via Tauri resolve_test_cwd.
+    if (!fw.includes("vitest")) {
+      // Nest default jest only scans src/**/*.spec.ts — use AItest config with passWithNoTests.
       return {
         compile: "",
-        test: "npx jest --config AItest/jest.config.cjs --runInBand",
+        test: "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests",
         coverage: "",
       };
     }
-    const test = paths ? `npm test -- ${paths}` : "npm test";
+    const test = paths ? `npx vitest run ${paths}` : "npx vitest run";
     return {
       compile: "",
       test,
@@ -245,15 +318,27 @@ export function suggestWorkspaceVerifyCommands(opts: {
   }
 
   if (lang.includes("go")) {
-    return { compile: "", test: paths ? `go test ${paths}` : "go test ./...", coverage: "" };
+    return {
+      compile: "",
+      test: shellJoinCommand(stack?.run_command) || (paths ? `go test ${paths}` : "go test ./..."),
+      coverage: shellJoinCommand(stack?.coverage_command) || "",
+    };
   }
 
   if (lang.includes("rust")) {
-    return { compile: "", test: "cargo test", coverage: "" };
+    return {
+      compile: "",
+      test: shellJoinCommand(stack?.run_command) || "cargo test",
+      coverage: "",
+    };
   }
 
   if (lang.includes("java") || stacks.includes("maven")) {
-    return { compile: "mvn -q -DskipTests compile", test: "mvn test", coverage: "" };
+    return {
+      compile: shellJoinCommand(stack?.compile_command) || "mvn -q -DskipTests compile",
+      test: shellJoinCommand(stack?.run_command) || "mvn test",
+      coverage: shellJoinCommand(stack?.coverage_command) || "",
+    };
   }
 
   const fallbackTest = lang.includes("python")

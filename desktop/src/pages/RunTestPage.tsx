@@ -28,6 +28,8 @@ import {
   type TestRunResult,
 } from "../tauri/bridge";
 
+import { ensureAitestJestTsconfigInWorkspace } from "../lib/unitWorkspace/ensureAitestJestTsconfig";
+
 type HistoryFilter = "all" | "Passed" | "Failed" | "Error";
 
 export default function RunTestPage() {
@@ -101,10 +103,34 @@ export default function RunTestPage() {
     setError(null);
     setMessage(null);
     try {
-      const isDotnet = /^dotnet\s+test\b/i.test(cmd);
+      let runCmd = cmd;
+      const isJest = /jest/i.test(cmd) || cmd === "npm test";
+      if (isJest) {
+        try {
+          await ensureAitestJestTsconfigInWorkspace({
+            projectRoot: localPath,
+            manifest: {
+              version: 1,
+              projectId: project.id,
+              runId: "run-page",
+              testCaseId: "",
+              status: "draft",
+              packagePrefix: "",
+              createdAt: new Date().toISOString(),
+              files: [],
+            },
+          });
+        } catch {
+          /* best effort */
+        }
+        if (cmd === "npm test" || cmd === "npx jest" || cmd === "jest") {
+          runCmd = "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
+        }
+      }
+      const isDotnet = /^dotnet\s+test\b/i.test(runCmd);
       const result = isDotnet
         ? await runDotnetTest(localPath, filter.trim() || undefined)
-        : await runTestCommand(localPath, cmd);
+        : await runTestCommand(localPath, runCmd);
       setRun(result);
       const status = result.success
         ? "Passed"

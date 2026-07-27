@@ -47,6 +47,7 @@ export function syncVerifyReport(manifest: UnitWorkspaceManifest, report: Verify
         command: s.command,
         exitCode: s.exitCode,
       })),
+      coverageSync: report.coverageSync ?? undefined,
     })
     .catch(() => undefined);
 }

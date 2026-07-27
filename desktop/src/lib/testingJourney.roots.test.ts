@@ -17,14 +17,36 @@ describe("computeJourneyStatus rootsAligned", () => {
   it("points next step to align roots when mismatched", () => {
     const s = computeJourneyStatus({ ...base, rootsAligned: false });
     assert.equal(s.rootsAligned, false);
-    assert.equal(s.nextLabel, "Khớp thư mục IDE · Root");
-    assert.equal(s.codeReady, false);
+    // CLI happy path: IDE mismatch không chặn — vẫn Sinh Unit
+    assert.equal(s.nextLabel, "Sinh Unit");
+    assert.equal(s.codeReady, true);
   });
 
   it("allows code when roots aligned", () => {
     const s = computeJourneyStatus({ ...base, rootsAligned: true });
     assert.equal(s.rootsAligned, true);
-    assert.equal(s.nextLabel, "Unit test");
+    assert.equal(s.nextLabel, "Sinh Unit");
     assert.equal(s.codeReady, true);
+  });
+
+  it("U0: Local FS root enough without IDE", () => {
+    const s = computeJourneyStatus({
+      ...base,
+      ideConnected: false,
+      hasLocalPath: true,
+      rootsAligned: true,
+    });
+    assert.equal(s.codeReady, true);
+    assert.equal(s.nextLabel, "Sinh Unit");
+  });
+
+  it("U0: prompts project root not Connect IDE", () => {
+    const s = computeJourneyStatus({
+      ...base,
+      ideConnected: false,
+      hasLocalPath: false,
+    });
+    assert.equal(s.nextLabel, "Gắn project root");
+    assert.equal(s.codeReady, false);
   });
 });

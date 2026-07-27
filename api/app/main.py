@@ -116,6 +116,14 @@ def _ensure_project_meta_columns() -> None:
     job_stmts = [
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS generate_strategy VARCHAR(20)",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requirement_version INTEGER",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS runner_used VARCHAR(20)",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cli_session_key VARCHAR(120)",
+    ]
+    conn_stmts = [
+        "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS runner_mode VARCHAR(20)",
+        "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS cli_type VARCHAR(40)",
+        "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS cli_path VARCHAR(500)",
+        "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS cli_args_json TEXT",
     ]
     ws_stmts = [
         "ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS context_source VARCHAR(40)",
@@ -128,7 +136,7 @@ def _ensure_project_meta_columns() -> None:
         "ALTER TABLE knowledge_workspaces ADD COLUMN IF NOT EXISTS coverage_json TEXT",
     ]
     with engine.begin() as conn:
-        for sql in tc_stmts + job_stmts + ws_stmts + studio_stmts:
+        for sql in tc_stmts + job_stmts + conn_stmts + ws_stmts + studio_stmts:
             conn.execute(text(sql))
 
 

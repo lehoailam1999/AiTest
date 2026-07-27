@@ -20,7 +20,7 @@ function Protected({ children }: { children: ReactNode }) {
   return children;
 }
 
-/** Legacy redirects → Sinh mã Unit (IDE-first). */
+/** Legacy redirects → Sinh mã Unit (AI CLI · project root). */
 function RedirectToGenerateTests() {
   return <Navigate to={unitTestUrl()} replace />;
 }
@@ -65,7 +65,7 @@ export default function App() {
         <Route path="/repo" element={<RedirectToGenerateTests />} />
         <Route path="/open-project" element={<RedirectToGenerateTests />} />
         <Route path="/run-test" element={<Navigate to="/run" replace />} />
-        <Route path="/jobs" element={<Navigate to="/activity" replace />} />
+        <Route path="/jobs" element={<Navigate to="/activity?tab=unit-jobs" replace />} />
         <Route path="/settings" element={<Navigate to="/settings/ai" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

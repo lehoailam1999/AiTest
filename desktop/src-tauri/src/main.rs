@@ -13,6 +13,7 @@ fn main() {
             commands::read_ide_bridge_discovery,
             commands::write_text_file,
             commands::delete_text_file,
+            commands::delete_dir,
             commands::run_dotnet_test,
             commands::run_test_command,
         ])

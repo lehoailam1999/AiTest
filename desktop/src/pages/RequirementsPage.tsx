@@ -22,6 +22,7 @@ import { connection, requirements, testcases } from "../api";
 import { TestingJourney } from "../components/TestingJourney";
 import { useTestingJourney } from "../hooks/useTestingJourney";
 import { generateTcUrl } from "../lib/testingJourney";
+import { activityUrl, unitTestUrl } from "../lib/productRoutes";
 import type { Requirement, RequirementSource, TestCase } from "../api/types";
 import RequirementDocField, {
   buildRequirementPayload,
@@ -568,14 +569,17 @@ export default function RequirementsPage() {
           title="Bước tiếp theo — Unit test"
         >
           <Typography.Paragraph style={{ marginBottom: 12 }}>
-            Có {journey.approvedCount} TC Approved. Connect IDE rồi chọn TC — Agent phân tích & lấy
-            context → Sinh Unit → Staging → Apply.
+            Có {journey.approvedCount} TC Approved. Gắn project root →{" "}
+            <strong>Chạy Unit Job</strong> (Local FS · AI CLI). Theo dõi trên Unit Job Board.
           </Typography.Paragraph>
           <Space wrap>
-            <Link to="/unit-test">
+            <Link to={unitTestUrl()}>
               <Button type="primary">
-                {journey.ideConnected || journey.hasLocalPath ? "Unit test" : "Connect IDE"}
+                {journey.hasLocalPath ? "Chạy Unit Job" : "Gắn project root"}
               </Button>
+            </Link>
+            <Link to={activityUrl({ tab: "unit-jobs" })}>
+              <Button>Unit Job Board</Button>
             </Link>
           </Space>
         </Card>
@@ -908,7 +912,7 @@ function RequirementPanel({
 
   const tcColumns: ColumnsType<TestCase> = [
     { title: "ID", dataIndex: "testCaseId", key: "code", width: 90 },
-    { title: "Tiêu đề", dataIndex: "title", key: "title" },
+    { title: "Tiêu đề", dataIndex: "title", key: "title", width: 100 },
     {
       title: "Module / chủ đề",
       dataIndex: "module",
@@ -1042,10 +1046,20 @@ function RequirementPanel({
         </>
       )}
 
-      <Typography.Text type="secondary" style={{ display: "block", marginTop: 12, marginBottom: 8 }}>
-        Test cases ({cases.length}
-        {moduleFilter !== "__all__" ? ` · lọc: ${moduleFilter}` : ""})
-      </Typography.Text>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, marginBottom: 8 }}>
+        <Typography.Text type="secondary">
+          Test cases ({cases.length}
+          {moduleFilter !== "__all__" ? ` · lọc: ${moduleFilter}` : ""})
+        </Typography.Text>
+        <Button
+          type="primary"
+          ghost
+          size="small"
+          onClick={() => navigate(unitTestUrl({ reqId: req.id }))}
+        >
+          ⚡ Sinh Unit Test cho Requirement này
+        </Button>
+      </div>
 
       {cases.length > 0 ? (
         <Space wrap style={{ marginBottom: 12 }}>

@@ -123,7 +123,7 @@ export function resolveNextAction(row: {
     if (!row.hasLocalPath) {
       return {
         action: "generate_code",
-        label: "Connect IDE",
+        label: "Gắn project root",
         path: ROUTES.unitTest,
       };
     }

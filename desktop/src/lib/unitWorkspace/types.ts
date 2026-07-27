@@ -30,6 +30,8 @@ export type UnitWorkspaceManifest = {
   verify?: VerifyReport;
   appliedAt?: string;
   repairAttempts?: number;
+  /** Step 3 — số lần verify trong auto-repair loop */
+  autoRepairAttempts?: number;
   /** unit (default) or api — Sprint 4 P5e */
   artifactKind?: "unit" | "api";
   /**
@@ -37,6 +39,8 @@ export type UnitWorkspaceManifest = {
    * Staging lives under `{packagePrefix}/.ai-test/`; Apply under `{packagePrefix}/AItest/`.
    */
   packagePrefix?: string;
+  /** Step 5 — npm scope / gradle project name for coverage tagging */
+  packageName?: string;
 };
 
 export type VerifyStageName = "compile" | "test" | "coverage";
@@ -50,10 +54,20 @@ export type VerifyStageResult = {
   logExcerpt: string;
 };
 
+/** Step 4 — snapshot sau khi sync coverage/junit → PostgreSQL */
+export type CoverageSyncSnapshot = {
+  uploaded: number;
+  linePct?: number | null;
+  format?: string | null;
+  reportId?: string | null;
+  junit?: { tests?: number; passed?: number; failed?: number } | null;
+};
+
 export type VerifyReport = {
   ranAt: string;
   overallPass: boolean;
   stages: VerifyStageResult[];
+  coverageSync?: CoverageSyncSnapshot | null;
 };
 
 export type StagingBackup = {

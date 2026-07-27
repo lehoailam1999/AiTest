@@ -50,8 +50,8 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
   const focusLabel = focus
     ? `${focus.symbol}${focus.method ? `.${focus.method}` : ""}`
     : status === "connected"
-      ? "Đặt caret trong IDE (method/class)"
-      : "Chưa kết nối IDE";
+      ? "Caret tuỳ chọn (boost)"
+      : "IDE offline — Apply vẫn OK";
 
   const ready =
     status === "connected" && ideFocusReadyForGenerate(confidence, Boolean(focus));
@@ -161,7 +161,7 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
               onClick={() => void connect()}
               disabled={!tauri}
             >
-              Connect IDE
+              Connect IDE (tuỳ chọn)
             </Button>
           )}
         </Space>
@@ -171,7 +171,7 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
         <Alert
           type={!tauri ? "error" : "warning"}
           showIcon
-          title={!tauri ? "Cần cửa sổ AITest Desktop (Tauri)" : "IDE bridge chưa kết nối"}
+          title={!tauri ? "Cần cửa sổ AITest Desktop (Tauri)" : "IDE viewer chưa kết nối (tuỳ chọn)"}
           description={
             !tauri ? (
               <span>
@@ -181,16 +181,14 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
               </span>
             ) : (
               <span>
-                Cài plugin AITest trong IDE (Cursor / VS Code / <strong>Antigravity</strong>),
-                rồi Reload Window. Status bar phải có{" "}
-                <strong>AITest :port</strong> hoặc <strong>AITest (Antigravity) :port</strong>.
-                Nếu thiếu: Command Palette → <strong>AITest: Start IDE Bridge</strong>, kiểm tra{" "}
-                <Typography.Text code>%USERPROFILE%\.aitest\ide-bridge.json</Typography.Text>, rồi
-                bấm Connect IDE.
+                Không bắt buộc để chạy Unit Job. Cài plugin AITest (Cursor / VS Code /{" "}
+                <strong>Antigravity</strong>) chỉ khi muốn mở file / boost — rồi Reload Window.
+                Status bar phải có <strong>AITest :port</strong>. Nếu thiếu: Command Palette →{" "}
+                <strong>AITest: Start IDE Bridge</strong>, rồi bấm Connect IDE (tuỳ chọn).
                 {error ? (
                   <>
                     {" "}
-                    <Typography.Text type="danger">{error}</Typography.Text>
+                    Lỗi: <Typography.Text type="danger">{error}</Typography.Text>
                   </>
                 ) : null}
               </span>
@@ -201,8 +199,8 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
 
       {!compact && status === "connected" && !ready ? (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          Reconnect không khôi phục focus cũ. Đặt caret vào method/class trong IDE (hoặc bấm
-          «Làm mới từ IDE») — confidence medium/high.
+          Caret là boost tuỳ chọn — không bắt buộc để Unit Job. Bấm «Làm mới từ IDE» nếu muốn
+          boost confidence.
         </Typography.Text>
       ) : null}
     </div>

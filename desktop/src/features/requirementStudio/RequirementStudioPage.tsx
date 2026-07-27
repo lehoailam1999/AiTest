@@ -6,7 +6,6 @@ import {
   Alert,
   App,
   Button,
-  Collapse,
   Empty,
   Popconfirm,
   Space,
@@ -26,14 +25,15 @@ import {
   SplitCellsOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { requirementStudio } from "../../api";
+import { useNavigate } from "react-router-dom";
+import { connection, requirementStudio } from "../../api";
 import type {
-  DocumentChunk,
   KnowledgeWorkspaceView,
   RequirementFileRef,
   RequirementStudioWorkspace,
 } from "../../api/types";
 import { useProject } from "../../state/ProjectContext";
+import { ROUTES } from "../../lib/productRoutes";
 import RequirementRichPreview from "../../components/RequirementRichPreview";
 import KnowledgePanel from "./KnowledgePanel";
 import FreezePanel from "./FreezePanel";
@@ -80,12 +80,12 @@ export default function RequirementStudioPage({
   onBackToHub,
 }: Props) {
   const { message } = App.useApp();
+  const navigate = useNavigate();
   const { project } = useProject();
   const [workspace, setWorkspace] = useState<RequirementStudioWorkspace | null>(null);
   const [files, setFiles] = useState<RequirementFileRef[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<RequirementFileRef | null>(null);
-  const [chunks, setChunks] = useState<DocumentChunk[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeWorkspaceView | null>(null);
   const [hasSnapshot, setHasSnapshot] = useState(false);
   const [innerFocus, setInnerFocus] = useState<StudioFocus>("docs");
@@ -198,25 +198,19 @@ export default function RequirementStudioPage({
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
-      setChunks([]);
       return;
     }
     let cancelled = false;
     (async () => {
       setDetailLoading(true);
       try {
-        const [file, chunkRes] = await Promise.all([
-          requirementStudio.getFile(selectedId),
-          requirementStudio.listChunks(selectedId),
-        ]);
+        const file = await requirementStudio.getFile(selectedId);
         if (cancelled) return;
         setDetail(file);
-        setChunks(chunkRes.items);
       } catch (e) {
         if (!cancelled) {
           message.error(e instanceof Error ? e.message : String(e));
           setDetail(null);
-          setChunks([]);
         }
       } finally {
         if (!cancelled) setDetailLoading(false);
@@ -269,10 +263,6 @@ export default function RequirementStudioPage({
       const res = await requirementStudio.rechunkWorkspace(workspace.id);
       message.success(`Đã tách lại ${res.filesUpdated} file · ${res.chunkCount} đoạn`);
       await loadFiles(workspace.id, selectedId);
-      if (selectedId) {
-        const chunkRes = await requirementStudio.listChunks(selectedId);
-        setChunks(chunkRes.items);
-      }
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -287,8 +277,6 @@ export default function RequirementStudioPage({
       const updated = await requirementStudio.rechunkFile(selectedId);
       message.success(`Đã tách lại · ${updated.chunkCount ?? 0} đoạn`);
       await loadFiles(workspace.id, selectedId);
-      const chunkRes = await requirementStudio.listChunks(selectedId);
-      setChunks(chunkRes.items);
       setDetail(updated);
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
@@ -298,15 +286,27 @@ export default function RequirementStudioPage({
   };
 
   const buildKnowledge = async () => {
-    if (!workspace) return;
+    if (!workspace || !project) return;
+    try {
+      const conn = await connection.get(project.id).catch(() => null);
+      if (!conn || conn.status !== "Ready") {
+        message.warning("Dự án chưa cấu hình AI. Vui lòng thiết lập kết nối AI trước khi phân tích.");
+        navigate(ROUTES.settingsAi);
+        return;
+      }
+    } catch {
+      message.warning("Không kiểm tra được cấu hình AI. Vui lòng kiểm tra kết nối.");
+      navigate(ROUTES.settingsAi);
+      return;
+    }
     setBuilding(true);
     try {
       const kw = await requirementStudio.buildKnowledge(workspace.id, true);
       setKnowledge(kw);
       emitStatus(files, kw);
       message.success(
-        kw.builder === "llm"
-          ? `Phân tích v${kw.version} (LLM)`
+        kw.builder === "llm" || kw.builder === "llm-cli"
+          ? `Phân tích v${kw.version} (${kw.builder === "llm-cli" ? "AI CLI" : "LLM"})`
           : `Phân tích v${kw.version} (heuristic)`
       );
       setFocus("knowledge");
@@ -334,17 +334,17 @@ export default function RequirementStudioPage({
   const stageMeta =
     focus === "freeze"
       ? {
-          title: "Sinh test case",
-          lead: "Tổng hợp tài liệu + Phân tích (+ TC đã có) → Snapshot → sinh TC chính xác.",
+          title: "Tạo test case",
+          lead: "Tổng hợp tài liệu, phân tích và test case hiện có thành snapshot, rồi tạo bộ test case.",
         }
       : focus === "knowledge"
         ? {
             title: "Phân tích",
-            lead: "Knowledge từ tài liệu — sau khi Ready, sang Sinh test case.",
+            lead: "Tổng hợp kiến thức từ tài liệu. Sau khi sẵn sàng, chuyển sang bước tạo test case.",
           }
         : {
             title: "Tài liệu",
-            lead: "Upload và tách đoạn — rồi Dựng Phân tích.",
+            lead: "Tải lên và tách đoạn tài liệu, sau đó tiến hành phân tích.",
           };
 
   return (
@@ -374,7 +374,7 @@ export default function RequirementStudioPage({
               loading={building}
               onClick={() => void buildKnowledge()}
             >
-              Dựng Phân tích
+              Phân tích
             </Button>
           ) : null}
         </Space>
@@ -392,7 +392,7 @@ export default function RequirementStudioPage({
           onGenerated={() => {
             setHasSnapshot(true);
             emitStatus(files, knowledge, true);
-            message.success("Đã sinh TC từ Snapshot — chuyển sang Duyệt TC");
+            message.success("Đã tạo test case từ snapshot. Chuyển sang duyệt.");
             onNavigateReview?.();
           }}
         />
@@ -431,10 +431,10 @@ export default function RequirementStudioPage({
             <Alert
               type="info"
               showIcon
-              title="Phân tích đang stale sau khi đổi tài liệu"
+              title="Phân tích cần cập nhật sau khi đổi tài liệu"
               action={
                 <Button size="small" type="primary" onClick={() => setFocus("knowledge")}>
-                  Xem & dựng lại
+                  Xem và phân tích lại
                 </Button>
               }
             />
@@ -603,48 +603,6 @@ export default function RequirementStudioPage({
                               <pre className="studio-text-preview">{detail.extractedText}</pre>
                             ) : (
                               <Empty description="Chưa có nội dung xem trước" />
-                            )}
-                          </div>
-                        ),
-                      },
-                      {
-                        key: "chunks",
-                        label: `Đoạn đã tách (${chunks.length})`,
-                        children: (
-                          <div className="studio-chunks-pane">
-                            {chunks.length === 0 ? (
-                              <Empty
-                                description={
-                                  selected.parseStatus === "ready"
-                                    ? "Chưa có đoạn — bấm «Tách lại»"
-                                    : "Cần đọc file thành công trước"
-                                }
-                              />
-                            ) : (
-                              <Collapse
-                                accordion
-                                bordered={false}
-                                className="studio-chunk-collapse"
-                                items={chunks.map((c) => ({
-                                  key: c.id,
-                                  label: (
-                                    <span className="studio-chunk-label">
-                                      <Typography.Text type="secondary">
-                                        #{c.ordinal + 1}
-                                      </Typography.Text>
-                                      <span>
-                                        {c.heading?.trim() ||
-                                          c.text.slice(0, 72).replace(/\s+/g, " ") +
-                                            (c.text.length > 72 ? "…" : "")}
-                                      </span>
-                                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                        {c.charCount} ký tự
-                                      </Typography.Text>
-                                    </span>
-                                  ),
-                                  children: <pre className="studio-chunk-body">{c.text}</pre>,
-                                }))}
-                              />
                             )}
                           </div>
                         ),

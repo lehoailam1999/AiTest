@@ -1,6 +1,6 @@
 /**
- * Root Apply / Run — gắn thư mục project trên máy (shared unit / api / …).
- * Semantic generate ưu tiên Connect IDE; bar này phục vụ Apply, Run, FS fallback.
+ * Project root — gắn thư mục repo trên máy (Unit Job / Apply / Run).
+ * Happy path = Local FS + AI CLI (không phụ thuộc IDE bridge).
  */
 
 import { useState } from "react";
@@ -187,13 +187,13 @@ export function SourceRootBar({
       <Alert
         type="warning"
         showIcon
-        title="Chưa gắn Root Apply"
+        title="Chưa gắn project root"
         description={
           <Space orientation="vertical" size={10} style={{ width: "100%" }}>
             <Typography.Text type="secondary">
-              Thư mục project trên máy — <strong>Apply</strong> ghi <Typography.Text code>AItest/</Typography.Text>,{" "}
-              <strong>Run</strong>, và fallback Local FS. Sinh unit ưu tiên{" "}
-              <strong>Connect IDE</strong> (caret).
+              Thư mục project trên máy — bắt buộc cho <strong>Chạy Unit Job</strong> (Local FS + AI CLI),{" "}
+              <strong>Apply</strong> ghi <Typography.Text code>AItest/</Typography.Text>, và{" "}
+              <strong>Run / Verify</strong>.
             </Typography.Text>
             <Space wrap>
               <Button
@@ -203,7 +203,7 @@ export function SourceRootBar({
                 disabled={!isTauri()}
                 onClick={() => void handlePick()}
               >
-                Gắn root Apply
+                Gắn project root
               </Button>
               <Button type="link" onClick={() => setShowManual((v) => !v)}>
                 {showManual ? "Ẩn nhập path" : "Nhập path thủ công"}

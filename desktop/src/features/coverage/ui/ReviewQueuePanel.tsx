@@ -18,6 +18,7 @@ import type { ColumnsType } from "antd/es/table";
 import {
   CheckOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   EditOutlined,
   EyeOutlined,
 } from "@ant-design/icons";
@@ -51,6 +52,8 @@ type EditForm = {
   testData?: string;
 };
 
+type StatusFilter = "__all__" | "pending" | "approved";
+
 const TYPE_OPTIONS = [
   { value: "Functional", label: "Chức năng" },
   { value: "Negative", label: "Phủ định" },
@@ -65,8 +68,108 @@ const PRIORITY_OPTIONS = [
   { value: "Critical", label: "Nghiêm trọng" },
 ];
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Giữ xuống dòng trong cùng một ô Excel (không bị cắt / chỉ hiện dòng đầu). */
+function cellHtml(value: string): string {
+  return escapeHtml(value).replace(
+    /\r\n|\n|\r/g,
+    '<br style="mso-data-placement:same-cell;">'
+  );
+}
+
 /**
- * F4 — Hàng đợi duyệt TC trên Coverage: Nháp → Đã duyệt (một bước).
+ * Xuất .xls (HTML Excel) — mở bằng Excel/LibreOffice sẽ hiện đủ nội dung ô,
+ * wrap text + xuống dòng trong cùng cell (CSV thường bị cắt khi mở Excel).
+ */
+function downloadCasesExcel(rows: TestCase[], filenamePrefix = "test-cases") {
+  const headers = [
+    "ID",
+    "Title",
+    "Module",
+    "Type",
+    "Priority",
+    "Status",
+    "Precondition",
+    "Steps",
+    "Expected",
+    "TestData",
+  ];
+  const colWidths = [72, 220, 110, 90, 90, 90, 200, 280, 280, 180];
+  const thead = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const tbody = rows
+    .map((c) => {
+      const vals = [
+        c.testCaseId,
+        c.title,
+        c.module || "",
+        labelOf(typeLabel, c.type),
+        labelOf(priorityLabel, c.priority),
+        displayReviewStatus(c.reviewStatus).label,
+        c.precondition || "",
+        c.steps || "",
+        c.expectedResult || "",
+        c.testData || "",
+      ];
+      return `<tr>${vals.map((v) => `<td>${cellHtml(String(v))}</td>`).join("")}</tr>`;
+    })
+    .join("");
+  const colgroup = colWidths
+    .map((w) => `<col style="width:${w}px">`)
+    .join("");
+  const html = `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:x="urn:schemas-microsoft-com:office:excel"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta charset="UTF-8">
+<!--[if gte mso 9]><xml>
+ <x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
+  <x:Name>TestCases</x:Name>
+  <x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
+ </x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook>
+</xml><![endif]-->
+<style>
+  table { border-collapse: collapse; table-layout: fixed; width: 100%; }
+  th, td {
+    border: 1px solid #999;
+    padding: 6px 8px;
+    vertical-align: top;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    mso-number-format: "\\@";
+  }
+  th { background: #f0f0f0; font-weight: bold; }
+</style>
+</head>
+<body>
+<table>
+  <colgroup>${colgroup}</colgroup>
+  <thead><tr>${thead}</tr></thead>
+  <tbody>${tbody}</tbody>
+</table>
+</body>
+</html>`;
+
+  const blob = new Blob(["\uFEFF" + html], {
+    type: "application/vnd.ms-excel;charset=utf-8",
+  });
+  const stamp = new Date().toISOString().slice(0, 10);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${filenamePrefix}-${stamp}.xls`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/**
+ * F4 — Danh sách TC trên Coverage: mọi trạng thái + duyệt hàng loạt + tải Excel.
  */
 export function ReviewQueuePanel({
   cases,
@@ -78,6 +181,7 @@ export function ReviewQueuePanel({
   const [selected, setSelected] = useState<Key[]>([]);
   const [busy, setBusy] = useState(false);
   const [moduleSel, setModuleSel] = useState<string>(moduleFilter || "__all__");
+  const [statusSel, setStatusSel] = useState<StatusFilter>("__all__");
   const [preview, setPreview] = useState<TestCase | null>(null);
   const [editing, setEditing] = useState<TestCase | null>(null);
   const [editBusy, setEditBusy] = useState(false);
@@ -94,19 +198,32 @@ export function ReviewQueuePanel({
 
   const modules = useMemo(() => {
     const s = new Set<string>();
-    for (const c of pending) {
+    for (const c of cases) {
       s.add((c.module || "").trim() || "(Chưa gán module)");
     }
     return [...s].sort((a, b) => a.localeCompare(b, "vi"));
-  }, [pending]);
+  }, [cases]);
 
   const filtered = useMemo(() => {
-    if (moduleSel === "__all__") return pending;
-    return pending.filter((c) => {
+    return cases.filter((c) => {
+      if (statusSel === "pending" && !isTcPendingReview(c.reviewStatus)) return false;
+      if (statusSel === "approved" && c.reviewStatus !== "Approved") return false;
+      if (moduleSel === "__all__") return true;
       const m = (c.module || "").trim() || "(Chưa gán module)";
       return m === moduleSel || m.toLowerCase() === moduleSel.toLowerCase();
     });
-  }, [pending, moduleSel]);
+  }, [cases, moduleSel, statusSel]);
+
+  const selectedPendingIds = useMemo(
+    () =>
+      selected
+        .map(String)
+        .filter((id) => {
+          const row = cases.find((c) => c.id === id);
+          return row && isTcPendingReview(row.reviewStatus);
+        }),
+    [selected, cases]
+  );
 
   async function bulkApprove(ids: string[]) {
     if (ids.length === 0) return;
@@ -196,6 +313,15 @@ export function ReviewQueuePanel({
     });
   }
 
+  function handleDownload() {
+    if (filtered.length === 0) {
+      message.info("Không có test case để tải về.");
+      return;
+    }
+    downloadCasesExcel(filtered);
+    message.success(`Đã tải ${filtered.length} test case (Excel).`);
+  }
+
   const columns: ColumnsType<TestCase> = [
     {
       title: "ID",
@@ -211,7 +337,7 @@ export function ReviewQueuePanel({
     {
       title: "Module",
       dataIndex: "module",
-      width: 128,
+      width: 268,
       render: (v: string | null | undefined) =>
         v ? <Tag>{v}</Tag> : <Typography.Text type="secondary">—</Typography.Text>,
     },
@@ -242,47 +368,56 @@ export function ReviewQueuePanel({
       width: 200,
       fixed: "right",
       align: "center",
-      render: (_, row) => (
-        <Space size={4} className="tc-review-actions" wrap>
-          <Tooltip title="Xem chi tiết">
-            <Button
-              type="text"
-              size="small"
-              icon={<EyeOutlined />}
-              aria-label="Xem chi tiết"
-              onClick={() => setPreview(row)}
-            />
-          </Tooltip>
-          <Tooltip title="Sửa">
-            <Button
-              type="text"
-              size="small"
-              icon={<EditOutlined />}
-              aria-label="Sửa"
-              onClick={() => openEdit(row)}
-            />
-          </Tooltip>
-          <Tooltip title="Xoá">
-            <Button
-              type="text"
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              aria-label="Xoá"
-              onClick={() => confirmDelete(row)}
-            />
-          </Tooltip>
-          <Button
-            size="small"
-            type="primary"
-            icon={<CheckOutlined />}
-            loading={busy}
-            onClick={() => void bulkApprove([row.id])}
-          >
-            Duyệt
-          </Button>
-        </Space>
-      ),
+      render: (_, row) => {
+        const canApprove = isTcPendingReview(row.reviewStatus);
+        return (
+          <Space size={4} className="tc-review-actions" wrap>
+            <Tooltip title="Xem chi tiết">
+              <Button
+                type="text"
+                size="small"
+                icon={<EyeOutlined />}
+                aria-label="Xem chi tiết"
+                onClick={() => setPreview(row)}
+              />
+            </Tooltip>
+            <Tooltip title="Sửa">
+              <Button
+                type="text"
+                size="small"
+                icon={<EditOutlined />}
+                aria-label="Sửa"
+                onClick={() => openEdit(row)}
+              />
+            </Tooltip>
+            <Tooltip title="Xoá">
+              <Button
+                type="text"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                aria-label="Xoá"
+                onClick={() => confirmDelete(row)}
+              />
+            </Tooltip>
+            {canApprove ? (
+              <Button
+                size="small"
+                type="primary"
+                icon={<CheckOutlined />}
+                loading={busy}
+                onClick={() => void bulkApprove([row.id])}
+              >
+                Duyệt
+              </Button>
+            ) : (
+              <Tag color="success" style={{ marginInlineEnd: 0 }}>
+                Đã duyệt
+              </Tag>
+            )}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -290,9 +425,20 @@ export function ReviewQueuePanel({
     <div className="coverage-review">
       <div className="coverage-review-toolbar">
         <Typography.Text type="secondary">
-          {filtered.length} TC nháp
-          {pending.length !== filtered.length ? ` (lọc / ${pending.length})` : ""}
+          {filtered.length} TC
+          {cases.length !== filtered.length ? ` (lọc / ${cases.length})` : ""}
+          {pending.length > 0 ? ` · ${pending.length} chờ duyệt` : ""}
         </Typography.Text>
+        <select
+          className="coverage-review-select"
+          value={statusSel}
+          onChange={(e) => setStatusSel(e.target.value as StatusFilter)}
+          aria-label="Lọc trạng thái"
+        >
+          <option value="__all__">Tất cả trạng thái</option>
+          <option value="pending">Chờ duyệt (Nháp)</option>
+          <option value="approved">Đã duyệt</option>
+        </select>
         <select
           className="coverage-review-select"
           value={moduleSel}
@@ -307,13 +453,20 @@ export function ReviewQueuePanel({
           ))}
         </select>
         <Button
+          icon={<DownloadOutlined />}
+          disabled={filtered.length === 0}
+          onClick={handleDownload}
+        >
+          Tải về
+        </Button>
+        <Button
           type="primary"
-          disabled={selected.length === 0 || busy}
+          disabled={selectedPendingIds.length === 0 || busy}
           loading={busy}
           icon={<CheckOutlined />}
-          onClick={() => void bulkApprove(selected.map(String))}
+          onClick={() => void bulkApprove(selectedPendingIds)}
         >
-          Duyệt đã chọn ({selected.length})
+          Duyệt đã chọn ({selectedPendingIds.length})
         </Button>
         <Link to="/requirement">
           <Button type="link">Về Requirement Studio →</Button>
@@ -330,10 +483,13 @@ export function ReviewQueuePanel({
           rowSelection={{
             selectedRowKeys: selected,
             onChange: setSelected,
+            getCheckboxProps: (row) => ({
+              disabled: !isTcPendingReview(row.reviewStatus),
+            }),
           }}
           scroll={{ x: 980, y: "max(40vh, 240px)" }}
           pagination={{ pageSize: 20, showSizeChanger: true, responsive: true }}
-          locale={{ emptyText: "Không còn TC nháp — sinh TC hoặc xem Requirement." }}
+          locale={{ emptyText: "Không có test case khớp bộ lọc." }}
         />
       </div>
 
@@ -356,18 +512,20 @@ export function ReviewQueuePanel({
               >
                 Xoá
               </Button>
-              <Button
-                type="primary"
-                size="small"
-                icon={<CheckOutlined />}
-                onClick={() => {
-                  const id = preview.id;
-                  setPreview(null);
-                  void bulkApprove([id]);
-                }}
-              >
-                Duyệt
-              </Button>
+              {isTcPendingReview(preview.reviewStatus) ? (
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<CheckOutlined />}
+                  onClick={() => {
+                    const id = preview.id;
+                    setPreview(null);
+                    void bulkApprove([id]);
+                  }}
+                >
+                  Duyệt
+                </Button>
+              ) : null}
             </Space>
           ) : null
         }

@@ -1,4 +1,4 @@
-/** Luồng: Requirement (Design) → Connect IDE → Unit test → Run */
+/** Luồng: Requirement (Design) → Project root → Unit test (AI CLI) → Run */
 
 import { requirementUrl, ROUTES, unitTestUrl } from "./productRoutes";
 
@@ -52,7 +52,7 @@ export const JOURNEY_STEPS: JourneyStep[] = [
     title: "5. Unit test",
     shortTitle: "Unit test",
     description:
-      "Chọn TC Approved → Agent phân tích intent & lấy context IDE → Sinh Unit → Staging → Apply. Caret là boost tuỳ chọn; Root Apply để ghi AItest/ và Run.",
+      "Chọn TC Approved → gắn project root → AI CLI sinh unit → Staging → Verify → Apply. IDE semantic là tuỳ chọn (boost context).",
     path: ROUTES.unitTest,
   },
   {
@@ -68,7 +68,7 @@ export type JourneyStatus = {
   hasProject: boolean;
   aiReady: boolean;
   hasLocalPath: boolean;
-  /** Desktop đã Connect IDE bridge (semantic source). */
+  /** Desktop đã Connect IDE bridge (semantic source — tuỳ chọn). */
   ideConnected: boolean;
   /** IDE workspaceRoot vs Root Apply — true when aligned or not comparable. */
   rootsAligned: boolean;
@@ -105,12 +105,8 @@ export function computeJourneyStatus(input: {
   const specDone = input.requirementCount > 0;
   const genTcDone = input.testCaseTotal > 0;
   const reviewDone = input.approvedCount > 0;
-  /** Có thể sinh khi IDE connected hoặc đã gắn root (FS fallback). Apply vẫn cần root. */
-  const codeReady =
-    prepareDone &&
-    reviewDone &&
-    (ideConnected || input.hasLocalPath) &&
-    rootsAligned;
+  /** Happy path: project root đủ để sinh (IDE không bắt buộc). */
+  const codeReady = prepareDone && reviewDone && input.hasLocalPath;
 
   const flags: RecordJourneyFlags = {
     prepare: prepareDone,
@@ -156,25 +152,13 @@ export function computeJourneyStatus(input: {
     nextStep = "review";
     nextLabel = "Requirement · duyệt TC";
     nextPath = requirementUrl({ tab: "home" });
-  } else if (!ideConnected && !input.hasLocalPath) {
-    nextStep = "code";
-    nextLabel = "Connect IDE";
-    nextPath = unitTestUrl();
-  } else if (!ideConnected && input.hasLocalPath) {
-    nextStep = "code";
-    nextLabel = "Connect IDE · Sinh mã";
-    nextPath = unitTestUrl();
   } else if (!input.hasLocalPath) {
     nextStep = "code";
-    nextLabel = "Gắn root Apply";
-    nextPath = unitTestUrl();
-  } else if (ideConnected && input.hasLocalPath && !rootsAligned) {
-    nextStep = "code";
-    nextLabel = "Khớp thư mục IDE · Root";
+    nextLabel = "Gắn project root";
     nextPath = unitTestUrl();
   } else {
     nextStep = "code";
-    nextLabel = "Unit test";
+    nextLabel = "Sinh Unit";
     nextPath = unitTestUrl();
   }
 

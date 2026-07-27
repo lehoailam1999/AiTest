@@ -16,6 +16,7 @@ import RequirementJourneyStrip, {
   type JourneyStageId,
 } from "../requirementStudio/RequirementJourneyStrip";
 import { ROUTES } from "../../lib/productRoutes";
+import { isTcPendingReview } from "../../i18n/labels";
 import { useCoverageBoard } from "./model/useCoverageBoard";
 import { ReviewQueuePanel } from "./ui/ReviewQueuePanel";
 
@@ -52,7 +53,7 @@ export default function CoverageBoardPage() {
   });
   const [journeySnapIds, setJourneySnapIds] = useState<Set<string>>(new Set());
 
-  const { project, pendingCases, loading, refresh, invalidate } = useCoverageBoard({
+  const { project, allCases, loading, refresh, invalidate } = useCoverageBoard({
     page: 1,
     pageSize: 50,
   });
@@ -78,15 +79,23 @@ export default function CoverageBoardPage() {
     };
   }, [workspaceId, studioStatus.hasSnapshot]);
 
-  const journeyPendingCases = useMemo(() => {
+  /** All TCs thuộc Requirement đang mở (mọi trạng thái duyệt). */
+  const journeyCases = useMemo(() => {
     if (!workspaceId) return [];
-    return pendingCases.filter(
-      (c) =>
-        c.requirementSnapshotId && journeySnapIds.has(String(c.requirementSnapshotId))
+    return allCases.filter(
+      (c: (typeof allCases)[number]) =>
+        Boolean(c.requirementSnapshotId) &&
+        journeySnapIds.has(String(c.requirementSnapshotId))
     );
-  }, [pendingCases, journeySnapIds, workspaceId]);
+  }, [allCases, journeySnapIds, workspaceId]);
 
-  const journeyPendingCount = journeyPendingCases.length;
+  const journeyPendingCount = useMemo(
+    () =>
+      journeyCases.filter((c: (typeof journeyCases)[number]) =>
+        isTcPendingReview(c.reviewStatus)
+      ).length,
+    [journeyCases]
+  );
 
   const journey = useMemo(
     () =>
@@ -208,22 +217,21 @@ export default function CoverageBoardPage() {
                 </Button>
                 <Typography.Title level={4} className="studio-title">
                   Duyệt TC
-                  {journeyPendingCount > 0 ? (
-                    <Typography.Text type="secondary" style={{ fontSize: 14, marginLeft: 8 }}>
-                      {journeyPendingCount} chờ duyệt (Requirement này)
-                    </Typography.Text>
-                  ) : null}
+                  <Typography.Text type="secondary" style={{ fontSize: 14, marginLeft: 8 }}>
+                    {journeyCases.length} TC
+                    {journeyPendingCount > 0 ? ` · ${journeyPendingCount} chờ duyệt` : ""}
+                  </Typography.Text>
                 </Typography.Title>
                 <Typography.Text type="secondary" className="studio-lead">
-                  Chỉ TC sinh từ Snapshot của Requirement đang mở.
+                  Tất cả test case của Requirement này (Draft / Approved / Rejected). Có thể tải về Excel (đầy đủ nội dung từng ô).
                 </Typography.Text>
               </div>
             </div>
-            {journeyPendingCount === 0 ? (
+            {journeyCases.length === 0 ? (
               <Alert
                 type="info"
                 showIcon
-                title="Chưa có TC chờ duyệt trong Requirement này"
+                title="Chưa có test case trong Requirement này"
                 description="Sinh TC từ tài liệu + Phân tích trước, hoặc quay lại Requirement khác."
                 action={
                   <Button type="primary" onClick={() => setStudioFocus("freeze")}>
@@ -234,7 +242,7 @@ export default function CoverageBoardPage() {
             ) : (
               <ReviewQueuePanel
                 projectId={project.id}
-                cases={journeyPendingCases}
+                cases={journeyCases}
                 moduleFilter={reviewModule}
                 loading={loading}
                 onChanged={() => {

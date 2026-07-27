@@ -43,8 +43,17 @@ class CoverageParserPort(Protocol):
         ...
 
 
-# WorkspacePort lives in ports/workspace.py (Local Agent swap point)
-from app.ports.workspace import WorkspacePort as WorkspacePort  # noqa: E402
+# WorkspacePort lives in ports/workspace.py (Local Agent swap point).
+# Lazy import avoids circular init with features.workspace.
+
+
+def __getattr__(name: str):
+    if name == "WorkspacePort":
+        from app.ports.workspace import WorkspacePort as _WorkspacePort
+
+        return _WorkspacePort
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "LlmPort",

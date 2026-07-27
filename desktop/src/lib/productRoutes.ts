@@ -10,16 +10,31 @@ export const ROUTES = {
    * Prefer ROUTES.unitTest. BE `/api/workspace/*` unchanged.
    */
   workspace: "/workspace",
-  /** Automate: Sinh mã Unit test (IDE-first) */
+  /** Automate: Unit Test Engine (AI CLI · project root) — Phase U4 */
   unitTest: "/unit-test",
   run: "/run",
   reports: "/reports",
   activity: "/activity",
+  /** Unit Job Board */
+  unitJobs: "/activity",
   settingsAi: "/settings/ai",
   /** Deep-link wizards (không lên sidebar) */
   generateTc: "/generate/tc",
   spec: "/spec",
 } as const;
+
+export function activityUrl(opts?: {
+  tab?: "unit-jobs" | "campaigns" | "legacy-jobs";
+  runId?: string;
+  module?: string;
+}): string {
+  const q = new URLSearchParams();
+  if (opts?.tab) q.set("tab", opts.tab);
+  if (opts?.runId) q.set("run", opts.runId);
+  if (opts?.module) q.set("module", opts.module);
+  const s = q.toString();
+  return s ? `${ROUTES.activity}?${s}` : ROUTES.activity;
+}
 
 export function requirementUrl(opts?: {
   tab?: "home" | "studio" | "board" | "review" | "edit";
@@ -51,6 +66,9 @@ export function unitTestUrl(opts?: {
   module?: string;
   modules?: string;
   testCaseId?: string;
+  /** Requirement Studio workspace id (or legacy requirement id) */
+  reqId?: string;
+  workspaceId?: string;
 }): string {
   const q = new URLSearchParams();
   q.set("artifact", "unit");
@@ -58,6 +76,8 @@ export function unitTestUrl(opts?: {
   if (opts?.module) q.set("module", opts.module);
   if (opts?.modules) q.set("modules", opts.modules);
   if (opts?.testCaseId) q.set("testCaseId", opts.testCaseId);
+  if (opts?.reqId) q.set("reqId", opts.reqId);
+  if (opts?.workspaceId) q.set("workspaceId", opts.workspaceId);
   return `${ROUTES.unitTest}?${q.toString()}`;
 }
 

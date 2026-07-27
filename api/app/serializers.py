@@ -89,6 +89,10 @@ def connection_dto(c: AiBackendConnection) -> dict:
         "hasApiKey": has_key,
         "lastVerifiedAt": _iso(c.last_verified_at),
         "lastError": c.last_error,
+        "runnerMode": getattr(c, "runner_mode", None) or "API_DIRECT",
+        "cliType": getattr(c, "cli_type", None) or "gemini-cli",
+        "cliPath": getattr(c, "cli_path", None),
+        "cliArgsJson": getattr(c, "cli_args_json", None),
     }
 
 
@@ -104,6 +108,8 @@ def job_dto(j: Job) -> dict:
         "backendType": j.backend_type,
         "generateStrategy": j.generate_strategy,
         "requirementVersion": j.requirement_version,
+        "runnerUsed": getattr(j, "runner_used", None),
+        "cliSessionKey": getattr(j, "cli_session_key", None),
         "error": j.error,
         "startedAt": _iso(j.started_at),
         "completedAt": _iso(j.completed_at),

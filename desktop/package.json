@@ -10,11 +10,12 @@
     "build:ui": "vite build",
     "preview": "vite preview",
     "test": "npm run test:unit",
-    "test:unit": "npm run test:p3 && npm run test:p5 && npm run test:p56 && npm run test:p0",
+    "test:unit": "npm run test:p3 && npm run test:p5 && npm run test:p56 && npm run test:p0 && npm run test:u5",
     "test:p3": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/projectIntelligence/contextBudget.test.ts",
     "test:p5": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/testOutputLayout.p5.test.ts",
     "test:p56": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/testRunnerEnsure/resolveTestFramework.test.ts",
-    "test:p0": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/agentRun/buildPacketFromAgentRun.test.ts"
+    "test:p0": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/agentRun/buildPacketFromAgentRun.test.ts",
+    "test:u5": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/unitWorkspace/parseTestRunSummary.test.ts"
   },
   "dependencies": {
     "@aitest/ide-protocol": "file:../packages/ide-protocol",

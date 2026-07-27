@@ -35,7 +35,7 @@ export function TestingJourney({ status, highlight, showNextAction = true, compa
   });
 
   return (
-    <Card className="testing-journey-card" size="small" title="Luồng kiểm thử (Requirement → Unit test)">
+    <Card className="testing-journey-card" size="small" title="Luồng kiểm thử (Requirement → Unit Engine)">
       <Steps
         size="small"
         orientation={compact ? "horizontal" : "vertical"}
@@ -48,11 +48,8 @@ export function TestingJourney({ status, highlight, showNextAction = true, compa
         <Tag color={status.prepareDone ? "success" : "default"}>
           AI {status.aiReady ? "Ready" : "chưa Ready"}
         </Tag>
-        <Tag color={status.ideConnected ? "success" : "default"}>
-          IDE {status.ideConnected ? "Connected" : "chưa Connect"}
-        </Tag>
-        <Tag color={status.hasLocalPath ? "success" : "default"}>
-          Root Apply {status.hasLocalPath ? "đã gắn" : "chưa gắn"}
+        <Tag color={status.hasLocalPath ? "success" : "warning"}>
+          Project root {status.hasLocalPath ? "OK" : "chưa gắn"}
         </Tag>
         <Tag>{status.requirementCount} requirement</Tag>
         <Tag>{status.testCaseTotal} TC</Tag>

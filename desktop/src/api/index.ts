@@ -49,7 +49,16 @@ export const connection = {
     authFetch<Connection>(`/projects/${projectId}/connection`),
   save: (
     projectId: string,
-    body: { provider: string; modelName?: string; baseUrl?: string; apiKey?: string }
+    body: {
+      provider: string;
+      modelName?: string;
+      baseUrl?: string;
+      apiKey?: string;
+      runnerMode?: string;
+      cliType?: string;
+      cliPath?: string;
+      cliArgsJson?: string;
+    }
   ) =>
     authFetch<Connection>(`/projects/${projectId}/connection`, {
       method: "PUT",
@@ -59,6 +68,10 @@ export const connection = {
     authFetch<Connection>(`/projects/${projectId}/connection/verify`, {
       method: "POST",
     }),
+  cliSessions: (projectId: string) =>
+    authFetch<{ items: { sessionKey: string; status: string; alive: boolean; idleSeconds: number }[] }>(
+      `/projects/${projectId}/connection/cli-sessions`
+    ),
 };
 
 export const requirements = {
@@ -181,7 +194,18 @@ export const generateUnit = {
     agentEnough?: boolean;
     agentOverride?: boolean;
     contextSource?: string;
+    /** Step 2 — absolute local project root for ProjectInspector */
+    projectRoot?: string;
+    packagePrefix?: string | null;
+    module?: string;
   }) => authFetch<UnitResult>("/generate-unit", { method: "POST", body: JSON.stringify(body) }),
+  /** Step 2 — inspect stack without generating */
+  inspect: (body: {
+    projectRoot: string;
+    sourceFileName?: string;
+    module?: string;
+    packagePrefix?: string | null;
+  }) => authFetch<import("./types").StackInspect>("/project-inspect", { method: "POST", body: JSON.stringify(body) }),
 };
 
 /** P9 — Business Analyzer (TC → BusinessIntent, no source) */
@@ -380,8 +404,15 @@ export const audit = {
   postApplyAudit: (body: Record<string, unknown>) =>
     authFetch<unknown>("/audit/apply", { method: "POST", body: JSON.stringify(body) }),
   listWorkspaceRuns: (projectId: string, page = 1, pageSize = 50) =>
-    authFetch<Paged<import("./types").WorkspaceRunAudit>>(
-      `/audit/workspace-runs${qs({ projectId, page, pageSize })}`
+    authFetch<{
+      items: import("./types").WorkspaceRunAudit[];
+      page: number;
+      pageSize: number;
+      total: number;
+    }>(`/audit/workspace-runs${qs({ projectId, page, pageSize })}`),
+  getWorkspaceRunDetail: (projectId: string, runKey: string) =>
+    authFetch<import("./types").WorkspaceRunDetail>(
+      `/audit/workspace-runs/${encodeURIComponent(runKey)}${qs({ projectId })}`
     ),
   createCampaign: (body: {
     projectId: string;
@@ -508,6 +539,47 @@ export const reporting = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  /** Step 4 — quét coverage/junit trên disk → PostgreSQL */
+  syncCoverageFromDisk: (
+    projectId: string,
+    body: {
+      projectRoot: string;
+      packagePrefix?: string;
+      packageName?: string;
+      localRunId?: string;
+      testCaseId?: string;
+      module?: string;
+      createReport?: boolean;
+    }
+  ) =>
+    authFetch<{
+      uploaded: number;
+      uploads?: Array<{
+        id: string;
+        format: string;
+        linePct: number;
+        branchPct?: number | null;
+        fileName?: string;
+        kind?: string;
+      }>;
+      coverage?: {
+        linePct?: number;
+        branchPct?: number | null;
+        format?: string;
+      } | null;
+      junit?: {
+        tests?: number;
+        passed?: number;
+        failed?: number;
+        format?: string;
+      } | null;
+      reportId?: string | null;
+      candidatesChecked?: number;
+      packageName?: string | null;
+    }>(`/projects/${projectId}/coverage/sync-from-disk`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listReports: (projectId: string, page = 1, pageSize = 20) =>
     authFetch<Paged<{ id: string; title: string; format: string; createdAt?: string }>>(
       `/projects/${projectId}/reports${qs({ page, pageSize })}`
@@ -539,6 +611,19 @@ export const requirementStudio = {
     authFetch<import("./types").RequirementStudioWorkspace>(
       `/requirement-workspaces/${workspaceId}`
     ),
+  deleteWorkspace: (workspaceId: string) =>
+    authFetch<{
+      status: string;
+      id: string;
+      deletedTestCases: number;
+      deletedJobs: number;
+      deletedSnapshots: number;
+      deletedChatMessages: number;
+      deletedChatSessions: number;
+      deletedChunks: number;
+      deletedFiles: number;
+      deletedKnowledge: number;
+    }>(`/requirement-workspaces/${workspaceId}`, { method: "DELETE" }),
   listFiles: (workspaceId: string) =>
     authFetch<{ items: import("./types").RequirementFileRef[] }>(
       `/requirement-workspaces/${workspaceId}/files`

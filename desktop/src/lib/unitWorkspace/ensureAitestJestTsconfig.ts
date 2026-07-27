@@ -1,6 +1,6 @@
 /**
- * Scaffold [{pkg}/]AItest/tsconfig.json + jest.config so IDE/Jest resolve `src/…`
- * imports and pick up tests outside Nest's default src spec files under src/.
+ * Scaffold [{pkg}/]AItest/tsconfig.json + jest.config so Jest finds tests under
+ * AItest/ (Nest default only scans src/ + .spec.ts under src).
  */
 import { readTextFile, writeTextFile } from "../../tauri/bridge";
 import { AITEST_ROOT, aitestRootFromTarget } from "../testOutputLayout";
@@ -21,6 +21,53 @@ function joinRoot(projectRoot: string, rel: string): string {
   return `${base}/${rel.replace(/\\/g, "/")}`;
 }
 
+function normPkg(packagePrefix?: string | null): string {
+  return (packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+/** Relative path to AItest Jest config from project root. */
+export function aitestJestConfigRel(packagePrefix?: string | null): string {
+  const pkg = normPkg(packagePrefix);
+  return pkg ? `${pkg}/AItest/jest.config.cjs` : "AItest/jest.config.cjs";
+}
+
+/**
+ * Jest command that finds AItest test files — never Nest's src-only npm test.
+ * Uses absolute --config so cwd (repo root vs package) does not break resolution.
+ */
+export function buildAitestJestCommand(
+  projectRoot: string,
+  packagePrefix?: string | null,
+  opts?: { coverage?: boolean }
+): string {
+  const root = projectRoot.replace(/[/\\]+$/, "").replace(/\\/g, "/");
+  let pkg = normPkg(packagePrefix);
+  // If project root IS the package (…/backend), don't prefix again with "backend".
+  if (pkg) {
+    const base = root.split("/").pop()?.toLowerCase() || "";
+    if (base === pkg.toLowerCase() || base === pkg.split("/").pop()?.toLowerCase()) {
+      pkg = "";
+    }
+  }
+  const rel = pkg ? `${pkg}/AItest/jest.config.cjs` : "AItest/jest.config.cjs";
+  const abs = `${root}/${rel}`.replace(/\/{2,}/g, "/");
+  const cov = opts?.coverage ? " --coverage" : "";
+  return `npx jest --config "${abs}" --runInBand --passWithNoTests${cov}`;
+}
+
+/** True when cmd is Nest/default npm test / bare jest without AItest config. */
+export function isDefaultNpmJestCommand(cmd: string): boolean {
+  const c = (cmd || "").trim().toLowerCase();
+  if (!c || /vitest/.test(c)) return false;
+  if (c.includes("aitest/jest.config")) return false;
+  if (c.includes("--config") && /jest\.config/.test(c)) return false;
+  return (
+    /^(npm\s+test|npm\s+run\s+test)\b/.test(c) ||
+    /^(npx\s+)?jest\b/.test(c) ||
+    (/\bnpm\b/.test(c) && /\btest\b/.test(c) && !/vitest/.test(c))
+  );
+}
+
 /** @deprecated use aitestRootFromTarget */
 export function aitestFolderFromTarget(targetRel?: string | null): string {
   return aitestRootFromTarget(targetRel);
@@ -30,7 +77,7 @@ export async function discoverJestTypeRootsAbs(
   projectRoot: string,
   packagePrefix?: string | null
 ): Promise<string[]> {
-  const pkg = (packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const pkg = normPkg(packagePrefix);
   const candidates = [
     ...(pkg ? [`${pkg}/node_modules/@types`] : []),
     "node_modules/@types",
@@ -50,20 +97,21 @@ export async function discoverJestTypeRootsAbs(
 }
 
 /**
- * Extends package tsconfig, baseUrl=package root, includes ../src so
- * `import … from 'src/todos/todos.service'` typechecks (no TS2307).
+ * Self-contained Jest/ts-jest tsconfig (no `extends`) so Nest parent `baseUrl` /
+ * `moduleResolution: node` deprecations (TS 6 → removed in 7) do not leak in.
+ * Paths replace baseUrl; bundler+commonjs is the TS 6 migration path for Jest.
  */
 export function buildAitestJestTsconfig(typeRootsAbs: string[]): string {
   return `${JSON.stringify(
     {
-      extends: "../tsconfig.json",
       compilerOptions: {
-        baseUrl: "..",
+        target: "ES2021",
+        lib: ["ES2021"],
         rootDir: "..",
         noEmit: true,
-        // Override Nest nodenext so extensionless src/… imports resolve in IDE
         module: "commonjs",
-        moduleResolution: "node",
+        moduleResolution: "bundler",
+        isolatedModules: true,
         esModuleInterop: true,
         allowSyntheticDefaultImports: true,
         strict: false,
@@ -72,6 +120,11 @@ export function buildAitestJestTsconfig(typeRootsAbs: string[]): string {
         typeRoots: typeRootsAbs,
         experimentalDecorators: true,
         emitDecoratorMetadata: true,
+        // Replace deprecated baseUrl — prefix inlined into paths (TS 6+).
+        paths: {
+          "src/*": ["../src/*"],
+          "@/*": ["../src/*"],
+        },
       },
       include: [
         "./**/*.ts",
@@ -81,36 +134,46 @@ export function buildAitestJestTsconfig(typeRootsAbs: string[]): string {
         "../src/**/*.js",
         "../src/**/*.jsx",
       ],
+      exclude: ["../node_modules", "../dist", "../build"],
     },
     null,
     2
   )}\n`;
 }
 
-/** Jest config run from package cwd (backend/): finds AItest tests + maps src/. */
+/**
+ * Jest config next to AItest/ — rootDir = package (parent of AItest) via __dirname
+ * so Nest's package.json jest (rootDir: src, testRegex: *.spec.ts) is never used.
+ */
 export function buildAitestJestConfigJs(): string {
-  return `/** Generated by AITest — run from package root (folder with package.json). */
+  return `/** Generated by AITest — do not use Nest package.json jest (src-only). */
+const path = require("path");
+const pkgRoot = path.join(__dirname, "..");
+
 module.exports = {
-  moduleFileExtensions: ["js", "json", "ts"],
-  rootDir: "..",
+  rootDir: pkgRoot,
+  moduleFileExtensions: ["js", "json", "ts", "tsx"],
   testMatch: [
     "<rootDir>/AItest/**/*.test.ts",
     "<rootDir>/AItest/**/*.test.tsx",
     "<rootDir>/AItest/**/*.spec.ts",
     "<rootDir>/AItest/**/*.spec.tsx",
+    "<rootDir>/AItest/**/*.test.js",
+    "<rootDir>/AItest/**/*.spec.js",
   ],
+  testPathIgnorePatterns: ["/node_modules/", "/dist/", "/build/"],
   transform: {
     "^.+\\\\.(t|j)sx?$": [
       "ts-jest",
       {
-        tsconfig: "<rootDir>/AItest/tsconfig.json",
-        isolatedModules: true,
+        tsconfig: path.join(__dirname, "tsconfig.json"),
       },
     ],
   },
   testEnvironment: "node",
   moduleNameMapper: {
     "^src/(.*)$": "<rootDir>/src/$1",
+    "^@/(.*)$": "<rootDir>/src/$1",
   },
 };
 `;
@@ -127,7 +190,7 @@ export async function ensureAitestJestTsconfigInWorkspace(input: {
   const jestContent = buildAitestJestConfigJs();
   const aitestFolder =
     aitestRootFromTarget(input.targetRel) ||
-    (packagePrefix ? `${packagePrefix}/${AITEST_ROOT}` : AITEST_ROOT);
+    (packagePrefix ? `${normPkg(packagePrefix)}/${AITEST_ROOT}` : AITEST_ROOT);
 
   let files = [...input.manifest.files];
   const writes: { rel: string; content: string }[] = [
@@ -138,14 +201,13 @@ export async function ensureAitestJestTsconfigInWorkspace(input: {
   for (const w of writes) {
     const workspaceRel = overlayRelPath(input.manifest.runId, w.rel, packagePrefix);
     await writeTextFile(input.projectRoot, workspaceRel, w.content);
-    const exists = await pathExists(input.projectRoot, w.rel);
-    if (!exists) {
-      try {
-        await writeTextFile(input.projectRoot, w.rel, w.content);
-      } catch {
-        /* overlay enough */
-      }
+    // Always overwrite on-disk scaffold (broken Nest-extends configs must be refreshed).
+    try {
+      await writeTextFile(input.projectRoot, w.rel, w.content);
+    } catch {
+      /* overlay still used at verify staging */
     }
+    const exists = await pathExists(input.projectRoot, w.rel);
     files = files.filter((f) => f.targetRel !== w.rel);
     files.push({
       op: exists ? "modify" : "new",
@@ -172,4 +234,12 @@ export function looksLikeJestTsTest(targetRel: string, content: string): boolean
     /\b(describe|beforeEach|afterEach|it|test|expect)\s*\(/.test(body) ||
     /\bjest\.(mock|fn|spyOn)\b/.test(body)
   );
+}
+
+export function manifestHasAitestTests(manifest: UnitWorkspaceManifest): boolean {
+  return manifest.files.some((f) => {
+    if (f.op === "delete") return false;
+    const p = f.targetRel.replace(/\\/g, "/");
+    return /(?:^|\/)AItest\//i.test(p) && /\.(test|spec)\.(ts|tsx|js|jsx)$/i.test(p);
+  });
 }

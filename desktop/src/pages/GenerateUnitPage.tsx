@@ -12,13 +12,12 @@ import {
   Select,
   Space,
   Steps,
-  Table,
   Tag,
   Typography,
 } from "antd";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { generateTcUrl } from "../lib/testingJourney";
-import { ROUTES, requirementUrl } from "../lib/productRoutes";
+import { ROUTES, requirementUrl, activityUrl } from "../lib/productRoutes";
 import {
   CodeOutlined,
   FolderOpenOutlined,
@@ -26,8 +25,14 @@ import {
   PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { audit, connection, generateApiTest, generateUnit, agentApi, projects, testcases } from "../api";
-import type { Connection, Project, TestCase, UnitResult } from "../api/types";
+import { audit, connection, generateApiTest, generateUnit, projects, requirementStudio, requirements, testcases } from "../api";
+import type {
+  Connection,
+  Project,
+  RequirementStudioWorkspace,
+  TestCase,
+  UnitResult,
+} from "../api/types";
 import {
   metaSyncedAt,
   normalizeProjectMeta,
@@ -48,27 +53,23 @@ import {
   createUnitWorkspaceRun,
   addArtifactToWorkspace,
   loadWorkspacePreviews,
+  loadManifest,
 } from "../lib/unitWorkspace/manager";
 import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWorkspace/types";
 import { UnitWorkspacePreview } from "../components/UnitWorkspacePreview";
 import { UnitWorkspaceVerifyPanel } from "../components/UnitWorkspaceVerifyPanel";
+import { VERIFY_APPLY_CONSOLE_ID } from "../features/unit-test/VerifyApplyConsole";
+import { BatchRunConsole, type BatchPipelineRow } from "../features/unit-test/BatchRunConsole";
+import {
+  BatchStagingPreview,
+  type BatchStagingJob,
+} from "../features/unit-test/BatchStagingPreview";
 import { UnitScopePanel } from "../components/UnitScopePanel";
 import { ReadyStrip } from "../components/ReadyStrip";
 import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
-import { AgentRunPanel } from "../components/AgentRunPanel";
-import { RootIdeMismatchBanner } from "../components/RootIdeMismatchBanner";
 import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
-import {
-  analyzeBusinessIntentLocal,
-  buildPacketFromAgentRun,
-  buildRound0Retrieval,
-  retrieveViaIdeCommands,
-  useAgentRunSession,
-} from "../lib/agentRun";
-import type { BusinessIntent } from "@aitest/ide-protocol";
 import type { AITestContextPacket } from "../lib/contextPacket/types";
 import type { UnitContextPacket } from "../lib/projectIntelligence/types";
-import { toUnitContextView } from "../lib/projectIntelligence/contextBuilder";
 import { GENERATED_TEST_FOLDERS } from "../lib/testOutputLayout";
 import {
   createBatchRunControl,
@@ -82,14 +83,7 @@ import {
   type IdeLocalGenerateBody,
 } from "../lib/ideLocalCommands";
 import { resolvePackagePrefix } from "../lib/resolvePackagePrefix";
-import {
-  contextPacketFromIdeSemantic,
-  fetchIdeSemanticOrNull,
-  ideFocusReadyForGenerate,
-  rootsMismatch,
-  useIdeBridgeSession,
-} from "../lib/ideBridge";
-import { getIdeRpcClientOrNull } from "../lib/ideBridge/session";
+import { labelContextSource, recordUnitJobMetric } from "../lib/unitJobMetrics";
 import {
   ensureWorkspaceOpen,
   getActiveWorkspaceId,
@@ -108,6 +102,27 @@ function displayRel(localPath: string | null, absOrRel: string): string {
   return absOrRel.replace(/^[\\/]+/, "");
 }
 
+/** Requirement Studio workspace (+ optional legacy) for Unit Engine selectors. */
+type ReqOption = {
+  id: string;
+  title: string;
+  description?: string;
+  kind: "studio" | "legacy";
+  legacySourceId?: string | null;
+  snapshotIds: string[];
+  tcTotal?: number;
+  tcApproved?: number;
+};
+
+function tcBelongsToReq(tc: TestCase, req: ReqOption): boolean {
+  if (tc.requirementSnapshotId && req.snapshotIds.includes(tc.requirementSnapshotId)) {
+    return true;
+  }
+  if (req.legacySourceId && tc.sourceId === req.legacySourceId) return true;
+  if (tc.sourceId === req.id) return true;
+  return false;
+}
+
 function guessClassFromCode(code: string, fileName: string): string {
   const m = code.match(
     /^\s*(?:public\s+|export\s+)?(?:class|interface|struct|type|def|fn|func)\s+(\w+)/m
@@ -117,14 +132,7 @@ function guessClassFromCode(code: string, fileName: string): string {
   return base || "Target";
 }
 
-type BatchRow = {
-  key: string;
-  testCaseId: string;
-  title: string;
-  status: "ok" | "fail";
-  error?: string;
-  workspaceRunId?: string;
-};
+type BatchRow = BatchPipelineRow;
 
 export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: boolean }) {
   const { message, modal } = App.useApp();
@@ -153,6 +161,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const [wsManifest, setWsManifest] = useState<UnitWorkspaceManifest | null>(null);
   const [wsPreviews, setWsPreviews] = useState<WorkspacePreviewFile[]>([]);
   const [wsSelectedRel, setWsSelectedRel] = useState<string | null>(null);
+  const [suggestVerify, setSuggestVerify] = useState(false);
   const [contextPacket, setContextPacket] = useState<UnitContextPacket | null>(null);
   const [unitPacketV1, setUnitPacketV1] = useState<AITestContextPacket | null>(null);
   const [scopeLoading, setScopeLoading] = useState(false);
@@ -164,34 +173,17 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const [broadLocalContext, setBroadLocalContext] = useState(true);
   /** FE lọc ứng viên → AI xếp hạng path */
   const [useAiScope, setUseAiScope] = useState(true);
-  /** P2: hiện file combobox (fallback) — ẩn khi IDE focus sẵn sàng */
+  /** P2: hiện file combobox (fallback) khi scope auto chưa khớp */
   const [showAdvancedSource, setShowAdvancedSource] = useState(false);
   const [, setContextSource] = useState<"ide" | "local-fs" | "agent-ide">("local-fs");
   const [testFwResolution, setTestFwResolution] = useState<TestFrameworkResolution | null>(
     null
   );
   const [skipTestFwInstall, setSkipTestFwInstall] = useState(false);
-  const agentPhase = useAgentRunSession((s) => s.phase);
-  const agentIntent = useAgentRunSession((s) => s.intent);
-  const agentRetrieved = useAgentRunSession((s) => s.retrieved);
-  const agentConfidence = useAgentRunSession((s) => s.confidence);
-  const agentError = useAgentRunSession((s) => s.error);
-  const agentOverride = useAgentRunSession((s) => s.override);
-  const agentPacket = useAgentRunSession((s) => s.packet);
-  const agentPrimaryPath = useAgentRunSession((s) => s.primaryPath);
-  const agentFw = useAgentRunSession((s) => s.framework);
-  const agentLang = useAgentRunSession((s) => s.language);
-  const agentSetAnalyzing = useAgentRunSession((s) => s.setAnalyzing);
-  const agentSetIntent = useAgentRunSession((s) => s.setIntent);
-  const agentSetRetrieving = useAgentRunSession((s) => s.setRetrieving);
-  const agentSetRetrieved = useAgentRunSession((s) => s.setRetrieved);
-  const agentSetPacket = useAgentRunSession((s) => s.setPacket);
-  const agentSetPhase = useAgentRunSession((s) => s.setPhase);
-  const agentSetError = useAgentRunSession((s) => s.setError);
-  const agentSetOverride = useAgentRunSession((s) => s.setOverride);
-  const agentClear = useAgentRunSession((s) => s.clear);
   const [repairing, setRepairing] = useState(false);
-  const [inputMode, setInputMode] = useState<"single" | "module">("single");
+  const [inputMode, setInputMode] = useState<"requirement" | "single">(() => {
+    return searchParams.get("reqId") ? "requirement" : "requirement";
+  });
   const [moduleKey, setModuleKey] = useState<string | undefined>();
   const [batchProgress, setBatchProgress] = useState<{
     current: number;
@@ -199,6 +191,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     label: string;
   } | null>(null);
   const [batchResults, setBatchResults] = useState<BatchRow[]>([]);
+  const [batchJobs, setBatchJobs] = useState<BatchStagingJob[]>([]);
+  const [batchJobKey, setBatchJobKey] = useState<string | null>(null);
+  const [batchFileRel, setBatchFileRel] = useState<string | null>(null);
   const [openApiSpec, setOpenApiSpec] = useState("");
   /** Bump after bind/sync so localPath re-reads from workspace store */
   const [sourceRootTick, setSourceRootTick] = useState(0);
@@ -209,14 +204,26 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     return batchControlRef.current.subscribe(setBatchRunStatus);
   }, []);
 
+  const [requirementsList, setRequirementsList] = useState<ReqOption[]>([]);
+  const [allTestCases, setAllTestCases] = useState<TestCase[]>([]);
+  const [selectedReqId, setSelectedReqId] = useState<string | undefined>(() => {
+    return searchParams.get("reqId") || searchParams.get("workspaceId") || undefined;
+  });
+  const [showAllTcStatus, setShowAllTcStatus] = useState<boolean>(false);
+
   useEffect(() => {
     const mode = searchParams.get("mode");
     const mod = searchParams.get("module");
     const tc = searchParams.get("testCaseId");
+    const req = searchParams.get("reqId") || searchParams.get("workspaceId");
+    if (req) {
+      setSelectedReqId(req);
+      setInputMode("requirement");
+    }
     if (mode === "gaps") {
-      setInputMode("module");
+      setInputMode("requirement");
     } else if (mode === "module" && mod) {
-      setInputMode("module");
+      setInputMode("requirement");
       setModuleKey(decodeURIComponent(mod));
     } else if (mode === "single" && tc) {
       setInputMode("single");
@@ -226,16 +233,38 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
   const [gapsPrompted, setGapsPrompted] = useState(false);
 
+  const filteredTestCases = useMemo(() => {
+    let list = showAllTcStatus ? allTestCases : approved;
+    if (selectedReqId && selectedReqId !== "__all__") {
+      const req = requirementsList.find((r) => r.id === selectedReqId);
+      if (req) {
+        list = list.filter((tc) => tcBelongsToReq(tc, req));
+      } else {
+        // Fallback: match legacy sourceId or snapshot id until list loads
+        list = list.filter(
+          (tc) =>
+            tc.sourceId === selectedReqId || tc.requirementSnapshotId === selectedReqId
+        );
+      }
+    }
+    return list;
+  }, [allTestCases, approved, selectedReqId, showAllTcStatus, requirementsList]);
+
+  const selectedReq = useMemo(
+    () => requirementsList.find((r) => r.id === selectedReqId),
+    [requirementsList, selectedReqId]
+  );
+
   const moduleGroups = useMemo(() => {
     const map = new Map<string, TestCase[]>();
-    for (const t of approved) {
+    for (const t of filteredTestCases) {
       const key = (t.module || "").trim() || "(Chưa gán module)";
       const arr = map.get(key) ?? [];
       arr.push(t);
       map.set(key, arr);
     }
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], "vi"));
-  }, [approved]);
+  }, [filteredTestCases]);
 
   useEffect(() => {
     if (moduleGroups.length === 0) {
@@ -271,18 +300,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     () => normalizeProjectMeta(serverProject?.meta),
     [serverProject?.meta]
   );
-  const ideStatus = useIdeBridgeSession((s) => s.status);
-  const ideFocus = useIdeBridgeSession((s) => s.focus);
-  const ideConfidence = useIdeBridgeSession((s) => s.confidence);
-  const ideLanguage = useIdeBridgeSession((s) => s.language);
-  const ideWorkspaceRoot = useIdeBridgeSession((s) => s.workspaceRoot);
-  const clearIdeFocus = useIdeBridgeSession((s) => s.clearFocus);
-  const ideReady = ideStatus === "connected" && ideFocusReadyForGenerate(ideConfidence, Boolean(ideFocus));
-  const ideRootMismatch = rootsMismatch(localPath, ideWorkspaceRoot);
 
-  // Đổi project AITest → xóa caret boost / source dính từ IDE project cũ
+  // Đổi project → xóa source/scope dính từ project cũ
   useEffect(() => {
-    clearIdeFocus();
     setManualSourcePick(false);
     manualSourcePickRef.current = false;
     setSourceFile(undefined);
@@ -292,16 +312,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setSourceCode("");
     setContextPacket(null);
     setUnitPacketV1(null);
-  }, [project?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- only on project switch
+  }, [project?.id]);
 
   /**
    * Language theo file đang test trước (monorepo Forensic: .cs → C#, không để
-   * IDE/ClientApp TS hoặc "C# + TypeScript" kéo framework sang Jest).
+   * ClientApp TS hoặc "C# + TypeScript" kéo framework sang Jest).
    */
   const language =
     languageFromSourcePath(sourceFile) ||
-    languageFromSourcePath(ideFocus?.file) ||
-    ideLanguage ||
     (serverProject?.language && !serverProject.language.includes("+")
       ? serverProject.language
       : null) ||
@@ -315,29 +333,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const fwOptions = useMemo(
     () => testFrameworkOptions(language, meta),
     [language, meta]
-  );
-
-  const onIdeFocusApplied = useCallback(
-    (focus: { file: string; symbol: string; method?: string }) => {
-      if (manualSourcePickRef.current) return;
-      if (rootsMismatch(localPath, useIdeBridgeSession.getState().workspaceRoot)) {
-        return;
-      }
-      const rel = focus.file.replace(/\\/g, "/");
-      setContextSource("ide");
-      setSourceFile(rel);
-      sourceFileRef.current = rel;
-      void (async () => {
-        if (!localPath || !isTauri()) return;
-        try {
-          const code = await ideReadFile(localPath, rel);
-          if (!manualSourcePickRef.current) setSourceCode(code);
-        } catch {
-          /* preview optional */
-        }
-      })();
-    },
-    [localPath]
   );
 
   useEffect(() => {
@@ -360,12 +355,67 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     if (!project) return;
     setLoading(true);
     try {
-      const [page, p, c] = await Promise.all([
-        testcases.list({ projectId: project.id, reviewStatus: "Approved" }),
+      const [allTcPage, studioRes, legacyRes, p, c] = await Promise.all([
+        testcases.list({ projectId: project.id }, 1, 500),
+        requirementStudio.listWorkspaces(project.id).catch(() => ({ items: [] as RequirementStudioWorkspace[] })),
+        requirements.list(project.id, 1, 200).catch(() => ({ items: [] })),
         projects.get(project.id),
         connection.get(project.id).catch(() => null),
       ]);
-      setApproved(page.items);
+      setAllTestCases(allTcPage.items);
+      const appList = allTcPage.items.filter((t) => t.reviewStatus === "Approved");
+      setApproved(appList);
+
+      const studios = studioRes.items ?? [];
+      const snapEntries = await Promise.all(
+        studios.map(async (ws) => {
+          try {
+            const snaps = await requirementStudio.listSnapshots(ws.id);
+            return [ws.id, (snaps.items ?? []).map((s) => s.id)] as const;
+          } catch {
+            return [ws.id, [] as string[]] as const;
+          }
+        })
+      );
+      const snapByWs = new Map(snapEntries);
+
+      const studioOpts: ReqOption[] = studios.map((ws) => ({
+        id: ws.id,
+        title: ws.title,
+        kind: "studio",
+        legacySourceId: ws.legacySourceId ?? null,
+        snapshotIds: snapByWs.get(ws.id) ?? [],
+        tcTotal: ws.tcTotal,
+        tcApproved: ws.tcApproved,
+      }));
+
+      const studioLegacyIds = new Set(
+        studioOpts.map((o) => o.legacySourceId).filter(Boolean) as string[]
+      );
+      const studioIds = new Set(studioOpts.map((o) => o.id));
+      const legacyOpts: ReqOption[] = (legacyRes.items ?? [])
+        .filter((r) => !studioIds.has(r.id) && !studioLegacyIds.has(r.id))
+        .map((r) => ({
+          id: r.id,
+          title: r.title,
+          description: r.description ?? undefined,
+          kind: "legacy",
+          legacySourceId: r.id,
+          snapshotIds: [],
+        }));
+
+      const merged = [...studioOpts, ...legacyOpts];
+      setRequirementsList(merged);
+
+      // Auto-select first Requirement when URL has none
+      setSelectedReqId((prev) => {
+        if (prev && merged.some((m) => m.id === prev)) return prev;
+        if (prev && allTcPage.items.some((t) => t.sourceId === prev || t.requirementSnapshotId === prev)) {
+          return prev;
+        }
+        return prev ?? merged[0]?.id;
+      });
+
       setServerProject({
         ...p,
         meta: normalizeProjectMeta(p.meta) ?? p.meta,
@@ -386,7 +436,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     if (!project?.id || !localPath || !isTauri()) return;
     try {
       const exts = sourceExtensionsForLanguage(language);
-      // IDE-local list first (Tauri); workspace list is fallback only
+      // Local FS list first (Tauri); workspace list is fallback only
       let all: string[] = [];
       try {
         all = await ideListSourceFiles(localPath, exts);
@@ -405,7 +455,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         : all;
       setSourceFiles(filtered.map((p) => p.replace(/\\/g, "/")));
     } catch (e) {
-      message.error(e instanceof Error ? e.message : "Không liệt kê được file nguồn (IDE local)");
+      message.error(e instanceof Error ? e.message : "Không liệt kê được file nguồn (Local FS)");
     }
   }, [project?.id, localPath, language, message]);
 
@@ -417,212 +467,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     () => approved.find((t) => t.id === testCaseId),
     [approved, testCaseId]
   );
-
-  const readForAgentPacket = useCallback(
-    async (pathRel: string): Promise<string> => {
-      if (localPath && isTauri()) {
-        try {
-          return await ideReadFile(localPath, pathRel);
-        } catch {
-          /* try IDE */
-        }
-      }
-      const client = getIdeRpcClientOrNull();
-      if (client?.isConnected) {
-        const r = await client.readFile({ pathRel, maxBytes: 16_000 });
-        return r.content;
-      }
-      throw new Error(`Không đọc được ${pathRel}`);
-    },
-    [localPath]
-  );
-
-  const freezeAgentPacket = useCallback(
-    async (opts: {
-      intent: BusinessIntent;
-      retrieved: import("@aitest/ide-protocol").RetrievedFile[];
-      confidence: import("@aitest/ide-protocol").ConfidenceReport;
-      tc: TestCase;
-    }) => {
-      if (!project?.id) return;
-      const semantic = await fetchIdeSemanticOrNull();
-      const built = await buildPacketFromAgentRun({
-        intent: opts.intent,
-        retrieved: opts.retrieved,
-        confidence: opts.confidence,
-        testCase: opts.tc,
-        projectId: project.id,
-        framework: framework === "auto" ? "" : framework || "",
-        readFile: readForAgentPacket,
-        ideSemantic: semantic,
-      });
-      agentSetPacket({
-        packet: built.packet,
-        language: built.language,
-        framework: built.framework,
-        primaryPath: built.primaryPath,
-      });
-      setUnitPacketV1(built.packet);
-      setContextPacket(toUnitContextView(built.packet));
-      setContextSource("ide");
-      if (built.primaryPath) {
-        setSourceFile(built.primaryPath);
-        sourceFileRef.current = built.primaryPath;
-      }
-      if (built.packet.files[0]?.content) {
-        setSourceCode(built.packet.files[0].content);
-      }
-      if (built.framework) setFramework(built.framework);
-    },
-    [project?.id, framework, readForAgentPacket, agentSetPacket]
-  );
-
-  const runAgentAnalyze = useCallback(async () => {
-    if (!selectedTc || !project?.id) {
-      agentSetError("Chọn TC Approved trước");
-      return;
-    }
-    if (rootsMismatch(localPath, useIdeBridgeSession.getState().workspaceRoot)) {
-      agentSetError(
-        "Lệch thư mục IDE · Root — dùng «Dùng folder Cursor làm Root Apply» hoặc Open Folder đúng repo, rồi Analyze lại."
-      );
-      return;
-    }
-    agentSetAnalyzing(selectedTc.id);
-    agentSetOverride(false);
-    let intent: BusinessIntent;
-    try {
-      const dto = await agentApi.analyzeIntent({
-        projectId: project.id,
-        testCaseId: selectedTc.id,
-      });
-      intent = {
-        action: dto.action,
-        entity: dto.entity,
-        expectedResults: dto.expectedResults ?? [],
-        businessRules: dto.businessRules ?? [],
-        validationRules: dto.validationRules ?? [],
-        externalDeps: dto.externalDeps ?? [],
-        domainTerms: dto.domainTerms ?? [],
-        searchHints: dto.searchHints ?? [],
-      };
-      if (dto.source === "heuristic" && dto.fallbackReason) {
-        message.warning(`Intent dùng heuristic (LLM lỗi): ${dto.fallbackReason}`);
-      }
-    } catch (e) {
-      intent = analyzeBusinessIntentLocal(selectedTc);
-      message.warning(
-        e instanceof Error
-          ? `API analyze-intent lỗi — dùng heuristic local: ${e.message}`
-          : "API analyze-intent lỗi — dùng heuristic local"
-      );
-    }
-    agentSetIntent(intent);
-    agentSetRetrieving();
-    const round0 = buildRound0Retrieval({
-      intent,
-      focus: ideFocus
-        ? { file: ideFocus.file, symbol: ideFocus.symbol, method: ideFocus.method }
-        : null,
-    });
-    agentSetRetrieved(round0.retrieved, round0.confidence);
-
-    const ide = await retrieveViaIdeCommands({
-      intent,
-      focus: ideFocus
-        ? { file: ideFocus.file, symbol: ideFocus.symbol, method: ideFocus.method }
-        : null,
-    });
-    const retrieved = ide.usedIde ? ide.retrieved : round0.retrieved;
-    const conf = ide.usedIde ? ide.confidence : round0.confidence;
-    agentSetRetrieved(retrieved, conf);
-    if (ide.usedIde && ide.error) message.warning(`IDE retrieve: ${ide.error}`);
-
-    try {
-      await freezeAgentPacket({
-        intent,
-        retrieved,
-        confidence: conf,
-        tc: selectedTc,
-      });
-    } catch (e) {
-      message.warning(
-        e instanceof Error
-          ? `Dựng packet thất bại: ${e.message}`
-          : "Dựng packet thất bại"
-      );
-    }
-  }, [
-    selectedTc,
-    ideFocus,
-    project?.id,
-    message,
-    agentSetAnalyzing,
-    agentSetOverride,
-    agentSetError,
-    agentSetIntent,
-    agentSetRetrieving,
-    agentSetRetrieved,
-    freezeAgentPacket,
-    localPath,
-  ]);
-
-  const runIdeRetrieveOnly = useCallback(async () => {
-    if (!agentIntent || !selectedTc) {
-      message.warning("Chưa có Business Intent — chọn TC trước");
-      return;
-    }
-    if (rootsMismatch(localPath, useIdeBridgeSession.getState().workspaceRoot)) {
-      message.warning(
-        "Lệch thư mục IDE · Root — khớp Root với Cursor trước khi lấy context IDE."
-      );
-      return;
-    }
-    agentSetRetrieving();
-    const ide = await retrieveViaIdeCommands({
-      intent: agentIntent,
-      focus: ideFocus
-        ? { file: ideFocus.file, symbol: ideFocus.symbol, method: ideFocus.method }
-        : null,
-    });
-    agentSetRetrieved(ide.retrieved, ide.confidence);
-    if (!ide.usedIde) {
-      message.warning(ide.error || "Connect IDE để searchSymbol / readFile");
-    } else if (ide.error) {
-      message.warning(`IDE retrieve: ${ide.error}`);
-    } else {
-      message.success(
-        `Đã lấy ${ide.retrieved.length} file qua IDE commands (không dump workspace)`
-      );
-    }
-    try {
-      await freezeAgentPacket({
-        intent: agentIntent,
-        retrieved: ide.retrieved,
-        confidence: ide.confidence,
-        tc: selectedTc,
-      });
-    } catch (e) {
-      message.warning(e instanceof Error ? e.message : "Dựng packet thất bại");
-    }
-  }, [
-    agentIntent,
-    ideFocus,
-    message,
-    selectedTc,
-    agentSetRetrieving,
-    agentSetRetrieved,
-    freezeAgentPacket,
-    localPath,
-  ]);
-
-  useEffect(() => {
-    if (!selectedTc || !project?.id) {
-      agentClear();
-      return;
-    }
-    void runAgentAnalyze();
-  }, [selectedTc?.id, project?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- re-analyze on TC change only
 
   const pathHint = useMemo(() => {
     if (!sourceCode.trim() && !sourceFile) return null;
@@ -894,6 +738,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       packagePrefix,
       openApiSpec: isApiKind ? openApiSpec || undefined : undefined,
       workspaceId: wsId,
+      projectRoot: localPath,
     });
     const res = isApiKind
       ? await generateApiTest.run(genBody)
@@ -929,6 +774,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       sourceFileName: relName,
       artifactKind: isApiKind ? "api" : "unit",
       packagePrefix,
+      packageName: res.stackInspect?.package_name,
     });
     const added = await addArtifactToWorkspace({
       projectRoot: localPath,
@@ -937,7 +783,16 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       content: res.code,
     });
     manifest = added.manifest;
-    syncWorkspaceRun(manifest, { module: tc.module, status: "generated" });
+        syncWorkspaceRun(manifest, { module: tc.module, status: "generated" });
+    recordUnitJobMetric({
+      projectId: project.id,
+      contextSource: "local-fs",
+      runnerUsed: res.runnerUsed,
+      ideConnected: false,
+    });
+    message.success(
+      `Unit Job đã tạo · ${manifest.runId.slice(0, 8)}… — xem Job Board`
+    );
     const previews = await loadWorkspacePreviews(localPath, manifest);
 
     setUnitPacketV1(null);
@@ -957,7 +812,168 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setWsManifest(manifest);
     setWsPreviews(previews);
     setWsSelectedRel(added.entry.targetRel);
-    return { runId: manifest.runId };
+    return { runId: manifest.runId, packagePrefix: manifest.packagePrefix };
+  }
+
+  function focusVerifyConsole() {
+    setSuggestVerify(true);
+    window.setTimeout(() => {
+      document
+        .getElementById(VERIFY_APPLY_CONSOLE_ID)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+  }
+
+  async function refreshBatchStaging(rows: BatchRow[]) {
+    if (!localPath || !isTauri()) {
+      setBatchJobs([]);
+      return;
+    }
+    const jobs: BatchStagingJob[] = [];
+    for (const row of rows) {
+      if (row.workspaceRunId && row.status === "ok") {
+        try {
+          const manifest = await loadManifest(
+            localPath,
+            row.workspaceRunId,
+            row.packagePrefix
+          );
+          const previews = manifest
+            ? await loadWorkspacePreviews(localPath, manifest)
+            : [];
+          jobs.push({ row, manifest, previews });
+        } catch {
+          jobs.push({ row, manifest: null, previews: [] });
+        }
+      } else {
+        jobs.push({ row, manifest: null, previews: [] });
+      }
+    }
+    setBatchJobs(jobs);
+    if (jobs.length) {
+      const firstOk = jobs.find((j) => j.row.status === "ok" && j.previews.length);
+      const pick = firstOk || jobs[0];
+      setBatchJobKey(pick.row.key);
+      setBatchFileRel(pick.previews[0]?.entry.targetRel ?? null);
+    }
+  }
+
+  async function runRequirementBatch(retryFailsOnly = false) {
+    if (!project || !selectedReqId) return;
+    const req = requirementsList.find((r) => r.id === selectedReqId);
+    const list = filteredTestCases;
+    if (list.length === 0) return;
+    if (!aiReady) {
+      message.error("AI chưa Ready — vào Cấu hình AI để Verify trước.");
+      return;
+    }
+    if (!localPath || !isTauri()) {
+      message.error("Sinh theo Requirement cần Desktop + gắn project root trên trang này.");
+      return;
+    }
+
+    const workList = retryFailsOnly
+      ? list.filter((t) => batchResults.some((r) => r.key === t.id && r.status === "fail"))
+      : list;
+
+    if (workList.length === 0) {
+      message.info(retryFailsOnly ? "Không có dòng lỗi để thử lại." : "Không có test case trong Requirement.");
+      return;
+    }
+
+    const rowMap = new Map<string, BatchRow>();
+    if (retryFailsOnly) {
+      for (const r of batchResults) rowMap.set(r.key, r);
+    } else {
+      for (const t of list) {
+        rowMap.set(t.id, {
+          key: t.id,
+          testCaseId: t.testCaseId,
+          title: t.title,
+          status: "fail",
+          error: "Đang chờ…",
+        });
+      }
+    }
+
+    setBusy(true);
+    const control = batchControlRef.current;
+    control.start();
+    setBatchProgress({ current: 0, total: workList.length, label: workList[0].title });
+
+    let campaignId: string | undefined;
+    if (!retryFailsOnly) {
+      try {
+        const camp = await audit.createCampaign({
+          projectId: project.id,
+          kind: isApiKind ? "api" : "unit",
+          scopeLevel: "requirement",
+          scopeLabel: req?.title || selectedReqId,
+        });
+        campaignId = camp.id;
+      } catch {
+        campaignId = undefined;
+      }
+    }
+
+    try {
+      for (let i = 0; i < workList.length; i++) {
+        await control.waitIfPaused();
+        const tc = workList[i];
+        setBatchProgress({ current: i + 1, total: workList.length, label: tc.title });
+        try {
+          const out = await runForTestCase(tc);
+          rowMap.set(tc.id, {
+            key: tc.id,
+            testCaseId: tc.testCaseId,
+            title: tc.title,
+            status: "ok",
+            workspaceRunId: out?.runId,
+            packagePrefix: out?.packagePrefix,
+            verifyStatus: "pending",
+            applyStatus: "pending",
+          });
+          if (campaignId) {
+            void audit.addCampaignTasks(campaignId, [
+              {
+                testCaseId: tc.id,
+                localRunId: out?.runId,
+                status: "ok",
+                sortOrder: i,
+              },
+            ]);
+          }
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : "Lỗi";
+          rowMap.set(tc.id, {
+            key: tc.id,
+            testCaseId: tc.testCaseId,
+            title: tc.title,
+            status: "fail",
+            error: errMsg,
+          });
+          if (campaignId) {
+            void audit.addCampaignTasks(campaignId, [
+              { testCaseId: tc.id, status: "fail", error: errMsg, sortOrder: i },
+            ]);
+          }
+        }
+        setBatchResults([...rowMap.values()]);
+        void refreshBatchStaging([...rowMap.values()]);
+      }
+    } finally {
+      control.reset();
+      setBatchProgress(null);
+      setBusy(false);
+      const finalRows = [...rowMap.values()];
+      void refreshBatchStaging(finalRows).then(() => {
+        window.setTimeout(() => {
+          document
+            .getElementById("aitest-batch-staging-preview")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 150);
+      });
+    }
   }
 
   async function runModuleBatch(retryFailsOnly = false, moduleOverride?: string) {
@@ -970,7 +986,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       return;
     }
     if (!localPath || !isTauri()) {
-      message.error("Sinh theo module cần Desktop + gắn Root Apply trên trang này.");
+      message.error("Sinh theo module cần Desktop + gắn project root trên trang này.");
       return;
     }
 
@@ -1032,6 +1048,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             title: tc.title,
             status: "ok",
             workspaceRunId: out?.runId,
+            packagePrefix: out?.packagePrefix,
+            verifyStatus: "pending",
+            applyStatus: "pending",
           });
           if (campaignId) {
             void audit.addCampaignTasks(campaignId, [
@@ -1059,6 +1078,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           }
         }
         setBatchResults([...rowMap.values()]);
+        void refreshBatchStaging([...rowMap.values()]);
       }
       const finalRows = [...rowMap.values()];
       setBatchResults(finalRows);
@@ -1078,6 +1098,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       control.reset();
       setBusy(false);
       setBatchProgress(null);
+      void refreshBatchStaging([...rowMap.values()]);
     }
   }
 
@@ -1134,16 +1155,23 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gapsMode, gapsPrompted, loading, project, moduleGroups, gapsModulesParam]);
 
+  /** Happy path: Local FS + AI CLI only. */
+  async function runUnitJob() {
+    try {
+      await run();
+    } finally {
+      /* done */
+    }
+  }
+
   async function run() {
-    const hasIdeScope = ideReady && Boolean(ideFocus);
     const hasFileScope = Boolean(
       sourceFile ||
         contextPacket?.primaryPath ||
-        (isApiKind && openApiSpec.trim()) ||
-        hasIdeScope
+        (isApiKind && openApiSpec.trim())
     );
     const hasPastedOnly =
-      Boolean(sourceCode.trim()) && !sourceFile && !contextPacket?.primaryPath && !hasIdeScope;
+      Boolean(sourceCode.trim()) && !sourceFile && !contextPacket?.primaryPath;
     if (
       !project ||
       !testCaseId ||
@@ -1152,7 +1180,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       message.error(
         isApiKind
           ? "Cần TC Approved và OpenAPI hoặc chọn file handler."
-          : "Cần TC Approved + Connect IDE (caret) hoặc chọn/dán mã nguồn (fallback)."
+          : "Cần TC Approved + project root (Local FS) hoặc chọn/dán mã nguồn."
       );
       return;
     }
@@ -1162,19 +1190,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
     if (!localPath || !isTauri()) {
       message.warning("Cần gắn project root trên trang này trước khi sinh → Bản nháp test.");
-      return;
-    }
-    if (
-      !isApiKind &&
-      !manualSourcePickRef.current &&
-      agentPacket?.files?.length &&
-      agentConfidence &&
-      !agentConfidence.enough &&
-      !agentOverride
-    ) {
-      message.warning(
-        "Confidence chưa đủ — bấm «Sinh anyway (override)» hoặc «Tiếp tục lấy context»."
-      );
       return;
     }
     setBusy(true);
@@ -1204,116 +1219,20 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       let classHint = "";
       let outName = "";
       let usedLanguage = language;
-      let usedSource: "ide" | "local-fs" | "agent-ide" = "local-fs";
+      const usedSource: "ide" | "local-fs" | "agent-ide" = "local-fs";
 
-      // P0 — Prefer frozen Agent packet (retrieve → packet → generate)
-      const useAgentPacket =
-        !isApiKind &&
-        !manualSourcePickRef.current &&
-        Boolean(agentPacket?.files?.length) &&
-        (Boolean(agentConfidence?.enough) || agentOverride);
-
-      if (useAgentPacket && agentPacket) {
-        usedSource = "agent-ide";
-        setContextSource("ide");
-        setUnitPacketV1(agentPacket);
-        setContextPacket(toUnitContextView(agentPacket));
-        usedLanguage = agentLang || languageFromSourcePath(agentPrimaryPath) || language;
-        outName =
-          agentPrimaryPath ||
-          agentPacket.sourceUnderTest?.pathRel ||
-          agentPacket.files[0]?.pathRel ||
-          "";
-        classHint =
-          agentPacket.sourceUnderTest?.symbol ||
-          guessClassFromCode(agentPacket.files[0]?.content || "", outName);
-        if (agentPacket.files[0]?.content) setSourceCode(agentPacket.files[0].content);
-        if (outName) setSourceFile(outName);
-        const fw =
-          (framework && framework !== "auto" ? framework : null) ||
-          agentFw ||
-          agentPacket.testingStack?.testingFramework ||
-          "";
-        genBody = buildIdeLocalGenerateBody({
-          projectId: project.id,
-          testCaseId,
-          packet: agentPacket,
-          sourceFileName: outName,
-          framework: fw,
-          language: usedLanguage ?? undefined,
-          className: classHint,
-          module: tc.module || undefined,
-          workspaceId: wsId,
-          agentConfidence: agentConfidence?.overall,
-          agentEnough: agentConfidence?.enough,
-          agentOverride,
-          contextSource: "agent-ide",
-        });
-      }
-
-      const preferIde =
-        !genBody &&
-        !manualSourcePickRef.current &&
-        ideStatus === "connected" &&
-        !isApiKind &&
-        ideFocusReadyForGenerate(ideConfidence, Boolean(ideFocus));
-
-      if (preferIde) {
-        const semantic = await fetchIdeSemanticOrNull();
-        if (semantic) {
-          const built = await contextPacketFromIdeSemantic({
-            packet: semantic,
-            testCase: tc,
-            projectId: project.id,
-            framework: framework === "auto" ? "" : framework || "",
-            purpose: "generate-unit",
-            testKind: "unit",
-            readFile: (pathRel) => ideReadFile(localPath, pathRel),
-          });
-          usedSource = "ide";
-          setContextSource("ide");
-          setUnitPacketV1(built.packet);
-          setContextPacket(toUnitContextView(built.packet));
-          usedLanguage = built.language || language;
-          outName = built.packet.sourceUnderTest?.pathRel || semantic.focus.file;
-          classHint =
-            built.packet.sourceUnderTest?.symbol ||
-            guessClassFromCode(built.packet.files[0]?.content || "", outName);
-          if (built.packet.files[0]?.content) setSourceCode(built.packet.files[0].content);
-          setSourceFile(outName);
-          const fw =
-            framework && framework !== "auto" ? framework : built.framework || framework || "";
-          genBody = buildIdeLocalGenerateBody({
-            projectId: project.id,
-            testCaseId,
-            packet: built.packetForApi,
-            sourceFileName: outName,
-            framework: fw,
-            language: usedLanguage ?? undefined,
-            className: classHint,
-            module: tc.module || undefined,
-            workspaceId: wsId,
-            contextSource: "ide-semantic",
-          });
-        } else {
-          message.warning("IDE không trả semantic — chuyển Local FS fallback.");
-        }
-      }
-
-      if (!genBody) {
+      {
         const relName = sourceFile
           ? displayRel(localPath, sourceFile)
           : contextPacket?.primaryPath ||
-            ideFocus?.file ||
             ("snippet" + (language?.toLowerCase().includes("python") ? ".py" : ".txt"));
         const relatedRels = relatedSourceFiles.map((f) => displayRel(localPath, f));
         classHint = guessClassFromCode(sourceCode, relName);
         outName = relName;
-        usedSource = "local-fs";
         setContextSource("local-fs");
 
         const pastedOnly =
-          Boolean(sourceCode.trim()) && !sourceFile && !contextPacket?.primaryPath && !ideFocus;
+          Boolean(sourceCode.trim()) && !sourceFile && !contextPacket?.primaryPath;
 
         if (pastedOnly) {
           genBody = {
@@ -1325,6 +1244,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             language: language ?? undefined,
             className: classHint,
             module: tc.module || undefined,
+            projectRoot: localPath,
             ...(isApiKind ? { openApiSpec: openApiSpec || undefined } : {}),
           };
         } else {
@@ -1340,7 +1260,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             testCase: tc,
             allSourcePaths: paths,
             manualPrimaryPath:
-              sourceFile ? relName : contextPacket?.primaryPath || ideFocus?.file || null,
+              sourceFile ? relName : contextPacket?.primaryPath || null,
             forcedRelatedPaths: relatedRels,
             broadLocalContext,
             codeAliases: (serverProject?.meta as { codeAliases?: Record<string, string[]> } | null)
@@ -1365,6 +1285,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             module: tc.module || undefined,
             openApiSpec: isApiKind ? openApiSpec || undefined : undefined,
             workspaceId: wsId,
+            projectRoot: localPath,
           });
         }
       }
@@ -1410,6 +1331,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           sourceFileName: outName,
           artifactKind: isApiKind ? "api" : "unit",
           packagePrefix,
+          packageName: res.stackInspect?.package_name,
         });
         const added = await addArtifactToWorkspace({
           projectRoot: localPath,
@@ -1421,8 +1343,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         syncWorkspaceRun(manifest, {
           status: "generated",
           contextSource: usedSource,
-          agentConfidence: agentConfidence?.overall,
-          agentOverride,
+        });
+        recordUnitJobMetric({
+          projectId: project.id,
+          contextSource: usedSource,
+          runnerUsed: res.runnerUsed,
+          ideConnected: false,
         });
         const previews = await loadWorkspacePreviews(localPath, manifest);
         setWsManifest(manifest);
@@ -1431,20 +1357,19 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         message.success(
           isApiKind
             ? `Đã sinh API test · Bản nháp (${added.entry.op})`
-            : `Đã sinh unit · nguồn ${
-                usedSource === "agent-ide"
-                  ? "Agent IDE packet"
-                  : usedSource === "ide"
-                    ? "IDE semantic"
-                    : "Local FS"
-              } · Bản nháp (${added.entry.op})`
+            : `Unit Job OK${
+                res.runnerUsed === "AI_CLI" ? " · AI CLI" : ""
+              } · ${labelContextSource(usedSource)} · ${manifest.runId.slice(0, 8)}…`
         );
+        focusVerifyConsole();
       } else {
         setWsManifest(null);
         setWsPreviews([]);
         setWsSelectedRel(null);
         message.success(
-          `Đã sinh ${isApiKind ? "API" : "unit"} test bằng ${res.provider} (chưa lưu bản nháp — cần Desktop + project root)`
+          `Đã sinh ${isApiKind ? "API" : "unit"} test bằng ${res.provider}${
+            res.runnerUsed === "AI_CLI" ? " · AI CLI" : ""
+          } (chưa lưu bản nháp — cần Desktop + project root)`
         );
       }
     } catch (e) {
@@ -1478,18 +1403,26 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
   }
 
-  async function repairWorkspaceWithAi() {
-    if (!project || !testCaseId || !localPath || !wsManifest || !isTauri()) return;
+  async function repairWorkspaceWithAi(
+    baseManifest?: UnitWorkspaceManifest
+  ): Promise<UnitWorkspaceManifest | null> {
+    if (!project || !testCaseId || !localPath || !isTauri()) return null;
+    const current = baseManifest ?? wsManifest;
+    if (!current) return null;
+    const previews = await loadWorkspacePreviews(localPath, current);
     const selected =
-      wsPreviews.find((p) => p.entry.targetRel === wsSelectedRel) ?? wsPreviews[0] ?? null;
+      previews.find((p) => p.entry.targetRel === (wsSelectedRel || previews[0]?.entry.targetRel)) ??
+      previews[0] ??
+      null;
     if (!selected) {
       message.warning("Không có file bản nháp để repair.");
-      return;
+      return null;
     }
-    const failedStages = wsManifest.verify?.stages.filter((s) => !s.success) ?? [];
+    const failedStages = current.verify?.stages.filter((s) => !s.success) ?? [];
     const repairContext = [
-      `Agent Staging run: ${wsManifest.runId}`,
+      `Agent Staging run: ${current.runId}`,
       `Target file: ${selected.entry.targetRel}`,
+      `Sandbox Auto-Repair (Step 3)`,
       ...(failedStages.length
         ? failedStages.map(
             (s) =>
@@ -1503,13 +1436,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       const repairBody = {
         projectId: project.id,
         testCaseId,
-        sourceFileName: wsManifest.sourceFileName || selected.entry.targetRel,
+        sourceFileName: current.sourceFileName || selected.entry.targetRel,
         sourceCode: selected.content,
         framework: framework === "auto" ? "" : framework || "",
         language: language ?? undefined,
         className: guessClassFromCode(selected.content, selected.entry.targetRel),
         module: selectedTc?.module || undefined,
-        packagePrefix: wsManifest.packagePrefix,
+        packagePrefix: current.packagePrefix,
+        projectRoot: localPath,
         relatedSources:
           contextPacket?.related
             .filter((r) => r.role === "dependency")
@@ -1525,26 +1459,27 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       const added = await addArtifactToWorkspace({
         projectRoot: localPath,
         manifest: {
-          ...wsManifest,
-          repairAttempts: (wsManifest.repairAttempts ?? 0) + 1,
+          ...current,
+          repairAttempts: (current.repairAttempts ?? 0) + 1,
         },
         targetRel: selected.entry.targetRel,
         content: res.code,
       });
-      const previews = await loadWorkspacePreviews(localPath, added.manifest);
+      const nextPreviews = await loadWorkspacePreviews(localPath, added.manifest);
       setResult(res);
       setWsManifest(added.manifest);
-      setWsPreviews(previews);
+      setWsPreviews(nextPreviews);
       setWsSelectedRel(selected.entry.targetRel);
-      message.success("AI đã sửa file trong bản nháp. Hãy chạy Verify lại.");
+      return added.manifest;
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Repair thất bại");
+      throw e;
     } finally {
       setRepairing(false);
     }
   }
 
-  const pageTitle = unitOnly ? "Unit test" : "Unit test";
+  const pageTitle = "Unit test";
 
   function onSourceRootBound(payload: {
     rootPath: string;
@@ -1616,10 +1551,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             {pageTitle}
           </Typography.Title>
           <Typography.Text type="secondary">
-            TC Approved → Agent lấy context IDE → Sinh Unit → Staging → Apply
+            TC Approved → Project root → Unit Job → Staging → Verify → Apply AItest/
           </Typography.Text>
         </div>
         <Space>
+          <Link to={activityUrl({ tab: "unit-jobs" })}>
+            <Button>Unit Job Board</Button>
+          </Link>
           <Button onClick={() => void load()} loading={loading}>
             Tải lại
           </Button>
@@ -1635,14 +1573,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           project={project ? { id: project.id, name: project.name } : null}
           meta={meta}
           preferredLanguage={language}
-          sourceFile={sourceFile || ideFocus?.file || null}
+          sourceFile={sourceFile || null}
           testFwResolution={testFwResolution}
           skipTestFwInstall={skipTestFwInstall}
           onSkipChange={setSkipTestFwInstall}
           onTestFwResolved={onTestFwResolved}
           onSourceRootBound={onSourceRootBound}
           onSourceRootSynced={onSourceRootSynced}
-          onFocusApplied={onIdeFocusApplied}
           extraAlerts={
             isApiKind && localPath && !openApiSpec ? (
               <Alert
@@ -1662,8 +1599,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               Chưa có test case Approved
             </Typography.Title>
             <Typography.Paragraph type="secondary" style={{ maxWidth: 420, margin: "0 auto 20px" }}>
-              Sinh Unit cần ít nhất một TC đã duyệt. Hoàn tất pha Design trước — không dùng Focus IDE
-              của project khác.
+              Sinh Unit cần ít nhất một TC đã duyệt. Hoàn tất pha Design trước, rồi gắn project
+              root trên trang này.
             </Typography.Paragraph>
             <Space wrap>
               <Link to={generateTcUrl()}>
@@ -1685,43 +1622,91 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         current={pipelineStep}
         style={{ marginTop: 16, marginBottom: 8, maxWidth: 640 }}
         items={[
-          { title: "Agent" },
-          { title: "Draft" },
+          { title: "Unit Job" },
+          { title: "Verify" },
           { title: "Apply" },
         ]}
       />
 
-      <Card title="Sinh Unit" style={{ marginTop: 8 }} loading={loading}>
+      <Card title="Unit Job · AI CLI" style={{ marginTop: 8 }} loading={loading}>
         <Radio.Group
           value={inputMode}
-          onChange={(e) => setInputMode(e.target.value as "single" | "module")}
-          style={{ marginBottom: 12 }}
+          onChange={(e) => setInputMode(e.target.value as "requirement" | "single")}
+          style={{ marginBottom: 16 }}
         >
-          <Radio.Button value="single">Từng test case</Radio.Button>
-          <Radio.Button value="module">Theo module (batch)</Radio.Button>
+          <Radio.Button value="requirement">📌 Theo Requirement (Batch tất cả TC)</Radio.Button>
+          <Radio.Button value="single">🎯 Theo Test Case (Từng TC lẻ)</Radio.Button>
         </Radio.Group>
 
-        {inputMode === "module" ? (
-          <Space orientation="vertical" size={12} style={{ width: "100%" }}>
-            <Alert
-              type="info"
-              showIcon
-              title="Sinh hàng loạt · Local FS"
-              description="Chọn module. Hệ thống lần lượt sinh mã + bản nháp cho mọi TC Approved — chưa dùng caret IDE từng item."
-            />
+        {inputMode === "requirement" ? (
+          <Space orientation="vertical" size={14} style={{ width: "100%" }}>
             <div>
-              <Typography.Text strong>Module</Typography.Text>
+              <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                1. Chọn Yêu cầu (Requirement) muốn chạy Unit Test hàng loạt:
+              </Typography.Text>
               <Select
-                style={{ width: "100%", marginTop: 6 }}
-                placeholder="— chọn module —"
-                value={moduleKey}
-                onChange={setModuleKey}
-                options={moduleGroups.map(([name, cases]) => ({
-                  value: name,
-                  label: `${name} (${cases.length} TC)`,
-                }))}
+                style={{ width: "100%" }}
+                size="large"
+                placeholder="— Chọn Requirement (Studio) trong dự án —"
+                value={selectedReqId || undefined}
+                onChange={(val) => setSelectedReqId(val)}
+                options={requirementsList.map((r) => {
+                  const linkedTc = allTestCases.filter((t) => tcBelongsToReq(t, r));
+                  const appCount = linkedTc.filter((t) => t.reviewStatus === "Approved").length;
+                  const total = r.tcTotal ?? linkedTc.length;
+                  const approvedN = r.tcApproved ?? appCount;
+                  return {
+                    value: r.id,
+                    label: `📄 ${r.title} (${total} TC · ${approvedN} Approved)`,
+                  };
+                })}
+                notFoundContent={
+                  <div style={{ padding: 12, textAlign: "center" }}>
+                    <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+                      Chưa có Requirement Studio nào trong dự án.
+                    </Typography.Text>
+                    <Link to={ROUTES.requirement}>
+                      <Button size="small" type="primary">Sang Requirement</Button>
+                    </Link>
+                  </div>
+                }
               />
             </div>
+
+            {selectedReq ? (
+              <Alert
+                type="info"
+                showIcon
+                title={`Yêu cầu: ${selectedReq.title}`}
+                description={
+                  <div>
+                    {selectedReq.description ? <div>{selectedReq.description}</div> : null}
+                    <div style={{ marginTop: 6 }}>
+                      Tự động sinh mã + bản nháp cho tất cả <strong>{filteredTestCases.length} Test Cases</strong> thuộc Yêu cầu này
+                      {selectedReq.kind === "studio" ? " (Requirement Studio)" : ""}.
+                    </div>
+                  </div>
+                }
+                action={
+                  <Radio.Group
+                    size="small"
+                    value={showAllTcStatus ? "all" : "approved"}
+                    onChange={(e) => setShowAllTcStatus(e.target.value === "all")}
+                  >
+                    <Radio.Button value="approved">Chỉ Approved</Radio.Button>
+                    <Radio.Button value="all">Tất cả (Gồm Draft)</Radio.Button>
+                  </Radio.Group>
+                }
+              />
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                title="Chưa chọn Yêu cầu"
+                description="Vui lòng chọn 1 Yêu cầu ở ô trên để tiến hành sinh Unit Test cho tất cả Test Cases của Yêu cầu đó."
+              />
+            )}
+
             {batchProgress ? (
               <Progress
                 percent={Math.round((batchProgress.current / batchProgress.total) * 100)}
@@ -1736,23 +1721,25 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                   : `Đang xử lý: ${batchProgress.label}`}
               </Typography.Text>
             ) : null}
-            <Space wrap>
+
+            <Space wrap style={{ marginTop: 4 }}>
               <Button
                 type="primary"
+                size="large"
                 icon={<ThunderboltOutlined />}
-                onClick={() => void runModuleBatch(false)}
+                onClick={() => void runRequirementBatch(false)}
                 loading={busy && batchRunStatus === "running"}
                 disabled={
                   !aiReady ||
-                  !moduleKey ||
-                  moduleGroups.length === 0 ||
+                  !selectedReqId ||
+                  filteredTestCases.length === 0 ||
                   !localPath ||
                   !isTauri() ||
                   batchRunStatus === "paused" ||
                   (busy && batchRunStatus === "running")
                 }
               >
-                Sinh {isApiKind ? "API" : "unit"} cho cả module
+                ⚡ Chạy Unit Job · Tất cả TC trong Requirement ({filteredTestCases.length} TC)
               </Button>
               {batchRunStatus === "running" ? (
                 <Button
@@ -1772,174 +1759,111 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 </Button>
               ) : null}
             </Space>
+
             {batchResults.length > 0 ? (
-              <Card size="small" title="Kết quả batch" type="inner">
-                <Table
-                  size="small"
-                  pagination={false}
-                  rowKey="key"
-                  dataSource={batchResults}
-                  columns={[
-                    { title: "TC", dataIndex: "testCaseId", width: 90 },
-                    { title: "Tiêu đề", dataIndex: "title", ellipsis: true },
-                    {
-                      title: "Trạng thái",
-                      width: 100,
-                      render: (_, r) =>
-                        r.status === "ok" ? (
-                          <Tag color="success">OK</Tag>
-                        ) : r.error === "Đang chờ…" ? (
-                          <Tag>Chờ</Tag>
-                        ) : (
-                          <Tag color="error">Lỗi</Tag>
-                        ),
-                    },
-                    {
-                      title: "Ghi chú",
-                      dataIndex: "error",
-                      ellipsis: true,
-                      render: (v, r) =>
-                        r.status === "ok" ? (
-                          <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
-                            {r.workspaceRunId?.slice(0, 8) ?? "staging"}
-                          </Typography.Text>
-                        ) : (
-                          v
-                        ),
-                    },
-                  ]}
-                />
-                {batchFailCount > 0 || batchRunStatus === "running" || batchRunStatus === "paused" ? (
-                  <Space wrap style={{ marginTop: 8 }}>
-                    {batchFailCount > 0 ? (
-                      <Button
-                        onClick={() => void runModuleBatch(true)}
-                        loading={busy && batchRunStatus === "running"}
-                        disabled={
-                          !aiReady ||
-                          batchRunStatus === "paused" ||
-                          (busy && batchRunStatus === "running")
-                        }
-                      >
-                        Thử lại các TC lỗi ({batchFailCount})
-                      </Button>
-                    ) : null}
-                    {batchRunStatus === "running" ? (
-                      <Button
-                        icon={<PauseCircleOutlined />}
-                        onClick={() => batchControlRef.current.pause()}
-                      >
-                        Tạm dừng
-                      </Button>
-                    ) : null}
-                    {batchRunStatus === "paused" ? (
-                      <Button
-                        type="primary"
-                        icon={<PlayCircleOutlined />}
-                        onClick={() => batchControlRef.current.resume()}
-                      >
-                        Tiếp tục
-                      </Button>
-                    ) : null}
-                  </Space>
-                ) : null}
-              </Card>
+              <BatchRunConsole
+                variant="table"
+                title="Kết quả Generate (batch)"
+                rows={batchResults}
+                onRowsChange={(rows) => {
+                  setBatchResults(rows);
+                  void refreshBatchStaging(rows);
+                }}
+                projectRoot={localPath!}
+                language={language}
+                framework={framework}
+                meta={meta ?? undefined}
+                stackInspect={result?.stackInspect}
+                busy={busy}
+                onBusy={setBusy}
+                batchControl={batchControlRef.current}
+                batchRunStatus={batchRunStatus}
+                generateFailCount={batchFailCount}
+                onRetryGenerateFails={() => void runRequirementBatch(true)}
+              />
             ) : null}
           </Space>
         ) : (
           <Space orientation="vertical" size={14} style={{ width: "100%" }}>
             <div>
-              <Typography.Text strong>Test case (đã duyệt)</Typography.Text>
+              <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                1. Chọn Yêu cầu (Requirement) để lọc Test Case:
+              </Typography.Text>
               <Select
-                style={{ width: "100%", marginTop: 6 }}
-                placeholder="— chọn —"
+                style={{ width: "100%" }}
+                placeholder="— Tất cả Requirement trong dự án —"
+                value={selectedReqId || "__all__"}
+                onChange={(val) => setSelectedReqId(val === "__all__" ? undefined : val)}
+                options={[
+                  { value: "__all__", label: `📦 Tất cả Requirement (${requirementsList.length})` },
+                  ...requirementsList.map((r) => {
+                    const linkedTc = allTestCases.filter((t) => tcBelongsToReq(t, r));
+                    const appCount = linkedTc.filter((t) => t.reviewStatus === "Approved").length;
+                    const total = r.tcTotal ?? linkedTc.length;
+                    const approvedN = r.tcApproved ?? appCount;
+                    return {
+                      value: r.id,
+                      label: `📄 ${r.title} (${total} TC · ${approvedN} Approved)`,
+                    };
+                  }),
+                ]}
+                notFoundContent={
+                  <div style={{ padding: 8, textAlign: "center" }}>
+                    <Link to={ROUTES.requirement}>Tạo Requirement Studio</Link>
+                  </div>
+                }
+              />
+            </div>
+            <div>
+              <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                2. Chọn Test Case cụ thể ({filteredTestCases.length}):
+              </Typography.Text>
+              <Select
+                style={{ width: "100%" }}
+                placeholder="— chọn test case —"
                 value={testCaseId}
                 onChange={(id) => {
                   setManualSourcePick(false);
                   manualSourcePickRef.current = false;
                   setTestCaseId(id);
                 }}
-                options={approved.map((t) => ({
+                options={filteredTestCases.map((t) => ({
                   value: t.id,
-                  label: `${t.testCaseId} · ${t.title}`,
+                  label: `${t.testCaseId} · ${t.title} [${t.reviewStatus}]`,
                 }))}
                 showSearch
                 optionFilterProp="label"
               />
             </div>
 
-            <AgentRunPanel
-              phase={agentPhase}
-              intent={agentIntent}
-              retrieved={agentRetrieved}
-              confidence={agentConfidence}
-              error={agentError}
-              packetReady={Boolean(agentPacket?.files?.length)}
-              primaryPath={agentPrimaryPath}
-              framework={agentFw}
-              language={agentLang}
-              fileCount={agentPacket?.files?.length}
-              override={agentOverride}
-              rootsMismatch={ideRootMismatch}
-              mismatchBanner={
-                ideRootMismatch && ideWorkspaceRoot && localPath ? (
-                  <RootIdeMismatchBanner
-                    compact
-                    ideRoot={ideWorkspaceRoot}
-                    localPath={localPath}
-                    project={project ? { id: project.id, name: project.name } : null}
-                    existingMeta={meta}
-                    onBound={onSourceRootBound}
-                  />
-                ) : null
-              }
-              onContinueRetrieve={() => {
-                void runIdeRetrieveOnly();
-              }}
-              onOverrideGenerate={() => {
-                agentSetOverride(true);
-                message.warning(
-                  "Override: Sinh với packet hiện tại dù confidence chưa đủ."
-                );
-                agentSetPhase("generating");
-                void run().finally(() => {
-                  agentSetPhase("done");
-                });
-              }}
-              onGenerate={() => {
-                if (agentConfidence && !agentConfidence.enough && !agentOverride) {
-                  agentSetOverride(true);
-                  message.warning(
-                    "Confidence chưa đủ — vẫn sinh (override). Nên Connect IDE + search."
-                  );
+            {localPath && isTauri() ? (
+              <Alert
+                type={contextPacket?.primaryPath || sourceFile ? "success" : "info"}
+                showIcon
+                title={
+                  contextPacket?.primaryPath || sourceFile
+                    ? `Local FS · ${contextPacket?.primaryPath || sourceFile}`
+                    : "Local FS · đang khớp file từ TC"
                 }
-                agentSetPhase("generating");
-                void run().finally(() => {
-                  agentSetPhase("done");
-                });
-              }}
-              generateLoading={busy}
-              generateDisabled={
-                ideRootMismatch ||
-                !aiReady ||
-                !testCaseId ||
-                !runnerOk ||
-                !(
-                  Boolean(agentPacket?.files?.length) ||
-                  sourceFile ||
-                  contextPacket?.primaryPath ||
-                  sourceCode.trim() ||
-                  ideReady ||
-                  ideStatus === "connected" ||
-                  agentConfidence?.enough ||
-                  agentOverride ||
-                  (isApiKind && openApiSpec.trim())
-                ) ||
-                (Boolean(agentPacket?.files?.length) &&
-                  !agentConfidence?.enough &&
-                  !agentOverride)
-              }
-            />
+                description={
+                  contextPacket?.primaryPath || sourceFile
+                    ? "Đọc source trên máy → AI CLI sinh → Staging."
+                    : "Chọn TC rồi đợi scope, hoặc mở «Nâng cao · chọn file» nếu chưa khớp."
+                }
+                action={
+                  <Button size="small" onClick={() => void resolveScope()} loading={scopeLoading}>
+                    Quét scope
+                  </Button>
+                }
+              />
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                title="Gắn project root để chạy Unit Job"
+                description="Mở Ready → Chi tiết → Project root."
+              />
+            )}
 
             <div>
               <Typography.Text strong>Framework test</Typography.Text>
@@ -1961,6 +1885,29 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 </Typography.Text>
               ) : null}
             </div>
+
+            <Button
+              type="primary"
+              size="large"
+              icon={<ThunderboltOutlined />}
+              onClick={() => void runUnitJob()}
+              loading={busy}
+              disabled={
+                !aiReady ||
+                !testCaseId ||
+                !runnerOk ||
+                !localPath ||
+                !isTauri() ||
+                !(
+                  Boolean(contextPacket?.primaryPath) ||
+                  Boolean(sourceFile) ||
+                  Boolean(sourceCode.trim()) ||
+                  (isApiKind && Boolean(openApiSpec.trim()))
+                )
+              }
+            >
+              Chạy Unit Job
+            </Button>
 
             <Collapse
               size="small"
@@ -2049,7 +1996,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                             setManualSourcePick(true);
                             setSourceCode(e.target.value);
                           }}
-                          placeholder="Preview từ IDE hoặc paste tạm. Sinh ưu tiên contextPacket từ IDE."
+                          placeholder="Paste mã nguồn hoặc preview từ scope Local FS."
                         />
                       </div>
                     </Space>
@@ -2064,19 +2011,41 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       {result ? (
         <Card
           title={
-            <Space>
+            <Space wrap>
               <CodeOutlined />
-              Kết quả AI · {result.fileName}
+              Kết quả · {result.fileName}
+              {result.runnerUsed === "AI_CLI" ? <Tag color="blue">AI CLI</Tag> : null}
+              {result.stackInspect?.package_name ? (
+                <Tag>
+                  {result.stackInspect.is_monorepo_package
+                    ? `mono:${result.stackInspect.workspace_kind || "pkg"}`
+                    : "pkg"}
+                  {" · "}
+                  {result.stackInspect.package_name}
+                </Tag>
+              ) : null}
+              {result.stackInspect?.language ? (
+                <Tag>
+                  {result.stackInspect.language}/{result.stackInspect.framework}
+                </Tag>
+              ) : null}
             </Space>
           }
           style={{ marginTop: 8 }}
           extra={
-            <Typography.Text type="secondary">provider: {result.provider}</Typography.Text>
+            <Space>
+              <Link to={activityUrl({ tab: "unit-jobs", runId: wsManifest?.runId })}>
+                <Button size="small" type="link">
+                  Job Board
+                </Button>
+              </Link>
+              <Typography.Text type="secondary">provider: {result.provider}</Typography.Text>
+            </Space>
           }
         >
           <Space orientation="vertical" size={12} style={{ width: "100%" }}>
             <div>
-              <Typography.Text strong>???ng d?n trong repo (khi Apply)</Typography.Text>
+              <Typography.Text strong>Đường dẫn trong repo (khi Apply)</Typography.Text>
               <Input
                 style={{ marginTop: 6 }}
                 value={writePath}
@@ -2094,7 +2063,59 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         </Card>
       ) : null}
 
-      {wsManifest && wsPreviews.length > 0 ? (
+      {batchJobs.length > 0 || (batchResults.length > 0 && inputMode === "requirement") ? (
+        <>
+          <BatchStagingPreview
+            jobs={
+              batchJobs.length > 0
+                ? batchJobs
+                : batchResults.map((row) => ({
+                    row,
+                    manifest: null,
+                    previews: [],
+                  }))
+            }
+            selectedJobKey={batchJobKey}
+            selectedTargetRel={batchFileRel}
+            onSelectJob={(key) => {
+              setBatchJobKey(key);
+              const job = batchJobs.find((j) => j.row.key === key);
+              setBatchFileRel(job?.previews[0]?.entry.targetRel ?? null);
+            }}
+            onSelectFile={setBatchFileRel}
+          />
+          {localPath && batchResults.some((r) => r.workspaceRunId) ? (
+            <BatchRunConsole
+              variant="verifyApply"
+              title="3. Verify & Apply"
+              rows={batchResults}
+              onRowsChange={(rows) => {
+                setBatchResults(rows);
+                void refreshBatchStaging(rows);
+              }}
+              projectRoot={localPath}
+              language={language}
+              framework={framework}
+              meta={meta ?? undefined}
+              stackInspect={result?.stackInspect}
+              busy={busy}
+              onBusy={setBusy}
+              batchControl={batchControlRef.current}
+              batchRunStatus={batchRunStatus}
+              generateFailCount={batchFailCount}
+              onRetryGenerateFails={() => void runRequirementBatch(true)}
+              onDiscarded={() => {
+                setBatchJobs([]);
+                setBatchResults([]);
+                setWsManifest(null);
+                setWsPreviews([]);
+              }}
+            />
+          ) : null}
+        </>
+      ) : null}
+
+      {batchResults.length === 0 && wsManifest && wsPreviews.length > 0 ? (
         <>
           <UnitWorkspacePreview
             manifest={wsManifest}
@@ -2110,11 +2131,27 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               language={language}
               framework={framework}
               meta={meta ?? undefined}
+              stackInspect={result?.stackInspect}
               busy={busy}
               repairing={repairing}
+              suggestVerify={suggestVerify}
               onBusy={setBusy}
-              onRepair={() => void repairWorkspaceWithAi()}
+              onRepair={async () => {
+                const next = await repairWorkspaceWithAi();
+                if (next) message.success("AI đã sửa file trong bản nháp. Hãy chạy Verify lại.");
+              }}
+              onRepairAsync={async (m) => {
+                const next = await repairWorkspaceWithAi(m);
+                if (!next) throw new Error("Repair không trả về manifest");
+                return next;
+              }}
               onManifestChange={(m) => {
+                setSuggestVerify(false);
+                if (m.status === "discarded") {
+                  setWsManifest(null);
+                  setWsPreviews([]);
+                  return;
+                }
                 setWsManifest(m);
                 if (m.status === "applied") {
                   message.success("Đã Apply vào source code — về Requirement.");
@@ -2122,7 +2159,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 } else if (m.status === "pass") {
                   message.success("Verify PASS — có thể Apply.");
                 } else if (m.status === "fail") {
-                  message.warning("Verify FAIL — xem log bên dưới. Bấm Repair with AI để AI tự sửa.");
+                  message.warning(
+                    "Verify FAIL — bấm Repair with AI hoặc Verify + Auto-Repair."
+                  );
                 }
               }}
             />

@@ -160,6 +160,8 @@ export type IdeLocalGenerateBody = {
   agentEnough?: boolean;
   agentOverride?: boolean;
   contextSource?: string;
+  /** Absolute local root — BE ProjectInspector (Step 2) */
+  projectRoot?: string;
 };
 
 export function buildIdeLocalGenerateBody(input: {
@@ -180,6 +182,8 @@ export function buildIdeLocalGenerateBody(input: {
   agentEnough?: boolean;
   agentOverride?: boolean;
   contextSource?: string;
+  /** Absolute project root for stack inspect */
+  projectRoot?: string | null;
 }): IdeLocalGenerateBody {
   const primary = primaryFile(input.packet);
   return {
@@ -201,5 +205,6 @@ export function buildIdeLocalGenerateBody(input: {
     ...(input.agentEnough != null ? { agentEnough: input.agentEnough } : {}),
     ...(input.agentOverride != null ? { agentOverride: input.agentOverride } : {}),
     ...(input.contextSource ? { contextSource: input.contextSource } : {}),
+    ...(input.projectRoot ? { projectRoot: input.projectRoot } : {}),
   };
 }

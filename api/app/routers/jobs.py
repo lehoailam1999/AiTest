@@ -23,9 +23,13 @@ from app.responses import errors, ok, page, page_params
 from app.serializers import connection_dto, job_dto, source_dto
 from app.services.connection_service import (
     connection_api_key,
-    llm_from_connection,
 )
 from app.llm.base import GenerateContext
+from app.services.ai_service import (
+    RUNNER_AI_CLI,
+    connection_runner_mode,
+    generate_test_cases_for_connection,
+)
 from app.services.requirement_content import (
     change_summary_from_description,
     content_meta_from_description,
@@ -90,8 +94,10 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         try:
             api_key = connection_api_key(conn)
         except ValueError as exc:
-            _fail_job(db, job_id, str(exc))
-            return
+            if connection_runner_mode(conn) != RUNNER_AI_CLI:
+                _fail_job(db, job_id, str(exc))
+                return
+            api_key = ""
 
         title, content = "Requirement", ""
         doc_hash: str | None = None
@@ -194,8 +200,8 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
 
         drafts: list = []
         fan_errors: list[str] = []
+        runner_meta: dict = {"runnerUsed": "API_DIRECT", "cliSessionKey": None}
         try:
-            provider = llm_from_connection(conn)
             # Nhiều Feature trong 1 lần gọi → JSON dễ bị cắt (Unterminated string).
             # Fan-out nội bộ: 1 LLM call / chức năng khi chưa có topicScope từ FE.
             titles_for_fan = [t for t in feature_titles if t]
@@ -216,7 +222,10 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         feature_titles=[feat_title],
                     )
                     try:
-                        part = await provider.generate(api_key, title, content, scoped)
+                        part, meta = await generate_test_cases_for_connection(
+                            conn, title, content, scoped, api_key=api_key
+                        )
+                        runner_meta = meta
                         for d in part:
                             if not d.module:
                                 d.module = feat_title
@@ -233,10 +242,20 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     )
                     return
             else:
-                drafts = await provider.generate(api_key, title, content, ctx)
+                drafts, runner_meta = await generate_test_cases_for_connection(
+                    conn, title, content, ctx, api_key=api_key
+                )
         except Exception as exc:  # noqa: BLE001
             _fail_job(db, job_id, str(exc))
             return
+
+        try:
+            job.runner_used = runner_meta.get("runnerUsed")
+            job.cli_session_key = runner_meta.get("cliSessionKey")
+            db.commit()
+        except Exception:
+            db.rollback()
+            job = db.query(Job).filter(Job.id == job_id).first()
 
         if mode == "replace" and (job.source_id or snap_id):
             q = db.query(TestCase).filter(
@@ -373,11 +392,14 @@ async def create_job(request: Request, db: Annotated[Session, Depends(get_db)]):
         .first()
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — vào Settings cấu hình API Key và Verify")
-    try:
-        connection_api_key(conn)
-    except ValueError:
-        return errors(400, "Chưa có API Key — vào Settings để lưu key")
+        return errors(
+            400, "AI chưa Ready — vào Settings cấu hình API Key hoặc AI CLI và Verify"
+        )
+    if connection_runner_mode(conn) != RUNNER_AI_CLI:
+        try:
+            connection_api_key(conn)
+        except ValueError:
+            return errors(400, "Chưa có API Key — vào Settings để lưu key")
 
     job = Job(
         project_id=pid,

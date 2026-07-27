@@ -6,14 +6,16 @@
 | **Version** | **2.2 (Requirement Studio + Agentic IDE)** |
 | **Ngày** | 24/07/2026 |
 | **Trạng thái** | Design SoT — Phase 1 mở rộng thành **AI Requirement Studio**; Phase 2 (Agentic IDE) giữ nguyên foundation P0–P5.7 + P9–P10 |
-| **Thay thế** | Không vá [`KIEN_TRUC_DU_AN.md`](../KIEN_TRUC_DU_AN.md) (v11). File này là kiến trúc mục tiêu. |
+| **Thay thế** | Không vá [`KIEN_TRUC_DU_AN.md`](../KIEN_TRUC_DU_AN.md) (v11). File này là kiến trúc mục tiêu **Agentic IDE (legacy)**. |
+| **Product UX hiện tại** | **[`UNIT_TEST_ENGINE_UX.md`](./UNIT_TEST_ENGINE_UX.md)** — Unit Job + AI CLI; IDE = viewer tuỳ chọn (U0–U4). |
 | **Supersedes** | V2.1 Agentic IDE Context — bản gốc: [`archive/ARCHITECTURE_V2_IDE_FIRST_2.1_pre_requirement_studio.md`](./archive/ARCHITECTURE_V2_IDE_FIRST_2.1_pre_requirement_studio.md) |
 | **Audience** | Architect, Tech Lead, Desktop/IDE/Backend engineers, UX |
 | **Phase boundary** | [`REQUIREMENT_STUDIO_PHASE_BOUNDARY.md`](./REQUIREMENT_STUDIO_PHASE_BOUNDARY.md) |
 
+> **⚠️ UX note (2026-07):** Happy path sản phẩm đã chuyển sang **Unit Test Engine (CLI-first)**. Tài liệu này giữ nền Agentic IDE / bridge protocol; **không** dùng làm SoT UI. Xem [`UNIT_TEST_ENGINE_UX.md`](./UNIT_TEST_ENGINE_UX.md).
+>
 > **North star (Phase 1 — Requirement Studio):** Upload nhiều tài liệu → Parse → **Knowledge Workspace** → Chat / Coverage → **Freeze** → **Requirement Snapshot** → Generate Test Cases → Review → Approve. AI phải **hiểu đủ Requirement** trước khi sinh TC — không Generate TC thẳng từ file upload.  
-> **North star (Phase 2 — Agentic IDE):** Người dùng chọn **Test Case Approved** → phân tích intent → Planner → IDE Commands từng bước → confidence → sinh Unit Test → Workspace → Verify → Apply → Run.  
-> Source **không** được coi là “đống text để scan”. Context Unit đến từ **IDE Command Layer** — **không bao giờ** gửi cả repo cho LLM. Caret là **tín hiệu phụ (boost)**.
+> **North star (Phase 2 — Unit Test Engine):** Người dùng chọn **Test Case Approved** → project root → **Chạy Unit Job** (AI CLI) → Staging → Verify → Coverage → Apply. IDE Commands / caret chỉ **boost tuỳ chọn**.
 
 ---
 

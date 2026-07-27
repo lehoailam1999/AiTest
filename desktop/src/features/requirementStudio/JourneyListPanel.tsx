@@ -16,7 +16,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { requirementStudio } from "../../api";
 import type { RequirementStudioWorkspace } from "../../api/types";
@@ -29,7 +29,7 @@ type Props = {
 
 function knowledgeTag(status?: string) {
   if (status === "ready") return <Tag color="success">Phân tích sẵn sàng</Tag>;
-  if (status === "stale") return <Tag color="warning">Phân tích stale</Tag>;
+  if (status === "stale") return <Tag color="warning">Cần phân tích lại</Tag>;
   if (status === "building" || status === "updating")
     return <Tag color="processing">Đang dựng</Tag>;
   return <Tag>Chưa phân tích</Tag>;
@@ -44,6 +44,7 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
   const [createOpen, setCreateOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     if (!project) return;
@@ -98,6 +99,32 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
     }
   };
 
+  const confirmDelete = (row: RequirementStudioWorkspace) => {
+    Modal.confirm({
+      title: `Xóa Requirement «${row.title}»?`,
+      content:
+        "Sẽ xóa vĩnh viễn khỏi DB: tài liệu, phân tích, snapshot, chat và toàn bộ test case liên quan. Không hoàn tác được.",
+      okText: "Xóa",
+      okType: "danger",
+      cancelText: "Huỷ",
+      onOk: async () => {
+        setDeletingId(row.id);
+        try {
+          const res = await requirementStudio.deleteWorkspace(row.id);
+          message.success(
+            `Đã xóa Requirement · ${res.deletedTestCases} TC · ${res.deletedFiles} file`
+          );
+          await reload();
+        } catch (e) {
+          message.error(e instanceof Error ? e.message : String(e));
+          throw e;
+        } finally {
+          setDeletingId(null);
+        }
+      },
+    });
+  };
+
   const columns: ColumnsType<RequirementStudioWorkspace> = [
     {
       title: "Requirement",
@@ -144,17 +171,26 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
     {
       title: "",
       key: "actions",
-      width: 220,
+      width: 280,
       render: (_, row) => (
-        <Space>
+        <Space wrap>
           <Button type="primary" size="small" onClick={() => onOpenJourney(row.id)}>
             Mở
           </Button>
           {(row.tcPending ?? 0) > 0 && onOpenReview ? (
             <Button size="small" onClick={() => onOpenReview(row.id)}>
-              Duyệt TC
+              Duyệt test case
             </Button>
           ) : null}
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            loading={deletingId === row.id}
+            onClick={() => confirmDelete(row)}
+          >
+            Xóa
+          </Button>
         </Space>
       ),
     },
@@ -168,9 +204,6 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
     <div className="journey-hub">
       <div className="studio-toolbar">
         <div className="studio-toolbar-main">
-          <Typography.Title level={4} className="studio-title">
-            Quản lý Requirement
-          </Typography.Title>
           <Typography.Text type="secondary" className="studio-lead">
             Mỗi Requirement = tài liệu + phân tích → TC. Muốn viết TC cho phần khác —
             tạo Requirement mới.

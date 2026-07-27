@@ -37,8 +37,10 @@ async def upload_coverage(
     summary = body.get("summary") or {}
     raw = body.get("content")
     if isinstance(raw, str) and raw.strip():
-        from app.ports.coverage import parse_coverage
+        from app.ports.coverage import detect_format, parse_coverage
 
+        if not body.get("format"):
+            fmt = detect_format(body.get("fileName") or "", raw)
         summary = {**summary, **parse_coverage(fmt, raw)}
     row = CoverageUpload(
         project_id=pid,
@@ -65,6 +67,42 @@ async def upload_coverage(
             "uploadedAt": row.uploaded_at.isoformat(),
         }
     )
+
+
+@router.post("/projects/{project_id}/coverage/sync-from-disk")
+async def sync_coverage_from_disk(
+    project_id: str, request: Request, db: Annotated[Session, Depends(get_db)]
+):
+    """
+    Step 4 — quét coverage.xml / lcov / junit / trx dưới projectRoot → PostgreSQL.
+    Desktop gọi sau Verify PASS (cùng máy với file báo cáo).
+    """
+    pid = _uuid(project_id)
+    if pid is None:
+        return errors(400, "invalid project id")
+    body = await request.json()
+    project_root = str(body.get("projectRoot") or "").strip()
+    if not project_root:
+        return errors(400, "projectRoot required")
+    try:
+        from app.services.coverage_sync import sync_coverage_artifacts_from_disk
+
+        result = sync_coverage_artifacts_from_disk(
+            db,
+            project_id=pid,
+            project_root=project_root,
+            package_prefix=str(body.get("packagePrefix") or ""),
+            package_name=(body.get("packageName") or body.get("package_name") or None),
+            local_run_id=(body.get("localRunId") or None),
+            test_case_id=(body.get("testCaseId") or None),
+            module=(body.get("module") or None),
+            create_report=bool(body.get("createReport", True)),
+        )
+    except ValueError as exc:
+        return errors(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return errors(400, f"coverage sync failed: {exc}")
+    return ok(result)
 
 
 @router.get("/projects/{project_id}/coverage")

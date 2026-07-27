@@ -46,6 +46,11 @@ export type Connection = {
   hasApiKey: boolean;
   lastVerifiedAt?: string | null;
   lastError?: string | null;
+  /** API_DIRECT | AI_CLI */
+  runnerMode?: string | null;
+  cliType?: string | null;
+  cliPath?: string | null;
+  cliArgsJson?: string | null;
 };
 
 export type RequirementTopicItem = {
@@ -313,6 +318,38 @@ export type UnitResult = {
   testCaseId: string;
   projectId: string;
   provider: string;
+  /** API_DIRECT | AI_CLI — Step 1 unit CLI workflow */
+  runnerUsed?: string;
+  cliSessionKey?: string | null;
+  /** Step 2 — ProjectInspector snapshot */
+  stackInspect?: StackInspect | null;
+};
+
+export type StackInspect = {
+  language: string;
+  framework: string;
+  test_dir: string;
+  native_test_dir: string;
+  run_command: string[];
+  file_extension: string;
+  manifest?: string;
+  package_root?: string;
+  package_name?: string;
+  is_monorepo_package?: boolean;
+  /** Step 5 — pnpm|turbo|nx|maven|… */
+  workspace_kind?: string;
+  coverage_command?: string[];
+  compile_command?: string[];
+  suggested_unit_path?: string | null;
+  suggested_file_name?: string | null;
+};
+
+export type WorkspaceRunVerifySnapshot = {
+  overallPass: boolean;
+  compileStatus?: string | null;
+  testStatus?: string | null;
+  coverageStatus?: string | null;
+  summaryJson?: string | null;
 };
 
 export type WorkspaceRunAudit = {
@@ -324,9 +361,39 @@ export type WorkspaceRunAudit = {
   module?: string | null;
   status: string;
   provider?: string | null;
+  contextSource?: string | null;
+  agentConfidence?: number | null;
+  agentOverride?: boolean;
   startedAt?: string | null;
   finishedAt?: string | null;
   createdAt: string;
+  /** Phase U2 — latest verify snapshot on list */
+  latestVerify?: WorkspaceRunVerifySnapshot | null;
+};
+
+export type WorkspaceRunDetail = {
+  run: WorkspaceRunAudit;
+  verifies: Array<{
+    id: string;
+    workspaceRunId: string;
+    localRunId: string;
+    compileStatus?: string | null;
+    testStatus?: string | null;
+    coverageStatus?: string | null;
+    overallPass: boolean;
+    summaryJson?: string | null;
+    createdAt: string;
+  }>;
+  applies: Array<{
+    id: string;
+    workspaceRunId: string;
+    localRunId: string;
+    filesApplied: string[];
+    success: boolean;
+    rollbackUsed?: boolean;
+    appliedAt?: string | null;
+    createdAt: string;
+  }>;
 };
 
 export type GenerationTaskAudit = {

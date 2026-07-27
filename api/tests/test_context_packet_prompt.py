@@ -6,7 +6,7 @@ from app.llm.base import UnitRequest, unit_system_prompt, unit_user_prompt
 from app.services.context_packet import (
     format_context_packet_for_prompt,
     related_sources_from_packet,
-    testing_hints_from_packet,
+    testing_hints_from_packet as get_testing_hints_from_packet,
 )
 
 
@@ -57,7 +57,7 @@ def _sample_packet() -> dict:
 
 
 def test_testing_hints_from_packet():
-    hints = testing_hints_from_packet(_sample_packet())
+    hints = get_testing_hints_from_packet(_sample_packet())
     assert hints["testing_framework"] == "jest"
     assert hints["mock_framework"] == "jest.mock"
     assert hints["module"] == "Auth"

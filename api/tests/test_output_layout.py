@@ -17,7 +17,7 @@ from app.services.test_output_layout import (
     package_prefix_from_source,
     reports_dir,
     rewrite_sut_imports,
-    test_file_name_from_source,
+    file_name_from_source,
     under_generated_test_folder,
 )
 
@@ -177,19 +177,50 @@ class TestOutputLayout(unittest.TestCase):
 
     def test_naming(self):
         self.assertEqual(
-            test_file_name_from_source(
+            file_name_from_source(
                 "OrderService.cs", language="C#", class_name="OrderService"
             ),
             "OrderServiceTests.cs",
         )
         self.assertEqual(
-            test_file_name_from_source("ProductService.ts", language="TypeScript"),
+            file_name_from_source("ProductService.ts", language="TypeScript"),
             "ProductService.test.ts",
         )
         self.assertEqual(
-            test_file_name_from_source("payment_service.py", language="Python"),
+            file_name_from_source("payment_service.py", language="Python"),
             "test_payment_service.py",
         )
+
+    def test_rewrite_sut_imports_alias_and_relative(self):
+        code = (
+            "import { X } from '@/todos/todos.service';\n"
+            "import { Y } from '../../../src/todos/todos.service';\n"
+            "import { Z } from '@nestjs/common';\n"
+        )
+        fixed = rewrite_sut_imports(
+            code,
+            test_rel="svc/AItest/UnitTest/T/x.test.ts",
+            source_rel="svc/src/todos/todos.service.ts",
+        )
+        self.assertIn("src/todos/todos.service", fixed)
+        self.assertNotIn("@/todos", fixed)
+        self.assertNotIn("../", fixed)
+        self.assertIn("@nestjs/common", fixed)
+
+    def test_rewrite_secondary_relative_imports(self):
+        code = (
+            "import { AuthService } from './auth.service';\n"
+            "import { CreateUserDto } from './dto/create-user.dto';\n"
+            "import { UserEntity } from '../entities/user.entity';\n"
+        )
+        fixed = rewrite_sut_imports(
+            code,
+            test_rel="AItest/UnitTest/Auth/auth.service.spec.ts",
+            source_rel="src/auth/auth.service.ts",
+        )
+        self.assertIn("import { AuthService } from 'src/auth/auth.service';", fixed)
+        self.assertIn("import { CreateUserDto } from 'src/auth/dto/create-user.dto';", fixed)
+        self.assertIn("import { UserEntity } from 'src/entities/user.entity';", fixed)
 
     def test_support_dirs(self):
         self.assertEqual(reports_dir(), "AItest/Reports")

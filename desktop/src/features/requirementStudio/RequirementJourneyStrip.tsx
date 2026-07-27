@@ -1,5 +1,5 @@
 /**
- * Journey strip — Tài liệu → Phân tích → Sinh test case → Duyệt TC.
+ * Journey strip — Tài liệu → Phân tích → Tạo test case → Duyệt test case.
  */
 import { CheckCircleFilled, LockOutlined } from "@ant-design/icons";
 
@@ -67,22 +67,22 @@ export function buildRequirementJourney(opts: {
       id: "knowledge",
       label: "Phân tích",
       hint: knowledgeStale
-        ? "Cần dựng lại"
+        ? "Cần phân tích lại"
         : knowledgeReady
           ? "Sẵn sàng"
           : docsDone
-            ? "Dựng Phân tích"
+            ? "Phân tích"
             : "Sau khi có đoạn",
       state: knowledgeState,
     },
     {
       id: "freeze",
-      label: "Sinh test case",
+      label: "Tạo test case",
       hint: opts.hasSnapshot
-        ? "Đã chốt Snapshot"
+        ? "Đã chốt snapshot"
         : analysisOk
-          ? "Tài liệu + Phân tích → Sinh TC"
-          : "Sau Phân tích",
+          ? "Từ tài liệu và phân tích"
+          : "Sau khi phân tích xong",
       state: freezeState,
     },
     {
@@ -92,8 +92,8 @@ export function buildRequirementJourney(opts: {
         (opts.pendingReviewCount ?? 0) > 0
           ? `${opts.pendingReviewCount} chờ duyệt`
           : opts.hasSnapshot
-            ? "Sau khi sinh test case"
-            : "Sau Snapshot",
+            ? "Sau khi tạo test case"
+            : "Sau khi chốt snapshot",
       state: reviewState,
     },
   ];

@@ -83,6 +83,8 @@ class Job(TimestampMixin, Base):
     )
     generate_strategy: Mapped[str | None] = mapped_column(String(20), nullable=True)
     requirement_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    runner_used: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cli_session_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class AiBackendConnection(TimestampMixin, Base):
@@ -101,6 +103,11 @@ class AiBackendConnection(TimestampMixin, Base):
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # API_DIRECT | AI_CLI
+    runner_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cli_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    cli_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    cli_args_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TestCase(TimestampMixin, Base):

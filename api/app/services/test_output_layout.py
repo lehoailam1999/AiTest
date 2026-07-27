@@ -196,7 +196,7 @@ def module_rel_from_source(source_rel: str | None) -> str:
     return f"{parts[0]}/{parts[-1]}"
 
 
-def test_file_name_from_source(
+def file_name_from_source(
     source_file_name: str,
     *,
     language: str = "",
@@ -320,7 +320,7 @@ def sut_module_specifier(test_rel: str, source_rel: str) -> str:
 
 
 def rewrite_sut_imports(code: str, *, test_rel: str, source_rel: str) -> str:
-    """Rewrite SUT imports to a stable specifier that resolves from AItest."""
+    """Rewrite SUT imports and secondary relative imports to stable specifiers that resolve from AItest."""
     if not code or not test_rel or not source_rel:
         return code
     correct = sut_module_specifier(test_rel, source_rel)
@@ -330,6 +330,31 @@ def rewrite_sut_imports(code: str, *, test_rel: str, source_rel: str) -> str:
     if not src_base:
         return code
 
+    source_dir = os.path.dirname(_norm_rel(source_rel)) or "."
+
+    def strip_ext(p: str) -> str:
+        return re.sub(r"\.(tsx?|jsx?)$", "", p, flags=re.IGNORECASE)
+
+    def as_src_specifier(spec: str) -> str | None:
+        n = strip_ext(spec.replace("\\", "/"))
+        if n.startswith("src/"):
+            return n
+        idx = n.lower().find("/src/")
+        if idx >= 0:
+            return n[idx + 1 :]
+        return None
+
+    def is_bare_npm(spec: str) -> bool:
+        if spec.startswith(".") or spec.startswith("/") or spec.startswith("src/"):
+            return False
+        if spec.startswith("@/"):
+            return False
+        if spec.startswith("@") and "/" in spec:
+            return src_base.lower() not in spec.lower()
+        if "/" not in spec and not spec.startswith("@"):
+            return True
+        return False
+
     pattern = re.compile(
         r"""((?:from|require\s*\()\s*['"])([^'"]+)(['"])""",
         re.MULTILINE,
@@ -338,18 +363,78 @@ def rewrite_sut_imports(code: str, *, test_rel: str, source_rel: str) -> str:
     def repl(m: re.Match[str]) -> str:
         prefix, spec, suffix = m.group(1), m.group(2), m.group(3)
         spec_norm = spec.replace("\\", "/")
-        # Never touch npm packages (@nestjs/…, lodash, …)
-        if not spec.startswith(".") and not spec_norm.startswith("src/"):
+        if is_bare_npm(spec_norm):
             return m.group(0)
+
+        if spec_norm.startswith("@/"):
+            return f"{prefix}src/{strip_ext(spec_norm[2:])}{suffix}"
+        if spec_norm.startswith("~/"):
+            return f"{prefix}src/{strip_ext(spec_norm[2:])}{suffix}"
+
+        from_src = as_src_specifier(spec_norm)
+        if from_src:
+            if (
+                from_src.lower() == correct.lower()
+                or from_src.lower().endswith(f"/{src_base.lower()}")
+                or from_src.lower() == src_base.lower()
+            ):
+                return f"{prefix}{correct}{suffix}"
+            return f"{prefix}{from_src}{suffix}"
+
         spec_base = os.path.splitext(os.path.basename(spec_norm))[0]
         if (
             spec_base.lower() == src_base.lower()
             or src_base.lower() in spec_norm.lower()
         ):
+            if (
+                spec_norm.startswith("@")
+                and not spec_norm.startswith("@/")
+                and spec_base.lower() != src_base.lower()
+            ):
+                return m.group(0)
             return f"{prefix}{correct}{suffix}"
+
+        # Relatives: AI usually writes them relative to the SUT file
+        if spec_norm.startswith("."):
+            resolved = os.path.normpath(os.path.join(source_dir, spec_norm)).replace(
+                "\\", "/"
+            )
+            src_spec = as_src_specifier(resolved)
+            if not src_spec and resolved.lower().startswith("src/"):
+                src_spec = strip_ext(resolved)
+            if src_spec:
+                leaf = os.path.splitext(os.path.basename(src_spec))[0]
+                if (
+                    src_spec.lower() == correct.lower()
+                    or leaf.lower() == src_base.lower()
+                ):
+                    return f"{prefix}{correct}{suffix}"
+                return f"{prefix}{src_spec}{suffix}"
+            rel = relative_module_specifier(test_rel, resolved)
+            if rel:
+                return f"{prefix}{strip_ext(rel)}{suffix}"
+
         return m.group(0)
 
-    return pattern.sub(repl, code)
+    out = pattern.sub(repl, code)
+
+    # Python: fix deep relative imports that point at the SUT module
+    src_norm = source_rel.replace("\\", "/").lower()
+    if src_norm.endswith(".py") and src_base:
+        py_mod = re.sub(r"\.py$", "", _norm_rel(source_rel).replace("/", "."))
+        for prefix in ("src.", "app.", "lib."):
+            if py_mod.startswith(prefix):
+                py_mod = py_mod[len(prefix) :]
+                break
+        if py_mod:
+            out = re.sub(
+                rf"from\s+\.+[\w.]*{re.escape(src_base)}\s+import\s+",
+                f"from {py_mod} import ",
+                out,
+                flags=re.IGNORECASE,
+            )
+
+    return out
 
 
 def under_generated_test_folder(

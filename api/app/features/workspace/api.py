@@ -249,46 +249,49 @@ async def resolve_scope(
         blob = f"{tc.module or ''} {tc.title or ''}"
         tokens = [w for w in blob.replace("-", " ").split() if len(w) >= 3][:12]
 
-    ctx = svc.build_context(workspace_id, tokens)
-    primary = ctx.primary_path
-    related = [r["path"] for r in ctx.related]
-    reason = ctx.reason
+    try:
+        ctx = svc.build_context(workspace_id, tokens)
+        primary = ctx.primary_path
+        related = [r["path"] for r in ctx.related]
+        reason = ctx.reason
 
-    # Optional AI rank among candidates
-    if use_ai and tc is not None and ctx.candidates:
-        conn = (
-            db.query(AiBackendConnection)
-            .filter(AiBackendConnection.project_id == uuid.UUID(session.project_id))
-            .first()
+        # Optional AI rank among candidates
+        if use_ai and tc is not None and ctx.candidates:
+            conn = (
+                db.query(AiBackendConnection)
+                .filter(AiBackendConnection.project_id == uuid.UUID(session.project_id))
+                .first()
+            )
+            if conn and C.is_ai_ready(conn.status):
+                try:
+                    api_key = connection_api_key(conn)
+                    provider = llm_from_connection(conn)
+                    system, user = build_resolve_scope_prompts(
+                        title=tc.title or "",
+                        module=tc.module,
+                        steps=tc.steps or "",
+                        expected=tc.expected_result or "",
+                        precondition=tc.precondition,
+                        test_data=tc.test_data,
+                        candidates=ctx.candidates[:60],
+                    )
+                    raw = await provider.chat(api_key, system, user)
+                    ranked = parse_resolve_scope_json(raw, ctx.candidates)
+                    primary = ranked.get("primary") or primary
+                    related = ranked.get("related") or related
+                    reason = ranked.get("reason") or reason
+                except Exception:  # noqa: BLE001
+                    pass
+
+        return ok(
+            {
+                "primary": primary,
+                "related": related,
+                "reason": reason,
+                "candidates": ctx.candidates,
+                "tokens": tokens,
+                "workspaceId": workspace_id,
+            }
         )
-        if conn and C.is_ai_ready(conn.status):
-            try:
-                api_key = connection_api_key(conn)
-                provider = llm_from_connection(conn)
-                system, user = build_resolve_scope_prompts(
-                    title=tc.title or "",
-                    module=tc.module,
-                    steps=tc.steps or "",
-                    expected=tc.expected_result or "",
-                    precondition=tc.precondition,
-                    test_data=tc.test_data,
-                    candidates=ctx.candidates[:60],
-                )
-                raw = await provider.chat(api_key, system, user)
-                ranked = parse_resolve_scope_json(raw, ctx.candidates)
-                primary = ranked.get("primary") or primary
-                related = ranked.get("related") or related
-                reason = ranked.get("reason") or reason
-            except Exception:  # noqa: BLE001
-                pass
-
-    return ok(
-        {
-            "primary": primary,
-            "related": related,
-            "reason": reason,
-            "candidates": ctx.candidates,
-            "tokens": tokens,
-            "workspaceId": workspace_id,
-        }
-    )
+    except Exception as exc:  # noqa: BLE001
+        return _map_error(exc)

@@ -30,7 +30,9 @@ const typescript: LanguageAdapter = {
       sourceFileName: sourceRel,
     }).relativePath,
   defaultTestCommand: (fw) =>
-    (fw || "").toLowerCase().includes("vitest") ? "npx vitest run" : "npm test",
+    (fw || "").toLowerCase().includes("vitest")
+      ? "npx vitest run"
+      : "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests",
 };
 
 const python: LanguageAdapter = {

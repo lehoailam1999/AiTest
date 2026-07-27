@@ -170,7 +170,13 @@ async def post_verify_report(
     )
 
     stages = body.get("stages")
-    summary = json.dumps(stages) if isinstance(stages, list) else None
+    summary_payload: dict | list = stages if isinstance(stages, list) else []
+    if body.get("coverageSync") is not None:
+        summary_payload = {
+            "stages": stages if isinstance(stages, list) else [],
+            "coverageSync": body.get("coverageSync"),
+        }
+    summary = json.dumps(summary_payload) if summary_payload else None
     compile_status = None
     test_status = None
     coverage_status = None
@@ -187,6 +193,14 @@ async def post_verify_report(
             elif stage == "coverage":
                 coverage_status = ok_flag
 
+    # Infer coverage_status from synced artifacts when stage skipped but sync succeeded
+    cov_sync = body.get("coverageSync")
+    if (
+        coverage_status is None
+        and isinstance(cov_sync, dict)
+        and int(cov_sync.get("uploaded") or 0) > 0
+    ):
+        coverage_status = "synced"
     rec = VerifyReportRecord(
         workspace_run_id=run.id,
         compile_status=compile_status,
@@ -262,12 +276,90 @@ def list_workspace_runs(
     )
     total = q.count()
     rows = q.offset(max(0, page - 1) * pageSize).limit(pageSize).all()
+
+    # Step U2 — attach latest verify snapshot per run (for job board)
+    verify_by_run: dict[uuid.UUID, VerifyReportRecord] = {}
+    if rows:
+        run_ids = [r.id for r in rows]
+        verifies = (
+            db.query(VerifyReportRecord)
+            .filter(VerifyReportRecord.workspace_run_id.in_(run_ids))
+            .order_by(VerifyReportRecord.created_at.desc())
+            .all()
+        )
+        for v in verifies:
+            if v.workspace_run_id not in verify_by_run:
+                verify_by_run[v.workspace_run_id] = v
+
+    items = []
+    for r in rows:
+        dto = workspace_run_dto(r)
+        v = verify_by_run.get(r.id)
+        if v is not None:
+            dto["latestVerify"] = {
+                "overallPass": v.overall_pass,
+                "compileStatus": v.compile_status,
+                "testStatus": v.test_status,
+                "coverageStatus": v.coverage_status,
+                "summaryJson": v.summary_json,
+            }
+        else:
+            dto["latestVerify"] = None
+        items.append(dto)
+
     return ok(
         {
-            "items": [workspace_run_dto(r) for r in rows],
+            "items": items,
             "page": page,
             "pageSize": pageSize,
             "total": total,
+        }
+    )
+
+
+@router.get("/audit/workspace-runs/{run_key}")
+def get_workspace_run_detail(
+    run_key: str,
+    db: Annotated[Session, Depends(get_db)],
+    projectId: str,
+):
+    """
+    Phase U2 — chi tiết Unit Job: run + verify reports + apply audits.
+    run_key: UUID của workspace_runs.id hoặc localRunId.
+    """
+    pid = _uuid(projectId)
+    if pid is None:
+        return errors(400, "projectId required")
+    rid = _uuid(run_key)
+    q = db.query(WorkspaceRun).filter(
+        WorkspaceRun.project_id == pid, WorkspaceRun.deleted_at.is_(None)
+    )
+    if rid is not None:
+        row = q.filter(WorkspaceRun.id == rid).first()
+    else:
+        row = q.filter(WorkspaceRun.local_run_id == run_key.strip()).first()
+    if row is None:
+        return errors(404, "workspace run not found")
+
+    verifies = (
+        db.query(VerifyReportRecord)
+        .filter(VerifyReportRecord.workspace_run_id == row.id)
+        .order_by(VerifyReportRecord.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    applies = (
+        db.query(ApplyAudit)
+        .filter(ApplyAudit.workspace_run_id == row.id)
+        .order_by(ApplyAudit.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    return ok(
+        {
+            "run": workspace_run_dto(row),
+            "verifies": [verify_report_dto(v, row) for v in verifies],
+            "applies": [apply_audit_dto(a, row) for a in applies],
         }
     )
 

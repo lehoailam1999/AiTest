@@ -11,11 +11,15 @@ from sqlalchemy.orm import Session
 from app import constants as C
 from app.database import get_db
 from app.deps import get_current_user
-from app.llm import LLMError, generate_unit
+from app.llm import LLMError
 from app.llm.base import UnitRequest
 from app.models.domain import AiBackendConnection, Project, TestCase
 from app.responses import errors, ok
-from app.services.connection_service import connection_api_key, llm_from_connection
+from app.services.ai_service import (
+    RUNNER_AI_CLI,
+    connection_runner_mode,
+    generate_unit_for_connection,
+)
 from app.services.context_packet import (
     gaps_from_packet,
     primary_from_packet,
@@ -82,16 +86,11 @@ async def generate_integration_test_route(
         .first()
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — vào Settings cấu hình API Key và Verify")
-    try:
-        api_key = connection_api_key(conn)
-    except ValueError as exc:
-        return errors(400, str(exc))
-
-    try:
-        provider = llm_from_connection(conn)
-    except Exception as exc:  # noqa: BLE001
-        return errors(400, str(exc))
+        return errors(
+            400,
+            "AI chưa Ready — vào Cấu hình AI thiết lập (API Key hoặc AI CLI) và Verify",
+        )
+    runner_mode = connection_runner_mode(conn)
 
     packet = body.get("contextPacket") if has_packet else None
     packet_dict = packet if isinstance(packet, dict) else None
@@ -146,7 +145,7 @@ async def generate_integration_test_route(
         context_gaps=gaps_from_packet(packet_dict),
     )
     try:
-        result = await generate_unit(provider, api_key, req)
+        result, meta = await generate_unit_for_connection(conn, req)
     except LLMError as exc:
         return errors(502, str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -161,6 +160,9 @@ async def generate_integration_test_route(
         module=(body.get("module") or tc.module or "") or None,
     )
 
+    provider_label = meta.get("provider") or (
+        "ai-cli" if runner_mode == RUNNER_AI_CLI else "api"
+    )
     return ok(
         {
             "code": result.code,
@@ -168,7 +170,9 @@ async def generate_integration_test_route(
             "fileName": result.file_name,
             "testCaseId": str(tc.id),
             "projectId": str(project.id),
-            "provider": provider.name,
+            "provider": provider_label,
+            "runnerUsed": meta.get("runnerUsed") or runner_mode,
+            "cliSessionKey": meta.get("cliSessionKey"),
             "artifactKind": "integration",
         }
     )

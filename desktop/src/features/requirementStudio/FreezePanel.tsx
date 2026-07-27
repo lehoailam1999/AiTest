@@ -74,7 +74,7 @@ export default function FreezePanel({
       const snapshotId = String(res.snapshot.id);
       const job = await waitForJob(jobId);
       if (job.status === "Failed") {
-        throw new Error(job.error || "Sinh TC thất bại");
+        throw new Error(job.error || "Tạo test case thất bại");
       }
       onGenerated?.({ snapshotId, jobId });
     } catch (e) {
@@ -89,7 +89,7 @@ export default function FreezePanel({
       <div className="freeze-panel">
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="Cần Phân tích Ready trước — Snapshot tổng hợp tài liệu upload + bản Phân tích để sinh TC đầy đủ."
+          description="Cần hoàn tất phân tích trước — snapshot dựa trên tài liệu đã tải lên và bản phân tích hiện tại."
         >
           {onOpenKnowledge ? (
             <Button type="primary" onClick={onOpenKnowledge}>
@@ -106,17 +106,17 @@ export default function FreezePanel({
       <Alert
         type="info"
         showIcon
-        title="Nguồn sinh Test Case"
+        title="Nguồn tạo test case"
         description={
           <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
             <li>
-              <strong>Tài liệu</strong> đã upload (extracted text)
+              <strong>Tài liệu</strong> đã tải lên
             </li>
             <li>
-              <strong>Phân tích</strong> (rules, actors, use cases, API, constraints…)
+              <strong>Phân tích</strong> (quy tắc, actor, use case, API, ràng buộc…)
             </li>
             <li>
-              <strong>TC đã có</strong> (nếu có) — tránh trùng, bổ sung phần còn thiếu
+              <strong>Test case hiện có</strong> (nếu có) — tránh trùng, bổ sung phần còn thiếu
             </li>
           </ul>
         }
@@ -130,7 +130,7 @@ export default function FreezePanel({
         <Alert
           type="warning"
           showIcon
-          title="Cảnh báo lúc Freeze"
+          title="Cảnh báo khi chốt snapshot"
           description={lastWarnings.map((w) => w.message).filter(Boolean).join(" · ")}
         />
       ) : null}
@@ -139,7 +139,7 @@ export default function FreezePanel({
         <Input.TextArea
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Ghi chú Freeze (tuỳ chọn)…"
+          placeholder="Ghi chú snapshot (tuỳ chọn)…"
           autoSize={{ minRows: 2, maxRows: 4 }}
           disabled={running}
         />
@@ -155,12 +155,12 @@ export default function FreezePanel({
             loading={running}
             onClick={() => void runFreezeAndGenerate()}
           >
-            Chốt Snapshot & Sinh TC
+            Chốt snapshot và tạo test case
           </Button>
         </Space>
         {running ? (
           <Typography.Text type="secondary">
-            <Spin size="small" /> Đang tổng hợp tài liệu + Phân tích + TC đã có → sinh TC…
+            <Spin size="small" /> Đang tổng hợp tài liệu, phân tích và test case hiện có…
           </Typography.Text>
         ) : null}
       </div>

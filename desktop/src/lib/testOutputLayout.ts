@@ -430,7 +430,7 @@ export function aitestRootFromTarget(targetRel?: string | null): string {
   return (m[0] || AITEST_ROOT).replace(/\/+$/, "") || AITEST_ROOT;
 }
 
-/** Rewrite SUT imports to a stable specifier that resolves from AItest. */
+/** Rewrite SUT + local imports to stable `src/…` (or relative) that resolve from AItest. */
 export function rewriteSutImports(
   code: string,
   opts: { testRel: string; sourceRel: string }
@@ -438,23 +438,116 @@ export function rewriteSutImports(
   if (!code || !opts.testRel || !opts.sourceRel) return code;
   const correct = sutModuleSpecifier(opts.testRel, opts.sourceRel);
   if (!correct) return code;
-  const srcBase = (opts.sourceRel.replace(/\\/g, "/").split("/").pop() || "").replace(
-    /\.[^.]+$/,
-    ""
-  );
+  const srcNorm = normRel(opts.sourceRel);
+  const srcBase = (srcNorm.split("/").pop() || "").replace(/\.[^.]+$/, "");
   if (!srcBase) return code;
+
+  const sourceDir = srcNorm.includes("/")
+    ? srcNorm.slice(0, srcNorm.lastIndexOf("/"))
+    : ".";
+
+  const stripExt = (p: string) => p.replace(/\.(tsx?|jsx?)$/i, "");
+
+  /** `foo/bar/src/x` or `src/x` → `src/x` */
+  const asSrcSpecifier = (spec: string): string | null => {
+    const n = stripExt(spec.replace(/\\/g, "/"));
+    if (n.startsWith("src/")) return n;
+    const idx = n.toLowerCase().indexOf("/src/");
+    if (idx >= 0) return n.slice(idx + 1);
+    return null;
+  };
+
+  /** Resolve path segments like path.posix.normalize without depending on node:path. */
+  const normJoin = (baseDir: string, relSpec: string): string => {
+    const baseParts = baseDir === "." ? [] : baseDir.split("/").filter(Boolean);
+    const relParts = relSpec.replace(/\\/g, "/").split("/");
+    const out = [...baseParts];
+    for (const part of relParts) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        out.pop();
+        continue;
+      }
+      out.push(part);
+    }
+    return out.join("/");
+  };
+
+  const isBareNpmPackage = (spec: string) => {
+    if (spec.startsWith(".") || spec.startsWith("/") || spec.startsWith("src/")) return false;
+    if (spec.startsWith("@/")) return false;
+    if (spec.startsWith("@") && spec.includes("/")) {
+      // @nestjs/common — leave; @app/foo with SUT name — rewrite
+      return !spec.toLowerCase().includes(srcBase.toLowerCase());
+    }
+    // lodash, reflect-metadata, …
+    if (!spec.includes("/") && !spec.startsWith("@")) return true;
+    return false;
+  };
+
   return code.replace(
     /((?:from|require\s*\()\s*['"])([^'"]+)(['"])/g,
     (full, prefix: string, spec: string, suffix: string) => {
       const specNorm = spec.replace(/\\/g, "/");
-      if (!spec.startsWith(".") && !specNorm.startsWith("src/")) return full;
+      if (isBareNpmPackage(specNorm)) return full;
+
+      // Always normalize @/ → src/
+      if (specNorm.startsWith("@/")) {
+        return `${prefix}src/${stripExt(specNorm.slice(2))}${suffix}`;
+      }
+      if (specNorm.startsWith("~/")) {
+        return `${prefix}src/${stripExt(specNorm.slice(2))}${suffix}`;
+      }
+
+      const fromSrcPath = asSrcSpecifier(specNorm);
+      if (fromSrcPath) {
+        // Prefer canonical SUT specifier when this points at the SUT file
+        if (
+          fromSrcPath.toLowerCase() === correct.toLowerCase() ||
+          fromSrcPath.toLowerCase().endsWith(`/${srcBase.toLowerCase()}`) ||
+          fromSrcPath.toLowerCase() === srcBase.toLowerCase()
+        ) {
+          return `${prefix}${correct}${suffix}`;
+        }
+        return `${prefix}${fromSrcPath}${suffix}`;
+      }
+
       const specBase = (specNorm.split("/").pop() || "").replace(/\.[^.]+$/, "");
       if (
         specBase.toLowerCase() === srcBase.toLowerCase() ||
         specNorm.toLowerCase().includes(srcBase.toLowerCase())
       ) {
+        // Avoid rewriting scoped packages that merely mention a substring
+        if (
+          specNorm.startsWith("@") &&
+          !specNorm.startsWith("@/") &&
+          specBase.toLowerCase() !== srcBase.toLowerCase()
+        ) {
+          return full;
+        }
         return `${prefix}${correct}${suffix}`;
       }
+
+      // Relatives in AI output are usually written as if next to the SUT
+      if (specNorm.startsWith(".")) {
+        const resolved = normJoin(sourceDir, specNorm);
+        const srcSpec = asSrcSpecifier(resolved) || (resolved.toLowerCase().startsWith("src/")
+          ? stripExt(resolved)
+          : null);
+        if (srcSpec) {
+          if (
+            srcSpec.toLowerCase() === correct.toLowerCase() ||
+            (srcSpec.split("/").pop() || "").toLowerCase() === srcBase.toLowerCase()
+          ) {
+            return `${prefix}${correct}${suffix}`;
+          }
+          return `${prefix}${srcSpec}${suffix}`;
+        }
+        // No src/ in tree — keep relative from test → resolved file
+        const fromTest = relativeModuleSpecifier(opts.testRel, resolved);
+        if (fromTest) return `${prefix}${stripExt(fromTest)}${suffix}`;
+      }
+
       return full;
     }
   );

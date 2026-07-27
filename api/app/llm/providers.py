@@ -12,15 +12,14 @@ from app.llm.base import (
     api_system_prompt,
     api_user_prompt,
     drafts_look_english,
-    ensure_node_test_globals_preamble,
     guess_class_name,
     infer_language,
     parse_test_cases_json,
     strip_code_fences,
     suggest_api_path,
-    suggest_unit_path,
     system_prompt,
     truncate,
+    unit_result_from_raw,
     unit_system_prompt,
     unit_user_prompt,
     user_prompt,
@@ -376,30 +375,10 @@ async def generate_unit(provider: Provider, api_key: str, req: UnitRequest) -> U
         ),
         unit_user_prompt(req),
     )
-    code = strip_code_fences(raw)
-    code = ensure_node_test_globals_preamble(
-        code,
-        language,
-        req.testing_framework or req.framework,
-    )
-    if not code.strip():
-        raise LLMError("LLM returned empty unit test code")
-    class_name = req.class_name or guess_class_name(req.source_file_name, req.source_code)
-    suggested, file_name = suggest_unit_path(
-        language,
-        class_name,
-        req.source_file_name,
-        req.framework,
-        module=req.module or "",
-        package_prefix=req.package_prefix,
-    )
-    if req.source_file_name:
-        from app.services.test_output_layout import rewrite_sut_imports
-
-        code = rewrite_sut_imports(
-            code, test_rel=suggested, source_rel=req.source_file_name
-        )
-    return UnitResult(code=code, suggested_path=suggested, file_name=file_name)
+    try:
+        return unit_result_from_raw(raw, req)
+    except ValueError as exc:
+        raise LLMError(str(exc)) from exc
 
 
 async def generate_api_test(provider: Provider, api_key: str, req: UnitRequest) -> UnitResult:
@@ -423,4 +402,10 @@ async def generate_api_test(provider: Provider, api_key: str, req: UnitRequest) 
         module=req.module or "",
         package_prefix=req.package_prefix,
     )
+    if req.source_file_name:
+        from app.services.test_output_layout import rewrite_sut_imports
+
+        code = rewrite_sut_imports(
+            code, test_rel=suggested, source_rel=req.source_file_name
+        )
     return UnitResult(code=code, suggested_path=suggested, file_name=file_name)

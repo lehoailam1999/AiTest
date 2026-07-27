@@ -3,8 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import GenerateUnitPage from "../../pages/GenerateUnitPage";
 
 /**
- * Automate — Sinh mã Unit test (IDE-first).
- * Chỉ Unit; API test tạm ẩn khỏi product path.
+ * Automate — Unit Test Engine (AI CLI + project root).
+ * Phase U4: IDE bridge chỉ viewer/boost tuỳ chọn — không còn happy path.
  */
 export default function UnitTestPage() {
   const [searchParams, setSearchParams] = useSearchParams();

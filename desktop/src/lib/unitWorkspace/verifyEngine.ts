@@ -1,6 +1,7 @@
-import { runDotnetTest, runTestCommand, writeTextFile, type TestRunResult } from "../../tauri/bridge";
+import { runDotnetTest, runTestCommand, writeTextFile, readTextFile, type TestRunResult } from "../../tauri/bridge";
 import { saveManifest } from "./manager";
 import { syncVerifyReport } from "./auditSync";
+import { syncCoverageAfterVerify } from "./coverageSync";
 import { captureStagingBackups, rollbackStaging, stageOverlayToTargets } from "./staging";
 import type {
   UnitWorkspaceManifest,
@@ -9,6 +10,14 @@ import type {
   VerifyStageResult,
 } from "./types";
 import { workspaceRunDir } from "./paths";
+import {
+  buildAitestJestCommand,
+  ensureAitestJestTsconfigInWorkspace,
+  isDefaultNpmJestCommand,
+  looksLikeJestTsTest,
+  manifestHasAitestTests,
+} from "./ensureAitestJestTsconfig";
+import { rewriteSutImports } from "../testOutputLayout";
 
 const LOG_MAX = 12_000;
 
@@ -81,10 +90,50 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
   await saveManifest(projectRoot, working);
 
   const stages: VerifyStageResult[] = [];
-  let backups = await captureStagingBackups(projectRoot, manifest);
+  let backups: Awaited<ReturnType<typeof captureStagingBackups>> = [];
 
   try {
-    await stageOverlayToTargets(projectRoot, manifest);
+    // Refresh Jest scaffold + rewrite imports so verify works on any Nest/TS project.
+    if (manifestHasAitestTests(working)) {
+      const testEntry = working.files.find(
+        (f) =>
+          f.op !== "delete" &&
+          /(?:^|\/)AItest\//i.test(f.targetRel.replace(/\\/g, "/")) &&
+          /\.(test|spec)\.(ts|tsx|js|jsx)$/i.test(f.targetRel)
+      );
+      working = await ensureAitestJestTsconfigInWorkspace({
+        projectRoot,
+        manifest: working,
+        targetRel: testEntry?.targetRel,
+      });
+      const srcName = (working.sourceFileName || "").trim();
+      if (srcName) {
+        for (const f of working.files) {
+          if (f.op === "delete") continue;
+          try {
+            let body = await readTextFile(projectRoot, f.workspaceRel);
+            if (!looksLikeJestTsTest(f.targetRel, body)) continue;
+            body = rewriteSutImports(body, {
+              testRel: f.targetRel,
+              sourceRel: srcName,
+            });
+            await writeTextFile(projectRoot, f.workspaceRel, body);
+            // Persist rewrite on target before backup so rollback keeps fixed imports.
+            try {
+              await writeTextFile(projectRoot, f.targetRel, body);
+            } catch {
+              /* stage will still write */
+            }
+          } catch {
+            /* skip unreadable overlay */
+          }
+        }
+      }
+      await saveManifest(projectRoot, working);
+    }
+
+    backups = await captureStagingBackups(projectRoot, working);
+    await stageOverlayToTargets(projectRoot, working);
 
     const compileCmd = (input.compileCommand ?? "").trim();
     if (compileCmd) {
@@ -96,17 +145,22 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
           overallPass: false,
           stages,
         };
-        working = { ...manifest, status: "fail", verify: report };
+        working = { ...working, status: "fail", verify: report };
         await saveManifest(projectRoot, working);
         syncVerifyReport(working, report);
         return { manifest: working, report };
       }
     }
 
-    const testCmd = input.testCommand.trim();
-    if (!testCmd) {
+    const rawTestCmd = input.testCommand.trim();
+    if (!rawTestCmd) {
       throw new Error("Cần lệnh test để verify.");
     }
+    // Safety net: Nest ``npm test`` only scans src/**/*.spec.ts — rewrite to AItest Jest.
+    const testCmd =
+      manifestHasAitestTests(working) && isDefaultNpmJestCommand(rawTestCmd)
+        ? buildAitestJestCommand(projectRoot, working.packagePrefix)
+        : rawTestCmd;
     const testRun = await runShellCommand(projectRoot, testCmd, input.dotnetFilter);
     stages.push(stageFromRun("test", testCmd, testRun));
 
@@ -119,29 +173,36 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
       overallPass = overallPass && covRun.success;
     }
 
-    const report: VerifyReport = {
+    let report: VerifyReport = {
       ranAt: new Date().toISOString(),
       overallPass,
       stages,
     };
     working = {
-      ...manifest,
+      ...working,
       status: overallPass ? "pass" : "fail",
       verify: report,
     };
-    await saveManifest(projectRoot, working);
 
+    // Step 4 — parse coverage/junit on disk → PostgreSQL (best-effort)
+    const coverageSync = await syncCoverageAfterVerify(working, projectRoot, report);
+    if (coverageSync) {
+      report = { ...report, coverageSync };
+      working = { ...working, verify: report };
+    }
+
+    await saveManifest(projectRoot, working);
     syncVerifyReport(working, report);
 
     const logBody = stages.map((s) => `=== ${s.stage} (${s.success ? "PASS" : "FAIL"}) ===\n${s.logExcerpt}`).join("\n\n");
     await writeTextFile(
       projectRoot,
-      `${workspaceRunDir(manifest.runId, manifest.packagePrefix)}/logs/verify.log`,
+      `${workspaceRunDir(working.runId, working.packagePrefix)}/logs/verify.log`,
       logBody
     );
 
     return { manifest: working, report };
   } finally {
-    await rollbackStaging(projectRoot, manifest.runId, backups, manifest.packagePrefix);
+    await rollbackStaging(projectRoot, working.runId, backups, working.packagePrefix);
   }
 }

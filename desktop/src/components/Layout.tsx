@@ -4,7 +4,6 @@ import { LogoutOutlined, UserOutlined } from "@ant-design/icons";
 import { useAuth } from "../auth/AuthContext";
 import { useProject } from "../state/ProjectContext";
 import { ApiHealthBanner } from "./ApiHealthBanner";
-import { IdeBridgeAutoConnect } from "./IdeBridgeAutoConnect";
 import {
   REQUIREMENT_MATCH,
   ROUTES,
@@ -20,7 +19,8 @@ type NavItem = {
 };
 
 /**
- * IA gọn — Design (Requirement) rồi Automate (Unit test → Run).
+ * IA — Design (Requirement) → Automate (Unit Test Engine → Run) → Insight (Jobs).
+ * Phase U4: không còn IDE-first trên happy path.
  */
 const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
   {
@@ -46,7 +46,7 @@ const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
     title: "Insight",
     items: [
       { to: ROUTES.reports, label: "Báo cáo" },
-      { to: ROUTES.activity, label: "Activity" },
+      { to: ROUTES.activity, label: "Unit Jobs" },
       { to: ROUTES.settingsAi, label: "Cấu hình AI" },
     ],
   },
@@ -93,7 +93,7 @@ export default function Layout() {
                 Chưa chọn dự án
               </strong>
               <span className="active-project-hint">
-                Chu trình: Requirement → Unit test → Chạy test.
+                Chu trình: Requirement → Unit Engine → Chạy test.
               </span>
               <Button
                 type="link"
@@ -146,7 +146,6 @@ export default function Layout() {
         </div>
       </aside>
       <main className="content">
-        <IdeBridgeAutoConnect />
         <ApiHealthBanner />
         <Outlet />
       </main>

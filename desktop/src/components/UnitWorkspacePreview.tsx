@@ -45,7 +45,7 @@ export function UnitWorkspacePreview({
 
   return (
     <Card
-      title="2. Agent Staging — preview"
+      title="2. Staging preview"
       style={{ marginTop: 8 }}
       extra={
         <Space size={8} wrap>
@@ -58,7 +58,7 @@ export function UnitWorkspacePreview({
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        title="File trong Agent Staging — chưa ghi vào source"
+        title="File staging — chưa ghi vào source"
         description={
           <>
             Thư mục tạm{" "}
@@ -78,7 +78,7 @@ export function UnitWorkspacePreview({
                 (<Typography.Text code>AItest/</Typography.Text>)
               </>
             )}
-            . Không đặt AItest/.ai-test ở root monorepo khi source thuộc BE/FE.
+            . Không đặt AItest/.ai-test ở root monorepo khi source thuộc BE/FE. IDE không bắt buộc.
           </>
         }
       />

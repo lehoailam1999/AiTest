@@ -41,7 +41,7 @@ import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
 import { requirementUrl, ROUTES } from "../lib/productRoutes";
 
-/** Bước sinh test case (Design). Sau Approved → Unit test (Connect IDE). */
+/** Bước sinh test case (Design). Sau Approved → Unit test (project root · AI CLI). */
 export default function GenerateHubPage() {
   const { message } = App.useApp();
   const { project } = useProject();

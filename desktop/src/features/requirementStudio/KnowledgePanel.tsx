@@ -113,7 +113,7 @@ export default function KnowledgePanel({
           description={
             <span>
               Chưa có bản Phân tích. Sau khi tài liệu đã tách đoạn, bấm{" "}
-              <strong>Dựng Phân tích</strong>.
+              <strong>Phân tích</strong>.
             </span>
           }
         >
@@ -124,7 +124,7 @@ export default function KnowledgePanel({
             disabled={!canBuild}
             onClick={onBuild}
           >
-            Dựng Phân tích
+            Phân tích
           </Button>
         </Empty>
         {!canBuild ? (
@@ -149,7 +149,11 @@ export default function KnowledgePanel({
       <div className="knowledge-toolbar">
         <Space wrap>
           <Tag color={status === "ready" ? "success" : status === "stale" ? "warning" : "default"}>
-            {status === "ready" ? "Ready" : status === "stale" ? "Stale" : status}
+            {status === "ready"
+              ? "Sẵn sàng"
+              : status === "stale"
+                ? "Cần cập nhật"
+                : status}
           </Tag>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             v{knowledge?.version ?? 0}
@@ -162,7 +166,7 @@ export default function KnowledgePanel({
         <Space wrap>
           {onOpenFreeze && (status === "ready" || status === "stale") ? (
             <Button type="primary" onClick={onOpenFreeze}>
-              Sang Sinh test case
+              Tiếp tục: Tạo test case
             </Button>
           ) : null}
           <Button icon={<ReloadOutlined />} onClick={onRefresh} disabled={building}>
@@ -175,7 +179,11 @@ export default function KnowledgePanel({
             disabled={!canBuild}
             onClick={onBuild}
           >
-            {status === "stale" || status === "ready" ? "Dựng lại Phân tích" : "Dựng Phân tích"}
+            {building
+              ? "Đang phân tích tài liệu…"
+              : status === "stale" || status === "ready"
+                ? "Phân tích lại"
+                : "Phân tích"}
           </Button>
         </Space>
       </div>
@@ -184,8 +192,8 @@ export default function KnowledgePanel({
         <Alert
           type="warning"
           showIcon
-          title="Phân tích đã cũ"
-          description="Tài liệu vừa đổi — dựng lại Phân tích trước khi Sinh test case."
+          title="Phân tích cần cập nhật"
+          description="Tài liệu vừa thay đổi. Phân tích lại trước khi tạo test case."
         />
       ) : null}
 
@@ -195,13 +203,13 @@ export default function KnowledgePanel({
           showIcon
           title={
             gapCount > 0
-              ? `${gapCount} mục Thiếu sót — xem trước khi Sinh TC`
-              : "Một số tiêu chí Sinh TC còn trống"
+              ? `${gapCount} mục thiếu sót — xem trước khi tạo test case`
+              : "Một số tiêu chí tạo test case còn trống"
           }
           description={
             missingCritical.length
               ? `Thiếu: ${missingCritical.map((m) => m.label).join(", ")}.`
-              : "Sinh TC vẫn tổng hợp tài liệu + Phân tích; bổ sung SRS sẽ chính xác hơn."
+              : "Hệ thống vẫn tổng hợp tài liệu và phân tích; bổ sung SRS sẽ chính xác hơn."
           }
         />
       ) : null}
@@ -254,7 +262,7 @@ function ReadinessStrip({ payload }: { payload: KnowledgePayload }) {
   return (
     <div className="knowledge-readiness" style={{ marginBottom: 12 }}>
       <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-        Sẵn sàng Sinh TC
+        Sẵn sàng tạo test case
       </Typography.Text>
       <Space wrap size={[6, 6]}>
         {READINESS_KEYS.map((r) => {

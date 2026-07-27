@@ -62,7 +62,7 @@ const QUICK_ACTIONS = [
   {
     to: "/unit-test",
     title: "Unit test",
-    desc: "Test case Approved → Agent lấy context IDE → Unit · Staging · Apply",
+    desc: "TC Approved → Project root → Unit Job → Staging → Apply (IDE tuỳ chọn)",
     icon: <ThunderboltOutlined />,
   },
   {
@@ -182,15 +182,11 @@ export default function HomePage() {
       },
       {
         key: "ide",
-        label: "IDE + Root",
-        done: journey.ideConnected && journey.hasLocalPath,
-        hint: journey.ideConnected
-          ? journey.hasLocalPath
-            ? "Connected · Root OK"
-            : "Connected · gắn Root"
-          : journey.hasLocalPath
-            ? "Root OK · Connect IDE"
-            : "Connect trên Sinh Unit",
+        label: "Project root",
+        done: journey.hasLocalPath,
+        hint: journey.hasLocalPath
+          ? "Root OK · sẵn sàng sinh"
+          : "Gắn root trên Sinh Unit",
         to: "/unit-test",
       },
       {

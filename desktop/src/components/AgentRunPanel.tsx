@@ -65,7 +65,16 @@ export function AgentRunPanel({
   rootsMismatch,
   mismatchBanner,
 }: Props) {
-  if (phase === "idle" && !intent && !rootsMismatch) return null;
+  if (phase === "idle" && !intent && !rootsMismatch) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        title="IDE boost chưa chạy"
+        description="Đang phân tích TC / lấy context IDE khi bạn mở mục này. Có thể đóng lại và dùng «Chạy Unit Job» (Local FS)."
+      />
+    );
+  }
 
   const step = PHASE_INDEX[phase] ?? 0;
   const enough = confidence?.enough ?? false;
@@ -74,8 +83,8 @@ export function AgentRunPanel({
   return (
     <Card
       size="small"
-      title="Agent Run — TC → IDE context → Sinh unit"
-      style={{ marginTop: 8 }}
+      title="IDE boost — TC → context → Sinh (tuỳ chọn)"
+      style={{ marginTop: 0 }}
       extra={
         phase !== "idle" || blockedByRoots ? (
           <Tag

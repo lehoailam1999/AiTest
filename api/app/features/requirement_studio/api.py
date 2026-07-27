@@ -94,6 +94,21 @@ def get_workspace(
     return ok(workspace_dto(ws, file_count=len(files), chunk_count=chunk_total))
 
 
+@router.delete("/requirement-workspaces/{workspace_id}")
+def delete_workspace(
+    workspace_id: str,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Hard-delete Requirement + snapshots, TCs, files, chat, knowledge."""
+    wid = _uuid(workspace_id)
+    if wid is None:
+        return errors(400, "invalid workspace id")
+    result = app_svc.hard_delete_workspace(db, wid)
+    if result is None:
+        return errors(404, "workspace not found")
+    return ok(result)
+
+
 @router.get("/requirement-workspaces/{workspace_id}/files")
 def list_files(
     workspace_id: str,

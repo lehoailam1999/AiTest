@@ -49,6 +49,8 @@ class UnitRequest:
     unit_strategy_summary: str = ""
     test_samples: list[tuple[str, str]] = field(default_factory=list)
     context_gaps: list[str] = field(default_factory=list)
+    requirement_title: str = ""
+    requirement_description: str = ""
 
 
 @dataclass
@@ -736,7 +738,7 @@ def suggest_unit_path(
 ) -> tuple[str, str]:
     """Return (relative_path, file_name) under [{pkg}/]AItest/UnitTest/{Module}/…"""
     from app.services.test_output_layout import (
-        test_file_name_from_source,
+        file_name_from_source,
         under_generated_test_folder,
     )
 
@@ -782,7 +784,7 @@ def suggest_unit_path(
         or "csharp" in lang_l
         or any(x in fw for x in ("xunit", "nunit", "mstest", "junit", "unittest"))
     ):
-        file_name = test_file_name_from_source(
+        file_name = file_name_from_source(
             src,
             language=lang,
             class_name=base,
@@ -831,6 +833,35 @@ def strip_code_fences(raw: str) -> str:
     return raw.strip()
 
 
+def unit_result_from_raw(raw: str, req: UnitRequest) -> UnitResult:
+    """Parse LLM/CLI raw text → UnitResult (path under AItest/UnitTest/…)."""
+    language = infer_language(req)
+    code = strip_code_fences(raw)
+    code = ensure_node_test_globals_preamble(
+        code,
+        language,
+        req.testing_framework or req.framework,
+    )
+    if not code.strip():
+        raise ValueError("LLM returned empty unit test code")
+    class_name = req.class_name or guess_class_name(req.source_file_name, req.source_code)
+    suggested, file_name = suggest_unit_path(
+        language,
+        class_name,
+        req.source_file_name,
+        req.framework,
+        module=req.module or "",
+        package_prefix=req.package_prefix,
+    )
+    if req.source_file_name:
+        from app.services.test_output_layout import rewrite_sut_imports
+
+        code = rewrite_sut_imports(
+            code, test_rel=suggested, source_rel=req.source_file_name
+        )
+    return UnitResult(code=code, suggested_path=suggested, file_name=file_name)
+
+
 def unit_system_prompt(framework: str, language: str = "", *, testing_framework: str = "", mock_framework: str = "", assertion_library: str = "") -> str:
     lang = language or "theo mã nguồn được cung cấp"
     fw = normalize_framework(testing_framework or framework, language)
@@ -858,10 +889,9 @@ def unit_system_prompt(framework: str, language: str = "", *, testing_framework:
         "- The host will place this file under [{pkg}/]AItest/UnitTest/{Module}/… "
         "(or AItest/APITest/…) — never beside production source. "
         "Write a complete file body suitable for that location.\n"
-        "- CRITICAL for TS/JS: import the source-under-test with the EXACT path "
-        "given in the user prompt (Import path for SUT). Prefer `src/…` (package "
-        "baseUrl) over deep `../../../src/…` relatives. Do NOT invent same-folder "
-        "imports unless that path is provided.\n"
+        "- CRITICAL for TS/JS: ALL project-internal imports (SUT, DTOs, entities, interfaces, helpers) "
+        "MUST use package root specifiers like `src/…` or `@/…` instead of local relative paths (`./…`) "
+        "because this test file is placed under `AItest/UnitTest/…`. Use the EXACT SUT path given in prompt.\n"
         f"{_node_test_types_rule(fw, lang)}"
         "- Do not invent APIs that are not in the source snippet; if incomplete, "
         "test the visible surface and add TODO comments.\n"
@@ -955,13 +985,13 @@ def unit_user_prompt(req: UnitRequest) -> str:
     )
     from app.services.test_output_layout import (
         sut_module_specifier,
-        test_file_name_from_source,
+        file_name_from_source,
         under_generated_test_folder,
     )
 
     suggested = under_generated_test_folder(
         "unit",
-        test_file_name_from_source(
+        file_name_from_source(
             req.source_file_name,
             language=language,
             class_name=class_hint,
@@ -1000,6 +1030,14 @@ def unit_user_prompt(req: UnitRequest) -> str:
         f"Steps:\n{or_dash(req.steps)}\n"
         f"Expected result:\n{or_dash(req.expected_result)}\n"
         f"Test data: {or_dash(req.test_data)}\n\n"
+    )
+    if req.requirement_title.strip() or req.requirement_description.strip():
+        base += (
+            "## Requirement Context\n"
+            f"Title: {or_dash(req.requirement_title)}\n"
+            f"Description: {or_dash(req.requirement_description)}\n\n"
+        )
+    base += (
         "## Source under test\n"
         f"Language: {language}\n"
         f"File: {or_dash(req.source_file_name)}\n"
@@ -1054,7 +1092,7 @@ def suggest_api_path(
 ) -> tuple[str, str]:
     """Return (relative_path, file_name) under [{pkg}/]AItest/APITest/{Module}/…"""
     from app.services.test_output_layout import (
-        test_file_name_from_source,
+        file_name_from_source,
         under_generated_test_folder,
     )
 
@@ -1064,7 +1102,7 @@ def suggest_api_path(
     src = (source_file_name or "").replace("\\", "/").lstrip("./")
 
     if src:
-        file_name = test_file_name_from_source(
+        file_name = file_name_from_source(
             src, language=language or "", class_name=base, kind="api"
         )
     elif "python" in lang_l or "pytest" in fw:

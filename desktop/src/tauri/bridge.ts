@@ -196,6 +196,20 @@ export function deleteTextFile(projectRoot: string, relativePath: string): Promi
   return invoke<void>("delete_text_file", { projectRoot, relativePath });
 }
 
+/** Remove staging dir under `.ai-test/` (path-jailed in Tauri). */
+export function deleteDir(
+  projectRoot: string,
+  relativePath: string,
+  opts?: { emptyOnly?: boolean }
+): Promise<void> {
+  ensureTauri();
+  return invoke<void>("delete_dir", {
+    projectRoot,
+    relativePath,
+    emptyOnly: opts?.emptyOnly ?? false,
+  });
+}
+
 export async function runDotnetTest(
   projectRoot: string,
   filter?: string

@@ -99,6 +99,18 @@ class ScannerAdapterTests(unittest.TestCase):
             bad = adapter.read_files(session.workspace_id, ["../etc/passwd"])
             self.assertTrue(bad[0].error)
 
+            # second open same project+root reuses (does not close)
+            again = adapter.open("11111111-1111-1111-1111-111111111111", str(root))
+            self.assertEqual(again.workspace_id, session.workspace_id)
+            self.assertEqual(again.status.value, "ready")
+            hits2 = adapter.search(
+                session.workspace_id,
+                __import__(
+                    "app.features.workspace.domain.models", fromlist=["SearchQuery"]
+                ).SearchQuery(by="token", query="LoginService", limit=10),
+            )
+            self.assertTrue(hits2)
+
 
 if __name__ == "__main__":
     unittest.main()

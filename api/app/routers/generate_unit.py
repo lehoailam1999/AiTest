@@ -10,11 +10,15 @@ from sqlalchemy.orm import Session
 from app import constants as C
 from app.database import get_db
 from app.deps import get_current_user
-from app.llm import LLMError, generate_unit
+from app.llm import LLMError
 from app.llm.base import UnitRequest
 from app.models.domain import AiBackendConnection, Project, TestCase
 from app.responses import errors, ok
-from app.services.connection_service import connection_api_key, llm_from_connection
+from app.services.ai_service import (
+    RUNNER_AI_CLI,
+    connection_runner_mode,
+    generate_unit_for_connection,
+)
 from app.services.context_packet import (
     gaps_from_packet,
     source_under_test_summary,
@@ -29,6 +33,10 @@ from app.services.generate_source_resolve import (
     resolve_from_context_packet,
 )
 from app.services.source_surface import analyze_source_surface
+from app.services.project_inspector import (
+    ProjectInspector,
+    apply_stack_to_generate_fields,
+)
 
 router = APIRouter(
     prefix="/api", tags=["generate-unit"], dependencies=[Depends(get_current_user)]
@@ -79,16 +87,11 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         .first()
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — vào Settings cấu hình API Key và Verify")
-    try:
-        api_key = connection_api_key(conn)
-    except ValueError as exc:
-        return errors(400, str(exc))
-
-    try:
-        provider = llm_from_connection(conn)
-    except LLMError as exc:
-        return errors(400, str(exc))
+        return errors(
+            400,
+            "AI chưa Ready — vào Cấu hình AI thiết lập (API Key hoặc AI CLI) và Verify",
+        )
+    runner_mode = connection_runner_mode(conn)
 
     packet = body.get("contextPacket") if isinstance(body.get("contextPacket"), dict) else None
     workspace_id = str(body.get("workspaceId") or "").strip() or None
@@ -178,6 +181,34 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
     else:
         framework = testing_fw or body_fw
 
+    # Step 2 — ProjectInspector: điền language/framework khi auto/empty
+    stack_inspect = None
+    project_root = str(body.get("projectRoot") or body.get("project_root") or "").strip()
+    if project_root:
+        try:
+            pkg_prefix = body.get("packagePrefix", body.get("package_prefix"))
+            stack_inspect = ProjectInspector.inspect_project(
+                project_root,
+                source_relative_path=source_file_name
+                or str(body.get("sourceFileName") or "")
+                or None,
+                module=(body.get("module") or hints.get("module") or tc.module or "")
+                or "",
+                package_prefix=(
+                    None
+                    if pkg_prefix is None
+                    else str(pkg_prefix)
+                ),
+            )
+            language, framework, testing_fw = apply_stack_to_generate_fields(
+                language=language,
+                framework=framework,
+                testing_framework=testing_fw or framework,
+                stack=stack_inspect,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("project inspect failed root=%s: %s", project_root, exc)
+
     fw_l = (framework or "").lower()
     lang_l = language.lower()
     if any(x in lang_l for x in ("c#", "csharp", ".net")) and fw_l in (
@@ -226,6 +257,16 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         sut_summary = str(surface.get("source_under_test_summary") or "")
         strategy_summary = str(surface.get("unit_strategy_summary") or "")
 
+    req_title = str(body.get("requirementTitle") or body.get("requirement_title") or "").strip()
+    req_desc = str(body.get("requirementDescription") or body.get("requirement_description") or "").strip()
+
+    if not req_title and tc.source_id:
+        from app.models.domain import Requirement
+        req_obj = db.query(Requirement).filter(Requirement.id == tc.source_id).first()
+        if req_obj:
+            req_title = req_obj.title or ""
+            req_desc = req_obj.description or ""
+
     req = UnitRequest(
         test_case_title=tc.title,
         test_case_type=tc.type,
@@ -255,12 +296,19 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         unit_strategy_summary=strategy_summary,
         test_samples=samples,
         context_gaps=gaps,
+        requirement_title=req_title,
+        requirement_description=req_desc,
     )
     try:
-        result = await generate_unit(provider, api_key, req)
+        result, meta = await generate_unit_for_connection(conn, req)
+    except LLMError as exc:
+        return errors(400, f"generate unit failed: {exc}")
     except Exception as exc:  # noqa: BLE001
         return errors(400, f"generate unit failed: {exc}")
 
+    provider_label = meta.get("provider") or (
+        "ai-cli" if runner_mode == RUNNER_AI_CLI else "api"
+    )
     return ok(
         {
             "code": result.code,
@@ -268,11 +316,157 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
             "fileName": result.file_name,
             "testCaseId": str(tc.id),
             "projectId": str(project_id),
-            "provider": provider.name,
+            "provider": provider_label,
+            "runnerUsed": meta.get("runnerUsed") or runner_mode,
+            "cliSessionKey": meta.get("cliSessionKey"),
+            "stackInspect": stack_inspect.to_dict() if stack_inspect else None,
             "contextSource": body.get("contextSource")
             or ("packet" if has_packet else ("workspace" if workspace_id else "body")),
             "agentConfidence": body.get("agentConfidence"),
             "agentEnough": body.get("agentEnough"),
             "agentOverride": bool(body.get("agentOverride")),
+        }
+    )
+
+
+@router.post("/project-inspect")
+async def project_inspect_route(request: Request):
+    """
+    Step 2 — quét manifest local (projectRoot) → language / framework / runCommand.
+    Desktop gọi khi bind root hoặc trước Sinh Unit.
+    """
+    body = await request.json()
+    project_root = str(body.get("projectRoot") or body.get("project_root") or "").strip()
+    if not project_root:
+        return errors(400, "projectRoot required")
+    source = str(body.get("sourceFileName") or body.get("source_file_name") or "").strip()
+    module = str(body.get("module") or "").strip()
+    pkg = body.get("packagePrefix", body.get("package_prefix"))
+    try:
+        info = ProjectInspector.inspect_project(
+            project_root,
+            source_relative_path=source or None,
+            module=module,
+            package_prefix=None if pkg is None else str(pkg),
+        )
+    except ValueError as exc:
+        return errors(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return errors(400, f"inspect failed: {exc}")
+    return ok(info.to_dict())
+
+
+@router.post("/unit-sandbox-repair")
+async def unit_sandbox_repair_route(request: Request, db: Annotated[Session, Depends(get_db)]):
+    """
+    Step 3 — chạy sandbox auto-repair trên projectRoot (cùng máy API).
+    Body: projectId, testCaseId, projectRoot, code, testFileRel?, maxRetries?
+    + các field generate (language/framework/source…) để AI sửa đúng ngữ cảnh.
+    """
+    body = await request.json()
+    project_id = _uuid(str(body.get("projectId") or ""))
+    test_case_id = _uuid(str(body.get("testCaseId") or ""))
+    project_root = str(body.get("projectRoot") or "").strip()
+    code = str(body.get("code") or "").strip()
+    if project_id is None or test_case_id is None:
+        return errors(400, "projectId and testCaseId required")
+    if not project_root:
+        return errors(400, "projectRoot required")
+    if not code:
+        return errors(400, "code required")
+
+    project = db.query(Project).filter(Project.id == project_id, Project.deleted_at.is_(None)).first()
+    if project is None:
+        return errors(404, "Project not found")
+    tc = (
+        db.query(TestCase)
+        .filter(TestCase.id == test_case_id, TestCase.project_id == project_id)
+        .first()
+    )
+    if tc is None:
+        return errors(404, "test case not found in project")
+
+    conn = (
+        db.query(AiBackendConnection)
+        .filter(AiBackendConnection.project_id == project_id)
+        .first()
+    )
+    if conn is None or not C.is_ai_ready(conn.status):
+        return errors(400, "AI chưa Ready — Verify CLI/API trước")
+
+    from app.services.unit_test_orchestrator import (
+        DEFAULT_MAX_RETRIES,
+        UnitTestOrchestrator,
+    )
+
+    source_file = str(body.get("sourceFileName") or "").strip()
+    module = str(body.get("module") or tc.module or "").strip()
+    pkg = body.get("packagePrefix", body.get("package_prefix"))
+    package_prefix = None if pkg is None else str(pkg)
+    test_rel = str(body.get("testFileRel") or body.get("suggestedPath") or "").strip()
+    max_retries = int(body.get("maxRetries") or DEFAULT_MAX_RETRIES)
+    max_retries = max(1, min(max_retries, 5))
+
+    try:
+        orch = UnitTestOrchestrator(
+            project_root,
+            source_relative_path=source_file or None,
+            module=module,
+            package_prefix=package_prefix,
+        )
+        if not test_rel:
+            test_rel = orch.resolve_test_rel(
+                source_file_path=source_file or "SUT",
+                suggested_path=str(body.get("suggestedPath") or "") or None,
+                module=module,
+                package_prefix=package_prefix,
+            )
+        req = UnitRequest(
+            test_case_title=tc.title,
+            test_case_type=tc.type,
+            priority=tc.priority,
+            steps=tc.steps,
+            expected_result=tc.expected_result,
+            precondition=tc.precondition or "",
+            test_data=tc.test_data or "",
+            source_file_name=source_file,
+            source_code=str(body.get("sourceCode") or ""),
+            class_name=str(body.get("className") or ""),
+            method_name=str(body.get("methodName") or ""),
+            framework=str(body.get("framework") or orch.stack.framework),
+            language=str(body.get("language") or orch.stack.language or project.language or ""),
+            module=module,
+            package_prefix=package_prefix,
+            testing_framework=str(body.get("framework") or orch.stack.framework),
+        )
+        sandbox = await orch.execute_sandbox_and_auto_repair(
+            initial_code=code,
+            test_file_rel=test_rel,
+            req=req,
+            conn=conn,
+            max_retries=max_retries,
+            write_file=bool(body.get("writeFile", True)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return errors(400, f"sandbox repair failed: {exc}")
+
+    return ok(
+        {
+            "status": sandbox.status,
+            "code": sandbox.code,
+            "testFilePath": sandbox.test_file_path,
+            "attempts": sandbox.attempts,
+            "errorLog": sandbox.error_log,
+            "history": [
+                {
+                    "attempt": h.attempt,
+                    "exitCode": h.exit_code,
+                    "success": h.success,
+                    "logExcerpt": h.log_excerpt,
+                }
+                for h in sandbox.history
+            ],
+            "stackInspect": sandbox.stack,
+            "runnerUsed": connection_runner_mode(conn),
         }
     )

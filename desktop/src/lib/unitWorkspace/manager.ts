@@ -34,6 +34,7 @@ export async function createUnitWorkspaceRun(input: {
   sourceFileName?: string;
   artifactKind?: "unit" | "api";
   packagePrefix?: string | null;
+  packageName?: string | null;
 }): Promise<UnitWorkspaceManifest> {
   const runId = newRunId(input.testCaseId);
   const packagePrefix =
@@ -52,6 +53,7 @@ export async function createUnitWorkspaceRun(input: {
     sourceFileName: input.sourceFileName,
     artifactKind: input.artifactKind ?? "unit",
     packagePrefix,
+    packageName: input.packageName?.trim() || undefined,
   };
   await saveManifest(input.projectRoot, manifest);
   return manifest;

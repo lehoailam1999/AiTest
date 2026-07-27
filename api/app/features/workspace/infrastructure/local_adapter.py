@@ -54,22 +54,41 @@ class LocalDiskWorkspaceAdapter:
 
     def open(self, project_id: str, root_path: str) -> WorkspaceSession:
         root = normalize_root(root_path)
+        root_s = str(root)
         with self._lock:
-            # close previous active for same project
+            # Reuse active session for same project+root — concurrent open must not
+            # close a live workspace (batch Unit Job + resolve-scope race).
             old_id = self._project_active.get(project_id)
             if old_id and old_id in self._sessions:
-                self._sessions[old_id].status = WorkspaceState.CLOSED
+                old = self._sessions[old_id]
+                same_root = Path(old.root_path).resolve() == root.resolve()
+                if same_root and old.status in (
+                    WorkspaceState.READY,
+                    WorkspaceState.INDEXING,
+                ):
+                    return old
+                old.status = WorkspaceState.CLOSED
+                if self._project_active.get(project_id) == old_id:
+                    self._project_active.pop(project_id, None)
+                closed_prev = old_id
+            else:
+                closed_prev = None
             workspace_id = str(uuid.uuid4())
             session = WorkspaceSession(
                 workspace_id=workspace_id,
                 project_id=project_id,
-                root_path=str(root),
+                root_path=root_s,
                 status=WorkspaceState.INDEXING,
                 opened_at=datetime.now(timezone.utc),
                 progress=0.0,
             )
             self._sessions[workspace_id] = session
             self._project_active[project_id] = workspace_id
+
+        if closed_prev:
+            self.memory.clear(closed_prev)
+            if self._watcher:
+                self._watcher.stop(closed_prev)
 
         t = threading.Thread(
             target=self._run_scan,
