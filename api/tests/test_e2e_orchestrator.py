@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from pathlib import Path
 
 from app.llm.base import (
     E2EFile,
@@ -114,7 +115,39 @@ def test_ensure_playwright_config():
     files = [E2EFile(path="AItest/E2ETest/Auth/specs/a.spec.ts", content="x", kind="spec")]
     out = ensure_playwright_config(files, module="Auth", target_url="http://localhost:5173")
     assert any(f.kind == "config" for f in out)
+    assert any(
+        f.path.replace("\\", "/").endswith("fixtures/global.setup.ts") for f in out
+    )
     assert "baseURL" in default_playwright_config(base_url="http://x")
+    assert "globalSetup: './fixtures/global.setup.ts'" in default_playwright_config(
+        base_url="http://x"
+    )
+
+
+def test_ensure_playwright_config_places_global_setup_next_to_config():
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Req A/TC B/specs/a.spec.ts",
+            content="test('a', async () => {})",
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Req A/TC B/playwright.config.ts",
+            content="export default defineConfig({ testDir: './specs' });",
+            kind="config",
+        ),
+    ]
+    out = ensure_playwright_config(
+        files,
+        module="Login",
+        requirement_title="Req A",
+        test_case_title="TC B",
+        target_url="http://localhost:5174",
+    )
+    setup = next(
+        f for f in out if f.path.replace("\\", "/").endswith("fixtures/global.setup.ts")
+    )
+    assert setup.path.replace("\\", "/").startswith("AItest/E2ETest/Req A/TC B/")
 
 
 def test_build_e2e_heal_prompt_context():
@@ -235,7 +268,9 @@ def test_resolve_e2e_work_cwd_uses_config_dir(tmp_path):
     )
     assert work.replace("\\", "/").endswith("AItest/E2ETest/Auth")
     assert spec_arg.replace("\\", "/") == "specs/login.spec.ts"
-    assert config_arg is None
+    assert config_arg is not None
+    assert config_arg.replace("\\", "/").endswith("AItest/E2ETest/Auth/playwright.config.ts")
+    assert Path(config_arg).is_absolute()
 
 
 def test_resolve_e2e_work_cwd_unicode_module(tmp_path):
@@ -254,9 +289,12 @@ def test_resolve_e2e_work_cwd_unicode_module(tmp_path):
 
 def test_check_playwright_ready_missing(tmp_path):
     check = check_playwright_ready(str(tmp_path))
-    assert check.ok is False
-    assert "Playwright" in check.message or "npx" in check.message
-    assert PLAYWRIGHT_INSTALL_HINT.split("npm")[0] in check.message or "npx" in check.message.lower() or "@playwright" in check.message
+    # Environment may have shared AITest runner pre-installed.
+    if check.ok:
+        assert check.source in ("aitest", "project")
+    else:
+        assert "Playwright" in check.message or "npx" in check.message
+        assert PLAYWRIGHT_INSTALL_HINT.split("npm")[0] in check.message or "npx" in check.message.lower() or "@playwright" in check.message
 
 
 def test_check_playwright_ready_with_package(tmp_path):
@@ -468,6 +506,103 @@ def test_execute_module_headless_maps_specs(tmp_path):
     by = {Path(s.spec_path).name: s for s in result.specs}
     assert by["a.spec.ts"].success is True
     assert by["b.spec.ts"].success is False
+
+
+def test_execute_module_headless_isolates_tc_folders(tmp_path):
+    """TC1 fail must not mark TC2 fail — each folder runs independently."""
+    from pathlib import Path
+
+    from app.services.e2e_orchestrator import _group_files_by_run_root
+
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Req/TC1/playwright.config.ts",
+            content="export default {}",
+            kind="config",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Req/TC1/specs/token-refresh-failure.spec.ts",
+            content="test('t1', async () => {})",
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Req/TC2/playwright.config.ts",
+            content="export default {}",
+            kind="config",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Req/TC2/specs/update-todo-missing-on-save.spec.ts",
+            content="test('t2', async () => {})",
+            kind="spec",
+        ),
+    ]
+    groups = _group_files_by_run_root(files)
+    assert len(groups) == 2
+
+    fail_report = {
+        "suites": [
+            {
+                "specs": [
+                    {
+                        "file": "specs/token-refresh-failure.spec.ts",
+                        "title": "t1",
+                        "tests": [
+                            {
+                                "results": [
+                                    {
+                                        "status": "failed",
+                                        "error": {
+                                            "message": "expect(received).toBeLessThanOrEqual(expected)"
+                                        },
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
+    pass_report = {
+        "suites": [
+            {
+                "specs": [
+                    {
+                        "file": "specs/update-todo-missing-on-save.spec.ts",
+                        "title": "t2",
+                        "tests": [{"results": [{"status": "passed"}]}],
+                    }
+                ]
+            }
+        ]
+    }
+    calls: list[str] = []
+
+    async def run_fn(cmd, cwd):
+        calls.append(str(cwd).replace("\\", "/"))
+        if cwd.replace("\\", "/").endswith("/TC1"):
+            return 1, json.dumps(fail_report)
+        return 0, json.dumps(pass_report)
+
+    orch = E2EOrchestrator(str(tmp_path), module="Req")
+    result = asyncio.run(
+        orch.execute_module_headless(
+            files=files,
+            module="Req",
+            run_fn=run_fn,
+            write_file=True,
+            require_playwright=False,
+        )
+    )
+    assert len(calls) == 2, f"expected 2 isolated runs, got {calls}"
+    assert result.status == "FAILED"
+    by = {Path(s.spec_path).name: s for s in result.specs}
+    assert by["token-refresh-failure.spec.ts"].success is False
+    assert "toBeLessThanOrEqual" in (by["token-refresh-failure.spec.ts"].error_excerpt or "")
+    assert by["update-todo-missing-on-save.spec.ts"].success is True
+    assert "toBeLessThanOrEqual" not in (
+        by["update-todo-missing-on-save.spec.ts"].error_excerpt or ""
+    )
 
 
 def test_runtime_fix_missing_storage_state_strips_config(tmp_path):

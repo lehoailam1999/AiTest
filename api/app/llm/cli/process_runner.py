@@ -60,7 +60,21 @@ def resolve_command(command: list[str]) -> list[str]:
     ps = _powershell_exe()
 
     if sys.platform == "win32":
-        # Prefer .ps1 over .cmd when both exist (avoids cmd quoting issues)
+        # npx.cmd often has npx.ps1 sibling. Wrapping via powershell.exe resets
+        # process cwd to C:\Windows\System32\WindowsPowerShell\v1.0 and breaks
+        # Playwright --config / headed Chromium. Always use cmd.exe for npx.
+        if path.name.lower() in {"npx.cmd", "npx.bat", "npx"} or exe.lower() in {
+            "npx",
+            "npx.cmd",
+            "npx.bat",
+        }:
+            npx_cmd = path if path.suffix.lower() in {".cmd", ".bat"} else path.with_suffix(".cmd")
+            if not npx_cmd.is_file():
+                which_cmd = shutil.which("npx.cmd")
+                npx_cmd = Path(which_cmd) if which_cmd else path
+            cmdline = subprocess.list2cmdline([str(npx_cmd), *rest])
+            return ["cmd.exe", "/d", "/s", "/c", cmdline]
+        # Prefer .ps1 over .cmd when both exist (Cursor agent layout)
         if path.suffix.lower() == ".cmd":
             ps1 = path.with_suffix(".ps1")
             if ps1.is_file():

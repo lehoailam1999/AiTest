@@ -47,6 +47,91 @@ PLAYWRIGHT_INSTALL_HINT = (
     "npm i -D @playwright/test && npx playwright install chromium"
 )
 
+_GLOBAL_SETUP_TS = """\
+/// <reference path="../types/playwright-shim.d.ts" />
+import fs from 'node:fs';
+import path from 'node:path';
+import { chromium, type FullConfig } from '@playwright/test';
+
+function roleCreds(): { user: string; pass: string } {
+  const roleHint = (process.env.E2E_ROLE || process.env.E2E_AUTH_ROLE || 'default').trim();
+  const slug = roleHint.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase();
+  const roleUser = slug ? (process.env[`E2E_${slug}_USERNAME`] || '').trim() : '';
+  const rolePass = slug ? (process.env[`E2E_${slug}_PASSWORD`] || '').trim() : '';
+  const user = (roleUser || process.env.E2E_USERNAME || '').trim();
+  const pass = (rolePass || process.env.E2E_PASSWORD || '').trim();
+  return { user, pass };
+}
+
+async function doLogin(page: any): Promise<void> {
+  const { user, pass } = roleCreds();
+  if (!user || !pass) return;
+
+  const loginHeading = page.getByRole('heading', {
+    name: /đăng\\s*nhập|sign\\s*in|log\\s*in|login/i,
+  }).first();
+  const email = page.getByRole('textbox', { name: /email|e-?mail|tài khoản|username/i }).first();
+  const password = page
+    .getByRole('textbox', { name: /password|mật khẩu|passwd/i })
+    .or(page.locator('input[type="password"]'))
+    .first();
+  const loginBtn = page
+    .locator('form')
+    .getByRole('button', { name: /đăng\\s*nhập|log\\s*in|sign\\s*in/i })
+    .first();
+  const loginTab = page.getByRole('tab', { name: /đăng\\s*nhập|log\\s*in|sign\\s*in/i }).first();
+
+  const onLoginWall =
+    (await email.isVisible().catch(() => false)) ||
+    (await loginHeading.isVisible().catch(() => false));
+  if (!onLoginWall) return;
+
+  if (await loginTab.isVisible().catch(() => false)) {
+    await loginTab.click().catch(() => undefined);
+  }
+  await email.fill(user);
+  await password.fill(pass);
+  await password.blur().catch(() => undefined);
+  await loginBtn.click().catch(() => undefined);
+  await page.waitForTimeout(1000);
+}
+
+export default async function globalSetup(config: FullConfig): Promise<void> {
+  const setupPath = __filename.replace(/\\\\/g, '/');
+  const fixturesDir = path.dirname(setupPath);
+  const statePath = path.join(fixturesDir, 'storageState.json');
+  const cwdStatePath = path.join(process.cwd(), 'fixtures', 'storageState.json');
+
+  // Reuse previously generated state by default for faster startup.
+  if (
+    (fs.existsSync(statePath) || fs.existsSync(cwdStatePath)) &&
+    !process.env.AITEST_FORCE_AUTH_SETUP
+  ) {
+    return;
+  }
+
+  const projectUse = (config.projects?.[0]?.use || {}) as Record<string, unknown>;
+  const baseURL =
+    (process.env.E2E_BASE_URL || String(projectUse.baseURL || 'http://localhost:3000')).replace(/\\/$/, '');
+
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.goto(baseURL || 'http://localhost:3000', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await doLogin(page);
+    fs.mkdirSync(fixturesDir, { recursive: true });
+    fs.mkdirSync(path.dirname(cwdStatePath), { recursive: true });
+    await page.context().storageState({ path: statePath });
+    // Playwright sometimes resolves storageState relative to process cwd.
+    if (cwdStatePath !== statePath) {
+      await page.context().storageState({ path: cwdStatePath });
+    }
+  } finally {
+    await browser.close();
+  }
+}
+"""
+
 RunCommandFn = Callable[[Sequence[str], str], Awaitable[tuple[int, str]]]
 FixE2EFn = Callable[[E2ERequest, str], Awaitable[str]]
 
@@ -523,15 +608,11 @@ def _sync_run_command(
         "env": env,
         "timeout": limit,
     }
-    # CREATE_NO_WINDOW chặn Chromium headed trên Win — headed dùng NEW_CONSOLE
+    # Windows: CREATE_NO_WINDOW hides Chromium; CREATE_NEW_CONSOLE often resets
+    # cwd to System32 (breaks --config discovery). Headed = no creationflags.
     want_gui = "--headed" in resolved
-    if sys.platform == "win32":
-        if want_gui:
-            kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NEW_CONSOLE", 0x00000010
-            )
-        elif _CREATE_NO_WINDOW:
-            kwargs["creationflags"] = _CREATE_NO_WINDOW
+    if sys.platform == "win32" and not want_gui and _CREATE_NO_WINDOW:
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
         completed = subprocess.run(resolved, **kwargs)  # noqa: S603
     except subprocess.TimeoutExpired as exc:
@@ -572,7 +653,10 @@ async def _default_run_command(
             _merge_env(env_extra), resolved
         ),
     }
-    if sys.platform == "win32" and _CREATE_NO_WINDOW:
+    # Windows: CREATE_NO_WINDOW hides Chromium; CREATE_NEW_CONSOLE often resets
+    # cwd to System32 (breaks --config discovery). Headed = no creationflags.
+    want_gui = "--headed" in resolved
+    if sys.platform == "win32" and not want_gui and _CREATE_NO_WINDOW:
         kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
         proc = await asyncio.create_subprocess_exec(*resolved, **kwargs)
@@ -642,8 +726,9 @@ def resolve_e2e_work_cwd(
         except ValueError:
             # Spec outside config dir — keep absolute path
             spec_arg = str((root / spec_rel).resolve())
-        # Config is in cwd → playwright finds playwright.config.ts by default
-        return str(work), spec_arg, None
+        # Always pass absolute --config so Playwright never resolves against a
+        # broken process.cwd() (seen as PowerShell System32 on Windows headed).
+        return str(work), spec_arg, str(cfg_abs)
 
     # No config: cwd = project root, spec as given
     return str(root), spec_rel, None
@@ -658,7 +743,7 @@ def default_playwright_run_command(
 ) -> list[str]:
     """
     Build playwright CLI.
-    runner_prefix → npx --prefix <AITest shared runner> (project không cần node_modules).
+    runner_prefix → node <runner>/…/cli.js (project không cần node_modules).
     headed=True → mở cửa sổ Chromium (--headed).
     """
     if runner_prefix:
@@ -670,6 +755,8 @@ def default_playwright_run_command(
             runner_dir=runner_prefix,
             headed=headed,
         )
+    # Prefer direct node cli when available under CWD-independent paths later;
+    # bare npx is last resort (Windows may wrap via PowerShell).
     cmd = [
         "npx",
         "-y",
@@ -682,7 +769,7 @@ def default_playwright_run_command(
     if headed:
         cmd.append("--headed")
     if config_arg:
-        cmd.extend(["--config", config_arg.replace("\\", "/")])
+        cmd.extend(["--config", str(Path(config_arg))])
     return cmd
 
 
@@ -695,6 +782,173 @@ def apply_headed_flag(cmd: Sequence[str], *, headed: bool) -> list[str]:
     elif not headed and has:
         out = [x for x in out if x != "--headed"]
     return out
+
+
+def _spec_run_root(path: str) -> str:
+    """Directory that owns a TC run (parent of specs/ or of playwright.config.ts)."""
+    p = path.replace("\\", "/").strip("/")
+    low = p.lower()
+    if low.endswith("playwright.config.ts"):
+        return p.rsplit("/", 1)[0]
+    if "/specs/" in low:
+        return p.split("/specs/")[0]
+    if "/pages/" in low:
+        return p.split("/pages/")[0]
+    if "/fixtures/" in low:
+        return p.split("/fixtures/")[0]
+    if "/types/" in low:
+        return p.split("/types/")[0]
+    return p.rsplit("/", 1)[0] if "/" in p else p
+
+
+def _group_files_by_run_root(files: list[E2EFile]) -> list[tuple[str, list[E2EFile]]]:
+    """
+    Group generated E2E files by TC folder.
+
+    New layout puts each TC under its own folder with its own playwright.config.ts.
+    Old layout keeps multiple specs under one module root — they stay one group.
+    """
+    buckets: dict[str, list[E2EFile]] = {}
+    for f in files:
+        root = _spec_run_root(getattr(f, "path", "") or "")
+        if not root:
+            continue
+        buckets.setdefault(root, []).append(f)
+    return sorted(buckets.items(), key=lambda kv: kv[0].lower())
+
+
+def _map_module_spec_results(
+    *,
+    specs_rel: list[str],
+    parsed: list[E2ESpecRunResult],
+    code: int,
+    log: str,
+) -> list[E2ESpecRunResult]:
+    """Map Playwright JSON results onto the specs that belonged to this run root."""
+    by_name: dict[str, E2ESpecRunResult] = {}
+    for pr in parsed:
+        key = Path(pr.spec_path.replace("\\", "/")).name
+        prev = by_name.get(key)
+        if prev is None:
+            by_name[key] = pr
+        else:
+            by_name[key] = E2ESpecRunResult(
+                spec_path=prev.spec_path,
+                success=prev.success and pr.success,
+                title=prev.title or pr.title,
+                error_excerpt=prev.error_excerpt or pr.error_excerpt,
+            )
+
+    out: list[E2ESpecRunResult] = []
+    for rel in specs_rel:
+        name = Path(rel).name
+        matched = by_name.get(name)
+        if matched is not None:
+            out.append(
+                E2ESpecRunResult(
+                    spec_path=rel,
+                    success=matched.success,
+                    title=matched.title,
+                    error_excerpt=matched.error_excerpt,
+                )
+            )
+        elif parsed:
+            # Spec belonged to this run root but was absent from JSON report.
+            # Never reuse another TC folder's exit code — groups are isolated.
+            out.append(
+                E2ESpecRunResult(
+                    spec_path=rel,
+                    success=code == 0,
+                    error_excerpt=(
+                        ""
+                        if code == 0
+                        else "not present in Playwright report for this TC folder"
+                    ),
+                )
+            )
+        else:
+            ok = code == 0
+            out.append(
+                E2ESpecRunResult(
+                    spec_path=rel,
+                    success=ok,
+                    error_excerpt="" if ok else (log[-800:] if log else f"exit {code}"),
+                )
+            )
+    return out
+
+
+async def _run_one_e2e_root(
+    *,
+    runner: RunCommandFn,
+    project_root: str,
+    root_rel: str,
+    root_files: list[E2EFile],
+    headed: bool,
+    run_command: Sequence[str] | None,
+    runner_prefix: str | None,
+) -> tuple[list[E2ESpecRunResult], list[str], str, str | None]:
+    """
+    Run Playwright for a single TC/module folder.
+    Returns (spec_results, run_command, log_tail, work_cwd).
+    Test failures are returned as failed specs — caller continues to next root.
+    """
+    specs_rel = [
+        f.path.replace("\\", "/")
+        for f in root_files
+        if "/specs/" in f.path.replace("\\", "/")
+        and f.path.replace("\\", "/").endswith((".ts", ".js", ".mjs"))
+    ]
+    if not specs_rel:
+        return [], [], "", None
+
+    cfg = next(
+        (
+            f
+            for f in root_files
+            if f.kind == "config"
+            or f.path.replace("\\", "/").endswith("playwright.config.ts")
+        ),
+        None,
+    )
+    work_cwd, _spec_arg, config_arg = resolve_e2e_work_cwd(
+        project_root,
+        config_rel=cfg.path if cfg else f"{root_rel}/playwright.config.ts",
+        primary_spec_path=specs_rel[0],
+    )
+    if config_arg and not Path(config_arg).is_absolute():
+        config_arg = str((Path(work_cwd) / config_arg).resolve())
+
+    if run_command is not None:
+        cmd = apply_headed_flag(list(run_command), headed=headed)
+    else:
+        cmd = default_playwright_run_command(
+            "specs/",
+            config_arg=config_arg,
+            runner_prefix=runner_prefix,
+            headed=headed,
+        )
+    _runtime_fix_missing_storage_state(work_cwd, config_arg=config_arg)
+
+    try:
+        code, log = await runner(cmd, work_cwd)
+    except Exception as exc:  # noqa: BLE001
+        detail = exc_detail(exc)
+        failed = [
+            E2ESpecRunResult(spec_path=p, success=False, error_excerpt=detail)
+            for p in specs_rel
+        ]
+        return failed, cmd, detail, work_cwd
+
+    parsed = parse_playwright_json_report(log)
+    return (
+        _map_module_spec_results(
+            specs_rel=specs_rel, parsed=parsed, code=code, log=log
+        ),
+        cmd,
+        log[-LOG_TAIL:] if log else "",
+        work_cwd,
+    )
 
 
 def ensure_playwright_config(
@@ -714,17 +968,17 @@ def ensure_playwright_config(
         looks_like_storage_state_path,
     )
 
-    # Only wire storageState when a valid Playwright state file is present.
-    # Empty `{}` or missing file makes Chromium fail before any test assertion.
+    # If a valid storageState is already present, keep using it.
+    # Otherwise global setup will generate/reuse one at runtime.
     has_valid_state = any(
         looks_like_storage_state_path(f.path)
         and is_valid_storage_state_json(f.content or "")
         for f in files
     )
     # Path is relative to playwright.config.ts (module folder), never repo-root AItest/...
-    storage_for_cfg = "./fixtures/storageState.json" if has_valid_state else ""
+    storage_for_cfg = "./fixtures/storageState.json"
     # Ignore host-requested storage_state_rel when file is not valid yet
-    _ = storage_state_rel  # kept for API compat / future disk check
+    _ = (storage_state_rel, has_valid_state)  # kept for API compat / future disk check
 
     cfg_content = default_playwright_config(
         base_url=target_url,
@@ -738,6 +992,7 @@ def ensure_playwright_config(
     cfg_path = f"{root}/playwright.config.ts"
 
     out: list[E2EFile] = []
+    cfg_out_path = cfg_path
     found = False
     for f in files:
         is_cfg = f.kind == "config" or f.path.replace("\\", "/").endswith(
@@ -764,13 +1019,35 @@ def ensure_playwright_config(
             or (has_valid_state and "fixtures/storageState.json" not in body)
         )
         if needs_refresh:
-            out.append(
-                E2EFile(path=f.path or cfg_path, content=cfg_content, kind="config")
-            )
+            cfg_out_path = f.path or cfg_path
+            out.append(E2EFile(path=cfg_out_path, content=cfg_content, kind="config"))
         else:
+            cfg_out_path = f.path or cfg_path
             out.append(f)
     if not found:
         out.append(E2EFile(path=cfg_path, content=cfg_content, kind="config"))
+        cfg_out_path = cfg_path
+
+    # Ensure global setup exists so auth runs once and persists session for all specs.
+    # With multi-TC batch, ensure each config dir that already has a config also has setup.
+    cfg_dirs = {
+        (f.path or "").replace("\\", "/").rsplit("/", 1)[0]
+        for f in out
+        if (f.path or "").replace("\\", "/").endswith("playwright.config.ts")
+    }
+    if not cfg_dirs:
+        cfg_dirs = {cfg_out_path.replace("\\", "/").rsplit("/", 1)[0]}
+    existing_setups = {
+        (f.path or "").replace("\\", "/").lower()
+        for f in out
+        if (f.path or "").replace("\\", "/").lower().endswith("/fixtures/global.setup.ts")
+    }
+    for cfg_dir in sorted(cfg_dirs):
+        setup_path = f"{cfg_dir}/fixtures/global.setup.ts"
+        if setup_path.lower() in existing_setups:
+            continue
+        out.append(E2EFile(path=setup_path, content=_GLOBAL_SETUP_TS, kind="fixture"))
+        existing_setups.add(setup_path.lower())
     return out
 
 
@@ -803,6 +1080,9 @@ def _runtime_fix_missing_storage_state(
     except OSError:
         return
     if "storageState" not in body:
+        return
+    # Global setup may create the state file right before tests start.
+    if "globalSetup" in body and "global.setup.ts" in body:
         return
 
     state_path = Path(work_cwd) / "fixtures" / "storageState.json"
@@ -904,7 +1184,18 @@ class E2EOrchestrator:
         if cwd:
             work_cwd = cwd
             spec_arg = primary_spec_path.replace("\\", "/")
-            config_arg = cfg.path if cfg else None
+            config_arg = None
+            if cfg:
+                cfg_path = Path(cfg.path)
+                if cfg_path.is_absolute():
+                    config_arg = str(cfg_path)
+                else:
+                    local_cfg = Path(work_cwd) / "playwright.config.ts"
+                    config_arg = str(
+                        local_cfg.resolve()
+                        if local_cfg.is_file()
+                        else (Path(self.project_root) / cfg.path).resolve()
+                    )
             cmd = list(
                 run_command
                 or default_playwright_run_command(
@@ -923,6 +1214,13 @@ class E2EOrchestrator:
                     spec_arg, config_arg=config_arg, headed=headed
                 )
             )
+
+        if config_arg and not Path(config_arg).is_absolute():
+            config_arg = str((Path(work_cwd) / config_arg).resolve())
+            if run_command is None:
+                cmd = default_playwright_run_command(
+                    spec_arg, config_arg=config_arg, headed=headed
+                )
 
         history: list[E2ESandboxAttempt] = []
         last_log = ""
@@ -947,7 +1245,7 @@ class E2EOrchestrator:
                 # Use AITest shared runner CLI (project không cần @playwright/test)
                 cmd = default_playwright_run_command(
                     spec_arg,
-                    config_arg=config_arg if cwd else None,
+                    config_arg=config_arg,
                     runner_prefix=check.package_root,
                     headed=headed,
                 )
@@ -956,7 +1254,7 @@ class E2EOrchestrator:
                 # to avoid "did not expect test.describe()" from mixed versions.
                 cmd = default_playwright_run_command(
                     spec_arg,
-                    config_arg=config_arg if cwd else None,
+                    config_arg=config_arg,
                     runner_prefix=check.package_root,
                     headed=headed,
                 )
@@ -1142,9 +1440,10 @@ class E2EOrchestrator:
         env_extra: dict[str, str] | None = None,
     ) -> E2EModuleRunResult:
         """
-        Ghi toàn bộ files module rồi chạy một lần `playwright test specs/`.
-        Parse JSON report → pass/fail theo từng file under specs/.
-        headed=True mở cửa sổ Chromium.
+        Ghi toàn bộ files rồi chạy Playwright theo từng TC folder.
+
+        Layout mới ({Requirement}/{TC}) có config riêng → chạy độc lập.
+        TC fail không chặn TC sau. headed=True mở cửa sổ Chromium.
         """
         mod = (module if module is not None else self.module) or ""
         pkg = package_prefix if package_prefix is not None else self.package_prefix
@@ -1160,6 +1459,7 @@ class E2EOrchestrator:
         if not work_files:
             return E2EModuleRunResult(status="FAILED", log="No E2E files to run.")
 
+        groups = _group_files_by_run_root(work_files)
         specs_rel = [
             f.path.replace("\\", "/")
             for f in work_files
@@ -1173,66 +1473,34 @@ class E2EOrchestrator:
                 log="No specs/ files found for module run.",
             )
 
-        cfg = next(
-            (
-                f
-                for f in work_files
-                if f.kind == "config" or f.path.endswith("playwright.config.ts")
-            ),
-            None,
-        )
-        # Use first spec only to resolve work_cwd (module root); run target = specs/
-        work_cwd, _spec_arg, config_arg = resolve_e2e_work_cwd(
-            self.project_root,
-            config_rel=cfg.path if cfg else None,
-            primary_spec_path=specs_rel[0],
-        )
-        cmd = list(
-            run_command
-            or default_playwright_run_command("specs/", config_arg=config_arg, headed=headed)
-        )
-
         if write_file:
             self.write_files(work_files)
-        _runtime_fix_missing_storage_state(work_cwd, config_arg=config_arg)
 
         merged_env: dict[str, str] = dict(env_extra or {})
+        runner_prefix: str | None = None
         if require_playwright and run_fn is None and run_command is None:
             check = check_playwright_ready(self.project_root)
             if not check.ok:
                 return E2EModuleRunResult(
                     status="FAILED",
                     files=work_files,
-                    work_cwd=work_cwd,
-                    run_command=cmd,
                     log=f"Playwright chưa sẵn sàng: {check.message}",
                     specs=[
                         E2ESpecRunResult(
-                            spec_path=p, success=False, error_excerpt="playwright missing"
+                            spec_path=p,
+                            success=False,
+                            error_excerpt="playwright missing",
                         )
                         for p in specs_rel
                     ],
                 )
-            if check.source == "aitest" and check.package_root:
-                cmd = default_playwright_run_command(
-                    "specs/",
-                    config_arg=None,
-                    runner_prefix=check.package_root,
-                    headed=headed,
-                )
-            elif check.package_root:
-                cmd = default_playwright_run_command(
-                    "specs/",
-                    config_arg=None,
-                    runner_prefix=check.package_root,
-                    headed=headed,
-                )
+            runner_prefix = check.package_root
             if check.package_root:
                 nm = str(Path(check.package_root) / "node_modules")
                 prev = os.environ.get("NODE_PATH", "")
-                merged_env["NODE_PATH"] = nm if not prev else f"{nm}{os.pathsep}{prev}"
-
-        cmd = apply_headed_flag(cmd, headed=headed)
+                merged_env["NODE_PATH"] = (
+                    nm if not prev else f"{nm}{os.pathsep}{prev}"
+                )
 
         if run_fn is not None:
             runner = run_fn
@@ -1252,8 +1520,6 @@ class E2EOrchestrator:
                 return E2EModuleRunResult(
                     status="FAILED",
                     files=work_files,
-                    work_cwd=work_cwd,
-                    run_command=cmd,
                     log=f"Seed failed (exit {code_s}):\n{log_s[-LOG_TAIL:]}",
                     specs=[
                         E2ESpecRunResult(
@@ -1263,66 +1529,64 @@ class E2EOrchestrator:
                     ],
                 )
 
+        all_spec_results: list[E2ESpecRunResult] = []
+        logs: list[str] = []
+        last_cmd: list[str] = []
+        last_cwd: str | None = None
+
         try:
-            code, log = await runner(cmd, work_cwd)
-            parsed = parse_playwright_json_report(log)
-            # Aggregate by basename (JSON may report absolute or relative paths)
-            by_name: dict[str, E2ESpecRunResult] = {}
-            for pr in parsed:
-                key = Path(pr.spec_path.replace("\\", "/")).name
-                prev = by_name.get(key)
-                if prev is None:
-                    by_name[key] = pr
-                else:
-                    # Any fail → fail
-                    by_name[key] = E2ESpecRunResult(
-                        spec_path=prev.spec_path,
-                        success=prev.success and pr.success,
-                        title=prev.title or pr.title,
-                        error_excerpt=prev.error_excerpt or pr.error_excerpt,
+            for root_rel, root_files in groups:
+                root_specs = [
+                    f.path.replace("\\", "/")
+                    for f in root_files
+                    if "/specs/" in f.path.replace("\\", "/")
+                ]
+                if not root_specs:
+                    continue
+                try:
+                    spec_results, cmd, log_tail, work_cwd = await _run_one_e2e_root(
+                        runner=runner,
+                        project_root=self.project_root,
+                        root_rel=root_rel,
+                        root_files=root_files,
+                        headed=headed,
+                        run_command=run_command,
+                        runner_prefix=runner_prefix,
                     )
+                except Exception as exc:  # noqa: BLE001
+                    detail = exc_detail(exc)
+                    logger.warning(
+                        "E2E batch root failed (continue): %s — %s",
+                        root_rel,
+                        detail,
+                    )
+                    all_spec_results.extend(
+                        E2ESpecRunResult(
+                            spec_path=p, success=False, error_excerpt=detail
+                        )
+                        for p in root_specs
+                    )
+                    logs.append(f"[{root_rel}] ERROR: {detail}")
+                    continue
 
-            spec_results: list[E2ESpecRunResult] = []
-            for rel in specs_rel:
-                name = Path(rel).name
-                matched = by_name.get(name)
-                if matched is not None:
-                    spec_results.append(
-                        E2ESpecRunResult(
-                            spec_path=rel,
-                            success=matched.success,
-                            title=matched.title,
-                            error_excerpt=matched.error_excerpt,
-                        )
-                    )
-                elif parsed:
-                    # Parsed other files but not this one — treat as pass if exit 0
-                    spec_results.append(
-                        E2ESpecRunResult(
-                            spec_path=rel,
-                            success=code == 0,
-                            error_excerpt="" if code == 0 else (log[-500:] if log else f"exit {code}"),
-                        )
-                    )
-                else:
-                    # No JSON — attribute overall exit to all specs
-                    ok = code == 0
-                    spec_results.append(
-                        E2ESpecRunResult(
-                            spec_path=rel,
-                            success=ok,
-                            error_excerpt="" if ok else (log[-800:] if log else f"exit {code}"),
-                        )
-                    )
+                all_spec_results.extend(spec_results)
+                if cmd:
+                    last_cmd = list(cmd)
+                if work_cwd:
+                    last_cwd = work_cwd
+                if log_tail:
+                    logs.append(f"--- {root_rel} ---\n{log_tail}")
 
-            all_pass = bool(spec_results) and all(s.success for s in spec_results)
+            all_pass = bool(all_spec_results) and all(
+                s.success for s in all_spec_results
+            )
             return E2EModuleRunResult(
                 status="PASSED" if all_pass else "FAILED",
                 files=work_files,
-                work_cwd=work_cwd,
-                run_command=list(cmd),
-                log=log[-LOG_TAIL:] if log else "",
-                specs=spec_results,
+                work_cwd=last_cwd,
+                run_command=last_cmd,
+                log="\n".join(logs)[-LOG_TAIL:] if logs else "",
+                specs=all_spec_results,
             )
         finally:
             if write_file and (teardown_command or "").strip():

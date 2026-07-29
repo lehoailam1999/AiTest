@@ -82,8 +82,21 @@ DOM_TABLIST = """
 
 def test_fix_duplicate_button_locators_scopes_to_form():
     fixed = fix_duplicate_button_locators(LOGIN_PAGE, dom_snapshot=DOM_TABLIST)
-    assert "locator('form').getByRole('button', { name: 'Đăng nhập' })" in fixed
+    assert "locator('form').getByRole('button', { name: 'Đăng nhập' }).first()" in fixed
     assert fixed.count("getByRole('button', { name: 'Đăng nhập' })") == 1
+
+
+def test_fix_duplicate_button_locators_scopes_auth_page_without_dom_snapshot():
+    page = """\
+export class LoginPage {
+  constructor(page: Page) {
+    this.passwordInput = page.getByLabel('Mật khẩu');
+    this.submitButton = page.getByRole('button', { name: /đăng nhập/i });
+  }
+}
+"""
+    fixed = fix_duplicate_button_locators(page, dom_snapshot="")
+    assert "locator('form').getByRole('button', { name: /đăng nhập/i }).first()" in fixed
 
 
 def test_fix_page_method_contract_adds_aliases():
@@ -435,3 +448,56 @@ test.describe('[E2E-Validation] Đăng nhập - Nhập email sai định dạng'
     spec_out = next(f for f in out if f.kind == "spec")
     assert "clickSubmit" in spec_out.content
     assert "expectSubmitDisabled" not in spec_out.content
+
+
+def test_rewrite_login_rejected_handles_html5_invalid_email_without_dom_snapshot():
+    page = """\
+export class LoginPage {
+  readonly emailInput: Locator;
+  readonly passwordInput: Locator;
+  readonly submitButton: Locator;
+
+  async expectErrorMessage(): Promise<void> {
+    await this.page.getByText(/email/i).first().waitFor({ state: 'visible' });
+  }
+
+  async expectLoginRejected(): Promise<void> {
+    await this.expectErrorMessage();
+  }
+
+  async expectOnLoginScreen(): Promise<void> {}
+}
+"""
+    from app.services.e2e_codegen_guard import _rewrite_login_rejected_assertion
+
+    fixed = _rewrite_login_rejected_assertion(page)
+    assert "checkValidity()" in fixed
+    assert "expectOnLoginScreen()" in fixed
+
+
+def test_missing_login_page_fallback_handles_submit_button_field_usage():
+    spec = """\
+import { test } from '@playwright/test';
+import { LoginPage } from '../pages/login.page';
+
+test('x', async ({ page }) => {
+  const loginPage = new LoginPage(page);
+  if (await loginPage.submitButton.isEnabled()) {
+    await loginPage.clickSubmit();
+  } else {
+    await loginPage.expectSubmitDisabled();
+  }
+});
+"""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Auth/specs/login.spec.ts",
+            content=spec,
+            kind="spec",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(files)
+    page = next(f for f in out if f.kind == "page")
+    assert "readonly submitButton: Locator;" in page.content
+    assert "async isSubmitEnabled" in page.content
+    assert "async clickSubmit" in page.content

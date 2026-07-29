@@ -259,24 +259,142 @@ def _collect_spec_method_calls(spec_content: str, var_name: str) -> set[str]:
     pattern = re.compile(rf"\b{re.escape(var_name)}\.(\w+)\s*\(")
     for m in pattern.finditer(spec_content):
         calls.add(m.group(1))
+    if re.search(
+        rf"\b{re.escape(var_name)}\.submitButton\.isEnabled\s*\(",
+        spec_content,
+        flags=re.IGNORECASE,
+    ):
+        calls.add("isSubmitEnabled")
     return calls
 
 
 def _render_missing_page_file(class_name: str, methods: set[str]) -> str:
     calls = sorted(m for m in methods if m not in {"constructor"})
+    keyset = {c.lower() for c in calls}
+    login_like = (
+        "login" in (class_name or "").lower()
+        or "fillemail" in keyset
+        or "fillpassword" in keyset
+        or "clicksubmit" in keyset
+        or "expectsubmitdisabled" in keyset
+    )
     body = [
         '/// <reference path="../types/playwright-shim.d.ts" />',
-        "import { type Page } from '@playwright/test';",
+        "import { expect, type Locator, type Page } from '@playwright/test';",
         "",
         f"export class {class_name} {{",
         "  readonly page: Page;",
-        "",
-        "  constructor(page: Page) {",
-        "    this.page = page;",
-        "  }",
-        "",
     ]
+    if login_like:
+        body.extend(
+            [
+                "  readonly emailInput: Locator;",
+                "  readonly passwordInput: Locator;",
+                "  readonly submitButton: Locator;",
+            ]
+        )
+    body.extend(
+        [
+            "",
+            "  constructor(page: Page) {",
+            "    this.page = page;",
+        ]
+    )
+    if login_like:
+        body.extend(
+            [
+                "    this.emailInput = page.locator('input[type=\"email\"], input[name*=\"email\" i], input[id*=\"email\" i], input[autocomplete=\"username\"], input[type=\"text\"]').first();",
+                "    this.passwordInput = page.locator('input[type=\"password\"], input[name*=\"pass\" i], input[id*=\"pass\" i], input[autocomplete=\"current-password\"]').first();",
+                "    this.submitButton = page.locator('form button[type=\"submit\"], form [role=\"button\"], button[type=\"submit\"], [role=\"button\"]').first();",
+            ]
+        )
+    body.extend(["  }", ""])
+
     for m in calls:
+        low = m.lower()
+        if low == "fillemail" and login_like:
+            body.extend(
+                [
+                    "  async fillEmail(value: string): Promise<void> {",
+                    "    await this.emailInput.fill(value);",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "fillpassword" and login_like:
+            body.extend(
+                [
+                    "  async fillPassword(value: string): Promise<void> {",
+                    "    await this.passwordInput.fill(value);",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "clicksubmit" and login_like:
+            body.extend(
+                [
+                    "  async clickSubmit(): Promise<void> {",
+                    "    await this.submitButton.click();",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "issubmitenabled" and login_like:
+            body.extend(
+                [
+                    "  async isSubmitEnabled(): Promise<boolean> {",
+                    "    return this.submitButton.isEnabled();",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "expectsubmitdisabled" and login_like:
+            body.extend(
+                [
+                    "  async expectSubmitDisabled(): Promise<void> {",
+                    "    await expect(this.submitButton).toBeDisabled();",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "expectstillonloginscreen" and login_like:
+            body.extend(
+                [
+                    "  async expectStillOnLoginScreen(): Promise<void> {",
+                    "    await expect(this.emailInput).toBeVisible();",
+                    "    await expect(this.passwordInput).toBeVisible();",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "expectemailinvalid" and login_like:
+            body.extend(
+                [
+                    "  async expectEmailInvalid(): Promise<void> {",
+                    "    const ok = await this.emailInput.evaluate((el) => (el as HTMLInputElement).checkValidity());",
+                    "    expect(ok).toBe(false);",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
+        if low == "expecterrormessage" and login_like:
+            body.extend(
+                [
+                    "  async expectErrorMessage(): Promise<void> {",
+                    "    const errorLike = this.page.locator('[role=\"alert\"], [aria-live=\"assertive\"], .error, .alert, [data-testid*=\"error\" i], [aria-invalid=\"true\"]').first();",
+                    "    await expect(errorLike).toBeVisible({ timeout: 10000 });",
+                    "  }",
+                    "",
+                ]
+            )
+            continue
         if m == "goto":
             body.extend(
                 [
@@ -369,11 +487,23 @@ def _button_names_from_dom(dom_snapshot: str) -> dict[str, int]:
     return counts
 
 
+def _looks_like_auth_page(content: str) -> bool:
+    """Heuristic: login/register pages usually expose a password field."""
+    low = content.lower()
+    return (
+        "passwordinput" in low.replace("_", "").replace("-", "")
+        or 'type="password"' in low
+        or "type='password'" in low
+        or bool(re.search(r"password|passwd|mật\s*khẩu", low, re.IGNORECASE))
+    )
+
+
 def fix_duplicate_button_locators(content: str, *, dom_snapshot: str = "") -> str:
     """
     Scope ambiguous global button locators to form when duplicates are likely.
 
     Typical SPA auth UI: tab "Đăng nhập" + submit "Đăng nhập".
+    Also applies on auth-like page objects even without DOM snapshot.
     """
     dup_names = {
         name
@@ -382,13 +512,14 @@ def fix_duplicate_button_locators(content: str, *, dom_snapshot: str = "") -> st
     }
     snap_low = (dom_snapshot or "").lower()
     has_tab_hint = "tablist" in snap_low or bool(dup_names)
+    auth_page = _looks_like_auth_page(content)
 
     def _repl(m: re.Match[str]) -> str:
         name_raw = m.group("name").strip()
         literal = name_raw.strip("'\"")
         if dup_names and literal not in dup_names:
             return m.group(0)
-        if not has_tab_hint and not dup_names:
+        if not has_tab_hint and not dup_names and not auth_page:
             return m.group(0)
         # Already scoped — leave unchanged
         window = content[max(0, m.start() - 80) : m.start()]
@@ -396,7 +527,7 @@ def fix_duplicate_button_locators(content: str, *, dom_snapshot: str = "") -> st
             return m.group(0)
         return (
             f"{m.group('prefix')}.locator('form')"
-            f".getByRole('button', {{ name: {name_raw} }})"
+            f".getByRole('button', {{ name: {name_raw} }}).first()"
         )
 
     return _UNSCOPED_BUTTON_ROLE_RE.sub(_repl, content)
@@ -416,6 +547,88 @@ def _scope_bare_button_to_form(content: str) -> str:
             return m.group(0)
         return f"{m.group('prefix')}.locator('form').getByRole('button')"
     return _BARE_BUTTON_ROLE_RE.sub(_repl, content)
+
+
+_UNIVERSAL_EXPECT_ERROR_MESSAGE = """\
+  async expectErrorMessage(): Promise<void> {
+    const errorLike = this.page
+      .locator('[role="alert"], [aria-live="assertive"], [aria-invalid="true"], .error, .alert, [data-testid*="error" i]')
+      .first();
+    if (await errorLike.isVisible().catch(() => false)) {
+      await expect(errorLike).toBeVisible({ timeout: 10000 });
+      return;
+    }
+    await this.page
+      .getByText(/error|fail|invalid|lỗi|thất bại/i)
+      .first()
+      .waitFor({ state: 'visible', timeout: 5000 });
+  }"""
+
+_UNIVERSAL_EXPECT_LOGIN_REJECTED = """\
+  async expectLoginRejected(): Promise<void> {
+    const submitDisabled = await this.submitButton.isDisabled();
+    if (submitDisabled) {
+      await expect(this.submitButton).toBeDisabled();
+      return;
+    }
+    const html5Invalid = await this.emailInput
+      .evaluate((el) => !(el as HTMLInputElement).checkValidity())
+      .catch(() => false);
+    if (html5Invalid) {
+      await this.expectOnLoginScreen();
+      return;
+    }
+    const errorLike = this.page
+      .locator('[role="alert"], [aria-live="assertive"], [aria-invalid="true"], .error, .alert, [data-testid*="error" i]')
+      .first();
+    if (await errorLike.isVisible().catch(() => false)) {
+      await expect(errorLike).toBeVisible({ timeout: 10000 });
+    }
+    await this.expectOnLoginScreen();
+  }"""
+
+_LOGIN_REJECTED_METHOD_RE = re.compile(
+    r"async\s+expectLoginRejected\s*\([^)]*\)\s*:\s*Promise<void>\s*\{",
+    re.MULTILINE,
+)
+_ERROR_MESSAGE_METHOD_RE = re.compile(
+    r"async\s+expectErrorMessage\s*\([^)]*\)\s*:\s*Promise<void>\s*\{",
+    re.MULTILINE,
+)
+
+
+def _replace_ts_method(content: str, pattern: re.Pattern[str], replacement: str) -> str:
+    m = pattern.search(content)
+    if not m:
+        return content
+    start = m.start()
+    brace_start = m.end() - 1
+    depth = 0
+    end = brace_start
+    for i in range(brace_start, len(content)):
+        ch = content[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if depth != 0:
+        return content
+    return content[:start] + replacement + content[end:]
+
+
+def _rewrite_login_rejected_assertion(content: str) -> str:
+    """Auth pages: accept HTML5 invalid email without visible error text."""
+    if not _looks_like_auth_page(content):
+        return content
+    out = content
+    if "async expectErrorMessage" in out:
+        out = _replace_ts_method(out, _ERROR_MESSAGE_METHOD_RE, _UNIVERSAL_EXPECT_ERROR_MESSAGE)
+    if "async expectLoginRejected" in out:
+        out = _replace_ts_method(out, _LOGIN_REJECTED_METHOD_RE, _UNIVERSAL_EXPECT_LOGIN_REJECTED)
+    return out
 
 
 def _render_alias_method(method: str, target: str, *, base_url_param: bool = False) -> str:
@@ -569,6 +782,7 @@ def apply_e2e_codegen_guards(
         if f.kind == "page" or "/pages/" in p:
             f.content = fix_duplicate_button_locators(f.content, dom_snapshot=dom_snapshot)
             f.content = _scope_bare_button_to_form(f.content)
+            f.content = _rewrite_login_rejected_assertion(f.content)
             f.content = strip_feature_expects_from_goto(f.content)
 
     for f in normalized:

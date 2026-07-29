@@ -166,23 +166,42 @@ def playwright_cli_via_shared_runner(
     runner_dir: str | None = None,
     headed: bool = False,
 ) -> list[str]:
-    """npx --prefix <aitest-runner> playwright test …"""
-    prefix = runner_dir or str(shared_playwright_runner_dir())
-    cmd = [
-        "npx",
-        "-y",
-        "--prefix",
-        prefix,
-        "playwright",
-        "test",
-        spec_arg.replace("\\", "/"),
-        "--reporter=json",
-        "--workers=1",
-    ]
+    """
+    Invoke Playwright via ``node <runner>/node_modules/@playwright/test/cli.js``.
+
+    Avoid ``npx`` on Windows: ``resolve_command`` may wrap ``npx.cmd`` through
+    ``powershell.exe``, which resets cwd to
+    ``C:\\Windows\\System32\\WindowsPowerShell\\v1.0`` and breaks config discovery.
+    """
+    prefix = Path(runner_dir or str(shared_playwright_runner_dir())).resolve()
+    cli = prefix / "node_modules" / "@playwright" / "test" / "cli.js"
+    node = shutil.which("node") or "node"
+    if not cli.is_file():
+        # Fallback — only used when runner is incomplete; prefer node path above.
+        cmd = [
+            "npx",
+            "-y",
+            "--prefix",
+            str(prefix),
+            "playwright",
+            "test",
+            spec_arg.replace("\\", "/"),
+            "--reporter=json",
+            "--workers=1",
+        ]
+    else:
+        cmd = [
+            node,
+            str(cli),
+            "test",
+            spec_arg.replace("\\", "/"),
+            "--reporter=json",
+            "--workers=1",
+        ]
     if headed:
         cmd.append("--headed")
     if config_arg:
-        cmd.extend(["--config", config_arg.replace("\\", "/")])
+        cmd.extend(["--config", str(Path(config_arg))])
     return cmd
 
 

@@ -1858,6 +1858,7 @@ def default_playwright_config(
     return (
         "import { defineConfig, devices } from '@playwright/test';\n\n"
         "export default defineConfig({\n"
+        "  globalSetup: './fixtures/global.setup.ts',\n"
         "  testDir: './specs',\n"
         "  fullyParallel: false,\n"
         "  workers: 1,\n"

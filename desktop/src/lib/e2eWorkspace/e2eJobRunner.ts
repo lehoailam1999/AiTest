@@ -567,10 +567,9 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
             (mod.log || "").slice(-800) ||
             "FAIL";
       } else {
-        passed = moduleStatus === "PASSED";
-        err = passed
-          ? undefined
-          : (mod.log || "").slice(-1200) || "FAIL — không map được spec";
+        // Do not inherit whole-module log (often another TC's error) when unmapped.
+        passed = false;
+        err = "FAIL — không map được spec trong báo cáo Verify batch";
       }
 
       rows[idx] = {
