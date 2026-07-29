@@ -1,22 +1,37 @@
 /**
- * Freeze Snapshot (tài liệu + Phân tích + TC đã có) rồi Sinh TC.
- * Flow ẩn: tổng hợp docs + Phân tích + inventory TC trước khi output.
+ * Freeze Snapshot rồi Sinh TC.
+ * Cả Unit và E2E đều gửi preferredEngine để BE đồng bộ prompt + lưu type DB.
  */
-import { useEffect, useState } from "react";
-import { Alert, Button, Empty, Input, Space, Spin, Typography } from "antd";
+import { useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Button,
+  Empty,
+  Input,
+  Space,
+  Spin,
+  Typography,
+} from "antd";
 import { LockOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { requirementStudio } from "../../api";
 import type {
   KnowledgeWorkspaceView,
   RequirementSnapshot,
 } from "../../api/types";
+import { EnginePicker } from "../../components/EnginePicker";
 import { waitForJob } from "../../lib/waitForJob";
+
+type PreferredEngine = "unit" | "e2e";
 
 type Props = {
   workspaceId: string | null;
   knowledge: KnowledgeWorkspaceView | null;
   onOpenKnowledge?: () => void;
-  onGenerated?: (info: { snapshotId: string; jobId: string }) => void;
+  onGenerated?: (info: {
+    snapshotId: string;
+    jobId: string;
+    preferredEngine: PreferredEngine;
+  }) => void;
 };
 
 export default function FreezePanel({
@@ -29,10 +44,15 @@ export default function FreezePanel({
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [note, setNote] = useState("");
+  const [engine, setEngine] = useState<PreferredEngine>("unit");
+  const [targetUrl, setTargetUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [cliLog, setCliLog] = useState<string[]>([]);
   const [lastWarnings, setLastWarnings] = useState<{ code?: string; message?: string }[]>(
     []
   );
+  const logEndRef = useRef<HTMLDivElement | null>(null);
 
   const knowledgeOk =
     knowledge?.status === "ready" || knowledge?.status === "stale";
@@ -57,26 +77,55 @@ export default function FreezePanel({
     void reload(workspaceId);
   }, [workspaceId, knowledgeOk, knowledge?.version]);
 
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [cliLog]);
+
   const runFreezeAndGenerate = async () => {
     if (!workspaceId || running) return;
     setRunning(true);
     setError(null);
+    setProgress("Đang chốt snapshot…");
+    setCliLog(["--- Chốt snapshot & tạo job ---"]);
     setLastWarnings([]);
     try {
       const res = await requirementStudio.freezeAndGenerate(workspaceId, {
         acknowledgeMissing: true,
         note: note.trim() || undefined,
         mode: "append",
+        preferredEngine: engine,
+        targetUrl: engine === "e2e" ? targetUrl.trim() || undefined : undefined,
       });
       setLastWarnings(res.warnings ?? []);
       setSnapshots((prev) => [res.snapshot, ...prev]);
       const jobId = res.job.id;
       const snapshotId = String(res.snapshot.id);
-      const job = await waitForJob(jobId);
+      setProgress(res.job.progressMessage || "Đã tạo job — đang gọi AI CLI…");
+      setCliLog((prev) => [
+        ...prev,
+        `Job ${jobId}`,
+        res.job.progressMessage || "Đã tạo job — đang gọi AI CLI…",
+      ]);
+      const job = await waitForJob(jobId, {
+        onProgress: (msg) => {
+          setProgress(msg);
+          // Highlight fan-out module lines in live status
+          if (/^Module\s+\d+\s*\/\s*\d+/i.test(msg.trim())) {
+            setCliLog((prev) => {
+              const last = prev[prev.length - 1];
+              if (last === msg) return prev;
+              return [...prev, msg];
+            });
+          }
+        },
+        onLog: (lines) => setCliLog(lines.length ? lines : ["(chưa có log)"]),
+      });
+      if (job.progressLog?.length) setCliLog(job.progressLog);
       if (job.status === "Failed") {
         throw new Error(job.error || "Tạo test case thất bại");
       }
-      onGenerated?.({ snapshotId, jobId });
+      setProgress(job.progressMessage || "Hoàn tất");
+      onGenerated?.({ snapshotId, jobId, preferredEngine: engine });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -136,6 +185,32 @@ export default function FreezePanel({
       ) : null}
 
       <div className="freeze-actions">
+        <div className="freeze-engine-field">
+          <Typography.Text strong>Loại test case</Typography.Text>
+          <EnginePicker
+            value={engine}
+            onChange={(v) => {
+              if (v === "unit" || v === "e2e") setEngine(v);
+            }}
+            disabled={running}
+          />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {engine === "e2e"
+              ? "Luồng E2E: sinh TC journey UI (type=E2E). Không cần nhập login — vượt auth bằng storageState / E2E_USERNAME·E2E_PASSWORD khi chạy code. Target URL tuỳ chọn khi Freeze; bắt buộc trên trang E2E Test."
+              : "Luồng Unit: sinh test case logic/service (type=Unit). Cùng pipeline fan-out + nhật ký AI CLI như E2E."}
+          </Typography.Text>
+        </div>
+
+        {engine === "e2e" ? (
+          <Input
+            value={targetUrl}
+            onChange={(e) => setTargetUrl(e.target.value)}
+            placeholder="Target URL (tuỳ chọn) — http://localhost:3000"
+            disabled={running}
+            aria-label="Target URL"
+          />
+        ) : null}
+
         <Input.TextArea
           value={note}
           onChange={(e) => setNote(e.target.value)}
@@ -155,15 +230,37 @@ export default function FreezePanel({
             loading={running}
             onClick={() => void runFreezeAndGenerate()}
           >
-            Chốt snapshot và tạo test case
+            {engine === "e2e"
+              ? "Chốt snapshot và tạo TC E2E"
+              : "Chốt snapshot và tạo test case"}
           </Button>
         </Space>
-        {running ? (
-          <Typography.Text type="secondary">
-            <Spin size="small" /> Đang tổng hợp tài liệu, phân tích và test case hiện có…
-          </Typography.Text>
-        ) : null}
       </div>
+
+      {running || cliLog.length > 0 ? (
+        <div className="cli-log-panel" aria-live="polite">
+          <div className="cli-log-panel__head">
+            <Typography.Text strong>Nhật ký AI CLI</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {running ? "live · prompt + xử lý hệ thống" : "lần chạy gần nhất"} ·{" "}
+              {cliLog.length} dòng
+            </Typography.Text>
+          </div>
+          {running ? (
+            <Typography.Text type="secondary" className="cli-log-panel__status">
+              <Spin size="small" />{" "}
+              {progress ||
+                (engine === "e2e"
+                  ? "Đang tổng hợp tài liệu, phân tích và tạo TC E2E…"
+                  : "Đang tổng hợp tài liệu, phân tích và test case hiện có…")}
+            </Typography.Text>
+          ) : null}
+          <pre className="cli-log-panel__body">
+            {cliLog.length ? cliLog.join("\n\n") : "Chưa có log…"}
+            <div ref={logEndRef} />
+          </pre>
+        </div>
+      ) : null}
 
       <div className="freeze-history">
         <Typography.Text strong>

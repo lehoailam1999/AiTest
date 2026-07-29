@@ -23,7 +23,7 @@ import type {
   WorkspaceRunDetail,
 } from "../api/types";
 import { jobStatusLabel, labelOf } from "../i18n/labels";
-import { activityUrl, ROUTES, unitTestUrl } from "../lib/productRoutes";
+import { activityUrl, e2eTestUrl, ROUTES, unitTestUrl } from "../lib/productRoutes";
 import { useProject } from "../state/ProjectContext";
 
 const ACTIVE = new Set(["Queued", "PendingWorker", "Running", "Pending"]);
@@ -76,7 +76,8 @@ export default function JobsPage() {
   const [tab, setTab] = useState(tabParam);
   const [items, setItems] = useState<Job[]>([]);
   const [campaigns, setCampaigns] = useState<GenerationCampaignAudit[]>([]);
-  const [runs, setRuns] = useState<WorkspaceRunAudit[]>([]);
+  const [unitRuns, setUnitRuns] = useState<WorkspaceRunAudit[]>([]);
+  const [e2eRuns, setE2eRuns] = useState<WorkspaceRunAudit[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<WorkspaceRunDetail | null>(null);
@@ -87,24 +88,20 @@ export default function JobsPage() {
     setTab(tabParam);
   }, [tabParam]);
 
-  const loadJobs = useCallback(async () => {
-    if (!project) return;
-    const page = await jobs.list(project.id);
-    setItems(page.items);
-  }, [project]);
-
   const loadAll = useCallback(async () => {
     if (!project) return;
     setLoading(true);
     try {
-      const [jobPage, campPage, runPage] = await Promise.all([
+      const [jobPage, campPage, unitPage, e2ePage] = await Promise.all([
         jobs.list(project.id),
         audit.listCampaigns(project.id),
-        audit.listWorkspaceRuns(project.id, 1, 80),
+        audit.listWorkspaceRuns(project.id, 1, 80, { testType: "unit" }),
+        audit.listWorkspaceRuns(project.id, 1, 80, { testType: "e2e" }),
       ]);
       setItems(jobPage.items);
       setCampaigns(campPage.items);
-      setRuns(runPage.items);
+      setUnitRuns(unitPage.items);
+      setE2eRuns(e2ePage.items);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Load failed");
@@ -121,7 +118,8 @@ export default function JobsPage() {
     const hasActive =
       items.some((j) => ACTIVE.has(j.status)) ||
       campaigns.some((c) => c.status === "Running") ||
-      runs.some((r) => r.status === "verifying" || r.status === "generated");
+      unitRuns.some((r) => r.status === "verifying" || r.status === "generated") ||
+      e2eRuns.some((r) => r.status === "verifying" || r.status === "generated");
     if (timer.current) {
       window.clearTimeout(timer.current);
       timer.current = null;
@@ -132,17 +130,17 @@ export default function JobsPage() {
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
-  }, [items, campaigns, runs, loadAll]);
+  }, [items, campaigns, unitRuns, e2eRuns, loadAll]);
 
   const openDetail = useCallback(
-    async (runKey: string) => {
+    async (runKey: string, boardTab: "unit-jobs" | "e2e-jobs" = "unit-jobs") => {
       if (!project) return;
       setDetailLoading(true);
       try {
         const d = await audit.getWorkspaceRunDetail(project.id, runKey);
         setDetail(d);
         const q = new URLSearchParams(searchParams);
-        q.set("tab", "unit-jobs");
+        q.set("tab", boardTab);
         q.set("run", d.run.localRunId || d.run.id);
         setSearchParams(q, { replace: true });
       } catch (e) {
@@ -160,20 +158,34 @@ export default function JobsPage() {
     if (!runParam || !project) return;
     if (openedRunRef.current === runParam) return;
     openedRunRef.current = runParam;
-    void openDetail(runParam);
-  }, [runParam, project, openDetail]);
+    const board: "unit-jobs" | "e2e-jobs" =
+      tabParam === "e2e-jobs" ? "e2e-jobs" : "unit-jobs";
+    void openDetail(runParam, board);
+  }, [runParam, project, openDetail, tabParam]);
 
-  const filteredRuns = useMemo(() => {
-    if (!moduleFilter) return runs;
-    const m = moduleFilter.toLowerCase();
-    return runs.filter((r) => (r.module || "").toLowerCase().includes(m));
-  }, [runs, moduleFilter]);
+  const filterByModule = useCallback(
+    (list: WorkspaceRunAudit[]) => {
+      if (!moduleFilter) return list;
+      const m = moduleFilter.toLowerCase();
+      return list.filter((r) => (r.module || "").toLowerCase().includes(m));
+    },
+    [moduleFilter]
+  );
+
+  const filteredUnitRuns = useMemo(
+    () => filterByModule(unitRuns),
+    [unitRuns, filterByModule]
+  );
+  const filteredE2eRuns = useMemo(
+    () => filterByModule(e2eRuns),
+    [e2eRuns, filterByModule]
+  );
 
   const onTabChange = (key: string) => {
     setTab(key);
     const q = new URLSearchParams(searchParams);
     q.set("tab", key);
-    if (key !== "unit-jobs") q.delete("run");
+    if (key !== "unit-jobs" && key !== "e2e-jobs") q.delete("run");
     setSearchParams(q, { replace: true });
   };
 
@@ -187,7 +199,7 @@ export default function JobsPage() {
   if (!project) {
     return (
       <div className="page">
-        <Typography.Title level={2}>Unit Job Board</Typography.Title>
+        <Typography.Title level={2}>Job Board</Typography.Title>
         <Alert type="error" showIcon title="Chưa chọn dự án. Vào tab Projects để chọn." />
       </div>
     );
@@ -197,88 +209,120 @@ export default function JobsPage() {
     ? parseSummary(detail.verifies[0].summaryJson)
     : null;
 
-  const runColumns: ColumnsType<WorkspaceRunAudit> = [
-    {
-      title: "Job",
-      dataIndex: "localRunId",
-      key: "run",
-      width: 120,
-      render: (v: string, r) => (
-        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => void openDetail(r.id)}>
-          {v.slice(0, 12)}
-        </Button>
-      ),
-    },
-    {
-      title: "Trạng thái",
-      dataIndex: "status",
-      key: "status",
-      width: 110,
-      render: (s: string) => <Tag color={statusColor[s] ?? "default"}>{s}</Tag>,
-    },
-    {
-      title: "Verify",
-      key: "verify",
-      width: 100,
-      render: (_, r) => {
-        const v = r.latestVerify;
-        if (!v) return <Typography.Text type="secondary">—</Typography.Text>;
-        return (
-          <Tag color={v.overallPass ? "success" : "error"}>
-            {v.overallPass ? "PASS" : "FAIL"}
-          </Tag>
-        );
+  function buildRunColumns(
+    board: "unit-jobs" | "e2e-jobs"
+  ): ColumnsType<WorkspaceRunAudit> {
+    const isE2e = board === "e2e-jobs";
+    return [
+      {
+        title: "Job",
+        dataIndex: "localRunId",
+        key: "run",
+        width: 120,
+        render: (v: string, r) => (
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0 }}
+            onClick={() => void openDetail(r.id, board)}
+          >
+            {v.slice(0, 12)}
+          </Button>
+        ),
       },
-    },
-    {
-      title: "Coverage",
-      key: "cov",
-      width: 110,
-      render: (_, r) => {
-        const summary = parseSummary(r.latestVerify?.summaryJson ?? null);
-        const pct = summary?.coverageSync?.linePct;
-        if (pct == null) {
+      {
+        title: "Trạng thái",
+        dataIndex: "status",
+        key: "status",
+        width: 110,
+        render: (s: string) => <Tag color={statusColor[s] ?? "default"}>{s}</Tag>,
+      },
+      {
+        title: isE2e ? "Headless" : "Verify",
+        key: "verify",
+        width: 100,
+        render: (_, r) => {
+          const v = r.latestVerify;
+          if (!v) return <Typography.Text type="secondary">—</Typography.Text>;
           return (
-            <Typography.Text type="secondary">
-              {r.latestVerify?.coverageStatus || "—"}
-            </Typography.Text>
+            <Tag color={v.overallPass ? "success" : "error"}>
+              {v.overallPass ? "PASS" : "FAIL"}
+            </Tag>
           );
-        }
-        return <Tag color="blue">{pct}%</Tag>;
+        },
       },
-    },
-    {
-      title: "Module",
-      dataIndex: "module",
-      key: "module",
-      ellipsis: true,
-      render: (v) => v ?? "—",
-    },
-    {
-      title: "Context",
-      dataIndex: "contextSource",
-      key: "ctx",
-      width: 100,
-      render: (v) => v || "—",
-    },
-    {
-      title: "Cập nhật",
-      dataIndex: "createdAt",
-      key: "createdAt",
-      width: 160,
-      render: (v: string) => new Date(v).toLocaleString(),
-    },
-    {
-      title: "",
-      key: "open",
-      width: 90,
-      render: (_, r) => (
-        <Link to={unitTestUrl({ mode: "single", testCaseId: r.testCaseId || undefined })}>
-          Mở Unit
-        </Link>
-      ),
-    },
-  ];
+      {
+        title: isE2e ? "Artifacts" : "Coverage",
+        key: "cov",
+        width: 110,
+        render: (_, r) => {
+          const summary = parseSummary(r.latestVerify?.summaryJson ?? null);
+          if (isE2e) {
+            const uploaded = summary?.coverageSync?.uploaded;
+            if (uploaded == null) {
+              return (
+                <Typography.Text type="secondary">
+                  {r.latestVerify?.coverageStatus || "—"}
+                </Typography.Text>
+              );
+            }
+            return <Tag color="blue">{uploaded}</Tag>;
+          }
+          const pct = summary?.coverageSync?.linePct;
+          if (pct == null) {
+            return (
+              <Typography.Text type="secondary">
+                {r.latestVerify?.coverageStatus || "—"}
+              </Typography.Text>
+            );
+          }
+          return <Tag color="blue">{pct}%</Tag>;
+        },
+      },
+      {
+        title: "Module",
+        dataIndex: "module",
+        key: "module",
+        ellipsis: true,
+        render: (v) => v ?? "—",
+      },
+      {
+        title: "Cập nhật",
+        dataIndex: "createdAt",
+        key: "createdAt",
+        width: 160,
+        render: (v: string) => new Date(v).toLocaleString(),
+      },
+      {
+        title: "",
+        key: "open",
+        width: 100,
+        render: (_, r) =>
+          isE2e ? (
+            <Link
+              to={e2eTestUrl({
+                testCaseId: r.testCaseId || undefined,
+                module: r.module || undefined,
+              })}
+            >
+              Mở E2E
+            </Link>
+          ) : (
+            <Link
+              to={unitTestUrl({
+                mode: "single",
+                testCaseId: r.testCaseId || undefined,
+              })}
+            >
+              Mở Unit
+            </Link>
+          ),
+      },
+    ];
+  }
+
+  const unitRunColumns = buildRunColumns("unit-jobs");
+  const e2eRunColumns = buildRunColumns("e2e-jobs");
 
   const campaignColumns: ColumnsType<GenerationCampaignAudit> = [
     {
@@ -319,13 +363,23 @@ export default function JobsPage() {
     {
       title: "",
       key: "goto",
-      width: 120,
-      render: (_, c) =>
-        c.scopeLabel ? (
-          <Link to={unitTestUrl({ mode: "module", module: c.scopeLabel })}>Chạy lại module</Link>
+      width: 140,
+      render: (_, c) => {
+        if (c.kind === "e2e") {
+          return c.scopeLabel ? (
+            <Link to={e2eTestUrl({ module: c.scopeLabel })}>Chạy lại module</Link>
+          ) : (
+            <Link to={ROUTES.e2eTest}>E2E Job</Link>
+          );
+        }
+        return c.scopeLabel ? (
+          <Link to={unitTestUrl({ mode: "module", module: c.scopeLabel })}>
+            Chạy lại module
+          </Link>
         ) : (
           <Link to={ROUTES.unitTest}>Unit Job</Link>
-        ),
+        );
+      },
     },
   ];
 
@@ -342,9 +396,22 @@ export default function JobsPage() {
       title: "Trạng thái",
       dataIndex: "status",
       key: "status",
+      width: 120,
       render: (s: string) => (
         <Tag color={statusColor[s] ?? "default"}>{labelOf(jobStatusLabel, s)}</Tag>
       ),
+    },
+    {
+      title: "Tiến độ",
+      dataIndex: "progressMessage",
+      key: "progress",
+      ellipsis: true,
+      render: (v: string | null | undefined, r) => {
+        const msg = (v || "").trim();
+        if (msg) return msg;
+        if (ACTIVE.has(r.status)) return "Đang chạy…";
+        return "—";
+      },
     },
     { title: "Lỗi", dataIndex: "error", key: "error", render: (v) => v ?? "—", ellipsis: true },
     {
@@ -361,15 +428,18 @@ export default function JobsPage() {
       <header className="page-head">
         <div>
           <Typography.Title level={2} style={{ margin: 0 }}>
-            Unit Job Board
+            Job Board
           </Typography.Title>
           <Typography.Text type="secondary">
-            Theo dõi Unit Job (gen → verify → coverage → apply) · campaign module · không cần IDE.
+            Unit Jobs · E2E Jobs · campaigns · lịch sử trên PostgreSQL (không cần đọc log máy).
           </Typography.Text>
         </div>
         <Space wrap>
           <Link to={unitTestUrl()}>
             <Button type="primary">Chạy Unit Job</Button>
+          </Link>
+          <Link to={ROUTES.e2eTest}>
+            <Button>Chạy E2E Job</Button>
           </Link>
           <Button onClick={() => void loadAll()}>Làm mới</Button>
         </Space>
@@ -404,19 +474,40 @@ export default function JobsPage() {
         items={[
           {
             key: "unit-jobs",
-            label: `Unit Jobs (${filteredRuns.length})`,
+            label: `Unit Jobs (${filteredUnitRuns.length})`,
             children: (
               <Table
                 rowKey="id"
                 loading={loading || detailLoading}
-                columns={runColumns}
-                dataSource={filteredRuns}
+                columns={unitRunColumns}
+                dataSource={filteredUnitRuns}
                 pagination={{ pageSize: 12, showSizeChanger: true, pageSizeOptions: [12, 25, 50] }}
                 locale={{
                   emptyText: (
                     <span>
                       Chưa có Unit Job —{" "}
                       <Link to={unitTestUrl()}>Chạy Unit Job</Link> từ TC Approved.
+                    </span>
+                  ),
+                }}
+              />
+            ),
+          },
+          {
+            key: "e2e-jobs",
+            label: `E2E Jobs (${filteredE2eRuns.length})`,
+            children: (
+              <Table
+                rowKey="id"
+                loading={loading || detailLoading}
+                columns={e2eRunColumns}
+                dataSource={filteredE2eRuns}
+                pagination={{ pageSize: 12, showSizeChanger: true, pageSizeOptions: [12, 25, 50] }}
+                locale={{
+                  emptyText: (
+                    <span>
+                      Chưa có E2E Job —{" "}
+                      <Link to={ROUTES.e2eTest}>Chạy E2E Job</Link> từ TC Approved type=E2E.
                     </span>
                   ),
                 }}
@@ -448,37 +539,41 @@ export default function JobsPage() {
                         {
                           title: "Run",
                           dataIndex: "localRunId",
-                          render: (v: string | null | undefined) =>
+                          render: (v) =>
                             v ? (
                               <Button
                                 type="link"
                                 size="small"
                                 style={{ padding: 0 }}
                                 onClick={() => {
-                                  onTabChange("unit-jobs");
-                                  void openDetail(v);
+                                  onTabChange(
+                                    c.kind === "e2e" ? "e2e-jobs" : "unit-jobs"
+                                  );
+                                  void openDetail(
+                                    String(v),
+                                    c.kind === "e2e" ? "e2e-jobs" : "unit-jobs"
+                                  );
                                 }}
                               >
-                                {v.slice(0, 10)}
+                                {String(v).slice(0, 12)}
                               </Button>
                             ) : (
                               "—"
                             ),
                         },
+                        { title: "Status", dataIndex: "status" },
                         {
-                          title: "Trạng thái",
-                          dataIndex: "status",
-                          render: (s: string) => (
-                            <Tag color={statusColor[s] ?? "default"}>{s}</Tag>
-                          ),
+                          title: "Lỗi",
+                          dataIndex: "error",
+                          ellipsis: true,
+                          render: (v) => v || "—",
                         },
-                        { title: "Lỗi", dataIndex: "error", ellipsis: true },
                       ]}
                     />
                   ),
                 }}
-                pagination={{ pageSize: 8, showSizeChanger: true }}
-                locale={{ emptyText: "Chưa có campaign — Chạy Unit Job · module." }}
+                pagination={{ pageSize: 10 }}
+                locale={{ emptyText: "Chưa có campaign." }}
               />
             ),
           },
@@ -502,8 +597,8 @@ export default function JobsPage() {
       <Drawer
         title={
           detail
-            ? `Unit Job · ${detail.run.localRunId.slice(0, 14)}`
-            : "Chi tiết Unit Job"
+            ? `${detail.run.testType === "e2e" ? "E2E" : "Unit"} Job · ${detail.run.localRunId.slice(0, 14)}`
+            : "Chi tiết Job"
         }
         width={520}
         open={Boolean(detail)}
@@ -518,6 +613,7 @@ export default function JobsPage() {
                   {detail.run.status}
                 </Tag>
               </Descriptions.Item>
+              <Descriptions.Item label="Loại">{detail.run.testType || "unit"}</Descriptions.Item>
               <Descriptions.Item label="Module">{detail.run.module || "—"}</Descriptions.Item>
               <Descriptions.Item label="Context">
                 {detail.run.contextSource || "—"}
@@ -525,7 +621,16 @@ export default function JobsPage() {
               <Descriptions.Item label="Provider">{detail.run.provider || "—"}</Descriptions.Item>
               <Descriptions.Item label="Test case">
                 {detail.run.testCaseId ? (
-                  <Link to={unitTestUrl({ testCaseId: detail.run.testCaseId })}>
+                  <Link
+                    to={
+                      detail.run.testType === "e2e"
+                        ? e2eTestUrl({
+                            testCaseId: detail.run.testCaseId,
+                            module: detail.run.module || undefined,
+                          })
+                        : unitTestUrl({ testCaseId: detail.run.testCaseId })
+                    }
+                  >
                     {detail.run.testCaseId.slice(0, 8)}…
                   </Link>
                 ) : (
@@ -595,7 +700,15 @@ export default function JobsPage() {
                 ) : null}
               </>
             ) : (
-              <Alert type="info" showIcon title="Chưa có verify report — chạy Verify trên Unit test." />
+              <Alert
+                type="info"
+                showIcon
+                title={
+                  detail.run.testType === "e2e"
+                    ? "Chưa có verify report — chạy E2E Job trên console."
+                    : "Chưa có verify report — chạy Verify trên Unit test."
+                }
+              />
             )}
 
             {detail.applies.length ? (

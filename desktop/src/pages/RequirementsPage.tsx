@@ -22,7 +22,8 @@ import { connection, requirements, testcases } from "../api";
 import { TestingJourney } from "../components/TestingJourney";
 import { useTestingJourney } from "../hooks/useTestingJourney";
 import { generateTcUrl } from "../lib/testingJourney";
-import { activityUrl, unitTestUrl } from "../lib/productRoutes";
+import { activityUrl, e2eTestUrl, unitTestUrl } from "../lib/productRoutes";
+import { ENGINE_TOOLTIP, TC_TYPE_OPTIONS } from "../lib/testEngine";
 import type { Requirement, RequirementSource, TestCase } from "../api/types";
 import RequirementDocField, {
   buildRequirementPayload,
@@ -104,8 +105,8 @@ export default function RequirementsPage() {
 
   const loadCases = useCallback(async () => {
     if (!project) return;
-    const page = await testcases.list({ projectId: project.id }, 1, 500);
-    setCasesByReq(groupBySource(page.items));
+    const items = await testcases.listAll({ projectId: project.id });
+    setCasesByReq(groupBySource(items));
   }, [project]);
 
   useEffect(() => {
@@ -566,20 +567,25 @@ export default function RequirementsPage() {
         <Card
           style={{ marginBottom: 12 }}
           size="small"
-          title="Bước tiếp theo — Unit test"
+          title="Bước tiếp theo — Automate"
         >
           <Typography.Paragraph style={{ marginBottom: 12 }}>
-            Có {journey.approvedCount} TC Approved. Gắn project root →{" "}
-            <strong>Chạy Unit Job</strong> (Local FS · AI CLI). Theo dõi trên Unit Job Board.
+            Có {journey.approvedCount} TC Approved. Chọn engine theo loại TC (Unit = SUT · E2E = UI +
+            Target URL). Tooltip: {ENGINE_TOOLTIP}
           </Typography.Paragraph>
           <Space wrap>
             <Link to={unitTestUrl()}>
               <Button type="primary">
-                {journey.hasLocalPath ? "Chạy Unit Job" : "Gắn project root"}
+                {journey.hasLocalPath ? "Chạy Unit Job" : "Gắn root · Unit Job"}
+              </Button>
+            </Link>
+            <Link to={e2eTestUrl()}>
+              <Button type="primary" ghost>
+                {journey.hasLocalPath ? "Chạy E2E Job" : "Gắn root · E2E Job"}
               </Button>
             </Link>
             <Link to={activityUrl({ tab: "unit-jobs" })}>
-              <Button>Unit Job Board</Button>
+              <Button>Job Board</Button>
             </Link>
           </Space>
         </Card>
@@ -1146,15 +1152,8 @@ function RequirementPanel({
           <Form.Item name="module" label="Module">
             <Input placeholder="Tên chức năng / module" />
           </Form.Item>
-          <Form.Item name="type" label="Loại">
-            <Select
-              options={[
-                { value: "Functional", label: "Chức năng" },
-                { value: "Negative", label: "Phủ định" },
-                { value: "Boundary", label: "Biên" },
-                { value: "Api", label: "API" },
-              ]}
-            />
+          <Form.Item name="type" label="Loại (engine)">
+            <Select options={[...TC_TYPE_OPTIONS]} />
           </Form.Item>
           <Form.Item name="priority" label="Ưu tiên">
             <Select

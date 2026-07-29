@@ -103,6 +103,15 @@ class LocalDiskWorkspaceAdapter:
         with self._lock:
             return self._sessions.get(workspace_id)
 
+    def get_active_workspace_id(self, project_id: str) -> str | None:
+        with self._lock:
+            wid = self._project_active.get(project_id)
+            if not wid:
+                return None
+            if wid not in self._sessions:
+                return None
+            return wid
+
     def get_status(self, workspace_id: str) -> WorkspaceStatus | None:
         s = self.get_session(workspace_id)
         if s is None:

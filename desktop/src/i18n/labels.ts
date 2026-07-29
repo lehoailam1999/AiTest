@@ -28,9 +28,15 @@ export const typeLabel: Record<string, string> = {
   Boundary: "Biên",
   Api: "API",
   API: "API",
+  Unit: "Unit",
+  E2E: "E2E",
+  Journey: "E2E",
+  UI: "E2E",
   "Chức năng": "Chức năng",
   "Phủ định": "Phủ định",
   Biên: "Biên",
+  "End-to-End": "E2E",
+  "End to End": "E2E",
 };
 
 export const priorityLabel: Record<string, string> = {

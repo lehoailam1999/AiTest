@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 from app.llm.base import GenerateContext, TestCaseDraft, UnitRequest, UnitResult
+
+ProgressCb = Callable[[str], None]
 
 
 class BaseLLMAdapter(ABC):
@@ -18,6 +21,9 @@ class BaseLLMAdapter(ABC):
         ctx: GenerateContext | None = None,
         topic_scope: str | None = None,
         context: dict[str, Any] | None = None,
+        on_progress: ProgressCb | None = None,
+        prefer_oneshot: bool | None = None,
+        session_topic_key: str | None = None,
     ) -> list[TestCaseDraft]:
         """Sinh danh sách TestCaseDraft từ requirement."""
 

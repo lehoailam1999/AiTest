@@ -1,0 +1,1890 @@
+/**
+ * Automate — E2E Test Engine (Playwright TS MVP).
+ * EX1–EX5: console · WorkspaceRun · staging Apply · batch · polish.
+ */
+import {
+  DesktopOutlined,
+  EyeInvisibleOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  RocketOutlined,
+  SaveOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Checkbox,
+  Collapse,
+  Input,
+  Modal,
+  Progress,
+  Radio,
+  Segmented,
+  Select,
+  Space,
+  Steps,
+  Tag,
+  Typography,
+} from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  connection,
+  generateE2e,
+  projects,
+  requirementStudio,
+  requirements,
+  testcases,
+  type E2EFileDto,
+} from "../../api";
+import type {
+  Connection,
+  Project,
+  ProjectMeta,
+  RequirementStudioWorkspace,
+  TestCase,
+} from "../../api/types";
+import { createBatchRunControl, type BatchRunStatus } from "../../lib/batchRunControl";
+import {
+  generateE2eBatch,
+  inspectE2eDom,
+  verifyE2eForTestCase,
+  verifyE2eModuleBatch,
+  generateE2eForTestCase,
+  type E2eGenItem,
+} from "../../lib/e2eWorkspace/e2eJobRunner";
+import {
+  applyE2eStaging,
+  buildE2eStagedFiles,
+  captureE2eBackups,
+  newE2eRunId,
+  refreshE2eOverlayFromFiles,
+  rollbackE2eTargets,
+  stagingDirHint,
+  writeE2eOverlay,
+  type E2eStagingSession,
+} from "../../lib/e2eWorkspace/stagingApply";
+import { activityUrl, ROUTES } from "../../lib/productRoutes";
+import { normalizeProjectMeta } from "../../lib/projectSync";
+import { isE2eTestCaseType } from "../../lib/testEngine";
+import { useProject } from "../../state/ProjectContext";
+import { isTauri } from "../../tauri/bridge";
+import { workspace } from "../../workspace";
+import { E2eGateBanner } from "./E2eGateBanner";
+import { E2ePipelineStrip } from "./E2ePipelineStrip";
+import { E2eResultTabs } from "./E2eResultTabs";
+import {
+  E2eBatchConsole,
+  type E2eBatchPipelineRow,
+} from "./E2eBatchConsole";
+import {
+  BATCH_NOTE_PAUSED,
+  BATCH_NOTE_RUNNING,
+  BATCH_NOTE_WAITING,
+  markBatchRowsPaused,
+  markBatchRowsResumed,
+  type BatchPipelineRow,
+} from "../unit-test/BatchRunConsole";
+import {
+  appendPhaseLog,
+  finishPhase,
+  initialE2eJobRunState,
+  setPhaseRunning,
+  type E2eJobRunState,
+  type E2ePhaseId,
+} from "./e2eJobState";
+
+/** Requirement Studio / legacy — same shape as Unit batch selector. */
+type ReqOption = {
+  id: string;
+  title: string;
+  description?: string;
+  kind: "studio" | "legacy";
+  legacySourceId?: string | null;
+  snapshotIds: string[];
+  tcTotal?: number;
+  tcApproved?: number;
+};
+
+function tcBelongsToReq(tc: TestCase, req: ReqOption): boolean {
+  if (tc.requirementSnapshotId && req.snapshotIds.includes(tc.requirementSnapshotId)) {
+    return true;
+  }
+  if (req.legacySourceId && tc.sourceId === req.legacySourceId) return true;
+  if (tc.sourceId === req.id) return true;
+  return false;
+}
+
+/** Folder under AItest/E2ETest — prefer shared TC.module, else requirement title. */
+function resolveBatchModuleFolder(cases: TestCase[], reqTitle: string): string {
+  const mods = cases
+    .map((t) => (t.module || "").trim())
+    .filter(Boolean);
+  if (mods.length > 0) {
+    const counts = new Map<string, number>();
+    for (const m of mods) counts.set(m, (counts.get(m) || 0) + 1);
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (top && top[1] >= Math.ceil(mods.length / 2)) return top[0];
+    if (new Set(mods).size === 1) return mods[0];
+  }
+  const slug = (reqTitle || "E2E").trim() || "E2E";
+  return slug.slice(0, 80);
+}
+
+function initE2eQueueRows(cases: TestCase[]): E2eBatchPipelineRow[] {
+  return cases.map((t) => ({
+    key: t.id,
+    testCaseId: t.id,
+    title: t.title,
+    status: "fail",
+    error: BATCH_NOTE_WAITING,
+  }));
+}
+
+function mapGenToPipeline(
+  cases: TestCase[],
+  rows: { testCaseId: string; title: string; status: string; error?: string; runId?: string; files?: number }[],
+  genItems: E2eGenItem[]
+): E2eBatchPipelineRow[] {
+  const byId = new Map(rows.map((r) => [r.testCaseId, r]));
+  const okIds = new Set(genItems.map((g) => g.testCaseId));
+  return cases.map((t) => {
+    const r = byId.get(t.id);
+    if (okIds.has(t.id) || r?.status === "generated" || r?.status === "ok") {
+      return {
+        key: t.id,
+        testCaseId: t.id,
+        title: t.title,
+        status: "ok" as const,
+        runId: r?.runId ?? genItems.find((g) => g.testCaseId === t.id)?.runId,
+        files: r?.files ?? genItems.find((g) => g.testCaseId === t.id)?.files.length,
+        verifyStatus: "pending" as const,
+      };
+    }
+    if (r?.status === "running") {
+      return {
+        key: t.id,
+        testCaseId: t.id,
+        title: t.title,
+        status: "fail" as const,
+        error: BATCH_NOTE_RUNNING,
+        runId: r.runId,
+      };
+    }
+    if (r?.status === "pending") {
+      return {
+        key: t.id,
+        testCaseId: t.id,
+        title: t.title,
+        status: "fail" as const,
+        error: BATCH_NOTE_WAITING,
+      };
+    }
+    return {
+      key: t.id,
+      testCaseId: t.id,
+      title: t.title,
+      status: "fail" as const,
+      error: r?.error || "Generate fail",
+      runId: r?.runId,
+    };
+  });
+}
+
+function mergeVerifyStatus(
+  prev: E2eBatchPipelineRow[],
+  verifyRows: { testCaseId: string; status: string; error?: string }[]
+): E2eBatchPipelineRow[] {
+  const byId = new Map(verifyRows.map((r) => [r.testCaseId, r]));
+  return prev.map((p) => {
+    const v = byId.get(p.testCaseId);
+    if (!v || p.status !== "ok") return p;
+    const pass = v.status === "ok";
+    return {
+      ...p,
+      verifyStatus: pass ? ("pass" as const) : ("fail" as const),
+      error: pass ? undefined : v.error || p.error,
+    };
+  });
+}
+
+export default function E2ETestPage() {
+  const { message } = App.useApp();
+  const { project } = useProject();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const [localPath, setLocalPath] = useState<string | null>(null);
+  const [serverProject, setServerProject] = useState<Project | null>(null);
+  const [conn, setConn] = useState<Connection | null>(null);
+  const [approved, setApproved] = useState<TestCase[]>([]);
+  const [testCaseId, setTestCaseId] = useState(searchParams.get("testCaseId") || "");
+  const [targetUrl, setTargetUrl] = useState("http://localhost:3000");
+  const [usePlaywrightInspect, setUsePlaywrightInspect] = useState(true);
+  /** Default on — feature specs skip login UI via fixtures/storageState.json */
+  const [useStorageState, setUseStorageState] = useState(true);
+  /** Optional override only — primary: AI seed → .ai-test/auth */
+  const [e2eUsername, setE2eUsername] = useState("");
+  const [e2ePassword, setE2ePassword] = useState("");
+  const [authDiscovery, setAuthDiscovery] = useState<{
+    ready: boolean;
+    defaultRole: string;
+    notes: string[];
+    envFilesRead: string[];
+    roles: {
+      role: string;
+      hasUsername: boolean;
+      hasPassword: boolean;
+      storageStateValid: boolean;
+      source: string;
+      skippedSeed: boolean;
+    }[];
+  } | null>(null);
+  const [showAuthOverride, setShowAuthOverride] = useState(false);
+  /** Default bật — hiện cửa sổ Chromium khi Headless (có thể tắt để nhanh hơn). */
+  const [showBrowser, setShowBrowser] = useState(true);
+  const [envHydrated, setEnvHydrated] = useState(false);
+
+  const [busy, setBusy] = useState(false);
+  const [files, setFiles] = useState<E2EFileDto[]>([]);
+  const [run, setRun] = useState<E2eJobRunState>(initialE2eJobRunState);
+  const [activePhase, setActivePhase] = useState<E2ePhaseId | null>(null);
+  const [resultTab, setResultTab] = useState("log");
+  const [, setGateReady] = useState(false);
+  const [, setGateReasons] = useState<string[]>([]);
+  const [staging, setStaging] = useState<E2eStagingSession | null>(null);
+  const [applyBusy, setApplyBusy] = useState(false);
+  const [appliedPaths, setAppliedPaths] = useState<string[]>([]);
+
+  /** Batch theo Requirement (giống Unit) — bên trong là TC E2E Approved */
+  const [requirementsList, setRequirementsList] = useState<ReqOption[]>([]);
+  const [batchReqId, setBatchReqId] = useState<string | undefined>(() => {
+    return searchParams.get("reqId") || searchParams.get("workspaceId") || undefined;
+  });
+  const [batchSelected, setBatchSelected] = useState<string[]>([]);
+  const [batchResults, setBatchResults] = useState<E2eBatchPipelineRow[]>([]);
+  const [batchGenItems, setBatchGenItems] = useState<E2eGenItem[]>([]);
+  const [singleRunId, setSingleRunId] = useState<string | null>(null);
+  const [singlePrimarySpec, setSinglePrimarySpec] = useState<string>("");
+  const [inputMode, setInputMode] = useState<"requirement" | "single">("requirement");
+  const [batchErrorDetail, setBatchErrorDetail] = useState<{
+    title: string;
+    error: string;
+  } | null>(null);
+  const [batchStatus, setBatchStatus] = useState<BatchRunStatus>("idle");
+  const [batchProgress, setBatchProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
+  const batchControlRef = useRef(createBatchRunControl());
+  /** Reuse Inspect DOM for ~5 phút cùng Target URL (skip cold Chromium). */
+  const inspectCacheRef = useRef<{
+    targetUrl: string;
+    promptJson: string;
+    elementCount: number;
+    routeCount: number;
+    source: string;
+    at: number;
+  } | null>(null);
+
+  const aiReady =
+    conn?.status === "Ready" ||
+    conn?.status === "Connected" ||
+    Boolean(conn?.hasApiKey);
+
+  const selected = useMemo(
+    () => approved.find((t) => t.id === testCaseId) || null,
+    [approved, testCaseId]
+  );
+
+  const selectedBatchReq = useMemo(
+    () => requirementsList.find((r) => r.id === batchReqId) || null,
+    [requirementsList, batchReqId]
+  );
+
+  const batchCandidates = useMemo(() => {
+    if (!selectedBatchReq) return [];
+    return approved.filter((t) => tcBelongsToReq(t, selectedBatchReq));
+  }, [approved, selectedBatchReq]);
+
+  useEffect(() => {
+    if (!selectedBatchReq) return;
+    setBatchSelected((prev) => {
+      const ids = batchCandidates.map((t) => t.id);
+      if (prev.length === 0 && ids.length > 0) return ids;
+      const keep = prev.filter((id) => ids.includes(id));
+      return keep.length > 0 ? keep : ids;
+    });
+  }, [selectedBatchReq?.id, batchCandidates]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Single TC: lọc theo cùng Requirement đang chọn ở Batch (nếu có). */
+  const singleTcOptions = useMemo(() => {
+    if (!selectedBatchReq) return approved;
+    const linked = approved.filter((t) => tcBelongsToReq(t, selectedBatchReq));
+    return linked.length > 0 ? linked : approved;
+  }, [approved, selectedBatchReq]);
+
+  useEffect(() => {
+    const unsub = batchControlRef.current.subscribe(setBatchStatus);
+    return unsub;
+  }, []);
+
+  // EX4.3 — hydrate env from project meta once
+  useEffect(() => {
+    if (!serverProject || envHydrated) return;
+    const e2e = normalizeProjectMeta(serverProject.meta)?.e2e;
+    if (e2e?.targetUrl) setTargetUrl(e2e.targetUrl);
+    if (typeof e2e?.usePlaywrightInspect === "boolean") {
+      setUsePlaywrightInspect(e2e.usePlaywrightInspect);
+    }
+    if (typeof e2e?.showBrowser === "boolean") {
+      setShowBrowser(e2e.showBrowser);
+    }
+    if (typeof e2e?.useStorageState === "boolean") {
+      setUseStorageState(e2e.useStorageState);
+    }
+    // username/password no longer persisted as primary auth — override only in-session
+    setEnvHydrated(true);
+  }, [serverProject, envHydrated]);
+
+  const persistE2eEnv = useCallback(async () => {
+    if (!project?.id || !serverProject) return;
+    const prev = normalizeProjectMeta(serverProject.meta) || {};
+    const nextMeta: ProjectMeta = {
+      ...prev,
+      e2e: {
+        targetUrl: targetUrl.trim() || undefined,
+        usePlaywrightInspect,
+        showBrowser,
+        useStorageState,
+      },
+    };
+    try {
+      const updated = await projects.update(project.id, { meta: nextMeta });
+      setServerProject({
+        ...updated,
+        meta: normalizeProjectMeta(updated.meta) ?? nextMeta,
+      });
+    } catch {
+      /* best-effort */
+    }
+  }, [
+    project?.id,
+    serverProject,
+    targetUrl,
+    usePlaywrightInspect,
+    showBrowser,
+    useStorageState,
+  ]);
+
+  const refreshRoot = useCallback(() => {
+    if (!project?.id) return;
+    setLocalPath(workspace.getLocalPath(project.id));
+  }, [project?.id]);
+
+  useEffect(() => {
+    refreshRoot();
+  }, [refreshRoot]);
+
+  useEffect(() => {
+    if (!localPath) {
+      setAuthDiscovery(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const d = await generateE2e.authDiscover({
+          projectRoot: localPath,
+          module:
+            inputMode === "requirement"
+              ? selectedBatchReq?.title
+              : selected?.module || undefined,
+        });
+        if (!cancelled) setAuthDiscovery(d);
+      } catch {
+        if (!cancelled) setAuthDiscovery(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [localPath, inputMode, selectedBatchReq?.title, selected?.module]);
+
+  async function refreshAuthDiscovery() {
+    if (!localPath) {
+      setAuthDiscovery(null);
+      return null;
+    }
+    try {
+      const d = await generateE2e.authDiscover({
+        projectRoot: localPath,
+        module:
+          inputMode === "requirement"
+            ? selectedBatchReq?.title
+            : selected?.module || undefined,
+      });
+      setAuthDiscovery(d);
+      return d;
+    } catch {
+      setAuthDiscovery(null);
+      return null;
+    }
+  }
+
+  /** AI seed → .ai-test/auth (idempotent). Prefer DOM from Inspect. */
+  async function runAuthSeed(opts?: { silent?: boolean }) {
+    if (!project?.id || !localPath) {
+      if (!opts?.silent) message.warning("Cần project + root");
+      return null;
+    }
+    if (!aiReady) {
+      if (!opts?.silent) message.warning("AI chưa Ready");
+      return null;
+    }
+    let domSnapshot = inspectCacheRef.current?.promptJson || "";
+    if (!domSnapshot && targetUrl.trim()) {
+      try {
+        domSnapshot = await ensureInspectSnapshot(false);
+      } catch (e) {
+        pushPhaseLog("inspect", `  inspect warn (seed): ${String(e)}\n`);
+      }
+    }
+    const tc =
+      inputMode === "single"
+        ? selected
+        : batchCandidates.find((t) => t.id === (batchSelected[0] || testCaseId)) ||
+          selected;
+    try {
+      pushPhaseLog("generate", "→ Seed auth (AI)…\n");
+      const res = await generateE2e.authEnsure({
+        projectId: project.id,
+        projectRoot: localPath,
+        testCaseId: tc?.id,
+        targetUrl: targetUrl.trim() || undefined,
+        domSnapshot: domSnapshot || undefined,
+        module: tc?.module || selectedBatchReq?.title || undefined,
+      });
+      pushPhaseLog(
+        "generate",
+        `  authSeed: ${res.message}${res.skipped ? " (skipped)" : ""}\n`
+      );
+      await refreshAuthDiscovery();
+      if (!opts?.silent) {
+        if (res.ok) message.success(res.message);
+        else message.warning(res.message || "Seed auth chưa xong");
+      }
+      return res;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      pushPhaseLog("generate", `  authSeed ERROR: ${msg}\n`);
+      if (!opts?.silent) message.error(msg);
+      return null;
+    }
+  }
+
+  useEffect(() => {
+    if (!project?.id) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [p, c, approvedAll, studioRes, legacyRes] = await Promise.all([
+          projects.get(project.id),
+          connection.get(project.id).catch(() => null),
+          testcases.listAll({
+            projectId: project.id,
+            reviewStatus: "Approved",
+          }),
+          requirementStudio
+            .listWorkspaces(project.id)
+            .catch(() => ({ items: [] as RequirementStudioWorkspace[] })),
+          requirements.list(project.id, 1, 200).catch(() => ({ items: [] })),
+        ]);
+        if (cancelled) return;
+        setServerProject({
+          ...p,
+          meta: normalizeProjectMeta(p.meta) ?? p.meta,
+        });
+        setConn(c);
+        const items = (approvedAll || []).filter((t) => isE2eTestCaseType(t.type));
+        setApproved(items);
+
+        const studios = studioRes.items ?? [];
+        const snapEntries = await Promise.all(
+          studios.map(async (ws) => {
+            try {
+              const snaps = await requirementStudio.listSnapshots(ws.id);
+              return [ws.id, (snaps.items ?? []).map((s) => s.id)] as const;
+            } catch {
+              return [ws.id, [] as string[]] as const;
+            }
+          })
+        );
+        if (cancelled) return;
+        const snapByWs = new Map(snapEntries);
+        const studioOpts: ReqOption[] = studios.map((ws) => ({
+          id: ws.id,
+          title: ws.title,
+          kind: "studio",
+          legacySourceId: ws.legacySourceId ?? null,
+          snapshotIds: snapByWs.get(ws.id) ?? [],
+          tcTotal: ws.tcTotal,
+          tcApproved: ws.tcApproved,
+        }));
+        const studioLegacyIds = new Set(
+          studioOpts.map((o) => o.legacySourceId).filter(Boolean) as string[]
+        );
+        const studioIds = new Set(studioOpts.map((o) => o.id));
+        const legacyOpts: ReqOption[] = (legacyRes.items ?? [])
+          .filter((r) => !studioIds.has(r.id) && !studioLegacyIds.has(r.id))
+          .map((r) => ({
+            id: r.id,
+            title: r.title,
+            description: r.description ?? undefined,
+            kind: "legacy" as const,
+            legacySourceId: r.id,
+            snapshotIds: [],
+          }));
+        const merged = [...studioOpts, ...legacyOpts];
+        setRequirementsList(merged);
+        setBatchReqId((prev) => {
+          if (prev && merged.some((m) => m.id === prev)) return prev;
+          if (
+            prev &&
+            items.some(
+              (t) => t.sourceId === prev || t.requirementSnapshotId === prev
+            )
+          ) {
+            return prev;
+          }
+          return prev ?? merged[0]?.id;
+        });
+
+        const fromUrl = searchParams.get("testCaseId");
+        const moduleQ = searchParams.get("module")?.trim();
+        if (fromUrl) {
+          setTestCaseId(fromUrl);
+        } else if (moduleQ) {
+          const match = items.find(
+            (t) => (t.module || "").toLowerCase() === moduleQ.toLowerCase()
+          );
+          if (match) setTestCaseId(match.id);
+          else if (!testCaseId && items[0]) setTestCaseId(items[0].id);
+        } else if (!testCaseId && items[0]) {
+          setTestCaseId(items[0].id);
+        }
+      } catch {
+        if (!cancelled) {
+          setApproved([]);
+          setRequirementsList([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const syncUrl = useCallback(
+    (id: string) => {
+      const q = new URLSearchParams(searchParams);
+      q.set("testCaseId", id);
+      setSearchParams(q, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
+
+  const onGateChange = useCallback((g: { ready: boolean; reasons: string[] }) => {
+    setGateReady(g.ready);
+    setGateReasons(g.reasons);
+  }, []);
+
+  function selectPhase(id: E2ePhaseId) {
+    setActivePhase(id);
+    setResultTab("log");
+  }
+
+  function pushPhaseLog(phase: E2ePhaseId, line: string) {
+    setActivePhase(phase);
+    setRun((r) => appendPhaseLog(setPhaseRunning(r, phase), phase, line));
+  }
+
+  async function ensureInspectSnapshot(force = false): Promise<string> {
+    if (!localPath) throw new Error("Chưa gắn project root");
+    const cached = inspectCacheRef.current;
+    const sameUrl = cached && cached.targetUrl === targetUrl.trim();
+    const fresh = sameUrl && Date.now() - cached.at < 5 * 60 * 1000;
+    if (!force && fresh && cached.promptJson) {
+      pushPhaseLog(
+        "inspect",
+        `→ Inspect (cache ${Math.round((Date.now() - cached.at) / 1000)}s) elements=${cached.elementCount}\n`
+      );
+      setRun((r) => finishPhase(r, "inspect", { status: "finish", durationMs: 0 }));
+      return cached.promptJson;
+    }
+    const t0 = performance.now();
+    setRun((r) => setPhaseRunning(r, "inspect"));
+    const inspected = await inspectE2eDom({
+      targetUrl,
+      projectRoot: localPath,
+      usePlaywrightInspect,
+      onLog: (line) => pushPhaseLog("inspect", line),
+    });
+    inspectCacheRef.current = {
+      targetUrl: targetUrl.trim(),
+      promptJson: inspected.domSnapshot,
+      elementCount: inspected.elementCount,
+      routeCount: inspected.routeCount,
+      source: inspected.source,
+      at: Date.now(),
+    };
+    setRun((r) =>
+      finishPhase(r, "inspect", {
+        status: inspected.elementCount > 0 ? "finish" : "error",
+        durationMs: Math.round(performance.now() - t0),
+      })
+    );
+    return inspected.domSnapshot;
+  }
+
+  async function stageFilesFromGen(
+    batchFiles: E2EFileDto[],
+    moduleName: string,
+    tcId: string
+  ) {
+    if (!project?.id || !localPath || batchFiles.length === 0) return;
+    setFiles(batchFiles);
+    setResultTab("files");
+    if (!isTauri()) return;
+    const batchRunId = newE2eRunId(tcId || "batch");
+    try {
+      const staged = buildE2eStagedFiles(batchFiles, {
+        runId: batchRunId,
+        module: moduleName,
+      });
+      const session: E2eStagingSession = {
+        runId: batchRunId,
+        projectId: project.id,
+        testCaseId: tcId,
+        module: moduleName,
+        files: staged,
+        backups: [],
+      };
+      await writeE2eOverlay(localPath, session);
+      setStaging(session);
+      setAppliedPaths([]);
+    } catch {
+      /* optional */
+    }
+  }
+
+  /** Step 1 — Inspect only */
+  async function runStepInspect() {
+    if (!localPath) {
+      message.warning("Cần gắn project root");
+      return;
+    }
+    if (!targetUrl.trim()) {
+      message.warning("Cần Target URL");
+      return;
+    }
+    setBusy(true);
+    setResultTab("log");
+    try {
+      await ensureInspectSnapshot(true);
+      message.success("Inspect xong");
+      void persistE2eEnv();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      setRun((r) =>
+        finishPhase(appendPhaseLog(r, "inspect", `ERROR: ${String(e)}\n`), "inspect", {
+          status: "error",
+          durationMs: 0,
+        })
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Step 2 — Generate only (batch) */
+  async function runStepGenerateBatch() {
+    if (!project?.id || !localPath) {
+      message.warning("Cần project + root");
+      return;
+    }
+    if (!selectedBatchReq || batchSelected.length === 0) {
+      message.warning("Chọn Requirement và ít nhất 1 TC E2E");
+      return;
+    }
+    if (!aiReady) {
+      message.warning("AI chưa Ready");
+      return;
+    }
+    const cases =
+      batchSelected.length > 0
+        ? batchCandidates.filter((t) => batchSelected.includes(t.id))
+        : [...batchCandidates];
+    if (cases.length === 0) return;
+    setBatchSelected(cases.map((t) => t.id));
+    if (!testCaseId && cases[0]) {
+      setTestCaseId(cases[0].id);
+      syncUrl(cases[0].id);
+    }
+
+    const batchModule = resolveBatchModuleFolder(cases, selectedBatchReq.title);
+    const control = batchControlRef.current;
+    control.start();
+    setBusy(true);
+    setAppliedPaths([]);
+    setBatchGenItems([]);
+    setBatchResults(initE2eQueueRows(cases));
+    setBatchProgress({ current: 0, total: cases.length, label: cases[0]?.title || "Generate…" });
+    setActivePhase("generate");
+    setResultTab("log");
+    setRun((r) => setPhaseRunning(r, "generate"));
+
+    try {
+      let domSnapshot = "";
+      try {
+        domSnapshot = await ensureInspectSnapshot(false);
+      } catch (e) {
+        pushPhaseLog("inspect", `  inspect warn (vẫn Generate): ${String(e)}\n`);
+      }
+
+      const t0 = performance.now();
+      const { rows, files: batchFiles, genItems } = await generateE2eBatch({
+        projectId: project.id,
+        projectRoot: localPath,
+        testCases: cases,
+        targetUrl,
+        module: batchModule,
+        requirementTitle: selectedBatchReq?.title,
+        domSnapshot,
+        provider: conn?.provider,
+        useStorageState,
+        username: e2eUsername,
+        password: e2ePassword,
+        waitIfPaused: async () => {
+          await control.waitIfPaused();
+          setBatchResults((prev) =>
+            control.getStatus() === "paused"
+              ? (markBatchRowsPaused(prev as BatchPipelineRow[]) as E2eBatchPipelineRow[])
+              : prev
+          );
+        },
+        onProgress: (p) => {
+          setActivePhase("generate");
+          setBatchProgress({
+            current: p.current,
+            total: p.total,
+            label: p.label,
+          });
+          setBatchResults((prev) => {
+            const idx = Math.min(p.current, cases.length - 1);
+            return prev.map((r, i) => {
+              if (i === idx && p.current < p.total) {
+                return { ...r, status: "fail", error: BATCH_NOTE_RUNNING };
+              }
+              if (i < p.current && r.error === BATCH_NOTE_RUNNING) {
+                return r;
+              }
+              return r;
+            });
+          });
+        },
+        onLog: (line) => pushPhaseLog("generate", line),
+      });
+      const pipeline = mapGenToPipeline(cases, rows, genItems);
+      setBatchResults(
+        control.getStatus() === "paused"
+          ? (markBatchRowsPaused(pipeline as BatchPipelineRow[]) as E2eBatchPipelineRow[])
+          : pipeline
+      );
+      setBatchGenItems(genItems);
+      await stageFilesFromGen(batchFiles, batchModule, cases[0]?.id || "");
+      setRun((r) => ({
+        ...finishPhase(r, "generate", {
+          status: genItems.length > 0 ? "finish" : "error",
+          durationMs: Math.round(performance.now() - t0),
+        }),
+        jobPassed: null,
+      }));
+      message.success(
+        `Generate xong: ${genItems.length}/${cases.length} TC — tiếp theo: Kiểm thử`
+      );
+      void persistE2eEnv();
+      void refreshAuthDiscovery();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      setRun((r) =>
+        finishPhase(appendPhaseLog(r, "generate", `ERROR: ${String(e)}\n`), "generate", {
+          status: "error",
+          durationMs: 0,
+        })
+      );
+    } finally {
+      control.reset();
+      setBusy(false);
+      setBatchProgress(null);
+    }
+  }
+
+  /** Step 3 — Verify Playwright (no AI heal). Allowed while Generate paused. */
+  async function runStepVerifyBatch() {
+    if (!project?.id || !localPath) {
+      message.warning("Cần project + root");
+      return;
+    }
+    if (files.length === 0 || batchGenItems.length === 0) {
+      message.warning("Chưa Generate — bấm Chạy E2E Job trước");
+      return;
+    }
+    const batchModule = selectedBatchReq
+      ? resolveBatchModuleFolder(
+          batchCandidates.filter((t) => batchSelected.includes(t.id)),
+          selectedBatchReq.title
+        )
+      : "E2E";
+
+    setBusy(true);
+    setActivePhase("headless");
+    setResultTab("log");
+    setBatchProgress({
+      current: 0,
+      total: batchGenItems.length,
+      label: "Kiểm thử…",
+    });
+
+    try {
+      const domSnapshot = inspectCacheRef.current?.promptJson || "";
+      if (
+        !authDiscovery?.ready &&
+        !e2eUsername.trim() &&
+        !e2ePassword.trim() &&
+        aiReady
+      ) {
+        await runAuthSeed({ silent: true });
+      }
+      let session = staging;
+      if (isTauri() && session) {
+        try {
+          session = {
+            ...session,
+            backups: await captureE2eBackups(localPath, session.files),
+          };
+          setStaging(session);
+          pushPhaseLog("headless", "  đã snapshot AItest (rollback sau Verify)\n");
+        } catch {
+          /* optional */
+        }
+      }
+
+      const t0 = performance.now();
+      const { rows, okCount, files: outFiles } = await verifyE2eModuleBatch({
+        projectId: project.id,
+        projectRoot: localPath,
+        module: batchModule,
+        targetUrl,
+        files,
+        genItems: batchGenItems,
+        domSnapshot,
+        showBrowser,
+        provider: conn?.provider,
+        healFailures: false,
+        maxRetries: 1,
+        useStorageState,
+        username: e2eUsername,
+        password: e2ePassword,
+        priorRows: batchResults.map((r) => ({
+          testCaseId: r.testCaseId,
+          title: r.title,
+          status: r.status === "ok" ? "generated" : "fail",
+          error: r.error,
+          runId: r.runId,
+          files: r.files,
+        })),
+        onProgress: (p) => {
+          setActivePhase("headless");
+          setBatchProgress({
+            current: p.current,
+            total: p.total,
+            label: p.label,
+          });
+        },
+        onLog: (line) => pushPhaseLog("headless", line),
+      });
+      setBatchResults((prev) => mergeVerifyStatus(prev, rows));
+      setFiles(outFiles);
+      if (isTauri() && session && outFiles.length > 0) {
+        try {
+          session = await refreshE2eOverlayFromFiles(localPath, session, outFiles);
+          setStaging(session);
+          if (session.backups.length) {
+            await rollbackE2eTargets(localPath, session.backups);
+            pushPhaseLog("headless", "  đã rollback AItest — chờ Apply từ staging\n");
+          }
+        } catch (e) {
+          pushPhaseLog("headless", `  staging warn: ${String(e)}\n`);
+        }
+      }
+      const allPassed = okCount === batchGenItems.length;
+      setRun((r) => ({
+        ...finishPhase(r, "headless", {
+          status: allPassed ? "finish" : "error",
+          durationMs: Math.round(performance.now() - t0),
+        }),
+        jobPassed: allPassed,
+      }));
+      setRun((r) => finishPhase(r, "heal", { status: "skip", durationMs: 0 }));
+      if (allPassed) {
+        message.success(`Kiểm thử: ${okCount}/${batchGenItems.length} PASS`);
+      } else {
+        const firstErr = rows.find((r) => r.status === "fail" && r.error)?.error;
+        setResultTab("log");
+        message.error(
+          firstErr
+            ? `Kiểm thử FAIL — xem tab Log. ${firstErr.slice(0, 180)}`
+            : `Kiểm thử: ${okCount}/${batchGenItems.length} PASS — xem Log chi tiết`
+        );
+      }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      setRun((r) =>
+        finishPhase(appendPhaseLog(r, "headless", `ERROR: ${String(e)}\n`), "headless", {
+          status: "error",
+          durationMs: 0,
+        })
+      );
+    } finally {
+      setBusy(false);
+      setBatchProgress(null);
+    }
+  }
+
+  /** Step 4 — Heal failed specs (AI + Playwright) */
+  async function runStepHealBatch() {
+    if (!project?.id || !localPath) {
+      message.warning("Cần project + root");
+      return;
+    }
+    if (files.length === 0 || batchGenItems.length === 0) {
+      message.warning("Chưa có file Generate");
+      return;
+    }
+    if (run.jobPassed === true) {
+      message.info("Không có TC FAIL để Heal");
+      return;
+    }
+    if (!aiReady) {
+      message.warning("AI chưa Ready — không Heal được");
+      return;
+    }
+    const batchModule = selectedBatchReq
+      ? resolveBatchModuleFolder(
+          batchCandidates.filter((t) => batchSelected.includes(t.id)),
+          selectedBatchReq.title
+        )
+      : "E2E";
+
+    setBusy(true);
+    setActivePhase("heal");
+    setResultTab("log");
+
+    try {
+      const t0 = performance.now();
+      const { rows, okCount, files: outFiles } = await verifyE2eModuleBatch({
+        projectId: project.id,
+        projectRoot: localPath,
+        module: batchModule,
+        targetUrl,
+        files,
+        genItems: batchGenItems,
+        domSnapshot: inspectCacheRef.current?.promptJson || "",
+        showBrowser,
+        provider: conn?.provider,
+        healFailures: true,
+        maxRetries: 2,
+        useStorageState,
+        username: e2eUsername,
+        password: e2ePassword,
+        priorRows: batchResults.map((r) => ({
+          testCaseId: r.testCaseId,
+          title: r.title,
+          status: r.status === "ok" ? "generated" : "fail",
+          error: r.error,
+          runId: r.runId,
+          files: r.files,
+        })),
+        onProgress: (p) => {
+          setActivePhase("heal");
+          setBatchProgress({
+            current: p.current,
+            total: p.total,
+            label: p.label,
+          });
+        },
+        onLog: (line) => pushPhaseLog("heal", line),
+      });
+      setBatchResults((prev) => mergeVerifyStatus(prev, rows));
+      setFiles(outFiles);
+      if (isTauri() && staging && outFiles.length > 0) {
+        try {
+          const session = await refreshE2eOverlayFromFiles(localPath, staging, outFiles);
+          setStaging(session);
+        } catch {
+          /* optional */
+        }
+      }
+      const allPassed = okCount === batchGenItems.length;
+      setRun((r) => ({
+        ...finishPhase(r, "heal", {
+          status: allPassed ? "finish" : "error",
+          durationMs: Math.round(performance.now() - t0),
+        }),
+        jobPassed: allPassed,
+        healCount: allPassed ? 1 : 0,
+      }));
+      message.success(`Heal: ${okCount}/${batchGenItems.length} PASS`);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      setRun((r) =>
+        finishPhase(appendPhaseLog(r, "heal", `ERROR: ${String(e)}\n`), "heal", {
+          status: "error",
+          durationMs: 0,
+        })
+      );
+    } finally {
+      setBusy(false);
+      setBatchProgress(null);
+    }
+  }
+
+  /** Single — Generate only */
+  async function runStepGenerateSingle() {
+    if (!project?.id || !localPath || !testCaseId || !selected) {
+      message.warning("Chọn TC + gắn root");
+      return;
+    }
+    if (!aiReady) {
+      message.warning("AI chưa Ready");
+      return;
+    }
+    setBusy(true);
+    setAppliedPaths([]);
+    setActivePhase("generate");
+    setResultTab("log");
+    setRun((r) => setPhaseRunning(r, "generate"));
+    try {
+      let domSnapshot = "";
+      try {
+        domSnapshot = await ensureInspectSnapshot(false);
+      } catch (e) {
+        pushPhaseLog("inspect", `  inspect warn: ${String(e)}\n`);
+      }
+      const t0 = performance.now();
+      const gen = await generateE2eForTestCase({
+        projectId: project.id,
+        projectRoot: localPath,
+        testCase: selected,
+        targetUrl,
+        module: selected.module || undefined,
+        domSnapshot,
+        provider: conn?.provider,
+        useStorageState,
+        username: e2eUsername,
+        password: e2ePassword,
+        onLog: (line) => pushPhaseLog("generate", line),
+      });
+      setSingleRunId(gen.runId);
+      setSinglePrimarySpec(gen.primarySpecPath);
+      setBatchGenItems([
+        {
+          testCaseId: selected.id,
+          title: selected.title,
+          runId: gen.runId,
+          primarySpecPath: gen.primarySpecPath,
+          files: gen.files,
+        },
+      ]);
+      await stageFilesFromGen(gen.files, selected.module || "E2E", selected.id);
+      setRun((r) => ({
+        ...finishPhase(r, "generate", {
+          status: gen.files.length > 0 ? "finish" : "error",
+          durationMs: Math.round(performance.now() - t0),
+        }),
+        jobPassed: null,
+      }));
+      message.success("Generate xong — bấm Verify để chạy Playwright");
+      void persistE2eEnv();
+      void refreshAuthDiscovery();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      setRun((r) =>
+        finishPhase(appendPhaseLog(r, "generate", `ERROR: ${String(e)}\n`), "generate", {
+          status: "error",
+          durationMs: 0,
+        })
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runStepVerifySingle(healFailures: boolean) {
+    if (!project?.id || !localPath || !selected) {
+      message.warning("Chọn TC + gắn root");
+      return;
+    }
+    if (files.length === 0) {
+      message.warning("Chưa Generate");
+      return;
+    }
+    const phase: E2ePhaseId = healFailures ? "heal" : "headless";
+    setBusy(true);
+    setActivePhase(phase);
+    setResultTab("log");
+    try {
+      if (
+        !authDiscovery?.ready &&
+        !e2eUsername.trim() &&
+        !e2ePassword.trim() &&
+        aiReady
+      ) {
+        await runAuthSeed({ silent: true });
+      }
+      let session = staging;
+      if (!healFailures && isTauri() && session) {
+        try {
+          session = {
+            ...session,
+            backups: await captureE2eBackups(localPath, session.files),
+          };
+          setStaging(session);
+        } catch {
+          /* optional */
+        }
+      }
+      const t0 = performance.now();
+      const verified = await verifyE2eForTestCase({
+        projectId: project.id,
+        projectRoot: localPath,
+        testCase: selected,
+        targetUrl,
+        files,
+        primarySpecPath: singlePrimarySpec || undefined,
+        runId: singleRunId || undefined,
+        domSnapshot: inspectCacheRef.current?.promptJson || "",
+        module: selected.module || undefined,
+        showBrowser,
+        provider: conn?.provider,
+        healFailures,
+        maxRetries: healFailures ? 2 : 1,
+        useStorageState,
+        username: e2eUsername,
+        password: e2ePassword,
+        onLog: (line) => pushPhaseLog(phase, line),
+      });
+      setFiles(verified.files);
+      if (verified.primarySpecPath) setSinglePrimarySpec(verified.primarySpecPath);
+      if (isTauri() && session && verified.files.length > 0) {
+        try {
+          session = await refreshE2eOverlayFromFiles(localPath, session, verified.files);
+          setStaging(session);
+          if (!healFailures && session.backups.length) {
+            await rollbackE2eTargets(localPath, session.backups);
+            pushPhaseLog(phase, "  đã rollback AItest — chờ Apply\n");
+          }
+        } catch (e) {
+          pushPhaseLog(phase, `  staging warn: ${String(e)}\n`);
+        }
+      }
+      setRun((r) => ({
+        ...finishPhase(r, phase, {
+          status: verified.passed ? "finish" : "error",
+          durationMs: Math.round(performance.now() - t0),
+        }),
+        jobPassed: verified.passed,
+        healAttempts: verified.attempts,
+        healCount: healFailures && verified.passed ? 1 : r.healCount,
+      }));
+      if (!healFailures) {
+        setRun((r) => finishPhase(r, "heal", { status: "skip", durationMs: 0 }));
+      }
+      message.success(verified.passed ? "PASS" : "FAIL — có thể bấm Heal");
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      setRun((r) =>
+        finishPhase(appendPhaseLog(r, phase, `ERROR: ${String(e)}\n`), phase, {
+          status: "error",
+          durationMs: 0,
+        })
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onApplyStaging() {
+    if (!localPath || !staging) {
+      message.warning("Không có staging để Apply");
+      return;
+    }
+    if (run.jobPassed !== true) {
+      message.warning("Chỉ Apply sau khi Kiểm thử PASS (giống Unit)");
+      return;
+    }
+    setApplyBusy(true);
+    try {
+      const result = await applyE2eStaging(localPath, staging);
+      setAppliedPaths(result.appliedPaths);
+      setBatchResults((prev) =>
+        prev.map((r) =>
+          r.verifyStatus === "pass" ? { ...r, applyStatus: "done" as const } : r
+        )
+      );
+      setRun((r) =>
+        finishPhase(r, "apply", {
+          status: "finish",
+          durationMs: 0,
+          logExtra:
+            `→ Applied ${result.appliedPaths.length} file(s) dưới AItest/E2ETest\n` +
+            result.appliedPaths.map((p) => `  ✓ ${p}\n`).join("") +
+            (result.stagingCleaned
+              ? "  staging đã dọn.\n"
+              : "  staging cleanup: một phần / bỏ qua.\n") +
+            "Done.\n",
+        })
+      );
+      setStaging(null);
+      setActivePhase("apply");
+      setResultTab("files");
+      message.success(
+        result.stagingCleaned
+          ? `Đã Apply ${result.appliedPaths.length} file · staging đã dọn`
+          : `Đã Apply ${result.appliedPaths.length} file`
+      );
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplyBusy(false);
+    }
+  }
+
+  function pauseE2eBatch() {
+    batchControlRef.current.pause();
+    setBatchResults(
+      (prev) => markBatchRowsPaused(prev as BatchPipelineRow[]) as E2eBatchPipelineRow[]
+    );
+  }
+
+  function resumeE2eBatch() {
+    setBatchResults(
+      (prev) => markBatchRowsResumed(prev as BatchPipelineRow[]) as E2eBatchPipelineRow[]
+    );
+    batchControlRef.current.resume();
+  }
+
+  async function onDiscardStaging() {
+    setStaging(null);
+    setFiles([]);
+    setBatchGenItems([]);
+    setBatchResults([]);
+    setAppliedPaths([]);
+    setRun(initialE2eJobRunState());
+    message.info("Đã hủy staging E2E");
+  }
+
+  const pipelineStep =
+    appliedPaths.length > 0 ? 2 : run.jobPassed != null ? 1 : files.length > 0 ? 1 : 0;
+  const batchFailCount = batchResults.filter(
+    (r) =>
+      r.status === "fail" &&
+      r.error !== BATCH_NOTE_WAITING &&
+      r.error !== BATCH_NOTE_PAUSED &&
+      r.error !== BATCH_NOTE_RUNNING
+  ).length;
+  const genOkCount = batchResults.filter((r) => r.status === "ok").length;
+
+  if (!project) {
+    return (
+      <div className="page">
+        <Alert type="warning" showIcon title="Chọn dự án ở Home / Projects trước." />
+      </div>
+    );
+  }
+
+  return (
+    <div className="page">
+      <header className="page-head">
+        <div>
+          <Typography.Title level={2} style={{ margin: 0 }}>
+            E2E test
+          </Typography.Title>
+          <Typography.Text type="secondary">
+            Giống Unit: E2E Job → Kiểm thử → Apply vào{" "}
+            <Typography.Text code style={{ fontSize: 12 }}>
+              {"{project root}"}/AItest/E2ETest/
+            </Typography.Text>
+          </Typography.Text>
+        </div>
+        <Space>
+          <Link to={activityUrl({ tab: "e2e-jobs" })}>
+            <Button>E2E Job Board</Button>
+          </Link>
+          <Link to={ROUTES.unitTest}>
+            <Button>Unit test</Button>
+          </Link>
+        </Space>
+      </header>
+
+      <Space orientation="vertical" size="middle" style={{ width: "100%", marginTop: 12 }}>
+        <E2eGateBanner
+          aiReady={Boolean(aiReady)}
+          aiProvider={conn?.provider}
+          localPath={localPath}
+          targetUrl={targetUrl}
+          testCaseId={testCaseId || batchSelected[0] || ""}
+          onGateChange={onGateChange}
+        />
+
+        {approved.length > 0 && !approved.some((t) => isE2eTestCaseType(t.type)) ? (
+          <Alert
+            type="info"
+            showIcon
+            title="Chưa có TC type=E2E"
+            description="Đổi loại thành E2E tại Duyệt TC, rồi Approve."
+          />
+        ) : null}
+
+        <Steps
+          current={pipelineStep}
+          style={{ marginTop: 8, marginBottom: 8, maxWidth: 640 }}
+          items={[
+            { title: "E2E Job" },
+            { title: "Verify" },
+            { title: "Apply" },
+          ]}
+        />
+
+        <Card
+          title={
+            <Space>
+              <RocketOutlined style={{ color: "#00b4d8" }} />
+              E2E Job · AI CLI
+            </Space>
+          }
+        >
+          <Radio.Group
+            value={inputMode}
+            onChange={(e) => setInputMode(e.target.value as "requirement" | "single")}
+            style={{ marginBottom: 16 }}
+          >
+            <Radio.Button value="requirement">
+              📌 Theo Requirement (Batch tất cả TC E2E)
+            </Radio.Button>
+            <Radio.Button value="single">🎯 Theo Test Case (Từng TC lẻ)</Radio.Button>
+          </Radio.Group>
+
+          <Collapse
+            size="small"
+            style={{ marginBottom: 16 }}
+            items={[
+              {
+                key: "env",
+                label: "Môi trường · Target URL & trình duyệt",
+                children: (
+                  <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+                    <div>
+                      <Typography.Text strong>Target URL</Typography.Text>
+                      <Space.Compact style={{ width: "100%", marginTop: 6 }}>
+                        <Input
+                          value={targetUrl}
+                          onChange={(e) => setTargetUrl(e.target.value)}
+                          placeholder="http://localhost:3000"
+                          disabled={busy}
+                        />
+                        <Button
+                          icon={<SaveOutlined />}
+                          disabled={busy || !project?.id}
+                          onClick={() => {
+                            void persistE2eEnv().then(() =>
+                              message.success("Đã lưu env E2E vào project")
+                            );
+                          }}
+                        >
+                          Lưu
+                        </Button>
+                      </Space.Compact>
+                    </div>
+                    <div>
+                      <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                        Chế độ trình duyệt khi Kiểm thử
+                      </Typography.Text>
+                      <Segmented
+                        options={[
+                          {
+                            label: (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                <DesktopOutlined /> Chromium · xem từng bước
+                              </span>
+                            ),
+                            value: "headed",
+                          },
+                          {
+                            label: (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                                <EyeInvisibleOutlined /> Chạy ngầm (nhanh)
+                              </span>
+                            ),
+                            value: "headless",
+                          },
+                        ]}
+                        value={showBrowser ? "headed" : "headless"}
+                        onChange={(v) => setShowBrowser(v === "headed")}
+                        disabled={busy}
+                      />
+                      {showBrowser ? (
+                        <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
+                          Chế độ cửa sổ dùng slowMo ~0.5s giữa mỗi thao tác (click/fill) để bạn theo dõi được từng bước.
+                          Muốn chạy nhanh → chọn «Chạy ngầm».
+                        </Typography.Text>
+                      ) : null}
+                    </div>
+                    <Checkbox
+                      checked={usePlaywrightInspect}
+                      onChange={(e) => setUsePlaywrightInspect(e.target.checked)}
+                      disabled={busy}
+                    >
+                      Quét DOM bằng Playwright Chromium (SPA)
+                    </Checkbox>
+                    <Checkbox
+                      checked={useStorageState}
+                      onChange={(e) => setUseStorageState(e.target.checked)}
+                      disabled={busy}
+                    >
+                      Dùng storageState — bỏ qua login UI khi test chức năng (fixtures/storageState.json)
+                    </Checkbox>
+                    <Alert
+                      type={authDiscovery?.ready ? "success" : "info"}
+                      showIcon
+                      style={{ marginBottom: 0 }}
+                      title={
+                        authDiscovery?.ready
+                          ? "Auth sẵn sàng (AI seed / storageState)"
+                          : "Auth: AI sẽ seed từ source khi Generate / Seed auth"
+                      }
+                      description={
+                        <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+                          <Typography.Text style={{ fontSize: 12 }}>
+                            Credential lưu tại <code>.ai-test/auth/&#123;role&#125;.json</code> (local,
+                            gitignore). TC gắn <code>authRole</code>/<code>authRef</code> — không nhập
+                            login trên AITest. Đã có artifact → bỏ qua seed.
+                          </Typography.Text>
+                          {authDiscovery?.notes?.length ? (
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              {authDiscovery.notes[authDiscovery.notes.length - 1]}
+                            </Typography.Text>
+                          ) : null}
+                          <Space wrap size={8}>
+                            <Button
+                              size="small"
+                              disabled={busy || !localPath || !project?.id || !aiReady}
+                              onClick={() => {
+                                void (async () => {
+                                  setBusy(true);
+                                  try {
+                                    await runAuthSeed();
+                                  } finally {
+                                    setBusy(false);
+                                  }
+                                })();
+                              }}
+                            >
+                              Seed auth (AI)
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              style={{ padding: 0, height: "auto" }}
+                              onClick={() => setShowAuthOverride((v) => !v)}
+                            >
+                              {showAuthOverride ? "Ẩn ghi đè" : "Ghi đè thủ công"}
+                            </Button>
+                          </Space>
+                          {showAuthOverride ? (
+                            <Space.Compact style={{ width: "100%" }}>
+                              <Input
+                                value={e2eUsername}
+                                onChange={(e) => setE2eUsername(e.target.value)}
+                                placeholder="Override email"
+                                disabled={busy}
+                                autoComplete="off"
+                                style={{ width: "50%" }}
+                              />
+                              <Input.Password
+                                value={e2ePassword}
+                                onChange={(e) => setE2ePassword(e.target.value)}
+                                placeholder="Override mật khẩu"
+                                disabled={busy}
+                                autoComplete="new-password"
+                                style={{ width: "50%" }}
+                              />
+                            </Space.Compact>
+                          ) : null}
+                        </Space>
+                      }
+                    />
+                    <Button
+                      size="small"
+                      disabled={busy || !localPath || !targetUrl.trim()}
+                      onClick={() => void runStepInspect()}
+                    >
+                      Quét DOM (Inspect) ngay
+                    </Button>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+
+          {inputMode === "requirement" ? (
+            <Space orientation="vertical" size={14} style={{ width: "100%" }}>
+              <div>
+                <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                  1. Chọn Yêu cầu (Requirement) muốn chạy E2E hàng loạt:
+                </Typography.Text>
+                <Select
+                  style={{ width: "100%" }}
+                  size="large"
+                  placeholder="— Chọn Requirement trong dự án —"
+                  value={batchReqId || undefined}
+                  options={requirementsList.map((r) => {
+                    const linked = approved.filter((t) => tcBelongsToReq(t, r));
+                    return {
+                      value: r.id,
+                      label: `📄 ${r.title} (${linked.length} TC E2E Approved)`,
+                    };
+                  })}
+                  onChange={(id) => {
+                    setBatchReqId(id);
+                    setBatchResults([]);
+                    const req = requirementsList.find((r) => r.id === id);
+                    if (req) {
+                      setBatchSelected(
+                        approved.filter((t) => tcBelongsToReq(t, req)).map((t) => t.id)
+                      );
+                    } else {
+                      setBatchSelected([]);
+                    }
+                  }}
+                  showSearch
+                  optionFilterProp="label"
+                  disabled={busy}
+                  notFoundContent={
+                    <div style={{ padding: 12, textAlign: "center" }}>
+                      <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+                        Chưa có Requirement.
+                      </Typography.Text>
+                      <Link to={ROUTES.requirement}>
+                        <Button size="small" type="primary">
+                          Sang Requirement
+                        </Button>
+                      </Link>
+                    </div>
+                  }
+                />
+              </div>
+
+              {selectedBatchReq ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  title={`Yêu cầu: ${selectedBatchReq.title}`}
+                  description={
+                    <>
+                      Tự động sinh code E2E cho tất cả{" "}
+                      <strong>{batchCandidates.length} TC E2E Approved</strong> thuộc Requirement
+                      này (giống Unit batch).
+                    </>
+                  }
+                />
+              ) : (
+                <Alert
+                  type="warning"
+                  showIcon
+                  title="Chưa chọn Yêu cầu"
+                  description="Chọn 1 Requirement ở ô trên để sinh E2E cho toàn bộ TC Approved."
+                />
+              )}
+
+              {batchProgress ? (
+                <>
+                  <Progress
+                    percent={Math.round((batchProgress.current / batchProgress.total) * 100)}
+                    status={batchStatus === "paused" ? "normal" : "active"}
+                    format={() => `${batchProgress.current}/${batchProgress.total}`}
+                  />
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {batchStatus === "paused"
+                      ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · có thể Kiểm thử phần đã gen · chờ Tiếp tục`
+                      : `Đang xử lý: ${batchProgress.label}`}
+                  </Typography.Text>
+                </>
+              ) : null}
+
+              <Space wrap>
+                <Button
+                  type="primary"
+                  size="large"
+                  icon={<ThunderboltOutlined />}
+                  loading={busy && batchStatus === "running" && activePhase === "generate"}
+                  disabled={
+                    !aiReady ||
+                    !selectedBatchReq ||
+                    batchCandidates.length === 0 ||
+                    !localPath ||
+                    batchStatus === "paused" ||
+                    (busy && batchStatus === "running")
+                  }
+                  onClick={() => {
+                    setBatchSelected(batchCandidates.map((t) => t.id));
+                    void runStepGenerateBatch();
+                  }}
+                >
+                  ⚡ Chạy E2E Job · Tất cả TC E2E trong Requirement ({batchCandidates.length} TC)
+                </Button>
+                {batchStatus === "running" ? (
+                  <Button icon={<PauseCircleOutlined />} onClick={() => pauseE2eBatch()}>
+                    Tạm dừng
+                  </Button>
+                ) : null}
+                {batchStatus === "paused" ? (
+                  <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => resumeE2eBatch()}>
+                    Tiếp tục
+                  </Button>
+                ) : null}
+              </Space>
+
+              {batchResults.length > 0 ? (
+                <E2eBatchConsole
+                  variant="table"
+                  title="Kết quả Generate (batch)"
+                  rows={batchResults}
+                  busy={busy}
+                  batchRunStatus={batchStatus}
+                  generateFailCount={batchFailCount}
+                  onRetryGenerateFails={() => void runStepGenerateBatch()}
+                />
+              ) : null}
+            </Space>
+          ) : (
+            <Space orientation="vertical" size={14} style={{ width: "100%" }}>
+              <div>
+                <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                  1. Chọn Yêu cầu để lọc Test Case (tuỳ chọn):
+                </Typography.Text>
+                <Select
+                  style={{ width: "100%", marginBottom: 12 }}
+                  placeholder="— Tất cả Requirement —"
+                  value={batchReqId || "__all__"}
+                  options={[
+                    { value: "__all__", label: `📦 Tất cả Requirement (${requirementsList.length})` },
+                    ...requirementsList.map((r) => {
+                      const n = approved.filter((t) => tcBelongsToReq(t, r)).length;
+                      return { value: r.id, label: `📄 ${r.title} (${n} TC E2E)` };
+                    }),
+                  ]}
+                  onChange={(id) => setBatchReqId(id === "__all__" ? undefined : id)}
+                  disabled={busy}
+                />
+                <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                  2. Chọn Test Case E2E Approved:
+                </Typography.Text>
+                <Select
+                  style={{ width: "100%" }}
+                  placeholder="Chọn TC E2E"
+                  value={testCaseId || undefined}
+                  options={singleTcOptions.map((t) => ({
+                    value: t.id,
+                    label: `${t.title}${t.module ? ` · ${t.module}` : ""}`,
+                  }))}
+                  onChange={(id) => {
+                    setTestCaseId(id);
+                    syncUrl(id);
+                  }}
+                  showSearch
+                  optionFilterProp="label"
+                  disabled={busy}
+                />
+              </div>
+              <Space wrap>
+                <Button
+                  type="primary"
+                  size="large"
+                  icon={<ThunderboltOutlined />}
+                  loading={busy && activePhase === "generate"}
+                  disabled={busy || !testCaseId || !aiReady || !localPath}
+                  onClick={() => void runStepGenerateSingle()}
+                >
+                  ⚡ Chạy E2E Job
+                </Button>
+                {files.length > 0 && run.jobPassed == null ? (
+                  <Tag color="processing">Đã Generate · tiếp theo: Kiểm thử</Tag>
+                ) : null}
+              </Space>
+            </Space>
+          )}
+        </Card>
+
+        {(files.length > 0 || genOkCount > 0) && (
+          <>
+            {inputMode === "requirement" && batchResults.length > 0 ? (
+              <E2eBatchConsole
+                variant="verifyApply"
+                title="3. Verify & Apply"
+                rows={batchResults}
+                busy={busy}
+                batchRunStatus={batchStatus}
+                generateFailCount={batchFailCount}
+                onRetryGenerateFails={() => void runStepGenerateBatch()}
+                onVerify={() => void runStepVerifyBatch()}
+                onHeal={() => void runStepHealBatch()}
+                onApply={() => void onApplyStaging()}
+                onDiscard={() => void onDiscardStaging()}
+                verifyLoading={busy && activePhase === "headless"}
+                healLoading={busy && activePhase === "heal"}
+                applyLoading={applyBusy}
+                canHeal={run.jobPassed === false}
+                canApply={run.jobPassed === true && !!staging && appliedPaths.length === 0}
+                hasStaging={!!staging}
+              />
+            ) : (
+              <Card id="aitest-e2e-verify-apply" title="3. Verify & Apply" style={{ marginTop: 8 }}>
+                <Space wrap>
+                  <Button
+                    type="primary"
+                    icon={<PlayCircleOutlined />}
+                    loading={busy && activePhase === "headless"}
+                    disabled={busy || files.length === 0}
+                    onClick={() => void runStepVerifySingle(false)}
+                  >
+                    Chạy Verify
+                  </Button>
+                  {run.jobPassed === false ? (
+                    <Button
+                      loading={busy && activePhase === "heal"}
+                      disabled={busy || files.length === 0}
+                      onClick={() => void runStepVerifySingle(true)}
+                    >
+                      Heal (AI sửa)
+                    </Button>
+                  ) : null}
+                  <Button
+                    icon={<SaveOutlined />}
+                    loading={applyBusy}
+                    disabled={busy || run.jobPassed !== true || !staging}
+                    onClick={() => void onApplyStaging()}
+                  >
+                    Áp dụng vào AItest/E2ETest
+                  </Button>
+                  {staging ? (
+                    <Button danger disabled={busy} onClick={() => void onDiscardStaging()}>
+                      Hủy bỏ & xóa staging
+                    </Button>
+                  ) : null}
+                  {run.jobPassed === true ? (
+                    <Tag color="success">
+                      PASS {run.healCount > 0 ? `· Heal ${run.healCount}×` : ""}
+                    </Tag>
+                  ) : null}
+                  {run.jobPassed === false ? <Tag color="error">FAIL</Tag> : null}
+                  {files.length > 0 && run.jobPassed == null ? (
+                    <Tag color="processing">Tiếp theo: Chạy Verify</Tag>
+                  ) : null}
+                </Space>
+                <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+                  Kiểm thử chạy Playwright. Heal chỉ khi FAIL. Apply chỉ sau PASS — giống Unit.
+                </Typography.Paragraph>
+              </Card>
+            )}
+          </>
+        )}
+
+        <E2ePipelineStrip
+          run={run}
+          busy={busy}
+          activePhase={activePhase}
+          onSelectPhase={selectPhase}
+          showBrowser={showBrowser}
+        />
+
+        {busy && (activePhase === "headless" || activePhase === "heal") ? (
+          <Alert
+            type={showBrowser ? "info" : "warning"}
+            showIcon
+            message={
+              showBrowser
+                ? "Đang mở Chromium · chậm từng bước (slowMo) — theo dõi cửa sổ đến khi test xong."
+                : "Đang chạy test headless (không cửa sổ)."
+            }
+          />
+        ) : null}
+
+        {run.jobPassed === true && staging && appliedPaths.length === 0 ? (
+          <Alert
+            type="success"
+            showIcon
+            title="Sẵn sàng Apply"
+            description="Kiểm thử PASS — bấm Áp dụng trong card Verify & Apply."
+          />
+        ) : null}
+
+        {staging ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0, fontSize: 12 }}>
+            Staging: <code>{stagingDirHint(staging.runId)}</code>
+          </Typography.Paragraph>
+        ) : null}
+
+        <E2eResultTabs
+          files={files}
+          run={run}
+          activePhase={activePhase}
+          onActivePhaseChange={setActivePhase}
+          tab={resultTab}
+          onTabChange={setResultTab}
+          projectRoot={localPath}
+          onFilesChange={setFiles}
+          editable={Boolean(staging) && appliedPaths.length === 0}
+        />
+      </Space>
+
+      <Modal
+        open={!!batchErrorDetail}
+        title={batchErrorDetail ? `Lỗi E2E: ${batchErrorDetail.title}` : "Chi tiết lỗi E2E"}
+        onCancel={() => setBatchErrorDetail(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setBatchErrorDetail(null)}>
+            Đóng
+          </Button>,
+        ]}
+        width={720}
+      >
+        <Typography.Paragraph
+          style={{
+            whiteSpace: "pre-wrap",
+            fontFamily: "ui-monospace, monospace",
+            fontSize: 12,
+            maxHeight: 420,
+            overflow: "auto",
+          }}
+        >
+          {batchErrorDetail?.error || ""}
+        </Typography.Paragraph>
+      </Modal>
+    </div>
+  );
+}

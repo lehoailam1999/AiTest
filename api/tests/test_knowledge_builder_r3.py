@@ -1,6 +1,8 @@
 """R3 — Knowledge Builder heuristic tests (TC-readiness criteria)."""
 
 from app.features.requirement_studio.knowledge_builder import (
+    ANALYSIS_CRITERIA_GUIDE,
+    build_knowledge_user_prompt,
     build_knowledge_heuristic,
     normalize_knowledge_payload,
     parse_knowledge_llm_json,
@@ -62,3 +64,33 @@ def test_parse_llm_json_fence():
 def test_empty_chunks_marks_gaps():
     payload = build_knowledge_heuristic([])
     assert payload["gaps"]
+
+
+def test_build_knowledge_user_prompt_contains_all_required_types():
+    prompt = build_knowledge_user_prompt(
+        [("Feature: Login", "User phải đăng nhập bằng email/password.")],
+        file_names=["SRS_Login.md"],
+    )
+    assert "SRS nguồn tải lên cần phân tích đầy đủ" in prompt
+    for criterion in ANALYSIS_CRITERIA_GUIDE:
+        assert criterion["type"] in prompt
+        assert criterion["json_key"] in prompt
+
+
+def test_normalize_splits_mixed_lines_into_separate_criteria():
+    raw = {
+        "summary": (
+            "Feature: Đăng nhập; Email bắt buộc; nếu sai mật khẩu trả 401; "
+            "Given user hợp lệ thì vào dashboard."
+        ),
+        "businessRules": [
+            {
+                "text": "Người dùng phải đăng nhập để truy cập; nếu sai thì báo lỗi."
+            }
+        ],
+    }
+    out = normalize_knowledge_payload(raw)
+    assert out["features"]
+    assert out["validationRules"]
+    assert out["exceptions"]
+    assert out["acceptanceCriteria"]

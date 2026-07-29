@@ -26,27 +26,12 @@ const KIND_ALIASES: Record<string, GeneratedTestKind> = {
   endtoend: "e2e",
 };
 
-const TECH_SEGMENTS = new Set([
+const DEFAULT_STRUCTURAL_SEGMENTS = new Set([
   "src",
-  "app",
   "lib",
   "libs",
   "source",
   "sources",
-  "backend",
-  "frontend",
-  "server",
-  "client",
-  "clientapp",
-  "serverapp",
-  "webapp",
-  "web",
-  "wwwroot",
-  "public",
-  "packages",
-  "pkg",
-  "internal",
-  "cmd",
   "dist",
   "build",
   "bin",
@@ -58,13 +43,42 @@ const TECH_SEGMENTS = new Set([
   "__pycache__",
   "target",
   "out",
+  "wwwroot",
+  "public",
   "assets",
   "environments",
-  "shared",
-  "core",
-  "common",
-  "components",
 ]);
+
+/** SPA host shells — strip from module labels; package prefix still keeps them. */
+const DEFAULT_SPA_SHELLS = new Set([
+  "clientapp",
+  "serverapp",
+  "webapp",
+  "webspa",
+  "spa",
+]);
+
+function envSegmentSet(varName: string, defaults: Set<string>): Set<string> {
+  const raw = (typeof process !== "undefined" ? process.env?.[varName] : "") || "";
+  if (!raw.trim()) return defaults;
+  const extra = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set([...defaults, ...extra]);
+}
+
+function structuralSegments(): Set<string> {
+  return envSegmentSet("AITEST_STRUCTURAL_SEGMENTS", DEFAULT_STRUCTURAL_SEGMENTS);
+}
+
+function spaShellSegments(): Set<string> {
+  return envSegmentSet("AITEST_SPA_SHELLS", DEFAULT_SPA_SHELLS);
+}
+
+function techSegments(): Set<string> {
+  return new Set([...structuralSegments(), ...spaShellSegments()]);
+}
 
 const STRIP_PREFIX_TREES = [
   "aitest/",
@@ -82,6 +96,30 @@ const STRIP_PREFIX_TREES = [
 ];
 
 const MAX_MODULE_DEPTH = 2;
+
+/**
+ * Layout Unit/API under AItest:
+ *   AItest/UnitTest/{Requirement}/{TestCaseTitle}/{file}
+ * Shared config stays at AItest/jest.config.cjs + AItest/tsconfig.json (not inside modules).
+ */
+export function buildRequirementTcModule(
+  requirementTitle?: string | null,
+  testCaseTitle?: string | null,
+  fallbackModule?: string | null
+): string {
+  const oneSeg = (raw?: string | null): string => {
+    let mod = (raw || "").replace(/\\/g, "/").trim().replace(/^\/+|\/+$/g, "");
+    mod = mod.replace(/[<>:"|?*]/g, "");
+    const parts = mod.split("/").filter((p) => p && p !== "." && p !== "..");
+    return (parts[0] || "").trim();
+  };
+  const req = oneSeg(requirementTitle);
+  const tc = oneSeg(testCaseTitle);
+  if (req && tc) return `${req}/${tc}`;
+  if (req) return req;
+  if (tc) return tc;
+  return sanitizeModuleLabel(fallbackModule);
+}
 
 export function normalizeKind(kind?: string | null): GeneratedTestKind {
   const k = (kind || "unit").trim().toLowerCase().replace(/\s+/g, "");
@@ -129,8 +167,8 @@ export function sanitizeModuleLabel(module?: string | null): string {
 }
 
 /**
- * Short module from source — strip ClientApp/src/app/…, cap depth.
- * Forensic/ClientApp/src/app/admin/case-record/update/x.ts → Forensic/update
+ * Short module from source — strip structural/SPA shells, cap depth.
+ * Generic for any project: last N business folders after shells removed.
  */
 export function moduleRelFromSource(sourceRel?: string | null): string {
   let p = normRel(sourceRel);
@@ -151,8 +189,18 @@ export function moduleRelFromSource(sourceRel?: string | null): string {
     }
   }
 
-  let parts = p.split("/").filter((s) => s && s !== "." && s !== "..");
-  parts = parts.filter((seg) => !TECH_SEGMENTS.has(seg.toLowerCase()));
+  const rawParts = p.split("/").filter((s) => s && s !== "." && s !== "..");
+  const tech = techSegments();
+  const spa = spaShellSegments();
+  const parts: string[] = [];
+  for (let i = 0; i < rawParts.length; i++) {
+    const seg = rawParts[i];
+    const lowSeg = seg.toLowerCase();
+    if (tech.has(lowSeg) || spa.has(lowSeg)) continue;
+    // Angular: strip `app` only when it sits under `src`
+    if (lowSeg === "app" && i > 0 && rawParts[i - 1].toLowerCase() === "src") continue;
+    parts.push(seg);
+  }
 
   if (parts[0]?.toLowerCase() === AITEST_ROOT.toLowerCase()) {
     parts.shift();
@@ -162,7 +210,7 @@ export function moduleRelFromSource(sourceRel?: string | null): string {
 
   if (!parts.length) return "";
   if (parts.length <= MAX_MODULE_DEPTH) return parts.join("/");
-  return `${parts[0]}/${parts[parts.length - 1]}`;
+  return parts.slice(-MAX_MODULE_DEPTH).join("/");
 }
 
 export function testFileNameFromSource(opts: {
@@ -218,18 +266,51 @@ export function testFileNameFromSource(opts: {
   return `${base}Tests${ext || ".txt"}`;
 }
 
+/**
+ * Ensure each Unit TC gets a distinct file under the same module/source.
+ * Without this, batch verify stages N overlays onto one path → Jest chỉ chạy 1 file
+ * trong khi UI vẫn gắn PASS cho mọi TC.
+ *
+ * Examples:
+ *   foo.test.ts + id 1b899cf6-… → foo.1b899cf6.test.ts
+ *   FooTests.cs + id → FooTests_1b899cf6.cs
+ */
+export function uniquifyTestTargetRel(targetRel: string, testCaseId: string): string {
+  const short = (testCaseId || "").replace(/-/g, "").slice(0, 8).toLowerCase();
+  if (!short) return targetRel.replace(/\\/g, "/");
+  const norm = targetRel.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (norm.toLowerCase().includes(`.${short}.`) || norm.toLowerCase().includes(`_${short}.`)) {
+    return norm;
+  }
+  const testSpec = norm.match(/^(.*?)(\.(?:test|spec))(\.[^.]+)$/i);
+  if (testSpec) {
+    return `${testSpec[1]}.${short}${testSpec[2]}${testSpec[3]}`;
+  }
+  const csStyle = norm.match(/^(.*?)(Tests?)(\.[^.]+)$/);
+  if (csStyle) {
+    return `${csStyle[1]}${csStyle[2]}_${short}${csStyle[3]}`;
+  }
+  const pyStyle = norm.match(/^(.*)\/(test_)([^/]+)$/i);
+  if (pyStyle) {
+    return `${pyStyle[1]}/${pyStyle[2]}${short}_${pyStyle[3]}`;
+  }
+  const anyExt = norm.match(/^(.*)(\.[^.]+)$/);
+  if (anyExt) {
+    return `${anyExt[1]}.${short}${anyExt[2]}`;
+  }
+  return `${norm}.${short}`;
+}
+
 /** Structural code-root folders — AItest is placed as a sibling of these. */
-const CODE_ROOT_MARKERS = new Set(["src", "lib", "libs"]);
+const DEFAULT_CODE_ROOT_MARKERS = new Set(["src", "lib", "libs"]);
+
+function codeRootMarkers(): Set<string> {
+  return envSegmentSet("AITEST_CODE_ROOT_MARKERS", DEFAULT_CODE_ROOT_MARKERS);
+}
 
 /**
  * Directory that owns the source package — place AItest next to its src/lib.
- * Generic for any project name:
- *   {any}/src/… → {any}
- *   Forensic/ClientApp/src/app/x.ts → Forensic/ClientApp
- *   src/todos/x.ts → ""
- *
- * Optional packagePrefix overrides path heuristic (from FS discovery).
- * Pass packagePrefix="" to force repo-root AItest/.
+ * Generic for any project name. Optional packagePrefix overrides heuristic.
  */
 export function packagePrefixFromSource(
   sourceRel?: string | null,
@@ -242,8 +323,12 @@ export function packagePrefixFromSource(
   if (!p) return "";
   const parts = p.split("/").filter((s) => s && s !== "." && s !== "..");
   if (parts.length < 2) return "";
+  const markers = codeRootMarkers();
   for (let i = 0; i < parts.length - 1; i++) {
-    if (!CODE_ROOT_MARKERS.has(parts[i].toLowerCase())) continue;
+    const low = parts[i].toLowerCase();
+    if (!markers.has(low)) continue;
+    // Django-style `app` root: only when not under `src`
+    if (low === "app" && i > 0 && parts[i - 1].toLowerCase() === "src") continue;
     if (i === 0) return "";
     const prefixParts = parts.slice(0, i);
     const lowJoin = prefixParts.map((s) => s.toLowerCase()).join("/");
@@ -287,7 +372,9 @@ export function sutModuleSpecifier(testRel: string, sourceRel: string): string {
 }
 
 /**
- * AItest/{Kind}/{Module}/file — TC.module ưu tiên; nest under package owning src/.
+ * AItest/{Kind}/{Requirement}/{TestCaseTitle}/file
+ * Prefer opts.requirementTitle + testCaseTitle; else legacy opts.module / source path.
+ * jest/tsconfig are NOT placed here — only under AItest/ root via ensureAitestJestTsconfig.
  */
 export function underGeneratedTestFolder(
   kind: GeneratedTestKind | string,
@@ -296,18 +383,25 @@ export function underGeneratedTestFolder(
   opts?: {
     sourceFileName?: string | null;
     module?: string | null;
+    requirementTitle?: string | null;
+    testCaseTitle?: string | null;
     /** Override path heuristic (from FS discovery). "" = repo-root AItest. */
     packagePrefix?: string | null;
   }
 ): string {
   let kindRoot = aitestKindRoot(kind);
   const srcKey = opts?.sourceFileName || sourceDir;
-  const usedTcModule = Boolean(sanitizeModuleLabel(opts?.module));
+  const reqModule = buildRequirementTcModule(
+    opts?.requirementTitle,
+    opts?.testCaseTitle,
+    opts?.module
+  );
+  const usedTcModule = Boolean(reqModule);
   const pkg = packagePrefixFromSource(srcKey, opts?.packagePrefix);
   if (pkg) kindRoot = `${pkg}/${kindRoot}`;
   const name = (fileName || "Tests.txt").replace(/\\/g, "/").replace(/^\/+/, "");
 
-  let mod = sanitizeModuleLabel(opts?.module);
+  let mod = reqModule;
   if (!mod) {
     mod = moduleRelFromSource(srcKey);
   }
@@ -319,7 +413,8 @@ export function underGeneratedTestFolder(
     const kindName = generatedTestRoot(kind).toLowerCase();
     let parts = mod.split("/").filter(Boolean);
     if (parts[0]?.toLowerCase() === kindName) parts.shift();
-    parts = parts.filter((p) => !TECH_SEGMENTS.has(p.toLowerCase()));
+    const drop = techSegments();
+    parts = parts.filter((p) => !drop.has(p.toLowerCase()));
     if (pkg && !usedTcModule) {
       const pkgParts = pkg.toLowerCase().split("/");
       while (parts.length && pkgParts.length && parts[0].toLowerCase() === pkgParts[0]) {
@@ -551,4 +646,41 @@ export function rewriteSutImports(
       return full;
     }
   );
+}
+
+/** [{pkg}/]AItest/E2ETest/{Requirement}/{TC} */
+export function e2eModuleRoot(
+  module?: string | null,
+  opts?: {
+    packagePrefix?: string | null;
+    sourceFileName?: string | null;
+    requirementTitle?: string | null;
+    testCaseTitle?: string | null;
+  }
+): string {
+  let kindRoot = aitestKindRoot("e2e");
+  const pkg = packagePrefixFromSource(opts?.sourceFileName, opts?.packagePrefix);
+  if (pkg) kindRoot = `${pkg}/${kindRoot}`;
+  const mod = buildRequirementTcModule(
+    opts?.requirementTitle,
+    opts?.testCaseTitle,
+    module
+  );
+  if (mod) return `${kindRoot}/${mod}`.replace(/\/+/g, "/");
+  return kindRoot;
+}
+
+/** Default fixtures/storageState.json under E2E module */
+export function e2eStorageStateRel(
+  module?: string | null,
+  opts?: {
+    packagePrefix?: string | null;
+    fileName?: string;
+    requirementTitle?: string | null;
+    testCaseTitle?: string | null;
+  }
+): string {
+  const root = e2eModuleRoot(module, opts);
+  const name = opts?.fileName || "storageState.json";
+  return `${root}/fixtures/${name}`.replace(/\/+/g, "/");
 }

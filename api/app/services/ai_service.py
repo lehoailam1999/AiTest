@@ -101,12 +101,21 @@ async def generate_test_cases_for_connection(
     *,
     api_key: str | None = None,
     provider: Provider | None = None,
+    on_progress: Any | None = None,
+    prefer_oneshot: bool | None = None,
+    session_topic_key: str | None = None,
 ) -> tuple[list[TestCaseDraft], dict[str, Any]]:
     """Returns (drafts, meta) with runnerUsed / cliSessionKey."""
     mode = connection_runner_mode(conn)
     meta: dict[str, Any] = {"runnerUsed": mode, "cliSessionKey": None}
     adapter = get_adapter_for_connection(conn, api_key=api_key, provider=provider)
-    drafts = await adapter.generate_test_cases(title, content, ctx=ctx)
+    kwargs: dict[str, Any] = {"ctx": ctx, "on_progress": on_progress}
+    if isinstance(adapter, BaseCLIAdapter):
+        if prefer_oneshot is not None:
+            kwargs["prefer_oneshot"] = prefer_oneshot
+        if session_topic_key is not None:
+            kwargs["session_topic_key"] = session_topic_key
+    drafts = await adapter.generate_test_cases(title, content, **kwargs)
     if isinstance(adapter, BaseCLIAdapter):
         meta["cliSessionKey"] = adapter.last_session_key
     return drafts, meta
@@ -169,6 +178,58 @@ async def generate_unit_for_connection(
         meta["provider"] = adapter.provider.name
     else:
         meta["provider"] = "llm"
+    return result, meta
+
+
+async def generate_e2e_for_connection(
+    conn: AiBackendConnection,
+    req: "E2ERequest",
+    *,
+    api_key: str | None = None,
+    provider: Provider | None = None,
+    heal: bool = False,
+) -> tuple["E2EResult", dict[str, Any]]:
+    """
+    E2E Playwright generate / heal via API_DIRECT or AI_CLI (chat + parse multi-file).
+    """
+    from app.llm.base import (
+        e2e_result_from_raw,
+        e2e_system_prompt,
+        e2e_user_prompt,
+    )
+
+    mode = connection_runner_mode(conn)
+    meta: dict[str, Any] = {
+        "runnerUsed": mode,
+        "cliSessionKey": None,
+        "provider": None,
+        "heal": heal,
+    }
+    key = api_key
+    if mode == RUNNER_AI_CLI:
+        key = None
+    elif key is None:
+        key = connection_api_key(conn)
+    adapter = get_adapter_for_connection(conn, api_key=key, provider=provider)
+
+    # CLI: dedicated warm session (avoid oneshot cold-start per TC).
+    if isinstance(adapter, BaseCLIAdapter) and hasattr(adapter, "generate_e2e"):
+        result = await adapter.generate_e2e(req, heal=heal)
+        meta["cliSessionKey"] = adapter.last_session_key
+        meta["provider"] = adapter.vendor
+        return result, meta
+
+    sys_p = e2e_system_prompt(heal=heal)
+    usr_p = e2e_user_prompt(req)
+    raw = await adapter.chat(sys_p, usr_p)
+    if isinstance(adapter, BaseCLIAdapter):
+        meta["cliSessionKey"] = adapter.last_session_key
+        meta["provider"] = adapter.vendor
+    elif isinstance(adapter, DirectAPIAdapter):
+        meta["provider"] = adapter.provider.name
+    else:
+        meta["provider"] = "llm"
+    result = e2e_result_from_raw(raw, req)
     return result, meta
 
 

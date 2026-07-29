@@ -233,3 +233,9 @@ export async function runTestCommand(
   });
   return normalizeRun(raw ?? {});
 }
+
+/** EX4.4 — open file/folder in OS (Explorer / default app). */
+export async function openPathInOs(path: string): Promise<void> {
+  ensureTauri();
+  await invoke<void>("open_path_in_os", { path });
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   App,
@@ -17,8 +17,6 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircleOutlined,
   LoadingOutlined,
-  PauseCircleOutlined,
-  PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useTestingJourney } from "../hooks/useTestingJourney";
@@ -27,14 +25,11 @@ import type { Requirement, RequirementTopic } from "../api/types";
 import { topicScopeForJob } from "../components/RequirementTopicsPanel";
 import { TcGenerateModeField } from "../components/TcGenerateModeField";
 import { buildTcJobContextPacket } from "../lib/buildTcJobContext";
-import {
-  createBatchRunControl,
-  type BatchRunStatus,
-} from "../lib/batchRunControl";
 import { normalizeFunctionLabel } from "../lib/normalizeFunctionLabel";
 import { workspaceUrl } from "../lib/testingJourney";
 import { SCOPE_HINTS, SCOPE_LABELS, parseHubSearchParams, type ScopeLevel } from "../lib/testScope";
 import { resolveTopicsForSystemFanOut } from "../lib/resolveTcFanOut";
+import { applyFanOutProgressToQueue } from "../lib/applyFanOutProgressToQueue";
 import { tcGenerateModeSummary, type TcGenerateMode } from "../lib/tcGenerateMode";
 import { waitForJob } from "../lib/waitForJob";
 import { useProject } from "../state/ProjectContext";
@@ -62,15 +57,10 @@ export default function GenerateHubPage() {
   const [loading, setLoading] = useState(false);
   type GenQueueItem = { title: string; status: "pending" | "running" | "done" | "error" };
   const [genQueue, setGenQueue] = useState<GenQueueItem[] | null>(null);
+  const [jobProgressHint, setJobProgressHint] = useState<string | null>(null);
   const [planTitles, setPlanTitles] = useState<string[]>([]);
   const [planLoading, setPlanLoading] = useState(false);
-  const [batchRunStatus, setBatchRunStatus] = useState<BatchRunStatus>("idle");
   const [lastGenCount, setLastGenCount] = useState<number | null>(null);
-  const batchControlRef = useRef(createBatchRunControl());
-
-  useEffect(() => {
-    return batchControlRef.current.subscribe(setBatchRunStatus);
-  }, []);
 
   useEffect(() => {
     if (initial.phase === 2) {
@@ -206,8 +196,6 @@ export default function GenerateHubPage() {
       return;
     }
     setRunning(true);
-    const control = batchControlRef.current;
-    control.start();
     try {
       let contextPacket: Record<string, unknown> | undefined;
       const localPath = workspace.getLocalPath(project.id);
@@ -232,12 +220,12 @@ export default function GenerateHubPage() {
           ? (topicScopeForJob(selectedTopic) as unknown as Record<string, unknown>)
           : undefined;
 
-      // Toàn hệ thống + nhiều chức năng → 1 job / chức năng (tránh LLM chỉ cover 1 module)
-      let fanOutTopics: RequirementTopic[] | null = null;
+      // Toàn hệ thống + nhiều chức năng → 1 job, BE fan-out song song (không N job tuần tự)
+      let planTopics: RequirementTopic[] | null = null;
       if (scopeLevel === "system") {
         const candidates = await resolveTopicsForSystemFanOut(requirementId);
         if (candidates.length > 1) {
-          fanOutTopics = candidates;
+          planTopics = candidates;
         } else if ((selectedReq.featureCount ?? 0) > 1) {
           message.warning(
             "Chỉ thấy một chức năng trong dữ liệu đã lưu — kiểm tra đã Lưu đủ 5 file SRS chưa."
@@ -246,68 +234,51 @@ export default function GenerateHubPage() {
       }
 
       const queueTitles =
-        fanOutTopics?.map((t) => t.title) ??
+        planTopics?.map((t) => t.title) ??
         (scopeLevel === "module" && selectedTopic
           ? [selectedTopic.title]
           : [selectedReq.title || "Requirement"]);
       setGenQueue(queueTitles.map((title) => ({ title, status: "pending" as const })));
+      setJobProgressHint(null);
 
-      let totalCount = 0;
-      if (fanOutTopics) {
-        for (let i = 0; i < fanOutTopics.length; i++) {
-          await control.waitIfPaused();
-          const t = fanOutTopics[i];
-          setGenQueue((prev) =>
-            prev?.map((row, idx) => ({
-              ...row,
-              status:
-                idx < i ? "done" : idx === i ? "running" : row.status === "error" ? "error" : "pending",
-            })) ?? null
-          );
-          const job = await jobs.create({
-            projectId: project.id,
-            sourceId: requirementId,
-            mode: i === 0 ? tcMode : "append",
-            useSourceContext,
-            contextPacket,
-            topicScope: topicScopeForJob(t) as unknown as Record<string, unknown>,
-          });
-          const done = await waitForJob(job.id);
-          if (done.status === "Failed") {
-            setGenQueue((prev) =>
-              prev?.map((row, idx) => (idx === i ? { ...row, status: "error" } : row)) ?? null
-            );
-            throw new Error(done.error ?? `Sinh TC thất bại: ${t.title}`);
-          }
-          totalCount += (await testcases.list({ jobId: job.id }, 1, 200)).items.length;
-          setGenQueue((prev) =>
-            prev?.map((row, idx) => (idx === i ? { ...row, status: "done" } : row)) ?? null
-          );
-        }
-      } else {
+      if (queueTitles.length === 1) {
         setGenQueue((prev) =>
           prev?.map((row, idx) => (idx === 0 ? { ...row, status: "running" } : row)) ?? null
         );
-        const job = await jobs.create({
-          projectId: project.id,
-          sourceId: requirementId,
-          mode: tcMode,
-          useSourceContext,
-          contextPacket,
-          topicScope,
-        });
-        const done = await waitForJob(job.id);
-        if (done.status === "Failed") {
-          setGenQueue((prev) =>
-            prev?.map((row, idx) => (idx === 0 ? { ...row, status: "error" } : row)) ?? null
-          );
-          throw new Error(done.error ?? "Sinh TC thất bại");
-        }
-        totalCount = (await testcases.list({ jobId: job.id }, 1, 200)).items.length;
-        setGenQueue((prev) =>
-          prev?.map((row, idx) => (idx === 0 ? { ...row, status: "done" } : row)) ?? null
-        );
       }
+
+      const job = await jobs.create({
+        projectId: project.id,
+        sourceId: requirementId,
+        mode: tcMode,
+        useSourceContext,
+        contextPacket,
+        // Không gửi topicScope khi system multi-module → BE fan-out
+        topicScope,
+      });
+
+      const done = await waitForJob(job.id, {
+        onProgress: (msg) => {
+          setJobProgressHint(msg);
+          setGenQueue((prev) => applyFanOutProgressToQueue(prev, msg));
+        },
+      });
+      if (done.status === "Failed") {
+        setGenQueue((prev) =>
+          prev?.map((row) =>
+            row.status === "running" || row.status === "pending"
+              ? { ...row, status: "error" as const }
+              : row
+          ) ?? null
+        );
+        throw new Error(done.error ?? "Sinh TC thất bại");
+      }
+      const totalCount = (await testcases.list({ jobId: job.id }, 1, 200)).items.length;
+      setGenQueue((prev) =>
+        prev?.map((row) =>
+          row.status === "error" ? row : { ...row, status: "done" as const }
+        ) ?? null
+      );
 
       message.success({
         key: "hub",
@@ -324,9 +295,9 @@ export default function GenerateHubPage() {
         content: e instanceof Error ? e.message : "Sinh TC thất bại",
       });
     } finally {
-      control.reset();
       setRunning(false);
       setGenQueue(null);
+      setJobProgressHint(null);
     }
   }
 
@@ -352,7 +323,7 @@ export default function GenerateHubPage() {
     if (planTitles.length > 1) {
       lines.push({
         label: "Số lượt AI",
-        value: `${planTitles.length} chức năng (lần lượt)`,
+        value: `${planTitles.length} chức năng (song song trên server)`,
       });
     }
     return lines;
@@ -562,10 +533,15 @@ export default function GenerateHubPage() {
         >
           {running && genQueue ? (
             <div style={{ marginBottom: 20 }}>
-              <Progress
-                percent={genProgressPercent}
-                status={batchRunStatus === "paused" ? "normal" : "active"}
-              />
+              <Progress percent={genProgressPercent} status="active" />
+              {jobProgressHint ? (
+                <Typography.Text
+                  type="secondary"
+                  style={{ display: "block", marginTop: 8, fontSize: 12 }}
+                >
+                  {jobProgressHint}
+                </Typography.Text>
+              ) : null}
               <ul style={{ margin: "16px 0 0", paddingLeft: 0, listStyle: "none" }}>
                 {genQueue.map((row, idx) => (
                   <li key={`${idx}-${row.title}`} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
@@ -589,36 +565,11 @@ export default function GenerateHubPage() {
                   </li>
                 ))}
               </ul>
-              {genQueue.length > 1 ? (
-                <Space wrap style={{ marginTop: 12 }}>
-                  {batchRunStatus === "running" ? (
-                    <Button
-                      icon={<PauseCircleOutlined />}
-                      onClick={() => batchControlRef.current.pause()}
-                    >
-                      Tạm dừng
-                    </Button>
-                  ) : null}
-                  {batchRunStatus === "paused" ? (
-                    <Button
-                      type="primary"
-                      icon={<PlayCircleOutlined />}
-                      onClick={() => batchControlRef.current.resume()}
-                    >
-                      Tiếp tục
-                    </Button>
-                  ) : null}
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {batchRunStatus === "paused"
-                      ? "Tạm dừng sau chức năng hiện tại · bấm Tiếp tục để chạy hết hàng đợi."
-                      : "Tạm dừng sẽ chờ xong chức năng đang chạy rồi dừng trước mục kế."}
-                  </Typography.Text>
-                </Space>
-              ) : (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  Vui lòng không đóng trang cho đến khi hoàn tất.
-                </Typography.Text>
-              )}
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
+                {genQueue.length > 1
+                  ? "Server chạy song song theo chức năng (fan-out). Vui lòng không đóng trang cho đến khi hoàn tất."
+                  : "Vui lòng không đóng trang cho đến khi hoàn tất."}
+              </Typography.Text>
             </div>
           ) : (
             <>
@@ -674,10 +625,9 @@ export default function GenerateHubPage() {
             <Button
               type="primary"
               icon={<ThunderboltOutlined />}
-              loading={running && batchRunStatus === "running"}
+              loading={running}
               disabled={
                 running ||
-                batchRunStatus === "paused" ||
                 (scopeLevel === "module" && topics.length > 0 && !selectedTopic) ||
                 aiReady === false
               }

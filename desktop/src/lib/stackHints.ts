@@ -381,13 +381,17 @@ function sanitizeBase(name: string): string {
   return cleaned || "Target";
 }
 
-/** Gợi ý đường dẫn ghi unit test — dưới AItest/UnitTest/{Module}/… */
+/** Gợi ý đường dẫn ghi unit test — AItest/UnitTest/{Requirement}/{TC title}/… */
 export function suggestUnitTestPath(opts: {
   language?: string | null;
   framework?: string | null;
   sourceFileName?: string | null;
   className?: string | null;
   module?: string | null;
+  /** Parent folder = Requirement name */
+  requirementTitle?: string | null;
+  /** Child folder = test case title */
+  testCaseTitle?: string | null;
   packagePrefix?: string | null;
 }): { relativePath: string; fileName: string } {
   const language = opts.language || "";
@@ -397,14 +401,15 @@ export function suggestUnitTestPath(opts: {
   const stemFromSrc = src ? (src.split("/").pop() || "").replace(/\.[^.]+$/, "") : "";
   const base = sanitizeBase(opts.className || stemFromSrc || "Target");
   const ext = unitTestFileExt(language, src);
-  const lang = language.toLowerCase();
   const pathOpts = {
     sourceFileName: src || null,
     module: opts.module || null,
+    requirementTitle: opts.requirementTitle || null,
+    testCaseTitle: opts.testCaseTitle || null,
     packagePrefix: opts.packagePrefix,
   };
 
-  if (lang.includes("python") || framework.includes("pytest") || framework.includes("unittest")) {
+  if (langIncludes(language, framework, "python", "pytest", "unittest")) {
     const fileName = testFileNameFromSource({
       sourceFileName: src,
       language,
@@ -417,7 +422,7 @@ export function suggestUnitTestPath(opts: {
     };
   }
 
-  if (lang.includes("go")) {
+  if (language.toLowerCase().includes("go")) {
     const fileName = testFileNameFromSource({
       sourceFileName: src,
       language,
@@ -430,7 +435,7 @@ export function suggestUnitTestPath(opts: {
     };
   }
 
-  if (lang.includes("rust")) {
+  if (language.toLowerCase().includes("rust")) {
     const fileName = `${base.toLowerCase()}_test.rs`;
     return {
       relativePath: underGeneratedTestFolder("unit", fileName, srcDir, pathOpts),
@@ -439,8 +444,8 @@ export function suggestUnitTestPath(opts: {
   }
 
   if (
-    lang.includes("typescript") ||
-    lang.includes("javascript") ||
+    language.toLowerCase().includes("typescript") ||
+    language.toLowerCase().includes("javascript") ||
     ["jest", "vitest", "mocha"].some((f) => framework.includes(f))
   ) {
     const fileName = testFileNameFromSource({
@@ -455,7 +460,11 @@ export function suggestUnitTestPath(opts: {
     };
   }
 
-  if (lang.includes("java") || lang.includes("kotlin") || framework.includes("junit")) {
+  if (
+    language.toLowerCase().includes("java") ||
+    language.toLowerCase().includes("kotlin") ||
+    framework.includes("junit")
+  ) {
     const useExt = [".java", ".kt"].includes(ext) ? ext : ".java";
     const fileName = `${base}${base.endsWith("Test") ? "" : "Test"}${useExt}`.replace(
       /TestTest/,
@@ -468,8 +477,8 @@ export function suggestUnitTestPath(opts: {
   }
 
   if (
-    lang.includes("c#") ||
-    lang.includes("csharp") ||
+    language.toLowerCase().includes("c#") ||
+    language.toLowerCase().includes("csharp") ||
     ["xunit", "nunit", "mstest"].some((f) => framework.includes(f))
   ) {
     const fileName = testFileNameFromSource({
@@ -491,13 +500,24 @@ export function suggestUnitTestPath(opts: {
   };
 }
 
-/** Gợi ý đường dẫn API test — dưới AItest/APITest/{Module}/… */
+function langIncludes(
+  language: string,
+  framework: string,
+  ...needles: string[]
+): boolean {
+  const blob = `${language} ${framework}`.toLowerCase();
+  return needles.some((n) => blob.includes(n));
+}
+
+/** Gợi ý đường dẫn API test — AItest/APITest/{Requirement}/{TC title}/… */
 export function suggestApiTestPath(opts: {
   language?: string | null;
   framework?: string | null;
   className?: string | null;
   sourceFileName?: string | null;
   module?: string | null;
+  requirementTitle?: string | null;
+  testCaseTitle?: string | null;
   packagePrefix?: string | null;
 }): { relativePath: string; fileName: string } {
   const lang = (opts.language || "").toLowerCase();
@@ -507,6 +527,8 @@ export function suggestApiTestPath(opts: {
   const pathOpts = {
     sourceFileName: src || null,
     module: opts.module || null,
+    requirementTitle: opts.requirementTitle || null,
+    testCaseTitle: opts.testCaseTitle || null,
     packagePrefix: opts.packagePrefix,
   };
   const fileName = testFileNameFromSource({

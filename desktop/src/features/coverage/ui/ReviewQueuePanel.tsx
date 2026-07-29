@@ -24,6 +24,7 @@ import {
 } from "@ant-design/icons";
 import { testcases } from "../../../api";
 import type { TestCase } from "../../../api/types";
+import { EnginePicker } from "../../../components/EnginePicker";
 import {
   displayReviewStatus,
   isTcPendingReview,
@@ -31,12 +32,22 @@ import {
   priorityLabel,
   typeLabel,
 } from "../../../i18n/labels";
+import {
+  ENGINE_TOOLTIP,
+  TC_TYPE_OPTIONS,
+  engineLabel,
+  engineTagColor,
+  resolveTestEngine,
+} from "../../../lib/testEngine";
+import { e2eTestUrl, unitTestUrl } from "../../../lib/productRoutes";
 
 type Props = {
   projectId: string;
   cases: TestCase[];
   /** Pre-filter module from URL/CTA */
   moduleFilter?: string;
+  /** Pre-filter engine from URL / after generate */
+  engineFilter?: "unit" | "e2e" | "all";
   loading?: boolean;
   onChanged: () => void;
 };
@@ -53,13 +64,9 @@ type EditForm = {
 };
 
 type StatusFilter = "__all__" | "pending" | "approved";
+type EngineFilter = "all" | "unit" | "e2e";
 
-const TYPE_OPTIONS = [
-  { value: "Functional", label: "Chức năng" },
-  { value: "Negative", label: "Phủ định" },
-  { value: "Boundary", label: "Biên" },
-  { value: "Api", label: "API" },
-];
+const TYPE_OPTIONS = [...TC_TYPE_OPTIONS];
 
 const PRIORITY_OPTIONS = [
   { value: "Low", label: "Thấp" },
@@ -174,6 +181,7 @@ function downloadCasesExcel(rows: TestCase[], filenamePrefix = "test-cases") {
 export function ReviewQueuePanel({
   cases,
   moduleFilter,
+  engineFilter: engineFilterProp,
   loading,
   onChanged,
 }: Props) {
@@ -182,6 +190,9 @@ export function ReviewQueuePanel({
   const [busy, setBusy] = useState(false);
   const [moduleSel, setModuleSel] = useState<string>(moduleFilter || "__all__");
   const [statusSel, setStatusSel] = useState<StatusFilter>("__all__");
+  const [engineSel, setEngineSel] = useState<EngineFilter>(
+    engineFilterProp === "unit" || engineFilterProp === "e2e" ? engineFilterProp : "all"
+  );
   const [preview, setPreview] = useState<TestCase | null>(null);
   const [editing, setEditing] = useState<TestCase | null>(null);
   const [editBusy, setEditBusy] = useState(false);
@@ -190,6 +201,14 @@ export function ReviewQueuePanel({
   useEffect(() => {
     if (moduleFilter) setModuleSel(moduleFilter);
   }, [moduleFilter]);
+
+  useEffect(() => {
+    if (engineFilterProp === "unit" || engineFilterProp === "e2e") {
+      setEngineSel(engineFilterProp);
+    } else if (engineFilterProp === "all") {
+      setEngineSel("all");
+    }
+  }, [engineFilterProp]);
 
   const pending = useMemo(
     () => cases.filter((c) => isTcPendingReview(c.reviewStatus)),
@@ -208,11 +227,19 @@ export function ReviewQueuePanel({
     return cases.filter((c) => {
       if (statusSel === "pending" && !isTcPendingReview(c.reviewStatus)) return false;
       if (statusSel === "approved" && c.reviewStatus !== "Approved") return false;
+      if (engineSel !== "all") {
+        const eng = resolveTestEngine(c.type);
+        if (engineSel === "e2e") {
+          if (eng !== "e2e") return false;
+        } else if (eng === "e2e") {
+          return false;
+        }
+      }
       if (moduleSel === "__all__") return true;
       const m = (c.module || "").trim() || "(Chưa gán module)";
       return m === moduleSel || m.toLowerCase() === moduleSel.toLowerCase();
     });
-  }, [cases, moduleSel, statusSel]);
+  }, [cases, moduleSel, statusSel, engineSel]);
 
   const selectedPendingIds = useMemo(
     () =>
@@ -342,9 +369,22 @@ export function ReviewQueuePanel({
         v ? <Tag>{v}</Tag> : <Typography.Text type="secondary">—</Typography.Text>,
     },
     {
+      title: (
+        <Tooltip title={ENGINE_TOOLTIP}>
+          <span>Engine</span>
+        </Tooltip>
+      ),
+      key: "engine",
+      width: 88,
+      render: (_, row) => {
+        const eng = resolveTestEngine(row.type);
+        return <Tag color={engineTagColor(eng)}>{engineLabel(eng)}</Tag>;
+      },
+    },
+    {
       title: "Loại",
       dataIndex: "type",
-      width: 96,
+      width: 100,
       render: (v: string) => labelOf(typeLabel, v),
     },
     {
@@ -365,11 +405,21 @@ export function ReviewQueuePanel({
     {
       title: "Thao tác",
       key: "actions",
-      width: 200,
+      width: 260,
       fixed: "right",
       align: "center",
       render: (_, row) => {
         const canApprove = isTcPendingReview(row.reviewStatus);
+        const eng = resolveTestEngine(row.type);
+        const jobUrl =
+          eng === "e2e"
+            ? e2eTestUrl({ testCaseId: row.id, module: row.module || undefined })
+            : unitTestUrl({
+                mode: "single",
+                testCaseId: row.id,
+                module: row.module || undefined,
+              });
+        const jobLabel = eng === "e2e" ? "Chạy E2E Job" : "Chạy Unit Job";
         return (
           <Space size={4} className="tc-review-actions" wrap>
             <Tooltip title="Xem chi tiết">
@@ -411,9 +461,18 @@ export function ReviewQueuePanel({
                 Duyệt
               </Button>
             ) : (
-              <Tag color="success" style={{ marginInlineEnd: 0 }}>
-                Đã duyệt
-              </Tag>
+              <>
+                <Tag color="success" style={{ marginInlineEnd: 0 }}>
+                  Đã duyệt
+                </Tag>
+                <Tooltip title={ENGINE_TOOLTIP}>
+                  <Link to={jobUrl}>
+                    <Button size="small" type="primary" ghost>
+                      {jobLabel}
+                    </Button>
+                  </Link>
+                </Tooltip>
+              </>
             )}
           </Space>
         );
@@ -429,6 +488,17 @@ export function ReviewQueuePanel({
           {cases.length !== filtered.length ? ` (lọc / ${cases.length})` : ""}
           {pending.length > 0 ? ` · ${pending.length} chờ duyệt` : ""}
         </Typography.Text>
+        <EnginePicker
+          size="small"
+          value={engineSel}
+          onChange={(v) => setEngineSel(v as EngineFilter)}
+          options={[
+            { value: "all", label: "Tất cả" },
+            { value: "unit", label: "Unit" },
+            { value: "e2e", label: "E2E" },
+          ]}
+          aria-label="Lọc engine"
+        />
         <select
           className="coverage-review-select"
           value={statusSel}
@@ -597,7 +667,16 @@ export function ReviewQueuePanel({
             <Form.Item name="module" label="Module" style={{ marginBottom: 12, width: "100%" }}>
               <Input placeholder="Tên chức năng / module" />
             </Form.Item>
-            <Form.Item name="type" label="Loại" style={{ marginBottom: 12, width: "100%" }}>
+            <Form.Item
+              name="type"
+              label={
+                <Tooltip title={ENGINE_TOOLTIP}>
+                  <span>Loại (engine)</span>
+                </Tooltip>
+              }
+              style={{ marginBottom: 12, width: "100%" }}
+              extra="Unit / E2E / API chọn trước khi Duyệt — CTA Job sẽ theo loại này."
+            >
               <Select options={TYPE_OPTIONS} />
             </Form.Item>
             <Form.Item name="priority" label="Ưu tiên" style={{ marginBottom: 12, width: "100%" }}>

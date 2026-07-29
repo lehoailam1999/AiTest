@@ -194,6 +194,7 @@ async def resolve_scope(
     from app.services.resolve_source_scope import (
         build_resolve_scope_prompts,
         build_resolve_tokens_prompts,
+        fallback_code_tokens_from_tc,
         parse_resolve_scope_json,
         parse_resolve_tokens_json,
     )
@@ -245,9 +246,13 @@ async def resolve_scope(
                 tokens = []
 
     if not tokens and tc is not None:
-        # fallback: module + title words
-        blob = f"{tc.module or ''} {tc.title or ''}"
-        tokens = [w for w in blob.replace("-", " ").split() if len(w) >= 3][:12]
+        # Deterministic VI→code tokens (không phụ thuộc AI)
+        tokens = fallback_code_tokens_from_tc(
+            title=tc.title or "",
+            module=tc.module,
+            steps=tc.steps or "",
+            test_data=tc.test_data,
+        )
 
     try:
         ctx = svc.build_context(workspace_id, tokens)

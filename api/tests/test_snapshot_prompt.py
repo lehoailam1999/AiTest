@@ -83,3 +83,30 @@ def test_legacy_knowledge_only_still_works():
     )
     assert "Must login" in text
     assert "Knowledge workspace" in text
+
+
+def test_freeze_prompt_dedup_helpers():
+    from app.features.requirement_studio.snapshot_prompt import (
+        freeze_prompt_has_existing_tcs,
+        freeze_prompt_has_knowledge,
+        strip_freeze_existing_tcs_section,
+    )
+
+    text = snapshot_payload_to_prompt(
+        title="X",
+        summary="s",
+        payload=build_freeze_bundle(
+            knowledge_payload={"features": [{"name": "A", "description": "d"}]},
+            knowledge_summary="s",
+            uploaded_files=[],
+            chat_transcript=[{"role": "user", "content": "hi"}],
+            existing_test_cases=[{"title": "TC1", "type": "Unit"}],
+        ),
+        knowledge_version=1,
+    )
+    assert freeze_prompt_has_knowledge(text)
+    assert freeze_prompt_has_existing_tcs(text)
+    stripped = strip_freeze_existing_tcs_section(text)
+    assert "TC1" not in stripped
+    assert "Knowledge workspace" in stripped
+    assert "hi" in stripped

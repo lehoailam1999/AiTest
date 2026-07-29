@@ -4,9 +4,8 @@
 import { useState } from "react";
 import { Alert, App, Button, Space, Typography } from "antd";
 import { CopyOutlined, FolderOpenOutlined } from "@ant-design/icons";
-import type { Project, ProjectMeta } from "../api/types";
+import type { Project } from "../api/types";
 import { bindSourceRoot } from "../lib/workspaceManager";
-import { normalizeProjectMeta } from "../lib/projectSync";
 import { isTauri, type ProjectScan } from "../tauri/bridge";
 
 function folderName(path: string | null | undefined): string {
@@ -19,7 +18,6 @@ type Props = {
   ideRoot: string;
   localPath: string;
   project: Pick<Project, "id" | "name"> | null;
-  existingMeta?: ProjectMeta | null;
   onBound?: (payload: {
     rootPath: string;
     syncedProject: Project | null;
@@ -34,7 +32,6 @@ export function RootIdeMismatchBanner({
   ideRoot,
   localPath,
   project,
-  existingMeta,
   onBound,
   compact,
   onUseIdeRoot,
@@ -61,7 +58,6 @@ export function RootIdeMismatchBanner({
         projectId: project.id,
         projectName: project.name,
         rootPath: ideRoot,
-        existingMeta: normalizeProjectMeta(existingMeta),
       });
       if (result.syncError) {
         message.warning(`Đã gắn Root; sync stack: ${result.syncError}`);

@@ -27,6 +27,7 @@ from app.routers import (
     connection,
     executions,
     generate_api_test,
+    generate_e2e,
     generate_unit,
     health,
     jobs,
@@ -118,6 +119,7 @@ def _ensure_project_meta_columns() -> None:
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requirement_version INTEGER",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS runner_used VARCHAR(20)",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cli_session_key VARCHAR(120)",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS progress_message TEXT",
     ]
     conn_stmts = [
         "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS runner_mode VARCHAR(20)",
@@ -171,6 +173,7 @@ app.include_router(jobs.router)
 app.include_router(testcases.router)
 app.include_router(generate_unit.router)
 app.include_router(generate_api_test.router)
+app.include_router(generate_e2e.router)
 app.include_router(agent.router)
 app.include_router(resolve_source.router)
 app.include_router(workspace_router)

@@ -4,7 +4,124 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
+
+# IT chung VI→EN — không gắn domain dự án (mirror FE viCodeAliases).
+_GENERIC_VI_WORDS: dict[str, list[str]] = {
+    "tao": ["Create", "Add", "New"],
+    "moi": ["Create", "New"],
+    "sua": ["Edit", "Update"],
+    "xoa": ["Delete", "Remove"],
+    "xem": ["View", "Get", "Detail"],
+    "tim": ["Search", "Find", "Query"],
+    "kiem": ["Search", "Check"],
+    "dang": ["Auth"],
+    "nhap": ["Login", "Input", "Import"],
+    "xuat": ["Export"],
+    "luu": ["Save"],
+    "gui": ["Send", "Submit"],
+    "duyet": ["Approve", "Review"],
+    "api": ["Api", "Controller"],
+    "todo": ["Todo", "Task"],
+    "auth": ["Auth", "Login"],
+    "user": ["User", "Account"],
+}
+
+_GENERIC_VI_PHRASES: dict[str, list[str]] = {
+    "dang nhap": ["Login", "Auth", "SignIn"],
+    "dang ky": ["Register", "SignUp"],
+    "quen mat khau": ["ForgotPassword", "ResetPassword"],
+    "phan quyen": ["Permission", "Role"],
+    "nguoi dung": ["User", "Account"],
+    "tim kiem": ["Search", "Query", "Filter"],
+    "quan ly": ["Manage", "Manager", "Service"],
+}
+
+_STOP = {
+    "the", "and", "for", "with", "from", "that", "this", "when", "then",
+    "user", "test", "case", "step", "expected", "result", "system",
+    "nhap", "vao", "cua", "cho", "voi", "khi", "thi", "cac", "mot",
+    "nay", "duoc", "khong", "phai", "tren", "duoi", "sau", "truoc",
+    "qua", "rest", "requirements",
+}
+
+
+def _strip_diacritics(s: str) -> str:
+    t = unicodedata.normalize("NFD", s or "")
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return t.replace("đ", "d").replace("Đ", "D")
+
+
+def _ascii_key(raw: str) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        re.sub(r"[^a-z0-9\s]+", " ", _strip_diacritics(raw).lower()),
+    ).strip()
+
+
+def fallback_code_tokens_from_tc(
+    *,
+    title: str,
+    module: str | None,
+    steps: str = "",
+    test_data: str | None = None,
+    max_tokens: int = 24,
+) -> list[str]:
+    """
+    Deterministic VI/Feature → code-ish tokens when AI mapping is unavailable.
+    Prefer Latin identifiers that can match file stems/paths.
+    """
+    blob = " ".join(
+        x for x in (module or "", title or "", steps or "", test_data or "") if x
+    )
+    ascii_blob = _ascii_key(blob)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(tok: str) -> None:
+        s = (tok or "").strip()
+        if not s or len(s) > 64:
+            return
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_.-]{1,63}$", s):
+            return
+        key = s.lower()
+        if key in seen or key in _STOP:
+            return
+        seen.add(key)
+        out.append(s)
+
+    # Explicit hints: code: Foo / path: a/b.ts
+    for m in re.finditer(
+        r"(?i)\b(?:code|path|alias)\s*[:=]\s*([A-Za-z0-9_./\\-]+)",
+        blob,
+    ):
+        add(m.group(1).replace("\\", "/").split("/")[-1].split(".")[0])
+
+    for phrase, aliases in _GENERIC_VI_PHRASES.items():
+        if phrase in ascii_blob:
+            for a in aliases:
+                add(a)
+
+    words = [w for w in ascii_blob.split(" ") if len(w) >= 2]
+    for w in words:
+        if w in _STOP:
+            continue
+        add(w)
+        for a in _GENERIC_VI_WORDS.get(w, []):
+            add(a)
+
+    if len(words) >= 2:
+        add("".join(words[:4]))
+        add("_".join(words[:4]))
+        add("".join(w[:1].upper() + w[1:] for w in words[:4]))
+
+    # Also keep original Latin tokens from module/title (PascalCase pieces)
+    for part in re.findall(r"[A-Za-z][a-z]+|[A-Z]{2,}(?![a-z])|[A-Z][a-z]+", blob):
+        add(part)
+
+    return out[:max_tokens]
 
 
 def build_resolve_tokens_prompts(

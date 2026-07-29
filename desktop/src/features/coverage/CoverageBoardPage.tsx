@@ -45,6 +45,13 @@ export default function CoverageBoardPage() {
         ? "freeze"
         : "docs";
   const reviewModule = searchParams.get("module")?.trim() || undefined;
+  const reviewEngineRaw = searchParams.get("engine")?.trim().toLowerCase();
+  const reviewEngine: "unit" | "e2e" | "all" | undefined =
+    reviewEngineRaw === "unit" || reviewEngineRaw === "e2e"
+      ? reviewEngineRaw
+      : reviewEngineRaw === "all"
+        ? "all"
+        : undefined;
   const [studioStatus, setStudioStatus] = useState<StudioStatusSnapshot>({
     fileCount: 0,
     chunkCount: 0,
@@ -53,7 +60,7 @@ export default function CoverageBoardPage() {
   });
   const [journeySnapIds, setJourneySnapIds] = useState<Set<string>>(new Set());
 
-  const { project, allCases, loading, refresh, invalidate } = useCoverageBoard({
+  const { project, allCases, loading, refresh, invalidate, hasLocalPath } = useCoverageBoard({
     page: 1,
     pageSize: 50,
   });
@@ -122,10 +129,11 @@ export default function CoverageBoardPage() {
     setSearchParams(q, { replace: true });
   }
 
-  function openReview(id: string) {
+  function openReview(id: string, engine?: "unit" | "e2e") {
     const q = new URLSearchParams();
     q.set("tab", "review");
     q.set("workspaceId", id);
+    if (engine) q.set("engine", engine);
     setSearchParams(q, { replace: true });
   }
 
@@ -182,8 +190,10 @@ export default function CoverageBoardPage() {
           <Typography.Title level={2}>Requirement</Typography.Title>
           <Typography.Text type="secondary" className="coverage-lead">
             Quản lý theo <strong>Requirement</strong> (mỗi phần nghiệp vụ một mục). Trong
-            Requirement: tài liệu → phân tích → sinh TC → duyệt. Sau Approved, sang{" "}
-            <Link to={ROUTES.unitTest}>Unit test</Link>.
+            Requirement: tài liệu → phân tích → sinh TC Unit/E2E → duyệt. Sau Approved:{" "}
+            <Link to={ROUTES.unitTest}>Unit test</Link>
+            {" · "}
+            <Link to={ROUTES.e2eTest}>E2E test</Link>.
           </Typography.Text>
         </div>
         <div className="page-head-actions">
@@ -197,6 +207,21 @@ export default function CoverageBoardPage() {
           ) : null}
         </div>
       </header>
+
+      {!hasLocalPath ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          title="Chưa gắn source root dự án"
+          description={
+            <>
+              Gắn thư mục mã nguồn trên máy để Unit/E2E Job và áp dụng test hoạt động đúng.{" "}
+              <Link to={ROUTES.projects}>Mở Projects → gắn root</Link>
+            </>
+          }
+        />
+      ) : null}
 
       {inJourney ? (
         <RequirementJourneyStrip stages={journey} onSelect={onJourneySelect} />
@@ -218,21 +243,23 @@ export default function CoverageBoardPage() {
                 <Typography.Title level={4} className="studio-title">
                   Duyệt TC
                   <Typography.Text type="secondary" style={{ fontSize: 14, marginLeft: 8 }}>
-                    {journeyCases.length} TC
-                    {journeyPendingCount > 0 ? ` · ${journeyPendingCount} chờ duyệt` : ""}
+                    {allCases.length} TC (toàn project)
+                    {allCases.filter((c) => isTcPendingReview(c.reviewStatus)).length > 0
+                      ? ` · ${allCases.filter((c) => isTcPendingReview(c.reviewStatus)).length} chờ duyệt`
+                      : ""}
                   </Typography.Text>
                 </Typography.Title>
                 <Typography.Text type="secondary" className="studio-lead">
-                  Tất cả test case của Requirement này (Draft / Approved / Rejected). Có thể tải về Excel (đầy đủ nội dung từng ô).
+                  Toàn bộ test case của project. Lọc Unit / E2E / module — Draft / Approved / Rejected.
                 </Typography.Text>
               </div>
             </div>
-            {journeyCases.length === 0 ? (
+            {allCases.length === 0 ? (
               <Alert
                 type="info"
                 showIcon
-                title="Chưa có test case trong Requirement này"
-                description="Sinh TC từ tài liệu + Phân tích trước, hoặc quay lại Requirement khác."
+                title="Chưa có test case trong project"
+                description="Sinh TC Unit hoặc E2E từ tài liệu + Phân tích trước."
                 action={
                   <Button type="primary" onClick={() => setStudioFocus("freeze")}>
                     Sang Sinh test case
@@ -242,8 +269,9 @@ export default function CoverageBoardPage() {
             ) : (
               <ReviewQueuePanel
                 projectId={project.id}
-                cases={journeyCases}
+                cases={allCases}
                 moduleFilter={reviewModule}
+                engineFilter={reviewEngine}
                 loading={loading}
                 onChanged={() => {
                   invalidate();
@@ -259,9 +287,9 @@ export default function CoverageBoardPage() {
             onFocusChange={setStudioFocus}
             onStatusChange={setStudioStatus}
             onBackToHub={setHome}
-            onNavigateReview={() => {
+            onNavigateReview={(opts) => {
               void refresh();
-              openReview(workspaceId);
+              openReview(workspaceId, opts?.engine);
             }}
           />
         )}

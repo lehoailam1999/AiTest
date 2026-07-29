@@ -15,7 +15,12 @@ from app.models.user import User
 from app.responses import errors, ok, page, page_params
 from app.serializers import testcase_dto
 from app.services.requirement_content import source_content_hash
-from app.services.vietnamese_labels import priority_vi, severity_vi, type_vi
+from app.services.vietnamese_labels import (
+    normalize_engine_type,
+    priority_vi,
+    severity_vi,
+    type_vi,
+)
 
 router = APIRouter(prefix="/api", tags=["testcases"], dependencies=[Depends(get_current_user)])
 
@@ -261,6 +266,9 @@ def _transition(
         tc.reviewed_by = user.id
         tc.reviewed_at = now
         tc.review_comment = comment
+        if to == C.REVIEW_APPROVED:
+            # R1.5 — Journey/UI/e2e → E2E; unit → Unit; api → API
+            tc.type = normalize_engine_type(tc.type)
     else:
         tc.reviewed_by = None
         tc.reviewed_at = None

@@ -239,6 +239,85 @@ def snapshot_payload_to_prompt(
     return text
 
 
+def is_freeze_snapshot_prompt(content: str) -> bool:
+    """True when content came from snapshot_prompt_content (not legacy ### Feature blocks)."""
+    c = (content or "").strip()
+    if not c.startswith("# "):
+        return False
+    markers = (
+        "Knowledge version:",
+        "## Uploaded documents",
+        "## Knowledge workspace",
+        "freeze-bundle-v1",
+    )
+    return any(m in c for m in markers)
+
+
+def freeze_prompt_has_knowledge(content: str) -> bool:
+    """True when freeze text already embeds Knowledge (Phân tích) — skip DB analysis re-inject."""
+    c = content or ""
+    return (
+        "## Knowledge workspace" in c
+        or "## Knowledge summary" in c
+        or "### Document summary" in c
+    )
+
+
+def freeze_prompt_has_existing_tcs(content: str) -> bool:
+    return "## Existing test cases" in (content or "")
+
+
+def strip_freeze_existing_tcs_section(content: str) -> str:
+    """
+    Remove freeze inventory block so live DB existing_cases can be the single source.
+    Keeps documents + Knowledge intact.
+    """
+    text = content or ""
+    marker = "## Existing test cases"
+    idx = text.find(marker)
+    if idx < 0:
+        return text
+    rest = text[idx + len(marker) :]
+    cut_at = len(rest)
+    offset = 0
+    for i, line in enumerate(rest.splitlines(keepends=True)):
+        if i > 0 and line.startswith("## ") and not line.startswith("### "):
+            cut_at = offset
+            break
+        offset += len(line)
+    return (text[:idx].rstrip() + "\n\n" + rest[cut_at:].lstrip()).strip()
+
+
+def module_titles_from_snapshot_payload(payload: dict | None) -> list[str]:
+    """Derive fan-out module names from structured Knowledge when ### Feature blocks absent."""
+    if not isinstance(payload, dict):
+        return []
+    knowledge = payload.get("knowledge") if isinstance(payload.get("knowledge"), dict) else payload
+    if not isinstance(knowledge, dict):
+        return []
+    titles: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        label = (name or "").strip()
+        if not label:
+            return
+        key = label.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        titles.append(label)
+
+    for row in _as_list(knowledge.get("features")):
+        if isinstance(row, dict):
+            _add(str(row.get("name") or row.get("title") or ""))
+    if len(titles) < 2:
+        for row in _as_list(knowledge.get("useCases")):
+            if isinstance(row, dict):
+                _add(str(row.get("name") or row.get("title") or ""))
+    return titles
+
+
 def parse_json_field(raw: str | None) -> dict | None:
     if not raw:
         return None

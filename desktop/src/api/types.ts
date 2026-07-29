@@ -33,6 +33,20 @@ export type ProjectMeta = {
    * VD: { "chia sẻ vật chứng": ["EvidenceShare", "ShareEvidence"] }
    */
   codeAliases?: Record<string, string[]>;
+  /** EX4.3 — E2E console env persisted per project */
+  e2e?: {
+    targetUrl?: string;
+    useStorageState?: boolean;
+    seedCommand?: string;
+    teardownCommand?: string;
+    usePlaywrightInspect?: boolean;
+    /** Mở cửa sổ Chromium khi Headless (--headed). Default true trên console. */
+    showBrowser?: boolean;
+    /** Optional override — primary auth: AI seed → .ai-test/auth */
+    username?: string;
+    /** Optional override — primary auth: AI seed → .ai-test/auth */
+    password?: string;
+  };
 };
 
 export type Connection = {
@@ -253,6 +267,11 @@ export type Job = {
   backendType?: string | null;
   generateStrategy?: "append" | "replace" | null;
   requirementVersion?: number | null;
+  runnerUsed?: string | null;
+  cliSessionKey?: string | null;
+  progressMessage?: string | null;
+  /** Live transcript từ AI CLI (stream-json / phase logs) */
+  progressLog?: string[] | null;
   error?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -263,6 +282,7 @@ export type FreezeAndGenerateResult = {
   snapshot: RequirementSnapshot;
   warnings: FreezeWarning[];
   job: Job;
+  preferredEngine?: "unit" | "e2e" | null;
 };
 
 export type TestCase = {

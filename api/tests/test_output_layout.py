@@ -1,11 +1,17 @@
-"""Tests for AItest output layout - pattern-based, no real project names.
+"""Tests for AItest output layout — pattern fixtures, NOT a real customer project.
 
-Monorepo rule: source under {pkg}/src|lib -> write under {pkg}/AItest
-(and Desktop stages under {pkg}/.ai-test). Never leave AItest at monorepo root
-for nested packages.
+Layout rule (any repo name):
+  source under {pkg}/src|lib → write under {pkg}/AItest
+  single-package src/… → AItest/… at apply root
+
+Customize shells/markers without code edits:
+  AITEST_SPA_SHELLS=webspa,myshell
+  AITEST_CODE_ROOT_MARKERS=src,lib,libs,app
+  AITEST_STRUCTURAL_SEGMENTS=src,lib,… (optional merge)
 """
 from __future__ import annotations
 
+import os
 import unittest
 
 from app.services.test_output_layout import (
@@ -29,34 +35,47 @@ class TestOutputLayout(unittest.TestCase):
             "Order/Services",
         )
 
-    def test_module_strips_spa_shell_segments(self):
+    def test_module_strips_spa_shell_keeps_business_leaf(self):
+        # Fixture shape only — any product/{SpaShell}/src/app/… works the same
         self.assertEqual(
             module_rel_from_source(
                 "product-a/WebSpa/src/app/admin/feature-x/update/widget.component.ts"
             ),
-            "product-a/update",
+            "feature-x/update",
         )
 
     def test_nested_package_gets_own_aitest(self):
-        """BE/FE style: {pkg}/src/… → {pkg}/AItest/… (not monorepo-root AItest)."""
+        """{anyPkg}/src/… → {anyPkg}/AItest/… (not monorepo-root AItest)."""
         cases = [
             (
-                "svc-api/src/todos/todos.service.ts",
-                "Todo",
-                "todos.service.test.ts",
-                "svc-api/AItest/UnitTest/Todo/todos.service.test.ts",
+                "pkg-api/src/orders/orders.service.ts",
+                "Orders",
+                "orders.service.test.ts",
+                "pkg-api/AItest/UnitTest/Orders/orders.service.test.ts",
             ),
             (
-                "web-app/src/pages/home.tsx",
+                "pkg-web/src/pages/home.tsx",
                 "Home",
                 "home.test.tsx",
-                "web-app/AItest/UnitTest/Home/home.test.tsx",
+                "pkg-web/AItest/UnitTest/Home/home.test.tsx",
             ),
             (
-                "org-z/services/billing/src/invoice.ts",
+                "org/services/billing/src/invoice.ts",
                 "Billing",
                 "invoice.test.ts",
-                "org-z/services/billing/AItest/UnitTest/Billing/invoice.test.ts",
+                "org/services/billing/AItest/UnitTest/Billing/invoice.test.ts",
+            ),
+            (
+                "backend/src/Users/UserService.cs",
+                "Users",
+                "UserServiceTests.cs",
+                "backend/AItest/UnitTest/Users/UserServiceTests.cs",
+            ),
+            (
+                "frontend/src/features/checkout/cart.ts",
+                "Checkout",
+                "cart.test.ts",
+                "frontend/AItest/UnitTest/Checkout/cart.test.ts",
             ),
         ]
         for src, module, name, expected in cases:
@@ -94,43 +113,58 @@ class TestOutputLayout(unittest.TestCase):
         )
         self.assertEqual(path, "AItest/UnitTest/Order/Services/OrderServiceTests.cs")
 
-    def test_package_prefix_override(self):
+    def test_package_prefix_override_any_name(self):
+        """FS discovery can force any package name — works across projects."""
         path = under_generated_test_folder(
             "unit",
             "x.test.ts",
-            source_file_name="svc-api/src/todos/x.ts",
-            module="Todo",
-            package_prefix="svc-api",
+            source_file_name="whatever/src/domain/x.ts",
+            module="Domain",
+            package_prefix="my-custom-pkg",
         )
-        self.assertEqual(path, "svc-api/AItest/UnitTest/Todo/x.test.ts")
+        self.assertEqual(path, "my-custom-pkg/AItest/UnitTest/Domain/x.test.ts")
         # Explicit empty only for true single-root packages
         path_root = under_generated_test_folder(
             "unit",
             "x.test.ts",
-            source_file_name="src/todos/x.ts",
-            module="Todo",
+            source_file_name="src/domain/x.ts",
+            module="Domain",
             package_prefix="",
         )
-        self.assertEqual(path_root, "AItest/UnitTest/Todo/x.test.ts")
+        self.assertEqual(path_root, "AItest/UnitTest/Domain/x.test.ts")
 
-    def test_relative_import_from_package_aitest(self):
-        src = "svc-api/src/todos/todos.service.ts"
+    def test_business_folder_named_backend_is_kept(self):
+        """Do not treat 'backend' as always-tech when it is a business module under src."""
+        self.assertEqual(
+            module_rel_from_source("src/backend/services/pay.ts"),
+            "backend/services",
+        )
         path = under_generated_test_folder(
             "unit",
-            "todos.service.test.ts",
+            "pay.test.ts",
+            source_file_name="src/backend/services/pay.ts",
+            module="backend",
+        )
+        self.assertEqual(path, "AItest/UnitTest/backend/pay.test.ts")
+
+    def test_relative_import_from_package_aitest(self):
+        src = "pkg-api/src/orders/orders.service.ts"
+        path = under_generated_test_folder(
+            "unit",
+            "orders.service.test.ts",
             source_file_name=src,
-            module="Todo",
+            module="Orders",
         )
         from app.services.test_output_layout import sut_module_specifier
 
-        self.assertEqual(sut_module_specifier(path, src), "src/todos/todos.service")
+        self.assertEqual(sut_module_specifier(path, src), "src/orders/orders.service")
         fixed = rewrite_sut_imports(
-            "import { TodosService } from '../todos.service';\n"
-            "import { TodosService as T2 } from '../../../src/todos/todos.service';\n",
+            "import { OrdersService } from '../orders.service';\n"
+            "import { OrdersService as T2 } from '../../../src/orders/orders.service';\n",
             test_rel=path,
             source_rel=src,
         )
-        self.assertIn("from 'src/todos/todos.service'", fixed)
+        self.assertIn("from 'src/orders/orders.service'", fixed)
         self.assertNotIn("../../../src/", fixed)
 
     def test_api_folder_name(self):
@@ -166,14 +200,14 @@ class TestOutputLayout(unittest.TestCase):
         )
         self.assertEqual(path, "AItest/UnitTest/Order/FooTests.cs")
 
-    def test_never_beside_go_source(self):
+    def test_go_internal_kept_as_business_path(self):
         path = under_generated_test_folder(
             "unit",
             "order_test.go",
             source_file_name="internal/order/order.go",
         )
-        self.assertEqual(path, "AItest/UnitTest/order/order_test.go")
-        self.assertFalse(path.startswith("internal/"))
+        self.assertEqual(path, "AItest/UnitTest/internal/order/order_test.go")
+        self.assertIn("internal/", path)
 
     def test_naming(self):
         self.assertEqual(
@@ -193,17 +227,17 @@ class TestOutputLayout(unittest.TestCase):
 
     def test_rewrite_sut_imports_alias_and_relative(self):
         code = (
-            "import { X } from '@/todos/todos.service';\n"
-            "import { Y } from '../../../src/todos/todos.service';\n"
+            "import { X } from '@/orders/orders.service';\n"
+            "import { Y } from '../../../src/orders/orders.service';\n"
             "import { Z } from '@nestjs/common';\n"
         )
         fixed = rewrite_sut_imports(
             code,
             test_rel="svc/AItest/UnitTest/T/x.test.ts",
-            source_rel="svc/src/todos/todos.service.ts",
+            source_rel="svc/src/orders/orders.service.ts",
         )
-        self.assertIn("src/todos/todos.service", fixed)
-        self.assertNotIn("@/todos", fixed)
+        self.assertIn("src/orders/orders.service", fixed)
+        self.assertNotIn("@/orders", fixed)
         self.assertNotIn("../", fixed)
         self.assertIn("@nestjs/common", fixed)
 
@@ -233,8 +267,8 @@ class TestOutputLayout(unittest.TestCase):
             "AItest/UnitTest/Order/FooTests.cs",
         )
         self.assertEqual(
-            assert_safe_aitest_target_rel("svc-api/AItest/UnitTest/Todo/x.test.ts"),
-            "svc-api/AItest/UnitTest/Todo/x.test.ts",
+            assert_safe_aitest_target_rel("pkg-api/AItest/UnitTest/Orders/x.test.ts"),
+            "pkg-api/AItest/UnitTest/Orders/x.test.ts",
         )
         self.assertEqual(
             assert_safe_aitest_target_rel(
@@ -248,6 +282,25 @@ class TestOutputLayout(unittest.TestCase):
             assert_safe_aitest_target_rel("AItest/../x.cs")
         with self.assertRaises(ValueError):
             assert_safe_aitest_target_rel("AItest/UnitTest/WebSpa/src/app/x.test.ts")
+
+    def test_env_spa_shell_extension(self):
+        """Projects can add SPA shell names without editing code."""
+        prev = os.environ.get("AITEST_SPA_SHELLS")
+        try:
+            os.environ["AITEST_SPA_SHELLS"] = "MyHost"
+            self.assertEqual(
+                module_rel_from_source("MyHost/src/app/billing/pay.ts"),
+                "billing",
+            )
+            self.assertEqual(
+                package_prefix_from_source("acme/MyHost/src/app/billing/pay.ts"),
+                "acme/MyHost",
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("AITEST_SPA_SHELLS", None)
+            else:
+                os.environ["AITEST_SPA_SHELLS"] = prev
 
 
 if __name__ == "__main__":

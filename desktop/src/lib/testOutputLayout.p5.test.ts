@@ -5,11 +5,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   assertSafeAitestTargetRel,
+  buildRequirementTcModule,
   coerceAitestApplyPath,
   isFlatAitestTarget,
   rewriteSutImports,
   sutModuleSpecifier,
   underGeneratedTestFolder,
+  uniquifyTestTargetRel,
 } from "./testOutputLayout.js";
 
 describe("P5 AItest path jail", () => {
@@ -109,6 +111,40 @@ describe("P5 AItest path jail", () => {
     );
     assert.match(fixed, /from 'src\/todos\/entities\/todo\.entity'/);
     assert.doesNotMatch(fixed, /\.\.\//);
+  });
+
+  it("uniquifyTestTargetRel keeps each TC on its own file", () => {
+    const a = uniquifyTestTargetRel(
+      "AItest/UnitTest/Todo/package-lock.test.ts",
+      "1b899cf6-3353-4dcb-99f4-c86e09963c25"
+    );
+    const b = uniquifyTestTargetRel(
+      "AItest/UnitTest/Todo/package-lock.test.ts",
+      "33b5cf67-aaaa-bbbb-cccc-dddddddddddd"
+    );
+    assert.equal(a, "AItest/UnitTest/Todo/package-lock.1b899cf6.test.ts");
+    assert.equal(b, "AItest/UnitTest/Todo/package-lock.33b5cf67.test.ts");
+    assert.notEqual(a, b);
+    assert.equal(
+      uniquifyTestTargetRel(a, "1b899cf6-3353-4dcb-99f4-c86e09963c25"),
+      a
+    );
+  });
+
+  it("Requirement folder nests TC title under UnitTest", () => {
+    assert.equal(
+      buildRequirementTcModule("Todo App SRS", "Lọc tất cả - Happy path", "FeatureX"),
+      "Todo App SRS/Lọc tất cả - Happy path"
+    );
+    const path = underGeneratedTestFolder("unit", "todos.service.test.ts", null, {
+      requirementTitle: "Todo App SRS",
+      testCaseTitle: "Lọc tất cả - Happy path",
+      packagePrefix: "",
+    });
+    assert.equal(
+      path,
+      "AItest/UnitTest/Todo App SRS/Lọc tất cả - Happy path/todos.service.test.ts"
+    );
   });
 });
 

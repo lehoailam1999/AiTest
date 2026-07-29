@@ -16,6 +16,7 @@ fn main() {
             commands::delete_dir,
             commands::run_dotnet_test,
             commands::run_test_command,
+            commands::open_path_in_os,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AITest Desktop");

@@ -1,5 +1,6 @@
 import { readTextFile, writeTextFile, deleteTextFile } from "../../tauri/bridge";
 import { workspaceRunDir } from "./paths";
+import { writeTextFileIfChanged } from "./contentDedup";
 import type { StagingBackup, UnitWorkspaceManifest } from "./types";
 
 function backupsRel(runId: string, packagePrefix?: string | null): string {
@@ -65,7 +66,7 @@ export async function captureStagingBackups(
   return backups;
 }
 
-/** Copy overlay → target paths (staging for verify). */
+/** Copy overlay → target paths (staging for verify). Skip identical content. */
 export async function stageOverlayToTargets(
   projectRoot: string,
   manifest: UnitWorkspaceManifest
@@ -73,7 +74,7 @@ export async function stageOverlayToTargets(
   for (const f of manifest.files) {
     if (f.op === "delete") continue;
     const content = await readTextFile(projectRoot, f.workspaceRel);
-    await writeTextFile(projectRoot, f.targetRel, content);
+    await writeTextFileIfChanged(projectRoot, f.targetRel, content);
   }
 }
 

@@ -30,7 +30,6 @@ export default function LoginPage() {
       <form className="auth-card" onSubmit={onSubmit}>
         <p className="brand">AITest</p>
         <h1>Sign in</h1>
-        <p className="muted">React Desktop · Python API (M1)</p>
         <label>
           Email
           <input

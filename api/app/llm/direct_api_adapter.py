@@ -22,8 +22,13 @@ class DirectAPIAdapter(BaseLLMAdapter):
         ctx: GenerateContext | None = None,
         topic_scope: str | None = None,
         context: dict[str, Any] | None = None,
+        on_progress: Any | None = None,
+        prefer_oneshot: bool | None = None,
+        session_topic_key: str | None = None,
     ) -> list[TestCaseDraft]:
-        del context
+        del context, prefer_oneshot, session_topic_key
+        if on_progress:
+            on_progress("Đang gọi API Direct…")
         ctx = ctx or GenerateContext()
         if topic_scope and not ctx.topic_scope:
             ctx.topic_scope = topic_scope

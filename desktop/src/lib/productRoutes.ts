@@ -12,6 +12,8 @@ export const ROUTES = {
   workspace: "/workspace",
   /** Automate: Unit Test Engine (AI CLI · project root) — Phase U4 */
   unitTest: "/unit-test",
+  /** Automate: E2E Test Engine (Playwright TS MVP) */
+  e2eTest: "/e2e-test",
   run: "/run",
   reports: "/reports",
   activity: "/activity",
@@ -24,7 +26,7 @@ export const ROUTES = {
 } as const;
 
 export function activityUrl(opts?: {
-  tab?: "unit-jobs" | "campaigns" | "legacy-jobs";
+  tab?: "unit-jobs" | "e2e-jobs" | "campaigns" | "legacy-jobs";
   runId?: string;
   module?: string;
 }): string {
@@ -81,6 +83,14 @@ export function unitTestUrl(opts?: {
   return `${ROUTES.unitTest}?${q.toString()}`;
 }
 
+export function e2eTestUrl(opts?: { testCaseId?: string; module?: string }): string {
+  const q = new URLSearchParams();
+  if (opts?.testCaseId) q.set("testCaseId", opts.testCaseId);
+  if (opts?.module) q.set("module", opts.module);
+  const s = q.toString();
+  return s ? `${ROUTES.e2eTest}?${s}` : ROUTES.e2eTest;
+}
+
 /** Prefixes that highlight Requirement in sidebar */
 export const REQUIREMENT_MATCH = [
   "/requirement",
@@ -96,6 +106,8 @@ export const UNIT_TEST_MATCH = [
   "/generate/code",
   "/generate-unit",
 ] as const;
+
+export const E2E_TEST_MATCH = ["/e2e-test", "/generate-e2e"] as const;
 
 export function pathMatches(pathname: string, prefixes: readonly string[]): boolean {
   return prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`) || pathname.startsWith(`${p}?`));

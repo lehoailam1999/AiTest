@@ -25,6 +25,12 @@ def stash_job_context_packet(job_id: uuid.UUID, packet: dict[str, Any]) -> None:
         stash_job_context(job_id, text)
 
 
+def stash_job_engine_hint(job_id: uuid.UUID, hint: dict[str, Any]) -> None:
+    """R1 Studio — preferredEngine unit|e2e + optional E2E inputs."""
+    entry = _pending.setdefault(str(job_id), {})
+    entry["engineHint"] = hint
+
+
 def pop_job_extras(job_id: uuid.UUID) -> dict[str, Any]:
     return _pending.pop(str(job_id), {})
 

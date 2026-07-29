@@ -25,6 +25,15 @@ class WorkspaceApplicationService:
     def get(self, workspace_id: str) -> WorkspaceSession | None:
         return self.port.get_session(workspace_id)
 
+    def active_workspace_for_project(self, project_id: str) -> WorkspaceSession | None:
+        getter = getattr(self.port, "get_active_workspace_id", None)
+        if not callable(getter):
+            return None
+        wid = getter(project_id)
+        if not wid:
+            return None
+        return self.port.get_session(wid)
+
     def status(self, workspace_id: str) -> dict[str, Any] | None:
         st = self.port.get_status(workspace_id)
         return st.to_dict() if st else None

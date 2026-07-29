@@ -1662,3 +1662,47 @@ mod test_output_parsers {
         assert_eq!(r, Some((1, 1, 0, 0)));
     }
 }
+
+/// EX4.4 — open file or folder in the OS (Explorer / default app).
+#[tauri::command]
+pub fn open_path_in_os(path: String) -> Result<(), String> {
+    let p = PathBuf::from(path.trim());
+    if !p.exists() {
+        return Err(format!("Path không tồn tại: {}", p.display()));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer reveal file in Explorer; for dirs just open.
+        if p.is_file() {
+            Command::new("explorer")
+                .arg("/select,")
+                .arg(&p)
+                .spawn()
+                .map_err(|e| format!("explorer: {e}"))?;
+        } else {
+            Command::new("explorer")
+                .arg(&p)
+                .spawn()
+                .map_err(|e| format!("explorer: {e}"))?;
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&p)
+            .spawn()
+            .map_err(|e| format!("open: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&p)
+            .spawn()
+            .map_err(|e| format!("xdg-open: {e}"))?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("open_path_in_os: unsupported OS".into())
+}

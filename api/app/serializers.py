@@ -97,6 +97,10 @@ def connection_dto(c: AiBackendConnection) -> dict:
 
 
 def job_dto(j: Job) -> dict:
+    from app.services.job_progress import get_job_log, get_job_progress
+
+    live = get_job_progress(j.id)
+    log_lines = get_job_log(j.id)
     return {
         "id": str(j.id),
         "projectId": str(j.project_id),
@@ -110,6 +114,8 @@ def job_dto(j: Job) -> dict:
         "requirementVersion": j.requirement_version,
         "runnerUsed": getattr(j, "runner_used", None),
         "cliSessionKey": getattr(j, "cli_session_key", None),
+        "progressMessage": live or getattr(j, "progress_message", None),
+        "progressLog": log_lines[-400:] if log_lines else [],
         "error": j.error,
         "startedAt": _iso(j.started_at),
         "completedAt": _iso(j.completed_at),
@@ -161,12 +167,6 @@ def testcase_dto(t: TestCase, source_content_hash: str | None = None) -> dict:
 
 
 def project_dto(p: Project, requirement_count: int, testcase_count: int) -> dict:
-    meta = None
-    if p.meta:
-        try:
-            meta = __import__("json").loads(p.meta)
-        except (TypeError, ValueError):
-            meta = None
     return {
         "id": str(p.id),
         "name": p.name,
@@ -174,7 +174,6 @@ def project_dto(p: Project, requirement_count: int, testcase_count: int) -> dict
         "code": p.code,
         "language": p.language,
         "framework": p.framework,
-        "meta": meta,
         "isActive": p.is_active,
         "requirementCount": requirement_count,
         "testCaseCount": testcase_count,

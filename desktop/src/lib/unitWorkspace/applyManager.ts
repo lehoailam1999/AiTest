@@ -3,6 +3,7 @@ import { saveManifest } from "./manager";
 import { syncApplyAudit } from "./auditSync";
 import { captureStagingBackups } from "./staging";
 import { cleanupWorkspaceRunAfterApply } from "./cleanup";
+import { writeTextFileIfChanged } from "./contentDedup";
 import type { UnitWorkspaceManifest } from "./types";
 import {
   assertSafeAitestTargetRel,
@@ -60,7 +61,7 @@ export async function applyWorkspaceToRepo(
         continue;
       }
       const content = await readTextFile(projectRoot, f.workspaceRel);
-      await writeTextFile(projectRoot, f.targetRel, content);
+      await writeTextFileIfChanged(projectRoot, f.targetRel, content);
       applied.push(f.targetRel);
     }
 

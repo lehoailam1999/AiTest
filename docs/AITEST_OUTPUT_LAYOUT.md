@@ -10,6 +10,11 @@ AItest/                         ← root của project (không cạnh production
 ├── IntegrationTest/
 ├── APITest/
 ├── E2ETest/
+│   └── {Module}/
+│       ├── pages/              # *.page.ts (POM)
+│       ├── specs/              # *.spec.ts
+│       ├── fixtures/           # storageState.json, data
+│       └── playwright.config.ts
 ├── Reports/
 ├── Coverage/
 └── Metadata/

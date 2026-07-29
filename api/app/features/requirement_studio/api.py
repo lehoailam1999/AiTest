@@ -278,6 +278,19 @@ def get_coverage(
     return ok(app_svc.coverage_summary(db, wid))
 
 
+@router.get("/requirement-workspaces/{workspace_id}/analysis")
+def get_analysis_records(
+    workspace_id: str,
+    db: Annotated[Session, Depends(get_db)],
+):
+    wid = _uuid(workspace_id)
+    if wid is None:
+        return errors(400, "invalid workspace id")
+    if app_svc.get_workspace(db, wid) is None:
+        return errors(404, "workspace not found")
+    return ok({"items": app_svc.list_analysis_records(db, wid)})
+
+
 @router.post("/requirement-workspaces/{workspace_id}/coverage/analyze")
 def analyze_coverage(
     workspace_id: str,
@@ -414,12 +427,20 @@ class FreezeBody(BaseModel):
 
 class GenerateFromSnapshotBody(BaseModel):
     mode: str = Field(default="append")
+    preferredEngine: str | None = Field(default=None, max_length=20)
+    targetUrl: str | None = Field(default=None, max_length=500)
+    authHint: str | None = Field(default=None, max_length=1000)
+    focusModules: str | None = Field(default=None, max_length=500)
 
 
 class FreezeAndGenerateBody(BaseModel):
     acknowledgeMissing: bool = False
     note: str | None = Field(default=None, max_length=2000)
     mode: str = Field(default="append")
+    preferredEngine: str | None = Field(default=None, max_length=20)
+    targetUrl: str | None = Field(default=None, max_length=500)
+    authHint: str | None = Field(default=None, max_length=1000)
+    focusModules: str | None = Field(default=None, max_length=500)
 
 
 @router.post("/requirement-workspaces/{workspace_id}/freeze")
@@ -500,7 +521,15 @@ async def generate_tc_from_snapshot(
     if mode not in ("append", "replace"):
         return errors(400, "mode must be append or replace")
     try:
-        job = app_svc.enqueue_generate_from_snapshot(db, snap, mode=mode)
+        job = app_svc.enqueue_generate_from_snapshot(
+            db,
+            snap,
+            mode=mode,
+            preferred_engine=body.preferredEngine,
+            target_url=body.targetUrl,
+            auth_hint=body.authHint,
+            focus_modules=body.focusModules,
+        )
     except ValueError as e:
         return errors(400, str(e))
     asyncio.create_task(process_generate_job(job.id))
@@ -548,7 +577,15 @@ async def freeze_and_generate(
         mode = (body.mode or "append").strip().lower()
         if mode not in ("append", "replace"):
             return errors(400, "mode must be append or replace")
-        job = app_svc.enqueue_generate_from_snapshot(db, snap, mode=mode)
+        job = app_svc.enqueue_generate_from_snapshot(
+            db,
+            snap,
+            mode=mode,
+            preferred_engine=body.preferredEngine,
+            target_url=body.targetUrl,
+            auth_hint=body.authHint,
+            focus_modules=body.focusModules,
+        )
     except ValueError as e:
         return errors(400, str(e))
     asyncio.create_task(process_generate_job(job.id))
@@ -557,6 +594,7 @@ async def freeze_and_generate(
             "snapshot": frozen["snapshot"],
             "warnings": frozen.get("warnings") or [],
             "job": job_dto(job),
+            "preferredEngine": (body.preferredEngine or "").strip().lower() or None,
         },
         status_code=201,
     )

@@ -63,7 +63,14 @@ export function BatchStagingPreview({
   }, [jobs]);
 
   const failJobs = useMemo(
-    () => jobs.filter((j) => j.row.status === "fail" && j.row.error !== "Đang chờ…"),
+    () =>
+      jobs.filter(
+        (j) =>
+          j.row.status === "fail" &&
+          j.row.error !== "Đang chờ…" &&
+          j.row.error !== "Tạm dừng — chờ Tiếp tục" &&
+          j.row.error !== "Đang chạy…"
+      ),
     [jobs]
   );
 
@@ -79,7 +86,13 @@ export function BatchStagingPreview({
 
   const okCount = jobs.filter((j) => j.row.status === "ok").length;
   const failCount = failJobs.length;
-  const waitingCount = jobs.filter((j) => j.row.error === "Đang chờ…").length;
+  const waitingCount = jobs.filter(
+    (j) =>
+      j.row.error === "Đang chờ…" ||
+      j.row.error === "Tạm dừng — chờ Tiếp tục" ||
+      j.row.error === "Đang chạy…"
+  ).length;
+  const pausedCount = jobs.filter((j) => j.row.error === "Tạm dừng — chờ Tiếp tục").length;
 
   return (
     <Card
@@ -91,7 +104,11 @@ export function BatchStagingPreview({
           <Tag color="blue">{allFiles.length} file</Tag>
           <Tag color="success">{okCount} TC OK</Tag>
           {failCount > 0 ? <Tag color="error">{failCount} lỗi</Tag> : null}
-          {waitingCount > 0 ? <Tag>{waitingCount} chờ</Tag> : null}
+          {pausedCount > 0 ? <Tag color="orange">{pausedCount} tạm dừng</Tag> : null}
+          {waitingCount > 0 && pausedCount === 0 ? <Tag>{waitingCount} chờ</Tag> : null}
+          {waitingCount > 0 && pausedCount > 0 ? (
+            <Tag>{waitingCount - pausedCount} chờ / chạy</Tag>
+          ) : null}
         </Space>
       }
     >

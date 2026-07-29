@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     Integer,
@@ -85,6 +86,7 @@ class Job(TimestampMixin, Base):
     requirement_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     runner_used: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cli_session_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    progress_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AiBackendConnection(TimestampMixin, Base):
@@ -418,3 +420,39 @@ class RequirementSnapshot(TimestampMixin, Base):
         UUID(as_uuid=True), nullable=True
     )
     freeze_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RequirementAnalysisRecord(TimestampMixin, Base):
+    """Structured persisted analysis slices by fixed type."""
+
+    __tablename__ = "requirement_analysis_records"
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ("
+            "'SUMMARY_SCOPE',"
+            "'FEATURES',"
+            "'ACTORS_PERMISSIONS',"
+            "'BUSINESS_FLOWS',"
+            "'BUSINESS_RULES',"
+            "'VALIDATION_DATA',"
+            "'API_UI',"
+            "'ERROR_HANDLING',"
+            "'ACCEPTANCE',"
+            "'NFR_CONSTRAINTS',"
+            "'GAPS'"
+            ")",
+            name="ck_requirement_analysis_records_type",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    knowledge_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    knowledge_version: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    type: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(120))
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    content_json: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -14,14 +14,10 @@ import {
   Typography,
 } from "antd";
 import {
-  ApiOutlined,
   CheckCircleOutlined,
-  CloudServerOutlined,
   CodeOutlined,
-  LinkOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
-  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { connection } from "../api";
 import type { Connection } from "../api/types";
@@ -30,14 +26,6 @@ import { Link } from "react-router-dom";
 import { ROUTES } from "../lib/productRoutes";
 
 const { Title, Paragraph, Text } = Typography;
-
-const PROVIDERS = [
-  { value: "openai", label: "OpenAI" },
-  { value: "anthropic", label: "Anthropic" },
-  { value: "gemini", label: "Google Gemini" },
-  { value: "ollama", label: "Ollama (local)" },
-  { value: "antigravity", label: "Antigravity (Google API / proxy)" },
-] as const;
 
 const CLI_TYPES = [
   {
@@ -90,11 +78,7 @@ export default function SettingsPage() {
   const { message } = App.useApp();
   const { project } = useProject();
   const [conn, setConn] = useState<Connection | null>(null);
-  const [provider, setProvider] = useState("openai");
   const [modelName, setModelName] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [runnerMode, setRunnerMode] = useState("API_DIRECT");
   const [cliType, setCliType] = useState("gemini-cli");
   const [cliPath, setCliPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -107,10 +91,7 @@ export default function SettingsPage() {
     try {
       const c = await connection.get(project.id);
       setConn(c);
-      setProvider(c.provider || "openai");
       setModelName(c.modelName ?? "");
-      setBaseUrl(c.baseUrl ?? "");
-      setRunnerMode((c.runnerMode || "API_DIRECT").toUpperCase());
       setCliType(c.cliType || "gemini-cli");
       setCliPath(c.cliPath ?? "");
     } catch (e) {
@@ -124,17 +105,6 @@ export default function SettingsPage() {
     void load();
   }, [load]);
 
-  const isCli = runnerMode === "AI_CLI";
-  const isOllama = provider === "ollama";
-  const isAntigravity = provider === "antigravity";
-  const showBaseUrl = !isCli && (isOllama || isAntigravity);
-  const apiKeyOptional =
-    isCli ||
-    isOllama ||
-    (isAntigravity &&
-      Boolean(baseUrl.trim()) &&
-      /127\.0\.0\.1|localhost/i.test(baseUrl));
-
   const cliHint = useMemo(
     () => CLI_TYPES.find((c) => c.value === cliType)?.hint ?? "",
     [cliType]
@@ -145,23 +115,17 @@ export default function SettingsPage() {
     setSaving(true);
     try {
       const c = await connection.save(project.id, {
-        provider,
+        provider: cliType === "ollama" ? "ollama" : "openai",
         modelName: modelName.trim() || undefined,
-        ...(provider === "ollama" || provider === "antigravity"
-          ? { baseUrl: baseUrl.trim() || "" }
-          : {}),
-        apiKey: apiKey.trim() || undefined,
-        runnerMode,
+        runnerMode: "AI_CLI",
         cliType,
         cliPath: cliPath.trim() || undefined,
       });
       setConn(c);
-      setBaseUrl(c.baseUrl ?? "");
-      setRunnerMode((c.runnerMode || "API_DIRECT").toUpperCase());
       setCliType(c.cliType || "gemini-cli");
       setCliPath(c.cliPath ?? "");
-      setApiKey("");
-      message.success("Đã lưu cấu hình AI");
+      setModelName(c.modelName ?? "");
+      message.success("Đã lưu cấu hình AI CLI");
     } catch (err) {
       message.error(err instanceof Error ? err.message : "Lưu thất bại");
     } finally {
@@ -173,12 +137,21 @@ export default function SettingsPage() {
     if (!project) return;
     setVerifying(true);
     try {
+      // Always persist AI_CLI before verify (legacy Direct API configs must migrate)
+      await connection.save(project.id, {
+        provider: cliType === "ollama" ? "ollama" : "openai",
+        modelName: modelName.trim() || undefined,
+        runnerMode: "AI_CLI",
+        cliType,
+        cliPath: cliPath.trim() || undefined,
+      });
       const c = await connection.verify(project.id);
       setConn(c);
+      setCliType(c.cliType || "gemini-cli");
+      setCliPath(c.cliPath ?? "");
+      setModelName(c.modelName ?? "");
       if (c.status === "Ready") {
-        message.success(
-          isCli ? "CLI sẵn sàng — AI đã Ready" : "Xác minh thành công — AI đã Ready"
-        );
+        message.success("CLI sẵn sàng — AI đã Ready");
       } else {
         message.warning(`Trạng thái: ${c.status}`);
       }
@@ -223,7 +196,7 @@ export default function SettingsPage() {
             Cấu hình AI
           </Title>
           <Paragraph type="secondary" className="page-lead">
-            Sinh TC &amp; Phân tích · <Text strong>{project.name}</Text>
+            AI CLI · Sinh TC &amp; Phân tích · <Text strong>{project.name}</Text>
           </Paragraph>
         </div>
         <Space size={6} wrap className="page-head-actions">
@@ -237,8 +210,7 @@ export default function SettingsPage() {
               {conn.status}
             </Tag>
           ) : null}
-          {conn?.hasApiKey && !isCli ? <Tag color="processing">Key đã lưu</Tag> : null}
-          {isCli ? <Tag icon={<CodeOutlined />}>AI CLI</Tag> : <Tag icon={<ApiOutlined />}>API</Tag>}
+          <Tag icon={<CodeOutlined />}>AI CLI</Tag>
         </Space>
       </header>
 
@@ -253,46 +225,6 @@ export default function SettingsPage() {
       ) : null}
 
       <section className="settings-ai-shell" aria-label="Cấu hình AI">
-        <div className="settings-ai-block">
-          <div className="settings-ai-block-label">Engine</div>
-          <div className="settings-engine-grid" role="radiogroup" aria-label="Engine mode">
-            <button
-              type="button"
-              role="radio"
-              aria-checked={!isCli}
-              className={`settings-engine-card${!isCli ? " is-active" : ""}`}
-              onClick={() => setRunnerMode("API_DIRECT")}
-              disabled={locked}
-            >
-              <span className="settings-engine-icon" aria-hidden>
-                <CloudServerOutlined />
-              </span>
-              <span className="settings-engine-body">
-                <strong>Direct API</strong>
-                <span>REST · API Key</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={isCli}
-              className={`settings-engine-card${isCli ? " is-active" : ""}`}
-              onClick={() => setRunnerMode("AI_CLI")}
-              disabled={locked}
-            >
-              <span className="settings-engine-icon settings-engine-icon--cli" aria-hidden>
-                <ThunderboltOutlined />
-              </span>
-              <span className="settings-engine-body">
-                <strong>
-                  AI CLI <em className="settings-engine-badge">khuyến nghị</em>
-                </strong>
-                <span>Subprocess local · tiết kiệm token</span>
-              </span>
-            </button>
-          </div>
-        </div>
-
         <Form
           layout="vertical"
           size="middle"
@@ -301,140 +233,51 @@ export default function SettingsPage() {
           onFinish={() => void onSave()}
         >
           <div className="settings-ai-block">
-            <div className="settings-ai-block-label">
-              {isCli ? "CLI" : "Nhà cung cấp"}
-            </div>
-
-            {isCli ? (
-              <Row gutter={[12, 0]}>
-                <Col xs={24} md={8}>
-                  <Form.Item label="Vendor" required>
-                    <Select
-                      value={cliType}
-                      onChange={setCliType}
-                      options={CLI_TYPES.map((p) => ({
-                        value: p.value,
-                        label: p.label,
-                      }))}
-                      disabled={locked}
-                    />
-                  </Form.Item>
-                  {cliHint ? (
-                    <Text type="secondary" className="settings-field-hint">
-                      {cliHint}
-                    </Text>
-                  ) : null}
-                </Col>
-                <Col xs={24} md={8}>
-                  <Form.Item label="Path" required>
-                    <Input
-                      value={cliPath}
-                      onChange={(e) => setCliPath(e.target.value)}
-                      placeholder={cliPathPlaceholder(cliType)}
-                      disabled={locked}
-                      prefix={<CodeOutlined />}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Form.Item
-                    label="Model"
-                    tooltip="Cursor: trống = auto · Ollama: bắt buộc"
-                  >
-                    <Input
-                      value={modelName}
-                      onChange={(e) => setModelName(e.target.value)}
-                      placeholder={cliType === "ollama" ? "llama3.2" : "auto"}
-                      disabled={locked}
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-            ) : (
-              <Row gutter={[12, 0]}>
-                <Col xs={24} md={8}>
-                  <Form.Item label="Provider" required>
-                    <Select
-                      value={provider}
-                      onChange={setProvider}
-                      options={[...PROVIDERS]}
-                      disabled={locked}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Form.Item
-                    label="Model"
-                    tooltip={
-                      isOllama
-                        ? "vd. llama3.2"
-                        : isAntigravity
-                          ? "vd. gemini-2.0-flash"
-                          : "Trống = mặc định"
-                    }
-                  >
-                    <Input
-                      value={modelName}
-                      onChange={(e) => setModelName(e.target.value)}
-                      placeholder={
-                        isAntigravity ? "gemini-2.0-flash" : "mặc định"
-                      }
-                      disabled={locked}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col xs={24} md={8}>
-                  <Form.Item
-                    label={apiKeyOptional ? "API Key (tuỳ chọn)" : "API Key"}
-                    required={!apiKeyOptional}
-                  >
-                    <Input.Password
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={
-                        conn?.hasApiKey
-                          ? "•••• đã lưu — nhập để thay"
-                          : "Nhập API key"
-                      }
-                      disabled={locked}
-                      autoComplete="off"
-                    />
-                  </Form.Item>
-                </Col>
-                {showBaseUrl ? (
-                  <Col xs={24}>
-                    <Form.Item
-                      label={
-                        isAntigravity ? "Base URL (tuỳ chọn)" : "Base URL"
-                      }
-                    >
-                      <Input
-                        value={baseUrl}
-                        onChange={(e) => setBaseUrl(e.target.value)}
-                        placeholder={
-                          isAntigravity
-                            ? "http://127.0.0.1:11435/v1"
-                            : "http://127.0.0.1:11434"
-                        }
-                        disabled={locked}
-                        prefix={<LinkOutlined />}
-                      />
-                    </Form.Item>
-                  </Col>
+            <div className="settings-ai-block-label">CLI</div>
+            <Row gutter={[12, 0]}>
+              <Col xs={24} md={8}>
+                <Form.Item label="Vendor" required>
+                  <Select
+                    value={cliType}
+                    onChange={setCliType}
+                    options={CLI_TYPES.map((p) => ({
+                      value: p.value,
+                      label: p.label,
+                    }))}
+                    disabled={locked}
+                  />
+                </Form.Item>
+                {cliHint ? (
+                  <Text type="secondary" className="settings-field-hint">
+                    {cliHint}
+                  </Text>
                 ) : null}
-                {isAntigravity ? (
-                  <Col xs={24}>
-                    <Text
-                      type="secondary"
-                      className="settings-field-hint settings-field-hint--block"
-                    >
-                      Antigravity: mặc định giống Gemini (API Key + model). Chỉ điền Base URL khi
-                      dùng proxy.
-                    </Text>
-                  </Col>
-                ) : null}
-              </Row>
-            )}
+              </Col>
+              <Col xs={24} md={8}>
+                <Form.Item label="Path" required>
+                  <Input
+                    value={cliPath}
+                    onChange={(e) => setCliPath(e.target.value)}
+                    placeholder={cliPathPlaceholder(cliType)}
+                    disabled={locked}
+                    prefix={<CodeOutlined />}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={8}>
+                <Form.Item
+                  label="Model"
+                  tooltip="Cursor: trống = auto · Ollama: bắt buộc"
+                >
+                  <Input
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                    placeholder={cliType === "ollama" ? "llama3.2" : "auto"}
+                    disabled={locked}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
           </div>
 
           <div className="settings-ai-actions">
@@ -448,7 +291,7 @@ export default function SettingsPage() {
                 loading={verifying}
                 disabled={locked && !verifying}
               >
-                {isCli ? "Test CLI" : "Xác minh"}
+                Test CLI
               </Button>
               <Button
                 type="text"
@@ -461,7 +304,7 @@ export default function SettingsPage() {
               </Button>
             </Space>
             <Text type="secondary" className="settings-ai-actions-hint">
-              Lưu → Xác minh → Ready trước khi Sinh TC / Phân tích
+              Lưu → Test CLI → Ready trước khi Sinh TC / Phân tích
             </Text>
           </div>
         </Form>

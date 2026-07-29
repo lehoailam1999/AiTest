@@ -64,6 +64,7 @@ API lắng nghe: **http://localhost:5000**
 | Jobs | `POST/GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/context`, `PATCH /api/jobs/{id}` | JWT — worker chạy async trong process |
 | Test Cases | `GET/POST /api/testcases`, `POST /api/testcases/bulk`, `.../{id}/{submit,approve,reject}` | JWT |
 | Generate Unit | `POST /api/generate-unit` | JWT — chỉ TC Approved |
+| Generate E2E | `POST /api/generate-e2e`, `/e2e-inspect`, `/e2e-sandbox-repair`, `/e2e-artifacts-sync` | JWT — Playwright TS MVP |
 | Executions | `GET/POST /api/executions`, `GET /api/executions/{id}` | JWT |
 | Stubs | `GET /api/dashboard`, `/api/prompts`, `/api/history`, `/api/reports/{projectId}` | JWT |
 

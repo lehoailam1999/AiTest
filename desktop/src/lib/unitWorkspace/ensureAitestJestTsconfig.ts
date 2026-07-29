@@ -5,6 +5,7 @@
 import { readTextFile, writeTextFile } from "../../tauri/bridge";
 import { AITEST_ROOT, aitestRootFromTarget } from "../testOutputLayout";
 import { overlayRelPath } from "./paths";
+import { textFileEquals, writeTextFileIfChanged } from "./contentDedup";
 import type { UnitWorkspaceManifest } from "./types";
 
 async function pathExists(projectRoot: string, rel: string): Promise<boolean> {
@@ -199,14 +200,19 @@ export async function ensureAitestJestTsconfigInWorkspace(input: {
   ];
 
   for (const w of writes) {
+    // Shared scaffold already on disk with same bytes → do not clone into this
+    // run's .ai-test overlay (N jobs × identical jest/tsconfig was pure waste).
+    // Verify still uses on-disk AItest/jest.config.cjs.
+    if (await textFileEquals(input.projectRoot, w.rel, w.content)) {
+      files = files.filter((f) => f.targetRel !== w.rel);
+      continue;
+    }
+
     const workspaceRel = overlayRelPath(input.manifest.runId, w.rel, packagePrefix);
     await writeTextFile(input.projectRoot, workspaceRel, w.content);
-    // Always overwrite on-disk scaffold (broken Nest-extends configs must be refreshed).
-    try {
-      await writeTextFile(input.projectRoot, w.rel, w.content);
-    } catch {
-      /* overlay still used at verify staging */
-    }
+    // Refresh on-disk scaffold when content changed (broken Nest-extends, etc.).
+    await writeTextFileIfChanged(input.projectRoot, w.rel, w.content);
+
     const exists = await pathExists(input.projectRoot, w.rel);
     files = files.filter((f) => f.targetRel !== w.rel);
     files.push({

@@ -6,12 +6,7 @@
 
 import { projects, workspaceApi } from "../../api";
 import { assertApiReadyForSync } from "../../api/health";
-import type { Project, ProjectMeta } from "../../api/types";
-import {
-  assertProjectSynced,
-  buildProjectMetaFromScan,
-  normalizeProjectMeta,
-} from "../projectSync";
+import type { Project } from "../../api/types";
 import { isTauri, pickProjectFolder, scanProject, type ProjectScan } from "../../tauri/bridge";
 import { workspace } from "../../workspace";
 import { ensureWorkspaceOpen } from "./client";
@@ -21,11 +16,9 @@ export type BindSourceRootInput = {
   projectName: string;
   /** Absolute path; if omitted, opens Tauri folder dialog */
   rootPath?: string;
-  /** Existing server meta (merge frameworks etc.) */
-  existingMeta?: ProjectMeta | null;
   /** Wait for BE index ready/error (default true) */
   waitForIndex?: boolean;
-  /** Sync language/framework/meta to API (default true when Tauri) */
+  /** Sync language/framework to API (default true when Tauri) */
   syncMeta?: boolean;
   /** Force full BE index refresh after open (Rescan) */
   refreshIndex?: boolean;
@@ -45,7 +38,6 @@ export type BindSourceRootResult = {
 export type SyncSourceMetaInput = {
   projectId: string;
   scan: ProjectScan;
-  existingMeta?: ProjectMeta | null;
 };
 
 /**
@@ -53,21 +45,11 @@ export type SyncSourceMetaInput = {
  */
 export async function syncSourceMeta(input: SyncSourceMetaInput): Promise<Project> {
   await assertApiReadyForSync();
-  const metaPayload = buildProjectMetaFromScan(
-    input.scan,
-    normalizeProjectMeta(input.existingMeta)
-  );
   await projects.update(input.projectId, {
     language: input.scan.language ?? null,
     framework: (input.scan.frameworks ?? [])[0] ?? null,
-    meta: metaPayload,
   });
-  const verified = await projects.get(input.projectId);
-  assertProjectSynced(verified, input.projectId);
-  return {
-    ...verified,
-    meta: normalizeProjectMeta(verified.meta) ?? verified.meta,
-  };
+  return projects.get(input.projectId);
 }
 
 /**
@@ -131,7 +113,6 @@ export async function bindSourceRoot(
       syncedProject = await syncSourceMeta({
         projectId: input.projectId,
         scan,
-        existingMeta: input.existingMeta,
       });
     } catch (e) {
       syncError = e instanceof Error ? e.message : "Đồng bộ stack thất bại";

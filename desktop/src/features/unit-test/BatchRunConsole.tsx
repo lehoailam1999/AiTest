@@ -26,16 +26,104 @@ import {
   formatDurationMs,
   parseTestRunSummary,
 } from "../../lib/unitWorkspace/parseTestRunSummary";
-import type { VerifyStageResult } from "../../lib/unitWorkspace/types";
+import type {
+  UnitWorkspaceManifest,
+  VerifyStageResult,
+} from "../../lib/unitWorkspace/types";
 import { suggestWorkspaceVerifyCommands } from "../../lib/stackHints";
 import type { ProjectMeta, StackInspect } from "../../api/types";
 import { isTauri } from "../../tauri/bridge";
+
+/** Queue notes for batch Generate list (Ghi chú column). */
+export const BATCH_NOTE_WAITING = "Đang chờ…";
+export const BATCH_NOTE_PAUSED = "Tạm dừng — chờ Tiếp tục";
+export const BATCH_NOTE_RUNNING = "Đang chạy…";
+
+export function isBatchQueueNote(error?: string | null): boolean {
+  return (
+    error === BATCH_NOTE_WAITING ||
+    error === BATCH_NOTE_PAUSED ||
+    error === BATCH_NOTE_RUNNING
+  );
+}
+
+export function isBatchWaitingOrPaused(error?: string | null): boolean {
+  return error === BATCH_NOTE_WAITING || error === BATCH_NOTE_PAUSED;
+}
+
+function extractFailedPathTokens(log: string): string[] {
+  const out = new Set<string>();
+  const push = (raw: string) => {
+    const norm = (raw || "").replace(/\\/g, "/").trim();
+    if (!norm) return;
+    const base = norm.split("/").pop() || norm;
+    if (base) out.add(base.toLowerCase());
+    out.add(norm.toLowerCase());
+  };
+  const failLine = /^\s*FAIL\s+(.+)$/gim;
+  let m: RegExpExecArray | null;
+  while ((m = failLine.exec(log)) !== null) {
+    push(m[1] || "");
+  }
+  const specLine = /^\s*(?:at|in)\s+([^\s]+(?:\.test|\.spec)\.[a-z]+)(?::\d+)?/gim;
+  while ((m = specLine.exec(log)) !== null) {
+    push(m[1] || "");
+  }
+  return [...out];
+}
+
+function rowMatchesFailedTokens(
+  row: BatchPipelineRow,
+  manifest: UnitWorkspaceManifest | undefined,
+  tokens: string[]
+): boolean {
+  if (!tokens.length) return false;
+  const hay = new Set<string>();
+  const add = (s?: string | null) => {
+    const norm = (s || "").replace(/\\/g, "/").trim();
+    if (!norm) return;
+    hay.add(norm.toLowerCase());
+    const base = norm.split("/").pop() || norm;
+    hay.add(base.toLowerCase());
+  };
+  add(row.testCaseId);
+  add(row.workspaceRunId);
+  add(row.title);
+  for (const f of manifest?.files || []) {
+    add(f.targetRel);
+    add(f.workspaceRel);
+  }
+  for (const t of tokens) {
+    for (const h of hay) {
+      if (h.includes(t) || t.includes(h)) return true;
+    }
+  }
+  return false;
+}
+
+/** Mark not-yet-started rows as paused (current RUNNING row keeps running until done). */
+export function markBatchRowsPaused(rows: BatchPipelineRow[]): BatchPipelineRow[] {
+  return rows.map((r) =>
+    r.status === "fail" && r.error === BATCH_NOTE_WAITING
+      ? { ...r, error: BATCH_NOTE_PAUSED }
+      : r
+  );
+}
+
+/** Restore paused rows to waiting before resume. */
+export function markBatchRowsResumed(rows: BatchPipelineRow[]): BatchPipelineRow[] {
+  return rows.map((r) =>
+    r.status === "fail" && r.error === BATCH_NOTE_PAUSED
+      ? { ...r, error: BATCH_NOTE_WAITING }
+      : r
+  );
+}
 
 export type BatchPipelineRow = {
   key: string;
   testCaseId: string;
   title: string;
-  /** Generate ok/fail */
+  /** Generate ok/fail — queue rows use fail + queue note in `error`. */
   status: "ok" | "fail";
   error?: string;
   workspaceRunId?: string;
@@ -158,6 +246,22 @@ export function BatchRunConsole({
     [verifyLog?.stages, framework, language]
   );
 
+  /** Prefer unit-job counts (table) over raw Jest line — batch may overwrite same path. */
+  const unitSummary = useMemo(() => {
+    const units = verifyLog?.units || [];
+    if (!units.length) return null;
+    const passed = units.filter((u) => u.verifyStatus === "pass").length;
+    const failed = units.filter((u) => u.verifyStatus === "fail").length;
+    return { passed, failed, total: units.length };
+  }, [verifyLog?.units]);
+
+  const runnerMismatch = Boolean(
+    unitSummary &&
+      logSummary.hasCounts &&
+      logSummary.total > 0 &&
+      logSummary.total < unitSummary.total
+  );
+
   async function applyOne(row: BatchPipelineRow): Promise<BatchPipelineRow> {
     if (row.verifyStatus !== "pass" || !row.workspaceRunId) {
       return { ...row, applyStatus: "skipped" };
@@ -181,6 +285,28 @@ export function BatchRunConsole({
     return { ...row, applyStatus: "done", error: undefined };
   }
 
+  /**
+   * Khi Generate đang tạm dừng: giữ batchControl + busy, chỉ Verify/Apply phần đã gen.
+   * Không start/reset — tránh đánh thức / kết thúc sớm vòng Generate.
+   */
+  function beginSidePhase(): { preserveGeneratePause: boolean } {
+    const preserveGeneratePause = batchControl.getStatus() === "paused";
+    onBusy(true);
+    if (!preserveGeneratePause) batchControl.start();
+    return { preserveGeneratePause };
+  }
+
+  function endSidePhase(preserveGeneratePause: boolean) {
+    setProgress(null);
+    if (preserveGeneratePause) {
+      // Generate vẫn chờ «Tiếp tục» — giữ paused + busy.
+      if (batchControl.getStatus() === "running") batchControl.pause();
+      return;
+    }
+    batchControl.reset();
+    onBusy(false);
+  }
+
   async function runVerifyAll() {
     if (!isTauri()) return;
     const work = rows.filter((r) => r.status === "ok" && r.workspaceRunId);
@@ -192,12 +318,13 @@ export function BatchRunConsole({
       message.error("Chưa có lệnh test — kiểm tra framework / stack.");
       return;
     }
-    onBusy(true);
-    batchControl.start();
+    const { preserveGeneratePause } = beginSidePhase();
     setProgress({
       current: 0,
       total: work.length,
-      label: `Staging ${work.length} job → chạy 1 lệnh test`,
+      label: preserveGeneratePause
+        ? `Verify ${work.length} unit đã gen (Generate đang tạm dừng)`
+        : `Staging ${work.length} job → chạy 1 lệnh test`,
       phase: "verify",
     });
     try {
@@ -223,6 +350,11 @@ export function BatchRunConsole({
         testCommand: hints.test,
       });
       const byRun = new Map(result.updatedManifests.map((m) => [m.runId, m]));
+      const testStageLog =
+        result.stages.find((s) => s.stage === "test")?.logExcerpt || "";
+      const failedTokens = extractFailedPathTokens(testStageLog);
+      const hasMappedFailure = failedTokens.length > 0;
+
       const nextRows = rows.map((r) => {
         if (!r.workspaceRunId || r.status !== "ok") {
           return { ...r, verifyStatus: "skipped" as const };
@@ -235,10 +367,20 @@ export function BatchRunConsole({
             error: "Thiếu staging sau verify",
           };
         }
+        if (m.verify?.overallPass) {
+          return {
+            ...r,
+            verifyStatus: "pass" as const,
+            error: undefined,
+            applyStatus: r.applyStatus ?? ("pending" as const),
+          };
+        }
+        const matchedFail = rowMatchesFailedTokens(r, m, failedTokens);
+        const treatAsFail = hasMappedFailure ? matchedFail : true;
         return {
           ...r,
-          verifyStatus: (m.verify?.overallPass ? "pass" : "fail") as "pass" | "fail",
-          error: m.verify?.overallPass ? undefined : "Verify FAIL (batch)",
+          verifyStatus: (treatAsFail ? "fail" : "pass") as "pass" | "fail",
+          error: treatAsFail ? "Verify FAIL (batch)" : undefined,
           applyStatus: r.applyStatus ?? ("pending" as const),
         };
       });
@@ -246,7 +388,9 @@ export function BatchRunConsole({
 
       const units = work.map((r) => {
         const m = byRun.get(r.workspaceRunId!);
-        const pass = Boolean(m?.verify?.overallPass);
+        const pass = m?.verify?.overallPass
+          ? true
+          : !rowMatchesFailedTokens(r, m, failedTokens);
         return {
           testCaseId: r.testCaseId,
           title: r.title,
@@ -282,9 +426,7 @@ export function BatchRunConsole({
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Verify batch thất bại");
     } finally {
-      batchControl.reset();
-      setProgress(null);
-      onBusy(false);
+      endSidePhase(preserveGeneratePause);
     }
   }
 
@@ -302,6 +444,7 @@ export function BatchRunConsole({
       okText: "Hủy bỏ & xóa file gen",
       okType: "danger",
       onOk: async () => {
+        const preserveGeneratePause = batchControl.getStatus() === "paused";
         onBusy(true);
         setProgress({
           current: 0,
@@ -340,7 +483,7 @@ export function BatchRunConsole({
           message.error(e instanceof Error ? e.message : "Hủy bỏ thất bại");
         } finally {
           setProgress(null);
-          onBusy(false);
+          if (!preserveGeneratePause) onBusy(false);
         }
       },
     });
@@ -359,8 +502,7 @@ export function BatchRunConsole({
         "Mỗi job ghi file dưới AItest/ và dọn staging. Không đụng production src.",
       okText: "Apply tất cả",
       onOk: async () => {
-        onBusy(true);
-        batchControl.start();
+        const { preserveGeneratePause } = beginSidePhase();
         setProgress({
           current: 0,
           total: work.length,
@@ -370,7 +512,8 @@ export function BatchRunConsole({
         const map = new Map(rows.map((r) => [r.key, r]));
         try {
           for (let i = 0; i < work.length; i++) {
-            await batchControl.waitIfPaused();
+            // Đang tạm dừng Generate: không waitIfPaused (sẽ treo mãi).
+            if (!preserveGeneratePause) await batchControl.waitIfPaused();
             const row = work[i];
             setProgress({
               current: i + 1,
@@ -392,9 +535,7 @@ export function BatchRunConsole({
           }
           message.success("Đã Apply xong các job PASS.");
         } finally {
-          batchControl.reset();
-          setProgress(null);
-          onBusy(false);
+          endSidePhase(preserveGeneratePause);
         }
       },
     });
@@ -439,6 +580,10 @@ export function BatchRunConsole({
     </Space>
   );
 
+  const sidePhaseBusy = Boolean(progress);
+  const actionsLockedByGenerate =
+    busy && batchRunStatus === "running" && !sidePhaseBusy;
+
   const actionBar = (
     <Space wrap style={{ marginBottom: variant === "verifyApply" ? 0 : 8 }}>
       <Button
@@ -449,11 +594,11 @@ export function BatchRunConsole({
         disabled={
           !isTauri() ||
           genOk === 0 ||
-          batchRunStatus === "paused" ||
-          (busy && batchRunStatus === "running")
+          actionsLockedByGenerate ||
+          sidePhaseBusy
         }
       >
-        Kiểm thử
+        {batchRunStatus === "paused" ? "Kiểm thử phần đã gen" : "Kiểm thử"}
       </Button>
       <Button
         icon={<SaveOutlined />}
@@ -462,8 +607,8 @@ export function BatchRunConsole({
         disabled={
           !isTauri() ||
           verifyDone === 0 ||
-          batchRunStatus === "paused" ||
-          (busy && batchRunStatus === "running")
+          actionsLockedByGenerate ||
+          sidePhaseBusy
         }
       >
         Áp dụng các unit
@@ -476,13 +621,17 @@ export function BatchRunConsole({
         disabled={
           !isTauri() ||
           rows.every((r) => !r.workspaceRunId) ||
-          (busy && batchRunStatus === "running")
+          actionsLockedByGenerate ||
+          sidePhaseBusy
         }
       >
         Hủy bỏ & xóa file đã sinh
       </Button>
       {generateFailCount > 0 && onRetryGenerateFails ? (
-        <Button onClick={onRetryGenerateFails} disabled={busy}>
+        <Button
+          onClick={onRetryGenerateFails}
+          disabled={busy || batchRunStatus === "paused"}
+        >
           Thử lại Generate lỗi ({generateFailCount})
         </Button>
       ) : null}
@@ -509,8 +658,17 @@ export function BatchRunConsole({
         {progressNode}
         {actionBar}
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          Verify chạy <strong>một lệnh test</strong> cho toàn bộ file AItest đã sinh trong batch.
-          Apply ghi từng job PASS vào AItest/. Hủy bỏ = không Apply + xóa file gen + dọn staging.
+          {batchRunStatus === "paused" ? (
+            <>
+              Generate đang <strong>tạm dừng</strong> — có thể{" "}
+              <strong>Kiểm thử / Apply</strong> các unit đã gen xong, rồi bấm Tiếp tục để gen tiếp.
+            </>
+          ) : (
+            <>
+              Verify chạy <strong>một lệnh test</strong> cho toàn bộ file AItest đã sinh trong batch.
+              Apply ghi từng job PASS vào AItest/. Hủy bỏ = không Apply + xóa file gen + dọn staging.
+            </>
+          )}
         </Typography.Paragraph>
 
         {verifyLog ? (
@@ -522,7 +680,15 @@ export function BatchRunConsole({
               <Tag color={verifyLog.success ? "success" : "error"}>
                 {verifyLog.success ? "PASS" : "FAIL"}
               </Tag>
-              {logSummary.hasCounts ? (
+              {unitSummary ? (
+                <>
+                  <Tag color="success">{unitSummary.passed} unit passed</Tag>
+                  <Tag color={unitSummary.failed ? "error" : "default"}>
+                    {unitSummary.failed} unit failed
+                  </Tag>
+                  <Tag>{unitSummary.total} unit total</Tag>
+                </>
+              ) : logSummary.hasCounts ? (
                 <>
                   <Tag color="success">{logSummary.passed} passed</Tag>
                   <Tag color={logSummary.failed ? "error" : "default"}>
@@ -533,6 +699,12 @@ export function BatchRunConsole({
                 </>
               ) : null}
               <Tag>{logSummary.runnerLabel}</Tag>
+              {logSummary.hasCounts && unitSummary ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {logSummary.runnerLabel} log: {logSummary.passed} passed / {logSummary.total}{" "}
+                  total
+                </Typography.Text>
+              ) : null}
               <Typography.Text type="secondary">
                 {formatDurationMs(logSummary.durationMs)}
               </Typography.Text>
@@ -540,6 +712,20 @@ export function BatchRunConsole({
                 {new Date(verifyLog.ranAt).toLocaleString()}
               </Typography.Text>
             </Space>
+
+            {runnerMismatch ? (
+              <Typography.Paragraph
+                style={{
+                  marginBottom: 8,
+                  fontSize: 12,
+                  color: "var(--ant-color-warning)",
+                }}
+              >
+                {logSummary.runnerLabel} chỉ thấy {logSummary.total} test file trong log — có thể
+                nhiều TC đang ghi đè cùng một path. Gen lại để mỗi TC có file riêng (…tcId.test.ts),
+                rồi Verify lại.
+              </Typography.Paragraph>
+            ) : null}
 
             {logSummary.failedNames.length > 0 ? (
               <Typography.Paragraph style={{ marginBottom: 8, color: "var(--ant-color-warning)" }}>
@@ -663,7 +849,11 @@ export function BatchRunConsole({
             render: (_, r) =>
               r.status === "ok" ? (
                 <Tag color="success">OK</Tag>
-              ) : r.error === "Đang chờ…" ? (
+              ) : r.error === BATCH_NOTE_PAUSED ? (
+                <Tag color="orange">Tạm dừng</Tag>
+              ) : r.error === BATCH_NOTE_RUNNING ? (
+                <Tag color="processing">Đang chạy</Tag>
+              ) : r.error === BATCH_NOTE_WAITING ? (
                 <Tag>Chờ</Tag>
               ) : (
                 <Tag color="error">Lỗi</Tag>
@@ -699,14 +889,25 @@ export function BatchRunConsole({
             title: "Ghi chú",
             dataIndex: "error",
             ellipsis: true,
-            render: (v, r) =>
-              r.status === "ok" && !r.error ? (
-                <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
-                  {r.workspaceRunId?.slice(0, 8) ?? "staging"}
-                </Typography.Text>
-              ) : (
-                v
-              ),
+            render: (v, r) => {
+              if (r.error === BATCH_NOTE_PAUSED) {
+                return <Typography.Text type="warning">{BATCH_NOTE_PAUSED}</Typography.Text>;
+              }
+              if (r.error === BATCH_NOTE_RUNNING) {
+                return <Typography.Text type="secondary">{BATCH_NOTE_RUNNING}</Typography.Text>;
+              }
+              if (r.error === BATCH_NOTE_WAITING) {
+                return <Typography.Text type="secondary">{BATCH_NOTE_WAITING}</Typography.Text>;
+              }
+              if (r.status === "ok" && !r.error) {
+                return (
+                  <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
+                    {r.workspaceRunId?.slice(0, 8) ?? "staging"}
+                  </Typography.Text>
+                );
+              }
+              return v;
+            },
           },
         ]}
       />

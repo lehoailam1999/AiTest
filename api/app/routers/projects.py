@@ -123,22 +123,7 @@ async def update_project(
         p.language = body.get("language")
     if "framework" in body:
         p.framework = body.get("framework")
-    if "meta" in body:
-        import json
-        from datetime import datetime, timezone
-
-        from sqlalchemy.orm.attributes import flag_modified
-
-        meta = body.get("meta")
-        if meta is None:
-            p.meta = None
-        elif isinstance(meta, str):
-            p.meta = meta
-        else:
-            if isinstance(meta, dict) and not meta.get("syncedAt"):
-                meta = {**meta, "syncedAt": datetime.now(timezone.utc).isoformat()}
-            p.meta = json.dumps(meta, ensure_ascii=False)
-        flag_modified(p, "meta")
+    # Ignore incoming "meta" payloads. Stack sync now updates only language/framework.
     db.commit()
     db.refresh(p)
     p = db.query(Project).filter(Project.id == pid, Project.deleted_at.is_(None)).first()

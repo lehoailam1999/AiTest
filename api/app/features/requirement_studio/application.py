@@ -33,8 +33,8 @@ from app.features.requirement_studio.dto import (
     workspace_dto,
 )
 from app.features.requirement_studio.knowledge_builder import (
+    build_knowledge_user_prompt,
     build_knowledge_heuristic,
-    chunks_to_prompt_text,
     knowledge_system_prompt,
     normalize_knowledge_payload,
     parse_knowledge_llm_json,
@@ -53,6 +53,7 @@ from app.models.domain import (
     Job,
     KnowledgeWorkspace,
     Project,
+    RequirementAnalysisRecord,
     RequirementFile,
     RequirementSnapshot,
     RequirementWorkspace,
@@ -63,10 +64,132 @@ from app.services.requirement_file_parse import parse_requirement_file
 
 MAX_FILE_BYTES = 15_000_000
 MAX_FILES_PER_REQUEST = 20
+ANALYSIS_RECORD_TYPES: tuple[str, ...] = (
+    "SUMMARY_SCOPE",
+    "FEATURES",
+    "ACTORS_PERMISSIONS",
+    "BUSINESS_FLOWS",
+    "BUSINESS_RULES",
+    "VALIDATION_DATA",
+    "API_UI",
+    "ERROR_HANDLING",
+    "ACCEPTANCE",
+    "NFR_CONSTRAINTS",
+    "GAPS",
+)
 
 
 def _alive(model):
     return model.deleted_at.is_(None)
+
+
+def _analysis_count(value: object) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, str):
+        return 1 if value.strip() else 0
+    return 0
+
+
+def _analysis_records_from_payload(payload: dict | None) -> list[dict]:
+    data = payload if isinstance(payload, dict) else {}
+    return [
+        {
+            "type": "SUMMARY_SCOPE",
+            "title": "Tóm tắt & phạm vi",
+            "itemCount": _analysis_count(data.get("summary")),
+            "content": {"summary": data.get("summary") or ""},
+        },
+        {
+            "type": "FEATURES",
+            "title": "Chức năng",
+            "itemCount": _analysis_count(data.get("features")),
+            "content": data.get("features") or [],
+        },
+        {
+            "type": "ACTORS_PERMISSIONS",
+            "title": "Actors & quyền",
+            "itemCount": _analysis_count(data.get("actors")),
+            "content": data.get("actors") or [],
+        },
+        {
+            "type": "BUSINESS_FLOWS",
+            "title": "Luồng nghiệp vụ",
+            "itemCount": _analysis_count(data.get("useCases")),
+            "content": data.get("useCases") or [],
+        },
+        {
+            "type": "BUSINESS_RULES",
+            "title": "Business rules",
+            "itemCount": _analysis_count(data.get("businessRules")),
+            "content": data.get("businessRules") or [],
+        },
+        {
+            "type": "VALIDATION_DATA",
+            "title": "Validation & dữ liệu",
+            "itemCount": _analysis_count(data.get("validationRules")),
+            "content": data.get("validationRules") or [],
+        },
+        {
+            "type": "API_UI",
+            "title": "API / giao diện",
+            "itemCount": _analysis_count(data.get("apiSummary")),
+            "content": data.get("apiSummary") or [],
+        },
+        {
+            "type": "ERROR_HANDLING",
+            "title": "Xử lý lỗi",
+            "itemCount": _analysis_count(data.get("exceptions")),
+            "content": data.get("exceptions") or [],
+        },
+        {
+            "type": "ACCEPTANCE",
+            "title": "Acceptance",
+            "itemCount": _analysis_count(data.get("acceptanceCriteria")),
+            "content": data.get("acceptanceCriteria") or [],
+        },
+        {
+            "type": "NFR_CONSTRAINTS",
+            "title": "Ràng buộc NFR",
+            "itemCount": _analysis_count(data.get("constraints")),
+            "content": data.get("constraints") or [],
+        },
+        {
+            "type": "GAPS",
+            "title": "Thiếu sót",
+            "itemCount": _analysis_count(data.get("gaps")),
+            "content": data.get("gaps") or [],
+        },
+    ]
+
+
+def _replace_analysis_records(
+    db: Session,
+    *,
+    workspace_id: uuid.UUID,
+    project_id: uuid.UUID,
+    knowledge_id: uuid.UUID | None,
+    knowledge_version: int,
+    payload: dict | None,
+) -> None:
+    db.query(RequirementAnalysisRecord).filter(
+        RequirementAnalysisRecord.workspace_id == workspace_id
+    ).delete(synchronize_session=False)
+    for row in _analysis_records_from_payload(payload):
+        if row["type"] not in ANALYSIS_RECORD_TYPES:
+            continue
+        db.add(
+            RequirementAnalysisRecord(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                knowledge_id=knowledge_id,
+                knowledge_version=int(knowledge_version or 0),
+                type=row["type"],
+                title=row["title"],
+                item_count=int(row["itemCount"] or 0),
+                content_json=json.dumps(row["content"], ensure_ascii=False),
+            )
+        )
 
 
 def get_project(db: Session, project_id: uuid.UUID) -> Project | None:
@@ -298,6 +421,11 @@ def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
         .filter(KnowledgeWorkspace.workspace_id == workspace_id)
         .delete(synchronize_session=False)
     )
+    deleted_analysis = (
+        db.query(RequirementAnalysisRecord)
+        .filter(RequirementAnalysisRecord.workspace_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
 
     db.delete(ws)
     db.commit()
@@ -312,6 +440,7 @@ def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
         "deletedChunks": int(deleted_chunks or 0),
         "deletedFiles": int(deleted_files or 0),
         "deletedKnowledge": int(deleted_knowledge or 0),
+        "deletedAnalysisRecords": int(deleted_analysis or 0),
     }
 
 
@@ -591,11 +720,7 @@ async def build_knowledge(
                 )
             )
             if conn is not None:
-                user_prompt = (
-                    "Document excerpts:\n\n"
-                    + chunks_to_prompt_text(pairs)
-                    + "\n\nReturn the Knowledge JSON now."
-                )
+                user_prompt = build_knowledge_user_prompt(pairs, file_names=file_names)
                 raw, meta = await chat_for_connection(
                     conn, knowledge_system_prompt(), user_prompt
                 )
@@ -640,6 +765,14 @@ async def build_knowledge(
         payload, chunk_texts=[t for _, t in pairs]
     )
     row.coverage_json = json.dumps(coverage, ensure_ascii=False)
+    _replace_analysis_records(
+        db,
+        workspace_id=workspace.id,
+        project_id=workspace.project_id,
+        knowledge_id=row.id,
+        knowledge_version=row.version,
+        payload=payload,
+    )
     db.commit()
     db.refresh(row)
     return knowledge_dto(row)
@@ -661,6 +794,14 @@ def analyze_coverage(db: Session, workspace_id: uuid.UUID) -> dict:
         payload, chunk_texts=[t for _, t in pairs]
     )
     row.coverage_json = json.dumps(coverage, ensure_ascii=False)
+    _replace_analysis_records(
+        db,
+        workspace_id=row.workspace_id,
+        project_id=row.project_id,
+        knowledge_id=row.id,
+        knowledge_version=row.version,
+        payload=payload,
+    )
     db.commit()
     db.refresh(row)
     return knowledge_dto(row)
@@ -674,6 +815,40 @@ def coverage_summary(db: Session, workspace_id: uuid.UUID) -> dict:
         "coverage": cov,
         "scorePct": coverage_score_pct(cov) if isinstance(cov, dict) else None,
     }
+
+
+def list_analysis_records(db: Session, workspace_id: uuid.UUID) -> list[dict]:
+    rows = db.scalars(
+        select(RequirementAnalysisRecord)
+        .where(
+            RequirementAnalysisRecord.workspace_id == workspace_id,
+            _alive(RequirementAnalysisRecord),
+        )
+        .order_by(RequirementAnalysisRecord.created_at.asc())
+    ).all()
+    out: list[dict] = []
+    for r in rows:
+        content = None
+        if r.content_json:
+            try:
+                content = json.loads(r.content_json)
+            except Exception:
+                content = None
+        out.append(
+            {
+                "id": r.id,
+                "workspaceId": r.workspace_id,
+                "projectId": r.project_id,
+                "knowledgeId": r.knowledge_id,
+                "knowledgeVersion": r.knowledge_version,
+                "type": r.type,
+                "title": r.title,
+                "itemCount": r.item_count,
+                "content": content,
+                "createdAt": r.created_at,
+            }
+        )
+    return out
 
 
 def list_chat_sessions(db: Session, workspace_id: uuid.UUID) -> list[dict]:
@@ -840,6 +1015,14 @@ async def post_chat_turn(
         kw.coverage_json = json.dumps(coverage, ensure_ascii=False)
         kw.builder = kw.builder or "chat"
         session.knowledge_version = kw.version
+        _replace_analysis_records(
+            db,
+            workspace_id=workspace.id,
+            project_id=workspace.project_id,
+            knowledge_id=kw.id,
+            knowledge_version=kw.version,
+            payload=new_payload,
+        )
 
     # Restore ready (chat is allowed on stale too; stay stale if was stale and no rebuild)
     if prev_status == "stale" and not knowledge_changed:
@@ -1120,14 +1303,25 @@ def enqueue_generate_from_snapshot(
     snap: RequirementSnapshot,
     *,
     mode: str = "append",
+    preferred_engine: str | None = None,
+    target_url: str | None = None,
+    auth_hint: str | None = None,
+    focus_modules: str | None = None,
 ) -> Job:
     """R7 — create Job bound to snapshotId only (BR-V2-16)."""
     from app import constants as C
     from app.services.connection_service import connection_api_key
     from app.services.ai_service import RUNNER_AI_CLI, connection_runner_mode
+    from app.services.job_context_stash import stash_job_engine_hint
 
     if mode not in ("append", "replace"):
         raise ValueError("mode must be append or replace")
+
+    eng = (preferred_engine or "").strip().lower()
+    if eng and eng not in ("unit", "e2e"):
+        raise ValueError("preferredEngine must be unit or e2e when set")
+    # Target URL optional for TC generation (used in precondition if provided).
+    # Required only when running E2E codegen / headless on E2E Test page.
 
     conn = db.scalar(
         select(AiBackendConnection).where(
@@ -1160,5 +1354,15 @@ def enqueue_generate_from_snapshot(
     db.add(job)
     db.commit()
     db.refresh(job)
+    if eng:
+        stash_job_engine_hint(
+            job.id,
+            {
+                "preferredEngine": eng,
+                "targetUrl": (target_url or "").strip() or None,
+                "authHint": (auth_hint or "").strip() or None,
+                "focusModules": (focus_modules or "").strip() or None,
+            },
+        )
     return job
 

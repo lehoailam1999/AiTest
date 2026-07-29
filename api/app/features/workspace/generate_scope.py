@@ -261,7 +261,18 @@ async def resolve_generate_scope(
         }
 
     blob = f"{module or ''} {title or ''}"
-    tokens = [w for w in blob.replace("-", " ").split() if len(w) >= 3][:12]
+    # VI Feature titles → Latin-ish tokens (cùng fallback Unit resolve_scope).
+    from app.services.resolve_source_scope import fallback_code_tokens_from_tc
+
+    tokens = fallback_code_tokens_from_tc(
+        title=title or "",
+        module=module,
+        steps="",
+        test_data=str(body.get("testData") or body.get("test_data") or "") or None,
+        max_tokens=16,
+    )
+    if not tokens:
+        tokens = [w for w in blob.replace("-", " ").split() if len(w) >= 3][:12]
     ctx = svc.build_context(workspace_id, tokens, max_related=MAX_RELATED)
     primary = ctx.primary_path
     primary_content = ctx.primary_content or ""

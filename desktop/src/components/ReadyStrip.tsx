@@ -6,7 +6,6 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Alert, Button, Collapse, Space, Tag, Typography } from "antd";
 import { DownOutlined, UpOutlined } from "@ant-design/icons";
 import { Link } from "react-router-dom";
-import { SourceRootBar } from "./SourceRootBar";
 import {
   EnsureTestRunnerPanel,
   testRunnerAllowsGenerate,
@@ -14,7 +13,6 @@ import {
 import type { Project, ProjectMeta } from "../api/types";
 import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
 import { ROUTES } from "../lib/productRoutes";
-import type { ProjectScan } from "../tauri/bridge";
 
 type Props = {
   aiReady: boolean;
@@ -30,12 +28,6 @@ type Props = {
   skipTestFwInstall: boolean;
   onSkipChange: (v: boolean) => void;
   onTestFwResolved: (r: TestFrameworkResolution | null) => void;
-  onSourceRootBound: (payload: {
-    rootPath: string;
-    syncedProject: Project | null;
-    scan: ProjectScan;
-  }) => void;
-  onSourceRootSynced: (project: Project) => void;
   /** Extra alert slots (e.g. OpenAPI) */
   extraAlerts?: ReactNode;
 };
@@ -44,8 +36,6 @@ export function ReadyStrip({
   aiReady,
   aiProvider,
   localPath,
-  syncedAt,
-  project,
   meta,
   preferredLanguage,
   sourceFile,
@@ -53,23 +43,16 @@ export function ReadyStrip({
   skipTestFwInstall,
   onSkipChange,
   onTestFwResolved,
-  onSourceRootBound,
-  onSourceRootSynced,
   extraAlerts,
 }: Props) {
   const runnerOk = testRunnerAllowsGenerate(testFwResolution, skipTestFwInstall);
   const allOk = aiReady && Boolean(localPath) && runnerOk;
 
   const [open, setOpen] = useState(!allOk);
-  const [rootKeys, setRootKeys] = useState<string[]>(!localPath ? ["root"] : []);
 
   useEffect(() => {
     if (!allOk) setOpen(true);
   }, [allOk]);
-
-  useEffect(() => {
-    if (!localPath) setRootKeys((k) => (k.includes("root") ? k : [...k, "root"]));
-  }, [localPath]);
 
   const rootLabel = useMemo(() => {
     if (!localPath) return "chưa gắn";
@@ -141,7 +124,11 @@ export function ReadyStrip({
           type="warning"
           showIcon
           title="Chưa gắn project root"
-          description="Gắn thư mục repo để AI CLI đọc source (Local FS), Staging / Apply và chạy Verify."
+          description={
+            <>
+              Gắn thư mục repo tại trang <Link to={ROUTES.projects}>Dự án</Link> trước khi sinh mã.
+            </>
+          }
         />
       ) : null}
 
@@ -151,29 +138,8 @@ export function ReadyStrip({
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
           <Collapse
             size="small"
-            activeKey={rootKeys}
-            onChange={(keys) =>
-              setRootKeys(Array.isArray(keys) ? keys.map(String) : [String(keys)])
-            }
+            defaultActiveKey={["runner"]}
             items={[
-              {
-                key: "root",
-                label: localPath
-                  ? `Project root · ${rootLabel}`
-                  : "Project root (bắt buộc để sinh / Apply / Run)",
-                children: project ? (
-                  <SourceRootBar
-                    project={project}
-                    localPath={localPath}
-                    syncedAt={syncedAt}
-                    existingMeta={meta}
-                    onBound={onSourceRootBound}
-                    onSynced={onSourceRootSynced}
-                  />
-                ) : (
-                  <Typography.Text type="secondary">Chọn dự án trước.</Typography.Text>
-                ),
-              },
               {
                 key: "runner",
                 label: runnerOk

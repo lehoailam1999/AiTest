@@ -1,4 +1,5 @@
 import { readTextFile, writeTextFile } from "../../tauri/bridge";
+import { stripCodeFences } from "../stripCodeFences";
 import { manifestRelPath, newRunId, overlayRelPath } from "./paths";
 import type {
   ManifestFileEntry,
@@ -105,7 +106,7 @@ export async function addArtifactToWorkspace(input: {
     throw new Error("Đường dẫn file không hợp lệ");
   }
 
-  let body = input.content;
+  let body = stripCodeFences(input.content);
   if (srcName) {
     body = rewriteSutImports(body, { testRel: targetRel, sourceRel: srcName });
   }
@@ -124,6 +125,8 @@ export async function addArtifactToWorkspace(input: {
   }
 
   const workspaceRel = overlayRelPath(input.manifest.runId, targetRel, packagePrefix);
+  // Same content already in repo — still keep overlay for this run's preview, but
+  // mark modify so Apply can no-op via writeTextFileIfChanged.
   await writeTextFile(input.projectRoot, workspaceRel, content);
 
   const entry: ManifestFileEntry = { op, targetRel, workspaceRel };
@@ -138,6 +141,7 @@ export async function addArtifactToWorkspace(input: {
   };
 
   if (looksLikeJestTsTest(targetRel, content)) {
+    // Shared jest/tsconfig: only first differing run copies into overlay + disk.
     manifest = await ensureAitestJestTsconfigInWorkspace({
       projectRoot: input.projectRoot,
       manifest,

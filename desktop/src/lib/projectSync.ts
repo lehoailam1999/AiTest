@@ -3,10 +3,11 @@ import type { ProjectScan } from "../tauri/bridge";
 
 export function buildProjectMetaFromScan(
   scan: ProjectScan,
-  _existingMeta?: ProjectMeta | null
+  existingMeta?: ProjectMeta | null
 ): ProjectMeta {
   const frameworks = scan.frameworks ?? [];
   const syncedAt = new Date().toISOString();
+  const prev = existingMeta ?? null;
 
   return {
     frameworks,
@@ -24,6 +25,9 @@ export function buildProjectMetaFromScan(
       stacks: m.stacks,
     })),
     syncedAt,
+    // Preserve user settings across stack re-scan (EX4.3)
+    codeAliases: prev?.codeAliases,
+    e2e: prev?.e2e,
   };
 }
 

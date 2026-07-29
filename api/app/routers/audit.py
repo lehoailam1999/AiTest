@@ -188,10 +188,12 @@ async def post_verify_report(
             ok_flag = "pass" if s.get("success") else "fail"
             if stage == "compile":
                 compile_status = ok_flag
-            elif stage == "test":
+            elif stage in ("test", "headless"):
                 test_status = ok_flag
             elif stage == "coverage":
                 coverage_status = ok_flag
+            elif stage == "artifacts" and s.get("success"):
+                coverage_status = coverage_status or "synced"
 
     # Infer coverage_status from synced artifacts when stage skipped but sync succeeded
     cov_sync = body.get("coverageSync")
@@ -263,6 +265,7 @@ def list_workspace_runs(
     projectId: str,
     page: int = 1,
     pageSize: int = 50,
+    testType: str | None = None,
 ):
     pid = _uuid(projectId)
     if pid is None:
@@ -274,6 +277,14 @@ def list_workspace_runs(
         .filter(WorkspaceRun.project_id == pid, WorkspaceRun.deleted_at.is_(None))
         .order_by(WorkspaceRun.created_at.desc())
     )
+    tt = (testType or "").strip().lower()
+    if tt == "e2e":
+        q = q.filter(WorkspaceRun.test_type == "e2e")
+    elif tt == "unit":
+        # Unit board: unit + api (không lẫn E2E)
+        q = q.filter(WorkspaceRun.test_type.in_(("unit", "api")))
+    elif tt:
+        q = q.filter(WorkspaceRun.test_type == tt)
     total = q.count()
     rows = q.offset(max(0, page - 1) * pageSize).limit(pageSize).all()
 
@@ -463,6 +474,7 @@ def list_campaigns(
     projectId: str,
     page: int = 1,
     pageSize: int = 30,
+    kind: str | None = None,
 ):
     pid = _uuid(projectId)
     if pid is None:
@@ -474,6 +486,9 @@ def list_campaigns(
         .filter(GenerationCampaign.project_id == pid, GenerationCampaign.deleted_at.is_(None))
         .order_by(GenerationCampaign.started_at.desc())
     )
+    kind_f = (kind or "").strip().lower()
+    if kind_f:
+        q = q.filter(GenerationCampaign.kind == kind_f)
     total = q.count()
     rows = q.offset(max(0, page - 1) * pageSize).limit(pageSize).all()
     items = []

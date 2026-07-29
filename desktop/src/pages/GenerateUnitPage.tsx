@@ -59,7 +59,15 @@ import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWor
 import { UnitWorkspacePreview } from "../components/UnitWorkspacePreview";
 import { UnitWorkspaceVerifyPanel } from "../components/UnitWorkspaceVerifyPanel";
 import { VERIFY_APPLY_CONSOLE_ID } from "../features/unit-test/VerifyApplyConsole";
-import { BatchRunConsole, type BatchPipelineRow } from "../features/unit-test/BatchRunConsole";
+import {
+  BatchRunConsole,
+  BATCH_NOTE_RUNNING,
+  BATCH_NOTE_WAITING,
+  isBatchQueueNote,
+  markBatchRowsPaused,
+  markBatchRowsResumed,
+  type BatchPipelineRow,
+} from "../features/unit-test/BatchRunConsole";
 import {
   BatchStagingPreview,
   type BatchStagingJob,
@@ -70,7 +78,11 @@ import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
 import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
 import type { AITestContextPacket } from "../lib/contextPacket/types";
 import type { UnitContextPacket } from "../lib/projectIntelligence/types";
-import { GENERATED_TEST_FOLDERS } from "../lib/testOutputLayout";
+import {
+  GENERATED_TEST_FOLDERS,
+  buildRequirementTcModule,
+  uniquifyTestTargetRel,
+} from "../lib/testOutputLayout";
 import {
   createBatchRunControl,
   type BatchRunStatus,
@@ -91,6 +103,9 @@ import {
   readWorkspaceFiles,
   resolveWorkspaceScope,
 } from "../lib/workspaceManager";
+import { resolveScopeWithAi } from "../lib/projectIntelligence/aiScopeResolve";
+import type { CodeAliasMap } from "../lib/projectIntelligence/viCodeAliases";
+import { isUnitTestCaseType } from "../lib/testEngine";
 
 function displayRel(localPath: string | null, absOrRel: string): string {
   if (!localPath) return absOrRel;
@@ -100,6 +115,41 @@ function displayRel(localPath: string | null, absOrRel: string): string {
     return n.slice(root.length + 1);
   }
   return absOrRel.replace(/^[\\/]+/, "");
+}
+
+/** BE workspace resolve → FE heuristic/AI fallback khi primary trống (TC VI ≠ path Latin). */
+async function resolveTcSourcePrimary(opts: {
+  projectId: string;
+  workspaceId: string;
+  testCase: TestCase;
+  allSourcePaths: string[];
+  useAi: boolean;
+  codeAliases?: CodeAliasMap | null;
+}): Promise<{ primary: string | null; related: string[]; reason: string }> {
+  const ranked = await resolveWorkspaceScope(
+    opts.workspaceId,
+    opts.testCase.id,
+    opts.useAi
+  );
+  let primary = (ranked.primary || "").replace(/\\/g, "/") || null;
+  let related = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
+  let reason = ranked.reason || "BE workspace resolve";
+
+  if (!primary && opts.allSourcePaths.length > 0) {
+    const fe = await resolveScopeWithAi({
+      projectId: opts.projectId,
+      testCase: opts.testCase,
+      allSourcePaths: opts.allSourcePaths,
+      codeAliases: opts.codeAliases,
+      useAi: opts.useAi,
+    });
+    if (fe.primary) {
+      primary = fe.primary.replace(/\\/g, "/");
+      related = (fe.related || []).map((p) => p.replace(/\\/g, "/"));
+      reason = `FE fallback · ${fe.reason || "heuristic"}`;
+    }
+  }
+  return { primary, related, reason };
 }
 
 /** Requirement Studio workspace (+ optional legacy) for Unit Engine selectors. */
@@ -121,6 +171,21 @@ function tcBelongsToReq(tc: TestCase, req: ReqOption): boolean {
   if (req.legacySourceId && tc.sourceId === req.legacySourceId) return true;
   if (tc.sourceId === req.id) return true;
   return false;
+}
+
+/** Requirement folder for Unit layout: selected req, else owning req of the TC. */
+function requirementTitleForTc(
+  tc: TestCase,
+  requirementsList: ReqOption[],
+  selectedReqId?: string | null
+): string {
+  if (selectedReqId && selectedReqId !== "__all__") {
+    const sel = requirementsList.find((r) => r.id === selectedReqId);
+    if (sel?.title?.trim()) return sel.title.trim();
+  }
+  const owned = requirementsList.find((r) => tcBelongsToReq(tc, r));
+  if (owned?.title?.trim()) return owned.title.trim();
+  return (tc.module || "Requirement").trim();
 }
 
 function guessClassFromCode(code: string, fileName: string): string {
@@ -235,6 +300,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
   const filteredTestCases = useMemo(() => {
     let list = showAllTcStatus ? allTestCases : approved;
+    // Unit Job chỉ lấy TC engine=unit (loại E2E/API).
+    list = list.filter((tc) => isUnitTestCaseType(tc.type));
     if (selectedReqId && selectedReqId !== "__all__") {
       const req = requirementsList.find((r) => r.id === selectedReqId);
       if (req) {
@@ -355,15 +422,17 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     if (!project) return;
     setLoading(true);
     try {
-      const [allTcPage, studioRes, legacyRes, p, c] = await Promise.all([
-        testcases.list({ projectId: project.id }, 1, 500),
+      const [allTcItems, studioRes, legacyRes, p, c] = await Promise.all([
+        testcases.listAll({ projectId: project.id }),
         requirementStudio.listWorkspaces(project.id).catch(() => ({ items: [] as RequirementStudioWorkspace[] })),
         requirements.list(project.id, 1, 200).catch(() => ({ items: [] })),
         projects.get(project.id),
         connection.get(project.id).catch(() => null),
       ]);
-      setAllTestCases(allTcPage.items);
-      const appList = allTcPage.items.filter((t) => t.reviewStatus === "Approved");
+      setAllTestCases(allTcItems);
+      const appList = allTcItems.filter(
+        (t) => t.reviewStatus === "Approved" && isUnitTestCaseType(t.type)
+      );
       setApproved(appList);
 
       const studios = studioRes.items ?? [];
@@ -410,7 +479,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       // Auto-select first Requirement when URL has none
       setSelectedReqId((prev) => {
         if (prev && merged.some((m) => m.id === prev)) return prev;
-        if (prev && allTcPage.items.some((t) => t.sourceId === prev || t.requirementSnapshotId === prev)) {
+        if (prev && allTcItems.some((t) => t.sourceId === prev || t.requirementSnapshotId === prev)) {
           return prev;
         }
         return prev ?? merged[0]?.id;
@@ -471,14 +540,29 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const pathHint = useMemo(() => {
     if (!sourceCode.trim() && !sourceFile) return null;
     const className = guessClassFromCode(sourceCode, sourceFile || "");
+    const reqTitle = selectedTc
+      ? requirementTitleForTc(selectedTc, requirementsList, selectedReqId)
+      : selectedReq?.title;
     return suggestUnitTestPath({
       language,
       framework: framework === "auto" ? "" : framework,
       sourceFileName: sourceFile ? displayRel(localPath, sourceFile) : undefined,
       className,
       module: selectedTc?.module || undefined,
+      requirementTitle: reqTitle,
+      testCaseTitle: selectedTc?.title,
     });
-  }, [sourceCode, sourceFile, language, framework, localPath, selectedTc?.module]);
+  }, [
+    sourceCode,
+    sourceFile,
+    language,
+    framework,
+    localPath,
+    selectedTc,
+    requirementsList,
+    selectedReqId,
+    selectedReq?.title,
+  ]);
 
   const matchSourceFile = useCallback(
     (pathOrRel: string): string | undefined => {
@@ -533,11 +617,21 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
       let reason = 'Manual pick';
       if (!primary) {
-        const ranked = await resolveWorkspaceScope(
-          wsId,
-          selectedTc.id,
-          useAiScope && aiReady !== false
-        );
+        const pathsForMatch =
+          sourceFiles.length > 0
+            ? sourceFiles.map((f) => displayRel(localPath, f))
+            : await listWorkspaceSourceFiles(wsId).then((xs) =>
+                xs.map((x) => x.replace(/\\/g, "/"))
+              ).catch(() => [] as string[]);
+        const ranked = await resolveTcSourcePrimary({
+          projectId: project.id,
+          workspaceId: wsId,
+          testCase: selectedTc,
+          allSourcePaths: pathsForMatch,
+          useAi: useAiScope && aiReady !== false,
+          codeAliases: (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+            ?.codeAliases,
+        });
         primary = ranked.primary;
         related = ranked.related ?? [];
         reason = ranked.reason || 'BE workspace resolve';
@@ -687,25 +781,32 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setTestCaseId(tc.id);
 
     const wsId = await ensureWorkspaceOpen(project.id, localPath);
-    const ranked = await resolveWorkspaceScope(
-      wsId,
-      tc.id,
-      useAiScope && aiReady !== false
-    );
+    const paths =
+      sourceFiles.length > 0
+        ? sourceFiles
+        : await ideListSourceFiles(localPath, sourceExtensionsForLanguage(language));
+    const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+      ?.codeAliases;
+    const ranked = await resolveTcSourcePrimary({
+      projectId: project.id,
+      workspaceId: wsId,
+      testCase: tc,
+      allSourcePaths: paths.map((p) => displayRel(localPath, p)),
+      useAi: useAiScope && aiReady !== false,
+      codeAliases: aliases,
+    });
     const primaryRel = (ranked.primary || "").replace(/\\/g, "/");
     const relatedRels = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
     if (!primaryRel && !(isApiKind && openApiSpec.trim())) {
       throw new Error(
         isApiKind
           ? `Không tìm handler/OpenAPI cho «${tc.title}». Thêm openapi.yaml hoặc chọn file thủ công.`
-          : `Không tìm được mã nguồn cho «${tc.title}». Chọn file thủ công ở chế độ từng TC.`
+          : `Không tìm được mã nguồn cho «${tc.title}» (module=${tc.module || "—"}). ` +
+              `Gợi ý: chọn file thủ công, hoặc thêm «code: ClassName» / «path: src/...» vào TestData, ` +
+              `hoặc cấu hình codeAliases trên project.`
       );
     }
     const relName = primaryRel || (isApiKind ? "openapi.yaml" : "snippet.txt");
-    const paths =
-      sourceFiles.length > 0
-        ? sourceFiles
-        : await ideListSourceFiles(localPath, sourceExtensionsForLanguage(language));
     const ctx = await buildGenerateContext({
       projectRoot: localPath,
       projectId: project.id,
@@ -716,8 +817,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       manualPrimaryPath: primaryRel || null,
       forcedRelatedPaths: relatedRels,
       broadLocalContext,
-      codeAliases: (serverProject?.meta as { codeAliases?: Record<string, string[]> } | null)
-        ?.codeAliases,
+      codeAliases: aliases,
     });
     setContextPacket(ctx.view);
     setUnitPacketV1(ctx.packet);
@@ -747,6 +847,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     const view = ctx.view;
     const primaryContent = ctx.primaryContent;
 
+    const reqTitle = requirementTitleForTc(tc, requirementsList, selectedReqId);
+    const layoutModule = buildRequirementTcModule(reqTitle, tc.title, tc.module);
     const feHint = isApiKind
       ? suggestApiTestPath({
           language,
@@ -754,6 +856,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           className: classHint,
           sourceFileName: relName,
           module: tc.module || undefined,
+          requirementTitle: reqTitle,
+          testCaseTitle: tc.title,
           packagePrefix,
         })
       : suggestUnitTestPath({
@@ -762,9 +866,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           sourceFileName: relName,
           className: classHint,
           module: tc.module || undefined,
+          requirementTitle: reqTitle,
+          testCaseTitle: tc.title,
           packagePrefix,
         });
-    const targetPath = (res.suggestedPath || feHint.relativePath).trim();
+    // FE owns folder layout (Requirement/TC title); keep file name from FE hint.
+    const targetPath = uniquifyTestTargetRel(feHint.relativePath, tc.id);
 
     let manifest = await createUnitWorkspaceRun({
       projectRoot: localPath,
@@ -781,9 +888,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       manifest,
       targetRel: targetPath,
       content: res.code,
+      module: layoutModule,
     });
     manifest = added.manifest;
-        syncWorkspaceRun(manifest, { module: tc.module, status: "generated" });
+    syncWorkspaceRun(manifest, { module: layoutModule, status: "generated" });
     recordUnitJobMetric({
       projectId: project.id,
       contextSource: "local-fs",
@@ -891,7 +999,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           testCaseId: t.testCaseId,
           title: t.title,
           status: "fail",
-          error: "Đang chờ…",
+          error: BATCH_NOTE_WAITING,
         });
       }
     }
@@ -917,10 +1025,27 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
 
     try {
+      const flushRows = () => {
+        const rows = [...rowMap.values()];
+        // Keep UI pause notes even after current TC finishes while paused.
+        const next =
+          control.getStatus() === "paused" ? markBatchRowsPaused(rows) : rows;
+        setBatchResults(next);
+        return next;
+      };
+
       for (let i = 0; i < workList.length; i++) {
         await control.waitIfPaused();
         const tc = workList[i];
         setBatchProgress({ current: i + 1, total: workList.length, label: tc.title });
+        rowMap.set(tc.id, {
+          key: tc.id,
+          testCaseId: tc.testCaseId,
+          title: tc.title,
+          status: "fail",
+          error: BATCH_NOTE_RUNNING,
+        });
+        flushRows();
         try {
           const out = await runForTestCase(tc);
           rowMap.set(tc.id, {
@@ -958,8 +1083,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             ]);
           }
         }
-        setBatchResults([...rowMap.values()]);
-        void refreshBatchStaging([...rowMap.values()]);
+        void refreshBatchStaging(flushRows());
       }
     } finally {
       control.reset();
@@ -1009,7 +1133,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           testCaseId: t.testCaseId,
           title: t.title,
           status: "fail",
-          error: "Đang chờ…",
+          error: BATCH_NOTE_WAITING,
         });
       }
     }
@@ -1036,10 +1160,26 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
 
     try {
+      const flushRows = () => {
+        const rows = [...rowMap.values()];
+        const next =
+          control.getStatus() === "paused" ? markBatchRowsPaused(rows) : rows;
+        setBatchResults(next);
+        return next;
+      };
+
       for (let i = 0; i < workList.length; i++) {
         await control.waitIfPaused();
         const tc = workList[i];
         setBatchProgress({ current: i + 1, total: workList.length, label: tc.title });
+        rowMap.set(tc.id, {
+          key: tc.id,
+          testCaseId: tc.testCaseId,
+          title: tc.title,
+          status: "fail",
+          error: BATCH_NOTE_RUNNING,
+        });
+        flushRows();
         try {
           const out = await runForTestCase(tc);
           rowMap.set(tc.id, {
@@ -1077,12 +1217,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             ]);
           }
         }
-        setBatchResults([...rowMap.values()]);
-        void refreshBatchStaging([...rowMap.values()]);
+        void refreshBatchStaging(flushRows());
       }
       const finalRows = [...rowMap.values()];
       setBatchResults(finalRows);
-      const failN = finalRows.filter((r) => r.status === "fail").length;
+      const failN = finalRows.filter(
+        (r) => r.status === "fail" && !isBatchQueueNote(r.error)
+      ).length;
       const okN = finalRows.filter((r) => r.status === "ok").length;
       if (campaignId) {
         void audit.finishCampaign(campaignId, failN > 0 ? "Partial" : "Completed");
@@ -1303,6 +1444,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         ? await generateApiTest.run(body)
         : await generateUnit.run(body);
       setResult(res);
+      const reqTitle = selectedTc
+        ? requirementTitleForTc(selectedTc, requirementsList, selectedReqId)
+        : selectedReq?.title || "";
+      const layoutModule = buildRequirementTcModule(
+        reqTitle,
+        selectedTc?.title,
+        selectedTc?.module
+      );
       const feHint = isApiKind
         ? suggestApiTestPath({
             language: usedLanguage,
@@ -1310,6 +1459,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             className: classHint,
             sourceFileName: outName,
             module: selectedTc?.module || undefined,
+            requirementTitle: reqTitle,
+            testCaseTitle: selectedTc?.title,
             packagePrefix,
           })
         : suggestUnitTestPath({
@@ -1318,10 +1469,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             sourceFileName: outName,
             className: classHint,
             module: selectedTc?.module || undefined,
+            requirementTitle: reqTitle,
+            testCaseTitle: selectedTc?.title,
             packagePrefix,
           });
-      setWritePath(res.suggestedPath || feHint.relativePath);
-      const targetPath = (res.suggestedPath || feHint.relativePath).trim();
+      const targetPath = uniquifyTestTargetRel(feHint.relativePath, testCaseId || "");
+      setWritePath(targetPath);
       if (localPath && isTauri() && targetPath) {
         let manifest = await createUnitWorkspaceRun({
           projectRoot: localPath,
@@ -1338,11 +1491,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           manifest,
           targetRel: targetPath,
           content: res.code,
+          module: layoutModule,
         });
         manifest = added.manifest;
         syncWorkspaceRun(manifest, {
           status: "generated",
           contextSource: usedSource,
+          module: layoutModule,
         });
         recordUnitJobMetric({
           projectId: project.id,
@@ -1540,7 +1695,19 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     return 0;
   }, [wsManifest, result]);
 
-  const batchFailCount = batchResults.filter((r) => r.status === "fail" && r.error !== "Đang chờ…").length;
+  const batchFailCount = batchResults.filter(
+    (r) => r.status === "fail" && !isBatchQueueNote(r.error)
+  ).length;
+
+  function pauseUnitBatch() {
+    batchControlRef.current.pause();
+    setBatchResults((prev) => markBatchRowsPaused(prev));
+  }
+
+  function resumeUnitBatch() {
+    setBatchResults((prev) => markBatchRowsResumed(prev));
+    batchControlRef.current.resume();
+  }
   const noApproved = approved.length === 0;
 
   return (
@@ -1578,8 +1745,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           skipTestFwInstall={skipTestFwInstall}
           onSkipChange={setSkipTestFwInstall}
           onTestFwResolved={onTestFwResolved}
-          onSourceRootBound={onSourceRootBound}
-          onSourceRootSynced={onSourceRootSynced}
           extraAlerts={
             isApiKind && localPath && !openApiSpec ? (
               <Alert
@@ -1596,11 +1761,11 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         {noApproved ? (
           <Card style={{ textAlign: "center", padding: "48px 24px" }}>
             <Typography.Title level={4} style={{ marginTop: 0 }}>
-              Chưa có test case Approved
+              Chưa có test case Unit Approved
             </Typography.Title>
             <Typography.Paragraph type="secondary" style={{ maxWidth: 420, margin: "0 auto 20px" }}>
-              Sinh Unit cần ít nhất một TC đã duyệt. Hoàn tất pha Design trước, rồi gắn project
-              root trên trang này.
+              Sinh Unit chỉ dùng TC type=Unit (hoặc Functional/Boundary/Negative) đã duyệt.
+              TC E2E/API nằm ở trang tương ứng — không đưa vào Unit Job.
             </Typography.Paragraph>
             <Space wrap>
               <Link to={generateTcUrl()}>
@@ -1651,13 +1816,15 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 value={selectedReqId || undefined}
                 onChange={(val) => setSelectedReqId(val)}
                 options={requirementsList.map((r) => {
-                  const linkedTc = allTestCases.filter((t) => tcBelongsToReq(t, r));
+                  const linkedTc = allTestCases.filter(
+                    (t) => isUnitTestCaseType(t.type) && tcBelongsToReq(t, r)
+                  );
                   const appCount = linkedTc.filter((t) => t.reviewStatus === "Approved").length;
-                  const total = r.tcTotal ?? linkedTc.length;
-                  const approvedN = r.tcApproved ?? appCount;
+                  const total = linkedTc.length;
+                  const approvedN = appCount;
                   return {
                     value: r.id,
-                    label: `📄 ${r.title} (${total} TC · ${approvedN} Approved)`,
+                    label: `📄 ${r.title} (${total} Unit TC · ${approvedN} Approved)`,
                   };
                 })}
                 notFoundContent={
@@ -1682,7 +1849,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                   <div>
                     {selectedReq.description ? <div>{selectedReq.description}</div> : null}
                     <div style={{ marginTop: 6 }}>
-                      Tự động sinh mã + bản nháp cho tất cả <strong>{filteredTestCases.length} Test Cases</strong> thuộc Yêu cầu này
+                      Tự động sinh mã + bản nháp cho tất cả <strong>{filteredTestCases.length} Unit TC</strong> thuộc Yêu cầu này
                       {selectedReq.kind === "studio" ? " (Requirement Studio)" : ""}.
                     </div>
                   </div>
@@ -1717,7 +1884,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             {batchProgress ? (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {batchRunStatus === "paused"
-                  ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · chờ tiếp tục`
+                  ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · có thể Verify phần đã gen · chờ Tiếp tục`
                   : `Đang xử lý: ${batchProgress.label}`}
               </Typography.Text>
             ) : null}
@@ -1739,12 +1906,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                   (busy && batchRunStatus === "running")
                 }
               >
-                ⚡ Chạy Unit Job · Tất cả TC trong Requirement ({filteredTestCases.length} TC)
+                ⚡ Chạy Unit Job · Tất cả Unit TC trong Requirement ({filteredTestCases.length} TC)
               </Button>
               {batchRunStatus === "running" ? (
                 <Button
                   icon={<PauseCircleOutlined />}
-                  onClick={() => batchControlRef.current.pause()}
+                  onClick={() => pauseUnitBatch()}
                 >
                   Tạm dừng
                 </Button>
@@ -1753,7 +1920,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 <Button
                   type="primary"
                   icon={<PlayCircleOutlined />}
-                  onClick={() => batchControlRef.current.resume()}
+                  onClick={() => resumeUnitBatch()}
                 >
                   Tiếp tục
                 </Button>
@@ -1797,13 +1964,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 options={[
                   { value: "__all__", label: `📦 Tất cả Requirement (${requirementsList.length})` },
                   ...requirementsList.map((r) => {
-                    const linkedTc = allTestCases.filter((t) => tcBelongsToReq(t, r));
+                    const linkedTc = allTestCases.filter(
+                      (t) => isUnitTestCaseType(t.type) && tcBelongsToReq(t, r)
+                    );
                     const appCount = linkedTc.filter((t) => t.reviewStatus === "Approved").length;
-                    const total = r.tcTotal ?? linkedTc.length;
-                    const approvedN = r.tcApproved ?? appCount;
                     return {
                       value: r.id,
-                      label: `📄 ${r.title} (${total} TC · ${approvedN} Approved)`,
+                      label: `📄 ${r.title} (${linkedTc.length} Unit TC · ${appCount} Approved)`,
                     };
                   }),
                 ]}
@@ -1952,7 +2119,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                         <Typography.Text code>
                           AItest/
                           {isApiKind ? GENERATED_TEST_FOLDERS.api : GENERATED_TEST_FOLDERS.unit}
-                          /{"{Module}/"}
+                          /{"{Requirement}/{TC title}/"}
                         </Typography.Text>
                       </Checkbox>
 

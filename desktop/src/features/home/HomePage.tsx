@@ -164,7 +164,7 @@ export default function HomePage() {
         key: "ai",
         label: "AI",
         done: journey.aiReady,
-        hint: journey.aiReady ? "Ready" : "Cấu hình API Key",
+        hint: journey.aiReady ? "Ready" : "Cấu hình AI CLI",
         to: "/settings/ai",
       },
       {

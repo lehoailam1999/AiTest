@@ -55,7 +55,7 @@ type Props = {
   focus?: StudioFocus;
   onFocusChange?: (focus: StudioFocus) => void;
   onStatusChange?: (status: StudioStatusSnapshot) => void;
-  onNavigateReview?: () => void;
+  onNavigateReview?: (opts?: { engine?: "unit" | "e2e" }) => void;
   onBackToHub?: () => void;
 };
 
@@ -389,11 +389,16 @@ export default function RequirementStudioPage({
           workspaceId={workspace?.id ?? null}
           knowledge={knowledge}
           onOpenKnowledge={() => setFocus("knowledge")}
-          onGenerated={() => {
+          onGenerated={(info) => {
             setHasSnapshot(true);
             emitStatus(files, knowledge, true);
-            message.success("Đã tạo test case từ snapshot. Chuyển sang duyệt.");
-            onNavigateReview?.();
+            if (info.preferredEngine === "e2e") {
+              message.success("Đã tạo TC E2E từ snapshot. Chuyển sang duyệt.");
+              onNavigateReview?.({ engine: "e2e" });
+            } else {
+              message.success("Đã tạo test case từ snapshot. Chuyển sang duyệt.");
+              onNavigateReview?.();
+            }
           }}
         />
       ) : focus === "knowledge" ? (

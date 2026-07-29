@@ -7,6 +7,7 @@ import HomePage from "./features/home/HomePage";
 import ProjectsPage from "./features/projects/ProjectsPage";
 import RequirementHubPage from "./features/requirement/RequirementHubPage";
 import UnitTestPage from "./features/unit-test/UnitTestPage";
+import E2ETestPage from "./features/e2e-test/E2ETestPage";
 import RunTestPage from "./features/execution/RunTestPage";
 import ReportsPage from "./features/reporting/ReportsPage";
 import ActivityPage from "./features/activity/ActivityPage";
@@ -40,6 +41,7 @@ export default function App() {
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path={ROUTES.requirement} element={<RequirementHubPage />} />
         <Route path={ROUTES.unitTest} element={<UnitTestPage />} />
+        <Route path={ROUTES.e2eTest} element={<E2ETestPage />} />
         <Route path="/run" element={<RunTestPage />} />
         <Route path="/reports" element={<ReportsPage />} />
         <Route path="/activity" element={<ActivityPage />} />

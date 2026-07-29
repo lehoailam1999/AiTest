@@ -55,8 +55,7 @@ export function useCoverageBoard(opts: Options = {}) {
   const casesQuery = useQuery({
     queryKey: project ? coverageBoardKeys.cases(project.id) : ["coverage-board", "cases-none"],
     queryFn: async (): Promise<TestCase[]> => {
-      const pageRes = await testcases.list({ projectId: project!.id }, 1, 500);
-      return pageRes.items;
+      return testcases.listAll({ projectId: project!.id });
     },
     enabled: Boolean(project) && includeCases,
   });

@@ -18,6 +18,7 @@ from app.llm.base import strip_code_fences
 MAX_CHUNK_CHARS_FOR_BUILD = 24_000
 MAX_ITEMS = 40
 MAX_GAPS = 20
+MAX_EVIDENCE_PER_ITEM = 3
 
 _API_RE = re.compile(
     r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_\-./{}:]+)",
@@ -25,6 +26,9 @@ _API_RE = re.compile(
 )
 _ACTOR_LINE_RE = re.compile(
     r"(?i)^\s*(?:[-*•]\s*)?(?:actor|vai trò|role|persona|người dùng|user|admin|hệ thống)\s*[:\-–]\s*(.+)$"
+)
+_USER_STORY_ACTOR_RE = re.compile(
+    r"(?i)\blà\s+một\s+([^,.;\n]+)|\bas\s+an?\s+([^,.;\n]+)"
 )
 _RULE_HINT = re.compile(
     r"(?i)\b(phải|bắt buộc|không được|cấm|shall|must|should not|required)\b"
@@ -61,6 +65,12 @@ _GLOSSARY_RE = re.compile(
 _ENTITY_RE = re.compile(
     r"(?i)\b(?:bảng|table|entity|entities|model)\s+[`'\"]?([A-Za-z_][\w]*)[`'\"]?"
 )
+_FLOW_STEP_HINT = re.compile(
+    r"(?i)^\s*(?:\d+[.)]|[-*•])\s*(mở|truy cập|vào|nhập|chọn|click|nhấn|bấm|tạo|sửa|xóa|lưu|gửi|xác nhận|đăng nhập|đăng xuất|tìm kiếm)\b"
+)
+_AUTH_HINT = re.compile(
+    r"(?i)\b(login|đăng nhập|đăng xuất|role|vai trò|quyền|permission|phân quyền|403|401|unauthorized|forbidden)\b"
+)
 
 PRIMARY_LIST_KEYS = (
     "features",
@@ -80,6 +90,98 @@ LEGACY_LIST_KEYS = (
     "databaseSummary",
     "openQuestions",
     "missingInformation",
+)
+
+ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
+    {
+        "type": "SUMMARY_SCOPE",
+        "json_key": "summary",
+        "label": "Tóm tắt & phạm vi",
+        "instruction": (
+            "Nêu mục tiêu hệ thống, phạm vi in-scope/out-of-scope, actor chính, và điều kiện tiền đề. "
+            "Không suy diễn ngoài tài liệu."
+        ),
+    },
+    {
+        "type": "FEATURES",
+        "json_key": "features",
+        "label": "Chức năng",
+        "instruction": (
+            "Liệt kê module/chức năng độc lập từ SRS; mỗi item cần name rõ và description ngắn."
+        ),
+    },
+    {
+        "type": "ACTORS_PERMISSIONS",
+        "json_key": "actors",
+        "label": "Actors & quyền",
+        "instruction": (
+            "Xác định vai trò user/system và quyền thao tác tương ứng theo từng chức năng."
+        ),
+    },
+    {
+        "type": "BUSINESS_FLOWS",
+        "json_key": "useCases",
+        "label": "Luồng nghiệp vụ",
+        "instruction": (
+            "Mỗi flow là một user journey có điểm bắt đầu-kết thúc; ghi steps rõ theo thứ tự."
+        ),
+    },
+    {
+        "type": "BUSINESS_RULES",
+        "json_key": "businessRules",
+        "label": "Business rules",
+        "instruction": (
+            "Trích các quy tắc must/shall/không được; chỉ giữ rule có thể kiểm thử."
+        ),
+    },
+    {
+        "type": "VALIDATION_DATA",
+        "json_key": "validationRules",
+        "label": "Validation & dữ liệu",
+        "instruction": (
+            "Trích rule cho field/input: required, format, range, unique, boundary, message lỗi mong đợi."
+        ),
+    },
+    {
+        "type": "API_UI",
+        "json_key": "apiSummary",
+        "label": "API / giao diện",
+        "instruction": (
+            "Liệt kê endpoint (method/path) hoặc entry UI trọng yếu liên quan flow nghiệp vụ."
+        ),
+    },
+    {
+        "type": "ERROR_HANDLING",
+        "json_key": "exceptions",
+        "label": "Xử lý lỗi",
+        "instruction": (
+            "Trích các case lỗi/exception/status code và phản hồi kỳ vọng của hệ thống."
+        ),
+    },
+    {
+        "type": "ACCEPTANCE",
+        "json_key": "acceptanceCriteria",
+        "label": "Acceptance",
+        "instruction": (
+            "Trích tiêu chí nghiệm thu (Given/When/Then hoặc điều kiện Done) theo ngôn ngữ SRS."
+        ),
+    },
+    {
+        "type": "NFR_CONSTRAINTS",
+        "json_key": "constraints",
+        "label": "Ràng buộc NFR",
+        "instruction": (
+            "Trích hiệu năng, bảo mật, audit, logging, compliance, timeout, SLA nếu có."
+        ),
+    },
+    {
+        "type": "GAPS",
+        "json_key": "gaps",
+        "label": "Thiếu sót",
+        "instruction": (
+            "Chỉ ghi thiếu sót thực sự cản trở sinh test chính xác (không bịa thêm)."
+        ),
+    },
 )
 
 
@@ -121,6 +223,19 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _split_fragments(text: str) -> list[str]:
+    if not text:
+        return []
+    chunks = re.split(r"(?:\n+|[;•\-]\s+)", text)
+    out: list[str] = []
+    for c in chunks:
+        s = (c or "").strip()
+        if len(s) < 8:
+            continue
+        out.append(s[:500])
+    return out
+
+
 def _text_item(row: Any) -> str:
     if isinstance(row, dict):
         for k in ("text", "name", "title", "criterion", "rule", "message"):
@@ -129,6 +244,129 @@ def _text_item(row: Any) -> str:
                 return str(v).strip()
         return " ".join(str(v).strip() for v in row.values() if v).strip()
     return str(row).strip() if row is not None else ""
+
+
+def _payload_fragments(payload: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if payload.get("summary"):
+        out.extend(_split_fragments(str(payload["summary"])))
+    for key in (
+        "features",
+        "actors",
+        "useCases",
+        "businessRules",
+        "validationRules",
+        "apiSummary",
+        "exceptions",
+        "acceptanceCriteria",
+        "constraints",
+        "gaps",
+        "openQuestions",
+        "missingInformation",
+    ):
+        for row in _as_list(payload.get(key)):
+            t = _text_item(row)
+            out.extend(_split_fragments(t))
+    return out
+
+
+def _append_unique(items: list[dict], key: str, value: dict, *, limit: int = MAX_ITEMS) -> None:
+    target = str(value.get(key) or "").strip().lower()
+    if not target:
+        return
+    for it in items:
+        if str(it.get(key) or "").strip().lower() == target:
+            return
+    if len(items) < limit:
+        items.append(value)
+
+
+def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Ensure mixed SRS lines are split into their own criteria buckets.
+    This helps when documents merge many rules in one paragraph.
+    """
+    fragments = _payload_fragments(payload)
+    if not fragments:
+        return payload
+
+    features = _as_list(payload.get("features"))
+    actors = _as_list(payload.get("actors"))
+    use_cases = _as_list(payload.get("useCases"))
+    business_rules = _as_list(payload.get("businessRules"))
+    validations = _as_list(payload.get("validationRules"))
+    apis = _as_list(payload.get("apiSummary"))
+    exceptions = _as_list(payload.get("exceptions"))
+    acceptance = _as_list(payload.get("acceptanceCriteria"))
+    constraints = _as_list(payload.get("constraints"))
+    gaps = _as_list(payload.get("gaps"))
+
+    for frag in fragments:
+        # 1) API/UI
+        for m in _API_RE.finditer(frag):
+            _append_unique(
+                apis,
+                "path",
+                {"method": m.group(1).upper(), "path": m.group(2), "note": frag[:200]},
+            )
+        # 2) Actors / permissions
+        m_actor = _ACTOR_LINE_RE.match(frag)
+        if m_actor:
+            _append_unique(
+                actors,
+                "name",
+                {"name": m_actor.group(1).strip()[:120], "description": "", "permissions": ""},
+            )
+        # 3) Business flow
+        if _FLOW_STEP_HINT.search(frag) or _USECASE_HEAD.search(frag):
+            flow_name = "Luồng tách từ SRS"
+            _append_unique(use_cases, "name", {"name": flow_name, "steps": frag[:800]})
+        # 4) Validation
+        if _VALIDATION_HINT.search(frag):
+            _append_unique(validations, "rule", {"field": "", "rule": frag[:500]})
+        # 5) Error handling
+        if _EXCEPTION_HINT.search(frag):
+            _append_unique(exceptions, "text", {"text": frag[:500]})
+        # 6) Acceptance
+        if _ACCEPTANCE_HINT.search(frag):
+            _append_unique(acceptance, "text", {"text": frag[:500]})
+        # 7) NFR constraints
+        if re.search(r"(?i)\b(performance|bảo mật|security|sla|timeout|audit|logging)\b", frag):
+            _append_unique(constraints, "text", {"text": frag[:500]})
+        # 8) Business rules
+        if _RULE_HINT.search(frag) or _AUTH_HINT.search(frag):
+            _append_unique(
+                business_rules,
+                "text",
+                {"id": f"BR-{len(business_rules) + 1}", "text": frag[:500]},
+            )
+        # 9) Features
+        m_feat = _FEATURE_HEAD.match(frag)
+        if m_feat:
+            _append_unique(
+                features,
+                "name",
+                {"name": (m_feat.group(2).strip() or frag[:80])[:200], "description": frag[:400]},
+            )
+        elif _FEATURE_HEAD_SIMPLE.search(frag):
+            _append_unique(features, "name", {"name": frag[:200], "description": ""})
+        # 10) Gaps
+        if _GAP_HINT.search(frag):
+            _append_unique(gaps, "text", {"text": frag[:500]}, limit=MAX_GAPS)
+
+    payload["features"] = _dedupe_list(features, "name")
+    payload["actors"] = _dedupe_list(actors, "name")
+    payload["useCases"] = _dedupe_list(use_cases, "name")
+    payload["businessRules"] = _dedupe_list(business_rules, "text")
+    for i, r in enumerate(payload["businessRules"], start=1):
+        r["id"] = f"BR-{i}"
+    payload["validationRules"] = _dedupe_list(validations, "rule")
+    payload["apiSummary"] = _dedupe_list(apis, "path")
+    payload["exceptions"] = _dedupe_list(exceptions, "text")
+    payload["acceptanceCriteria"] = _dedupe_list(acceptance, "text")
+    payload["constraints"] = _dedupe_list(constraints, "text")
+    payload["gaps"] = _dedupe_list(gaps, "text")[:MAX_GAPS]
+    return payload
 
 
 def normalize_knowledge_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -224,7 +462,7 @@ def normalize_knowledge_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
             )
         base["validationRules"] = base["validationRules"][:MAX_ITEMS]
 
-    return base
+    return _enforce_criteria_split(base)
 
 
 def build_knowledge_heuristic(
@@ -277,6 +515,16 @@ def build_knowledge_heuristic(
         h = (heading or "").strip()
         body = (text or "").strip()
 
+        if h and not _USECASE_HEAD.search(h) and _FEATURE_HEAD_SIMPLE.search(h):
+            flow_lines = [ln.strip() for ln in body.splitlines() if _FLOW_STEP_HINT.search(ln)]
+            if flow_lines:
+                use_cases.append(
+                    {
+                        "name": h[:200],
+                        "steps": "\n".join(flow_lines[:12])[:800],
+                    }
+                )
+
         if h and _USECASE_HEAD.search(h):
             use_cases.append({"name": h[:200], "steps": body[:800]})
 
@@ -306,6 +554,17 @@ def build_knowledge_heuristic(
                         "permissions": "",
                     }
                 )
+            else:
+                m_story = _USER_STORY_ACTOR_RE.search(s)
+                story_actor = (m_story.group(1) or m_story.group(2) or "").strip() if m_story else ""
+                if story_actor:
+                    actors.append(
+                        {
+                            "name": story_actor[:120],
+                            "description": "",
+                            "permissions": "",
+                        }
+                    )
 
             if _RULE_HINT.search(s):
                 item = {"id": f"BR-{len(rules) + 1}", "text": s[:500]}
@@ -320,6 +579,9 @@ def build_knowledge_heuristic(
                     validations.append({"field": "", "rule": s[:500]})
             elif _VALIDATION_HINT.search(s):
                 validations.append({"field": "", "rule": s[:500]})
+
+            if _AUTH_HINT.search(s):
+                rules.append({"id": f"BR-{len(rules) + 1}", "text": s[:500]})
 
             if _EXCEPTION_HINT.search(s):
                 exceptions.append({"text": s[:500]})
@@ -350,6 +612,10 @@ def build_knowledge_heuristic(
 
             for m in _ENTITY_RE.finditer(s):
                 entities.append({"entity": m.group(1), "note": s[:200]})
+
+            if _FLOW_STEP_HINT.search(s):
+                flow_name = h[:200] if h else "Luồng nghiệp vụ"
+                use_cases.append({"name": flow_name, "steps": s[:800]})
 
     payload["features"] = _dedupe_list(features, "name")
     payload["businessRules"] = _dedupe_list(rules, "text")
@@ -389,6 +655,10 @@ def build_knowledge_heuristic(
     if not payload["acceptanceCriteria"]:
         structural_gaps.append(
             {"text": "Chưa có Acceptance criteria (Done when / Given-When-Then)."}
+        )
+    if not payload["apiSummary"] and not payload["databaseSummary"]:
+        structural_gaps.append(
+            {"text": "Chưa có thông tin API / entity / model / bảng dữ liệu liên quan."}
         )
 
     payload["gaps"] = _dedupe_list(gaps + structural_gaps, "text")[:MAX_GAPS]
@@ -430,9 +700,13 @@ def parse_knowledge_llm_json(raw: str) -> dict[str, Any] | None:
 
 
 def knowledge_system_prompt() -> str:
+    criteria_lines = "\n".join(
+        f"- {c['type']} ({c['json_key']}): {c['instruction']}"
+        for c in ANALYSIS_CRITERIA_GUIDE
+    )
     return (
         "You are a requirements analyst preparing Knowledge for QA test-case generation. "
-        "From document excerpts, build a structured Knowledge Workspace. "
+        "From uploaded SRS excerpts, build a structured Knowledge Workspace for database persistence. "
         "Return ONLY one JSON object (no markdown) with keys:\n"
         "- summary (string): scope in/out + short overview\n"
         "- features ([{name,description}]): distinct features/modules for TC module mapping\n"
@@ -446,8 +720,42 @@ def knowledge_system_prompt() -> str:
         "- constraints ([{text}]): NFR (perf/security/audit…)\n"
         "- gaps ([{text}]): ONLY real missing info that blocks accurate TCs "
         "(do NOT invent dozens of open questions; max ~15)\n"
+        "Mandatory extraction criteria by persisted DB type:\n"
+        f"{criteria_lines}\n"
+        "CRITICAL: If one SRS paragraph mixes multiple criteria, split it into separate items "
+        "for each relevant key (do not keep mixed/combined items).\n"
+        "For list items (except gaps), attach 1..3 evidence snippets from SRS when available: "
+        "evidence: [\"<quote>\", ...]. Keep each quote short and verbatim.\n"
         "Use the document language (often Vietnamese). Be concise; do not invent facts. "
         "Prefer Features + Use Cases + Validation + Exceptions + Acceptance over trivia."
+    )
+
+
+def build_knowledge_user_prompt(
+    chunks: list[tuple[str | None, str]],
+    *,
+    file_names: list[str] | None = None,
+) -> str:
+    files = ", ".join((file_names or [])[:20]) or "(unknown)"
+    criteria = "\n".join(
+        f"{idx + 1}. {c['label']} [{c['type']}] -> JSON key '{c['json_key']}'"
+        for idx, c in enumerate(ANALYSIS_CRITERIA_GUIDE)
+    )
+    return (
+        "SRS nguồn tải lên cần phân tích đầy đủ theo checklist bắt buộc dưới đây.\n"
+        f"Files: {files}\n\n"
+        "Checklist tiêu chí:\n"
+        f"{criteria}\n\n"
+        "Quy tắc output:\n"
+        "- Trả về DUY NHẤT 1 JSON object hợp lệ theo schema đã yêu cầu.\n"
+        "- Không markdown, không giải thích thêm ngoài JSON.\n"
+        "- Mỗi tiêu chí phải tách item riêng; không gộp Validation/Rule/Exception/Acceptance vào cùng 1 item.\n"
+        "- Nếu 1 đoạn SRS chứa nhiều ý, phải tách thành nhiều item và map đúng key tương ứng.\n"
+        "- Nếu không đủ dữ liệu cho tiêu chí nào, ghi lý do vào gaps.\n"
+        "- Ưu tiên trích dẫn đúng câu từ tài liệu (evidence) để tăng độ chính xác.\n\n"
+        "Document excerpts:\n\n"
+        f"{chunks_to_prompt_text(chunks)}\n\n"
+        "Return the Knowledge JSON now."
     )
 
 

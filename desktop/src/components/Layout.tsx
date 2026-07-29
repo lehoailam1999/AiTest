@@ -5,6 +5,7 @@ import { useAuth } from "../auth/AuthContext";
 import { useProject } from "../state/ProjectContext";
 import { ApiHealthBanner } from "./ApiHealthBanner";
 import {
+  E2E_TEST_MATCH,
   REQUIREMENT_MATCH,
   ROUTES,
   UNIT_TEST_MATCH,
@@ -39,6 +40,7 @@ const NAV_SECTIONS: { title: string; items: NavItem[] }[] = [
     title: "Automate",
     items: [
       { to: ROUTES.unitTest, label: "Unit test", match: UNIT_TEST_MATCH },
+      { to: ROUTES.e2eTest, label: "E2E test", match: E2E_TEST_MATCH },
       { to: ROUTES.run, label: "Chạy test" },
     ],
   },
@@ -93,7 +95,7 @@ export default function Layout() {
                 Chưa chọn dự án
               </strong>
               <span className="active-project-hint">
-                Chu trình: Requirement → Unit Engine → Chạy test.
+                Chu trình: Requirement → Unit / E2E Engine → Chạy test.
               </span>
               <Button
                 type="link"

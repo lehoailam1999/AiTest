@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   App,
   Button,
   Form,
@@ -15,8 +16,11 @@ import { FolderOpenOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { projects } from "../api";
 import type { Project } from "../api/types";
-import { formatSyncedAt, normalizeProjectMeta, projectImportSummary } from "../lib/projectSync";
+import { SourceRootBar } from "../components/SourceRootBar";
+import { ROUTES } from "../lib/productRoutes";
 import { useProject } from "../state/ProjectContext";
+import { workspace } from "../workspace";
+import type { ProjectScan } from "../tauri/bridge";
 
 export default function ProjectsPage() {
   const { message, modal } = App.useApp();
@@ -27,6 +31,7 @@ export default function ProjectsPage() {
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editItem, setEditItem] = useState<Project | null>(null);
+  const [rootTick, setRootTick] = useState(0);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
 
@@ -119,6 +124,32 @@ export default function ProjectsPage() {
     });
   }
 
+  const activeProject = useMemo(
+    () => (active ? items.find((p) => p.id === active.id) ?? null : null),
+    [active, items]
+  );
+  const activeLocalPath = useMemo(() => {
+    void rootTick;
+    return active ? workspace.getLocalPath(active.id) : null;
+  }, [active, rootTick]);
+
+  function onSourceRootBound(payload: {
+    rootPath: string;
+    syncedProject: Project | null;
+    scan: ProjectScan;
+  }) {
+    setRootTick((n) => n + 1);
+    if (payload.syncedProject) {
+      setItems((prev) =>
+        prev.map((p) => (p.id === payload.syncedProject!.id ? payload.syncedProject! : p))
+      );
+    }
+  }
+
+  function onSourceRootSynced(project: Project) {
+    setItems((prev) => prev.map((p) => (p.id === project.id ? project : p)));
+  }
+
   const columns: ColumnsType<Project> = [
     {
       title: "Tên dự án",
@@ -136,14 +167,12 @@ export default function ProjectsPage() {
       title: "Import / Stack",
       key: "import",
       render: (_, p) => {
-        const meta = normalizeProjectMeta(p.meta);
-        const summary = projectImportSummary({ ...p, meta: meta ?? undefined });
-        const synced = meta?.syncedAt;
+        const summary = [p.language, p.framework].filter(Boolean).join(" · ") || "Chưa import";
         return (
           <Space orientation="vertical" size={0}>
             <span>{summary}</span>
             <Typography.Text type="secondary" style={{ fontSize: "0.78rem" }}>
-              {formatSyncedAt(synced)}
+              {workspace.getLocalPath(p.id) ? "Đã gắn source root" : "Chưa gắn source root"}
             </Typography.Text>
           </Space>
         );
@@ -154,7 +183,7 @@ export default function ProjectsPage() {
     {
       title: "Hành động",
       key: "actions",
-      width: 400,
+      width: 520,
       render: (_, p) => (
         <Space wrap>
           <Button size="small" type={active?.id === p.id ? "primary" : "default"} onClick={() => setProject(p.id, p.name)}>
@@ -169,6 +198,24 @@ export default function ProjectsPage() {
             }}
           >
             Unit test
+          </Button>
+          <Button
+            size="small"
+            onClick={() => {
+              setProject(p.id, p.name);
+              navigate(ROUTES.e2eTest);
+            }}
+          >
+            E2E test
+          </Button>
+          <Button
+            size="small"
+            onClick={() => {
+              setProject(p.id, p.name);
+              navigate(ROUTES.requirement);
+            }}
+          >
+            Requirement
           </Button>
           <Button size="small" onClick={() => openEdit(p)}>
             Sửa
@@ -189,18 +236,42 @@ export default function ProjectsPage() {
             Dự án
           </Typography.Title>
           <Typography.Text type="secondary">
-            Tạo dự án trên server → chọn dự án → gắn project root tại Unit test.
+            Luồng chuẩn: Tạo dự án → Chọn dự án → Import source code (project root) → Unit/E2E.
           </Typography.Text>
         </div>
         <Space>
-          <Button onClick={() => navigate("/unit-test")} disabled={!active}>
+          <Button onClick={() => navigate(ROUTES.unitTest)} disabled={!active}>
             Unit test
+          </Button>
+          <Button onClick={() => navigate(ROUTES.e2eTest)} disabled={!active}>
+            E2E test
           </Button>
           <Button type="primary" onClick={() => setCreateOpen(true)}>
             Tạo mới
           </Button>
         </Space>
       </header>
+
+      {active ? (
+        <div style={{ marginTop: 12, marginBottom: 12 }}>
+          {activeProject ? (
+            <SourceRootBar
+              project={{ id: activeProject.id, name: activeProject.name }}
+              localPath={activeLocalPath}
+              onBound={onSourceRootBound}
+              onSynced={onSourceRootSynced}
+            />
+          ) : null}
+        </div>
+      ) : (
+        <Alert
+          style={{ marginTop: 12 }}
+          type="warning"
+          showIcon
+          message="Bước 1 · Chọn dự án"
+          description="Chọn một dự án trong bảng dưới để gắn source code."
+        />
+      )}
 
       <Table
         rowKey="id"

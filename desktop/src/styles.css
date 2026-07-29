@@ -2135,6 +2135,72 @@ label textarea:disabled,
   max-width: 40rem;
 }
 
+.cli-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: none;
+  align-self: stretch;
+  box-sizing: border-box;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  background: #0f1419;
+  color: #e6edf3;
+  padding: 12px 14px;
+  margin-top: 4px;
+}
+
+.cli-log-panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cli-log-panel__head .ant-typography {
+  color: #e6edf3 !important;
+}
+
+.cli-log-panel__status {
+  color: #9db0c4 !important;
+  font-size: 12px;
+}
+
+.cli-log-panel__body {
+  margin: 0;
+  width: 100%;
+  max-height: min(56vh, 560px);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #d7e2ec;
+}
+
+.freeze-engine-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.engine-pick.ant-space-compact {
+  display: inline-flex;
+}
+
+.engine-pick .ant-btn {
+  min-width: 4.5rem;
+  font-weight: 500;
+}
+
+.coverage-review-toolbar .engine-pick .ant-btn {
+  min-width: 3.75rem;
+}
+
 .freeze-history {
   display: flex;
   flex-direction: column;
@@ -2951,5 +3017,121 @@ label textarea:disabled,
   .settings-engine-card {
     transition: none;
   }
+}
+
+/* —— E2E Job Console (EX1) —— */
+.e2e-page {
+  max-width: 960px;
+}
+
+.e2e-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7fbf9;
+}
+
+.e2e-gate-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.e2e-gate-alert {
+  margin: 0;
+}
+
+.e2e-gate-root {
+  background: #fff;
+  border-radius: 8px;
+}
+
+.e2e-env {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.e2e-pipeline {
+  padding: 8px 4px 4px;
+}
+
+.e2e-pipeline .e2e-pipe-step {
+  cursor: pointer;
+}
+
+.e2e-pipeline .e2e-pipe-step--active .ant-steps-item-title {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.e2e-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.e2e-file-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.e2e-file-list__item {
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.e2e-file-list__item:hover {
+  background: rgba(15, 110, 86, 0.06);
+}
+
+.e2e-file-list__item--active {
+  background: rgba(15, 110, 86, 0.1);
+  border-color: rgba(15, 110, 86, 0.25);
+}
+
+.e2e-files-preview {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.e2e-files-list-pane {
+  flex: 0 0 min(320px, 100%);
+  max-height: 420px;
+  overflow: auto;
+}
+
+.e2e-files-content-pane {
+  flex: 1 1 280px;
+  min-width: 200px;
+}
+
+.e2e-file-preview {
+  width: 100%;
+}
+
+.e2e-result-tabs {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px 12px 12px;
+  background: #fff;
+}
+
+.e2e-log-pane {
+  display: flex;
+  flex-direction: column;
 }
 

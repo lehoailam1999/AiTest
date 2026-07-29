@@ -1,9 +1,3 @@
-const RECENT_KEY = "aitest.recentProjects";
-const PATH_MAP_KEY = "aitest.projectPaths";
-const WORKSPACE_ID_KEY = "aitest.workspaceIds";
-const ACTIVE_KEY = "aitest.activeProject";
-const FAVORITES_KEY = "aitest.favoritePaths";
-
 export type RecentProject = {
   id: string;
   name: string;
@@ -11,73 +5,64 @@ export type RecentProject = {
   path?: string;
 };
 
-function read<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
+const memory = {
+  recent: [] as RecentProject[],
+  pathMap: {} as Record<string, string>,
+  workspaceIds: {} as Record<string, string>,
+  activeProjectId: null as string | null,
+  favorites: [] as string[],
+};
 
 export const workspace = {
   recent(): RecentProject[] {
-    return read<RecentProject[]>(RECENT_KEY, []);
+    return [...memory.recent];
   },
   addRecent(id: string, name: string, path?: string) {
-    const items = workspace.recent().filter((p) => p.id !== id);
+    const items = memory.recent.filter((p) => p.id !== id);
     items.unshift({
       id,
       name,
       path,
       openedAt: new Date().toISOString(),
     });
-    localStorage.setItem(RECENT_KEY, JSON.stringify(items.slice(0, 12)));
+    memory.recent = items.slice(0, 12);
   },
   getLocalPath(projectId: string): string | null {
-    const map = read<Record<string, string>>(PATH_MAP_KEY, {});
-    return map[projectId] ?? null;
+    return memory.pathMap[projectId] ?? null;
   },
   setLocalPath(projectId: string, path: string) {
-    const map = read<Record<string, string>>(PATH_MAP_KEY, {});
-    map[projectId] = path;
-    localStorage.setItem(PATH_MAP_KEY, JSON.stringify(map));
+    memory.pathMap[projectId] = path;
   },
   /** Backend workspace session id (after POST /workspace/open) */
   getWorkspaceId(projectId: string): string | null {
-    const map = read<Record<string, string>>(WORKSPACE_ID_KEY, {});
-    return map[projectId] ?? null;
+    return memory.workspaceIds[projectId] ?? null;
   },
   setWorkspaceId(projectId: string, workspaceId: string) {
-    const map = read<Record<string, string>>(WORKSPACE_ID_KEY, {});
-    map[projectId] = workspaceId;
-    localStorage.setItem(WORKSPACE_ID_KEY, JSON.stringify(map));
+    memory.workspaceIds[projectId] = workspaceId;
   },
   clearWorkspaceId(projectId: string) {
-    const map = read<Record<string, string>>(WORKSPACE_ID_KEY, {});
-    delete map[projectId];
-    localStorage.setItem(WORKSPACE_ID_KEY, JSON.stringify(map));
+    delete memory.workspaceIds[projectId];
   },
   getActive(): string | null {
-    return localStorage.getItem(ACTIVE_KEY);
+    return memory.activeProjectId;
   },
   setActive(projectId: string) {
-    localStorage.setItem(ACTIVE_KEY, projectId);
+    memory.activeProjectId = projectId;
   },
   clearActive() {
-    localStorage.removeItem(ACTIVE_KEY);
+    memory.activeProjectId = null;
   },
   favorites(): string[] {
-    return read<string[]>(FAVORITES_KEY, []);
+    return [...memory.favorites];
   },
   toggleFavorite(path: string) {
     const norm = path.replace(/\\/g, "/");
-    const cur = workspace.favorites();
+    const cur = memory.favorites;
     const next = cur.includes(norm) ? cur.filter((f) => f !== norm) : [norm, ...cur].slice(0, 20);
-    localStorage.setItem(FAVORITES_KEY, JSON.stringify(next));
+    memory.favorites = next;
     return next;
   },
   isFavorite(path: string) {
-    return workspace.favorites().includes(path.replace(/\\/g, "/"));
+    return memory.favorites.includes(path.replace(/\\/g, "/"));
   },
 };

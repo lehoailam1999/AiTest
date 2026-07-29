@@ -42,29 +42,16 @@ _KIND_ALIASES = {
     "endtoend": "e2e",
 }
 
-# Leading / mid segments that are tooling or SPA shells — never keep under AItest
-_TECH_SEGMENTS = frozenset(
+# Structural build/tooling folders — strip from module path on EVERY project.
+# Do NOT put package-role names here (backend/frontend/web/client/shared/…) —
+# those are often real business folders in other repos.
+_STRUCTURAL_SEGMENTS = frozenset(
     {
         "src",
-        "app",
         "lib",
         "libs",
         "source",
         "sources",
-        "backend",
-        "frontend",
-        "server",
-        "client",
-        "clientapp",
-        "serverapp",
-        "webapp",
-        "web",
-        "wwwroot",
-        "public",
-        "packages",
-        "pkg",
-        "internal",
-        "cmd",
         "dist",
         "build",
         "bin",
@@ -76,14 +63,48 @@ _TECH_SEGMENTS = frozenset(
         "__pycache__",
         "target",
         "out",
+        "wwwroot",
+        "public",
         "assets",
         "environments",
-        "shared",
-        "core",
-        "common",
-        "components",  # Angular noise when alone as folder chain
     }
 )
+
+# SPA / host shells — strip from module labels only (package_prefix still keeps them).
+# Extensible via AITEST_SPA_SHELLS=webspa,myshell (comma-separated, case-insensitive).
+_DEFAULT_SPA_SHELLS = frozenset(
+    {
+        "clientapp",
+        "serverapp",
+        "webapp",
+        "webspa",
+        "spa",
+    }
+)
+
+
+def _env_segment_set(var_name: str, defaults: frozenset[str]) -> frozenset[str]:
+    raw = (os.environ.get(var_name) or "").strip()
+    if not raw:
+        return defaults
+    extra = {s.strip().lower() for s in raw.split(",") if s.strip()}
+    return frozenset(defaults | extra)
+
+
+def _structural_segments() -> frozenset[str]:
+    return _env_segment_set("AITEST_STRUCTURAL_SEGMENTS", _STRUCTURAL_SEGMENTS)
+
+
+def _spa_shell_segments() -> frozenset[str]:
+    return _env_segment_set("AITEST_SPA_SHELLS", _DEFAULT_SPA_SHELLS)
+
+
+# Back-compat alias used by older call sites / tests
+def _tech_segments() -> frozenset[str]:
+    return _structural_segments() | _spa_shell_segments()
+
+
+_TECH_SEGMENTS = _STRUCTURAL_SEGMENTS | _DEFAULT_SPA_SHELLS  # static snapshot for imports
 
 _STRIP_PREFIX_TREES = (
     "aitest/",
@@ -155,10 +176,12 @@ def sanitize_module_label(module: str | None) -> str:
 
 def module_rel_from_source(source_rel: str | None) -> str:
     """
-    Short business module from source path — strip SPA/tech shells, cap depth.
-    Example:
-      Forensic/ClientApp/src/app/admin/case-record/update/foo.ts
-      → Forensic/case-record   (or case-record/update)
+    Short business module from source path — strip structural/SPA shells, cap depth.
+
+    Generic for any project name. Examples:
+      {pkg}/src/Order/Services/x.cs → Order/Services
+      {product}/{SpaShell}/src/app/admin/feature/update/x.ts → feature/update
+      internal/order/order.go → internal/order
     """
     p = _norm_rel(source_rel)
     if not p:
@@ -177,9 +200,19 @@ def module_rel_from_source(source_rel: str | None) -> str:
             break
 
     parts = [seg for seg in p.split("/") if seg and seg not in (".", "..")]
+    tech = _tech_segments()
+    spa = _spa_shell_segments()
 
-    # Drop tech/SPA shells anywhere they appear (not only leading)
-    parts = [seg for seg in parts if seg.lower() not in _TECH_SEGMENTS]
+    cleaned: list[str] = []
+    for i, seg in enumerate(parts):
+        low_seg = seg.lower()
+        if low_seg in tech or low_seg in spa:
+            continue
+        # Angular convention: only strip bare `app` when it sits under `src`
+        if low_seg == "app" and i > 0 and parts[i - 1].lower() == "src":
+            continue
+        cleaned.append(seg)
+    parts = cleaned
 
     if parts and parts[0].lower() == AITEST_ROOT.lower():
         parts = parts[1:]
@@ -189,11 +222,10 @@ def module_rel_from_source(source_rel: str | None) -> str:
     if not parts:
         return ""
 
-    # Prefer: first business root + last feature folder (skip deep admin/…)
+    # Prefer leaf business folders (last N) — works across monorepo depths
     if len(parts) <= _MAX_MODULE_DEPTH:
         return "/".join(parts)
-    # Forensic/.../case-record/update → Forensic/update (root + leaf)
-    return f"{parts[0]}/{parts[-1]}"
+    return "/".join(parts[-_MAX_MODULE_DEPTH:])
 
 
 def file_name_from_source(
@@ -247,7 +279,15 @@ def file_name_from_source(
 
 
 # Structural code-root folders — AItest is placed as a sibling of these.
-_CODE_ROOT_MARKERS = frozenset({"src", "lib", "libs"})
+# Extend via AITEST_CODE_ROOT_MARKERS=src,lib,libs,app
+_DEFAULT_CODE_ROOT_MARKERS = frozenset({"src", "lib", "libs"})
+
+
+def _code_root_markers() -> frozenset[str]:
+    return _env_segment_set("AITEST_CODE_ROOT_MARKERS", _DEFAULT_CODE_ROOT_MARKERS)
+
+
+_CODE_ROOT_MARKERS = _DEFAULT_CODE_ROOT_MARKERS
 
 
 def package_prefix_from_source(
@@ -262,7 +302,7 @@ def package_prefix_from_source(
       {any}/src/… → {any}
       apps/web/src/x.ts → apps/web
       product/WebSpa/src/app/x.ts → product/WebSpa
-      src/todos/x.ts → "" (code root is already at apply root)
+      src/orders/x.ts → "" (code root is already at apply root)
 
     Optional ``package_prefix`` overrides path heuristic (from Desktop FS discovery).
     Pass ``package_prefix=""`` to force repo-root AItest/.
@@ -276,8 +316,13 @@ def package_prefix_from_source(
     parts = [seg for seg in p.split("/") if seg and seg not in (".", "..")]
     if len(parts) < 2:
         return ""
+    markers = _code_root_markers()
     for i, seg in enumerate(parts[:-1]):
-        if seg.lower() not in _CODE_ROOT_MARKERS:
+        low = seg.lower()
+        if low not in markers:
+            continue
+        # Django-style: treat `app` as code root only when not under `src`
+        if low == "app" and i > 0 and parts[i - 1].lower() == "src":
             continue
         if i == 0:
             return ""
@@ -472,7 +517,8 @@ def under_generated_test_folder(
         parts = [p for p in mod.split("/") if p]
         if parts and parts[0].lower() == kind_name:
             parts = parts[1:]
-        parts = [p for p in parts if p.lower() not in _TECH_SEGMENTS]
+        drop = _tech_segments() | _spa_shell_segments()
+        parts = [p for p in parts if p.lower() not in drop]
         # Only strip package segments from source-derived modules (keep TC labels).
         if pkg and not used_tc_module:
             pkg_parts = pkg.lower().split("/")
@@ -484,6 +530,233 @@ def under_generated_test_folder(
     if mod:
         return f"{kind_root}/{mod}/{name}".replace("//", "/")
     return f"{kind_root}/{name}".replace("//", "/")
+
+
+def _build_e2e_module(
+    module: str = "",
+    requirement_title: str = "",
+    test_case_title: str = "",
+) -> str:
+    """
+    Build E2E subfolder from requirement + test case (like Unit test layout).
+
+    Priority:
+      1) requirement_title / test_case_title  → {Requirement}/{TC}
+      2) requirement_title only               → {Requirement}
+      3) module (legacy fallback)             → {Module}
+    """
+    req = sanitize_module_label(requirement_title)
+    tc = sanitize_module_label(test_case_title)
+    if req and tc:
+        return f"{req}/{tc}"
+    if req:
+        return req
+    if tc:
+        return tc
+    return sanitize_module_label(module)
+
+
+def e2e_module_root(
+    module: str = "",
+    *,
+    package_prefix: str | None = None,
+    source_file_name: str | None = None,
+    requirement_title: str = "",
+    test_case_title: str = "",
+) -> str:
+    """[{pkg}/]AItest/E2ETest/{Requirement}/{TC} (no trailing slash)."""
+    kind_root = aitest_kind_root("e2e")
+    pkg = package_prefix_from_source(source_file_name, package_prefix=package_prefix)
+    if pkg:
+        kind_root = f"{pkg}/{kind_root}"
+    mod = _build_e2e_module(module, requirement_title, test_case_title)
+    if mod:
+        return f"{kind_root}/{mod}".replace("//", "/")
+    return kind_root
+
+
+def resolve_e2e_file_paths(
+    files: list,
+    *,
+    module: str = "",
+    package_prefix: str | None = None,
+    journey_slug: str = "journey",
+    source_file_name: str | None = None,
+    requirement_title: str = "",
+    test_case_title: str = "",
+) -> list:
+    """
+    Normalize LLM-returned E2E paths under AItest/E2ETest/{Requirement}/{TC}/…
+    Accepts objects with .path / .content / .kind (E2EFile) or dicts.
+    """
+    from app.llm.base import E2EFile
+
+    root = e2e_module_root(
+        module,
+        package_prefix=package_prefix,
+        source_file_name=source_file_name,
+        requirement_title=requirement_title,
+        test_case_title=test_case_title,
+    )
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", journey_slug or "journey").strip("-") or "journey"
+    out: list[E2EFile] = []
+    seen: set[str] = set()
+
+    for item in files:
+        if isinstance(item, E2EFile):
+            path = item.path
+            content = item.content
+            kind = item.kind
+        elif isinstance(item, dict):
+            path = str(item.get("path") or "")
+            content = str(item.get("content") or "")
+            kind = str(item.get("kind") or "spec")
+        else:
+            continue
+        path = _norm_rel(path)
+        if not path or not content.strip():
+            continue
+
+        low = path.lower()
+        # Already under AItest/E2ETest
+        if "aitest/" in low and "e2etest" in low:
+            final = path
+        elif low.endswith("playwright.config.ts") or low.endswith("playwright.config.js"):
+            final = f"{root}/playwright.config.ts"
+            kind = "config"
+        elif low.startswith("pages/") or "/pages/" in f"/{low}/":
+            name = os.path.basename(path)
+            final = f"{root}/pages/{name}"
+            kind = "page"
+        elif low.startswith("specs/") or "/specs/" in f"/{low}/":
+            name = os.path.basename(path)
+            final = f"{root}/specs/{name}"
+            kind = "spec"
+        elif low.startswith("fixtures/") or "/fixtures/" in f"/{low}/":
+            name = os.path.basename(path)
+            final = f"{root}/fixtures/{name}"
+            kind = "fixture"
+        elif kind == "page" or path.endswith(".page.ts"):
+            name = os.path.basename(path) or f"{slug}.page.ts"
+            final = f"{root}/pages/{name}"
+            kind = "page"
+        elif kind == "config":
+            final = f"{root}/playwright.config.ts"
+        elif kind == "fixture":
+            name = os.path.basename(path) or "data.json"
+            final = f"{root}/fixtures/{name}"
+        else:
+            name = os.path.basename(path) or f"{slug}.spec.ts"
+            if not name.endswith(".spec.ts") and not name.endswith(".test.ts"):
+                name = f"{slug}.spec.ts"
+            final = f"{root}/specs/{name}"
+            kind = "spec"
+
+        final = final.replace("//", "/")
+        if final in seen:
+            continue
+        seen.add(final)
+        out.append(E2EFile(path=final, content=content, kind=kind))
+
+    # TS portability guard:
+    # Some target repos do not install @playwright/test in their main workspace.
+    # Add a local ambient-module shim so generated E2E files don't raise TS2307.
+    shim_path = f"{root}/types/playwright-shim.d.ts".replace("//", "/")
+    shim_content = (
+        "declare module '@playwright/test' {\n"
+        "  export const test: any;\n"
+        "  export const expect: any;\n"
+        "  export const devices: any;\n"
+        "  export function defineConfig(config: any): any;\n"
+        "  const _default: any;\n"
+        "  export default _default;\n"
+        "}\n"
+    )
+    if shim_path not in seen:
+        seen.add(shim_path)
+        out.append(E2EFile(path=shim_path, content=shim_content, kind="fixture"))
+
+    # Post-check: keep internal imports stable after relocating files under AItest/E2ETest/{Module}.
+    # This fixes common AI drift like importing pages via "./pages/..." from specs folder.
+    by_page_base: dict[str, str] = {}
+    for f in out:
+        p = f.path.replace("\\", "/")
+        if "/pages/" not in p:
+            continue
+        base = os.path.splitext(os.path.basename(p))[0].lower()
+        by_page_base[base] = p
+
+    if not by_page_base:
+        return out
+
+    import_re = re.compile(r"""(from\s+['"])([^'"]+)(['"])""", re.MULTILINE)
+    req_re = re.compile(r"""(require\(\s*['"])([^'"]+)(['"]\s*\))""", re.MULTILINE)
+
+    def _norm_no_ext(spec: str) -> str:
+        return re.sub(r"\.(tsx?|jsx?)$", "", spec.replace("\\", "/"), flags=re.IGNORECASE)
+
+    def _rewrite_to_page(spec_path: str, import_spec: str) -> str | None:
+        raw = import_spec.strip()
+        low = _norm_no_ext(raw).lower()
+        if "node_modules" in low or low.startswith("@playwright/"):
+            return None
+        # identify leaf candidate
+        leaf = os.path.basename(low)
+        if not leaf:
+            return None
+        candidates = [leaf]
+        if leaf.endswith(".page"):
+            candidates.append(leaf[:-5])
+        if not leaf.endswith(".page"):
+            candidates.append(f"{leaf}.page")
+        page_path = None
+        for c in candidates:
+            page_path = by_page_base.get(c)
+            if page_path:
+                break
+        if not page_path:
+            return None
+        spec_dir = os.path.dirname(spec_path.replace("\\", "/")) or "."
+        rel = os.path.relpath(page_path, spec_dir).replace("\\", "/")
+        rel = _norm_no_ext(rel)
+        if not rel.startswith("."):
+            rel = f"./{rel}"
+        return rel
+
+    fixed: list[E2EFile] = []
+    for f in out:
+        p = f.path.replace("\\", "/")
+        content = f.content
+        low_content = content.lower()
+        if "@playwright/test" in low_content and "reference path=" not in low_content:
+            ref = None
+            if "/specs/" in p or "/pages/" in p:
+                ref = "/// <reference path=\"../types/playwright-shim.d.ts\" />\n"
+            elif p.endswith("/playwright.config.ts") or p.endswith("/playwright.config.js"):
+                ref = "/// <reference path=\"./types/playwright-shim.d.ts\" />\n"
+            if ref:
+                content = f"{ref}{content}"
+        if f.kind == "spec" or "/specs/" in p:
+            def _from_repl(m: re.Match[str]) -> str:
+                prefix, spec, suffix = m.group(1), m.group(2), m.group(3)
+                # only rewrite page-object imports; keep npm imports unchanged
+                new_spec = _rewrite_to_page(p, spec)
+                if not new_spec:
+                    return m.group(0)
+                return f"{prefix}{new_spec}{suffix}"
+
+            def _req_repl(m: re.Match[str]) -> str:
+                prefix, spec, suffix = m.group(1), m.group(2), m.group(3)
+                new_spec = _rewrite_to_page(p, spec)
+                if not new_spec:
+                    return m.group(0)
+                return f"{prefix}{new_spec}{suffix}"
+
+            content = import_re.sub(_from_repl, content)
+            content = req_re.sub(_req_repl, content)
+        fixed.append(E2EFile(path=f.path, content=content, kind=f.kind))
+
+    return fixed
 
 
 def assert_safe_aitest_target_rel(target_rel: str) -> str:
@@ -524,4 +797,13 @@ def assert_safe_aitest_target_rel(target_rel: str) -> str:
             "Path jail: do not mirror production folders under AItest "
             f"(got {p})"
         )
+    return p
+
+
+def assert_e2e_aitest_target_rel(target_rel: str) -> str:
+    """EX3.2/3.4 — E2E Apply jail: under AItest/…/E2ETest/… only."""
+    p = assert_safe_aitest_target_rel(target_rel)
+    low_parts = [s.lower() for s in p.replace("\\", "/").split("/")]
+    if "e2etest" not in low_parts:
+        raise ValueError(f"Path jail E2E: must be under AItest/E2ETest/ (got {p})")
     return p

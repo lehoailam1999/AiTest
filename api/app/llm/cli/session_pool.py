@@ -14,11 +14,13 @@ logger = logging.getLogger(__name__)
 _SYSTEM_INIT = (
     "Bạn là kỹ sư QA senior. Từ giờ mọi phản hồi sinh test case PHẢI là JSON hợp lệ "
     '(không markdown giải thích dài), schema: '
-    '{"testCases":[{"title":"...","type":"Chức năng|Phủ định|Biên|API",'
+    '{"testCases":[{"title":"...","type":"Unit|E2E|API|Chức năng|Phủ định|Biên",'
     '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
     '"module":"...","precondition":"...","steps":"1. ...\\n2. ...",'
     '"expectedResult":"...","testData":"...","automationReady":false}]}. '
-    "Toàn bộ nội dung tiếng Việt."
+    "Title/steps/expected bằng tiếng Việt. "
+    "type=Unit khi test hàm/service; type=E2E khi user journey UI; type=API khi HTTP endpoint. "
+    "Không gộp Unit+E2E trong một TC."
 )
 
 

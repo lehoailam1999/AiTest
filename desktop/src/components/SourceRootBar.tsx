@@ -6,21 +6,18 @@
 import { useState } from "react";
 import { Alert, App, Button, Input, Space, Tag, Typography } from "antd";
 import { FolderOpenOutlined, SyncOutlined } from "@ant-design/icons";
-import type { Project, ProjectMeta } from "../api/types";
+import type { Project } from "../api/types";
 import {
   bindSourceRoot,
   pickAndBindSourceRoot,
   syncSourceMeta,
 } from "../lib/workspaceManager";
 import { isTauri, type ProjectScan } from "../tauri/bridge";
-import { formatSyncedAt, normalizeProjectMeta } from "../lib/projectSync";
 
 type Props = {
   /** Active project from context — chỉ cần id/name để bind path */
   project: Pick<Project, "id" | "name">;
   localPath: string | null;
-  syncedAt: string | null;
-  existingMeta?: ProjectMeta | null;
   /** After bind/sync — parent refreshes path + server project */
   onBound: (payload: {
     rootPath: string;
@@ -33,8 +30,6 @@ type Props = {
 export function SourceRootBar({
   project,
   localPath,
-  syncedAt,
-  existingMeta,
   onBound,
   onSynced,
 }: Props) {
@@ -53,7 +48,6 @@ export function SourceRootBar({
       const result = await pickAndBindSourceRoot({
         projectId: project.id,
         projectName: project.name,
-        existingMeta: normalizeProjectMeta(existingMeta),
       });
       if (!result) return;
       if (result.openError) {
@@ -89,7 +83,6 @@ export function SourceRootBar({
         projectId: project.id,
         projectName: project.name,
         rootPath: path,
-        existingMeta: normalizeProjectMeta(existingMeta),
       });
       if (result.openError) {
         message.warning(`Đã gắn thư mục; phiên server: ${result.openError}`);
@@ -120,7 +113,6 @@ export function SourceRootBar({
         projectId: project.id,
         projectName: project.name,
         rootPath: localPath,
-        existingMeta: normalizeProjectMeta(existingMeta),
         refreshIndex: true,
       });
       if (result.syncError) {
@@ -148,7 +140,6 @@ export function SourceRootBar({
         projectId: project.id,
         projectName: project.name,
         rootPath: localPath,
-        existingMeta: normalizeProjectMeta(existingMeta),
         waitForIndex: false,
         syncMeta: true,
       });
@@ -162,7 +153,6 @@ export function SourceRootBar({
           const verified = await syncSourceMeta({
             projectId: project.id,
             scan: result.scan,
-            existingMeta: normalizeProjectMeta(existingMeta),
           });
           onSynced(verified);
           message.success("Đã đồng bộ stack · không upload source");
@@ -235,16 +225,12 @@ export function SourceRootBar({
 
   return (
     <Alert
-      type={syncedAt ? "success" : "info"}
+      type="success"
       showIcon
       title={
         <Space wrap size={8}>
           <span>Project root (Apply / Run)</span>
-          {syncedAt ? (
-            <Tag color="success">Stack · {formatSyncedAt(syncedAt)}</Tag>
-          ) : (
-            <Tag color="warning">Chưa đồng bộ stack</Tag>
-          )}
+          <Tag color="success">Đã gắn source root</Tag>
         </Space>
       }
       description={
@@ -264,26 +250,9 @@ export function SourceRootBar({
             <Button size="small" loading={busy} onClick={() => void handleRescan()}>
               Làm mới
             </Button>
-            {!syncedAt ? (
-              <Button
-                size="small"
-                type="primary"
-                icon={<SyncOutlined />}
-                loading={busy}
-                onClick={() => void handleSync()}
-              >
-                Đồng bộ stack
-              </Button>
-            ) : (
-              <Button
-                size="small"
-                icon={<SyncOutlined />}
-                loading={busy}
-                onClick={() => void handleSync()}
-              >
-                Đồng bộ lại
-              </Button>
-            )}
+            <Button size="small" icon={<SyncOutlined />} loading={busy} onClick={() => void handleSync()}>
+              Đồng bộ stack
+            </Button>
           </Space>
         </Space>
       }

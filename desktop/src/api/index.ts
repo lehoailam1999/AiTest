@@ -156,6 +156,30 @@ export const testcases = {
     pageSize = 100
   ) =>
     authFetch<Paged<TestCase>>(`/testcases${qs({ ...params, page, pageSize })}`),
+  /** Page through API (cap 100/page) until all items for filters are loaded. */
+  listAll: async (
+    params: {
+      projectId?: string;
+      sourceId?: string;
+      jobId?: string;
+      reviewStatus?: string;
+    },
+    pageSize = 100
+  ) => {
+    const size = Math.min(Math.max(pageSize, 1), 100);
+    const all: TestCase[] = [];
+    let page = 1;
+    for (;;) {
+      const res = await authFetch<Paged<TestCase>>(
+        `/testcases${qs({ ...params, page, pageSize: size })}`
+      );
+      all.push(...res.items);
+      if (!res.hasNext || res.items.length === 0) break;
+      page += 1;
+      if (page > 200) break;
+    }
+    return all;
+  },
   get: (id: string) => authFetch<TestCase>(`/testcases/${id}`),
   create: (body: TestCaseInput) =>
     authFetch<TestCase>("/testcases", { method: "POST", body: JSON.stringify(body) }),
@@ -255,6 +279,275 @@ export const generateApiTest = {
     repairContext?: string;
   }) =>
     authFetch<UnitResult>("/generate-api-test", { method: "POST", body: JSON.stringify(body) }),
+};
+
+export type E2EFileDto = {
+  path: string;
+  content: string;
+  kind: string;
+};
+
+export type E2EGenerateResult = {
+  files: E2EFileDto[];
+  suggestedPaths: string[];
+  primarySpecPath: string;
+  testCaseId: string;
+  projectId: string;
+  provider?: string;
+  runnerUsed?: string;
+  cliSessionKey?: string | null;
+  playwrightConfigScaffold?: string;
+};
+
+export type E2EInspectResult = {
+  targetUrl?: string | null;
+  source: string;
+  routes: string[];
+  elements: {
+    tag: string;
+    role?: string | null;
+    name?: string | null;
+    testId?: string | null;
+    ariaLabel?: string | null;
+    placeholder?: string | null;
+    type?: string | null;
+    href?: string | null;
+    selectorCandidates: string[];
+  }[];
+  promptJson: string;
+  rawSnippet?: string | null;
+};
+
+export type E2ESandboxResult = {
+  status: "PASSED" | "FAILED" | string;
+  attempts: number;
+  primarySpecPath: string;
+  files: E2EFileDto[];
+  errorLog?: string | null;
+  workCwd?: string | null;
+  history: {
+    attempt: number;
+    exitCode: number;
+    success: boolean;
+    logExcerpt: string;
+  }[];
+  runCommand?: string[];
+};
+
+export type E2EModuleSandboxResult = {
+  status: "PASSED" | "FAILED" | string;
+  files: E2EFileDto[];
+  workCwd?: string | null;
+  log?: string;
+  runCommand?: string[];
+  specs: {
+    specPath: string;
+    success: boolean;
+    title?: string;
+    errorExcerpt?: string;
+  }[];
+  heal?: {
+    specPath: string;
+    status: string;
+    attempts?: number;
+    errorLog?: string | null;
+    primarySpecPath?: string;
+  }[];
+  healSkipped?: string;
+};
+
+export type E2EArtifactsSyncResult = {
+  reportId?: string | null;
+  artifactCount: number;
+  artifacts: { kind: string; path: string; sizeBytes?: number | null }[];
+  packagePrefix?: string | null;
+  status?: string | null;
+};
+
+export const generateE2e = {
+  run: (body: {
+    projectId: string;
+    testCaseId: string;
+    targetUrl?: string;
+    domSnapshot?: string;
+    sourceFileName?: string;
+    sourceCode?: string;
+    module?: string;
+    requirementTitle?: string;
+    packagePrefix?: string | null;
+    projectRoot?: string;
+    storageStateRel?: string;
+    seedCommand?: string;
+    teardownCommand?: string;
+    framework?: string;
+    language?: string;
+    relatedSources?: { path: string; content: string }[];
+    existingFiles?: { path: string; content: string; kind?: string }[];
+  }) =>
+    authFetch<E2EGenerateResult>("/generate-e2e", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  inspect: (body: {
+    targetUrl?: string;
+    sourceCode?: string;
+    projectRoot?: string;
+    sourcePaths?: string[] | { path: string; content: string }[];
+    /** EX4.2 — Chromium render for SPA */
+    usePlaywright?: boolean;
+  }) =>
+    authFetch<E2EInspectResult>("/e2e-inspect", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Gate — @playwright/test + npx under project root */
+  playwrightCheck: (body: { projectRoot: string }) =>
+    authFetch<{
+      ok: boolean;
+      message: string;
+      hasPackage: boolean;
+      hasNpx: boolean;
+      checkedRoot?: string;
+      packageRoot?: string | null;
+      source?: "project" | "aitest" | "none";
+      installHint: string;
+    }>("/e2e-playwright-check", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Cài Chromium dùng chung vào ~/.aitest/playwright-runner */
+  playwrightEnsure: (body?: { force?: boolean }) =>
+    authFetch<{
+      ok: boolean;
+      message: string;
+      runnerDir: string;
+      installed: boolean;
+      source: string;
+    }>("/e2e-playwright-ensure", {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
+  /** Discover auth from project .ai-test/auth / storageState / .env fallback. */
+  authDiscover: (body: {
+    projectRoot: string;
+    module?: string;
+    packagePrefix?: string | null;
+    role?: string;
+  }) =>
+    authFetch<{
+      ready: boolean;
+      defaultRole: string;
+      notes: string[];
+      envFilesRead: string[];
+      roles: {
+        role: string;
+        hasUsername: boolean;
+        hasPassword: boolean;
+        storageStateRel?: string | null;
+        storageStateValid: boolean;
+        source: string;
+        skippedSeed: boolean;
+      }[];
+    }>("/e2e-auth-discover", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** AI analyze source → seed auth artifact under .ai-test/auth (idempotent). */
+  authEnsure: (body: {
+    projectId: string;
+    projectRoot: string;
+    testCaseId?: string;
+    role?: string;
+    targetUrl?: string;
+    sourceCode?: string;
+    domSnapshot?: string;
+    sourceFileName?: string;
+    module?: string;
+    force?: boolean;
+  }) =>
+    authFetch<{
+      ok: boolean;
+      skipped: boolean;
+      role: string;
+      authRel?: string | null;
+      hasUsername: boolean;
+      message: string;
+      seedRel?: string | null;
+    }>("/e2e-auth-ensure", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  sandboxRepair: (body: {
+    projectId: string;
+    testCaseId: string;
+    projectRoot: string;
+    files: E2EFileDto[];
+    primarySpecPath?: string;
+    targetUrl?: string;
+    domSnapshot?: string;
+    module?: string;
+    packagePrefix?: string | null;
+    storageStateRel?: string;
+    seedCommand?: string;
+    teardownCommand?: string;
+    maxRetries?: number;
+    writeFile?: boolean;
+    runCommand?: string[];
+    /** Mở cửa sổ Chromium (--headed) */
+    headed?: boolean;
+    showBrowser?: boolean;
+    /** Inject E2E_* into Playwright process (credentials từ AITest UI) */
+    playwrightEnv?: Record<string, string>;
+    e2eUsername?: string;
+    e2ePassword?: string;
+  }) =>
+    authFetch<E2ESandboxResult>("/e2e-sandbox-repair", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Batch: one Playwright run for specs/ + optional selective heal */
+  sandboxModule: (body: {
+    projectId: string;
+    projectRoot: string;
+    files: E2EFileDto[];
+    module?: string;
+    packagePrefix?: string | null;
+    targetUrl?: string;
+    domSnapshot?: string;
+    storageStateRel?: string;
+    seedCommand?: string;
+    teardownCommand?: string;
+    maxRetries?: number;
+    writeFile?: boolean;
+    healFailures?: boolean;
+    healItems?: { testCaseId: string; primarySpecPath: string }[];
+    testCaseId?: string;
+    runCommand?: string[];
+    headed?: boolean;
+    showBrowser?: boolean;
+    playwrightEnv?: Record<string, string>;
+    e2eUsername?: string;
+    e2ePassword?: string;
+  }) =>
+    authFetch<E2EModuleSandboxResult>("/e2e-sandbox-module", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  artifactsSync: (body: {
+    projectId: string;
+    projectRoot: string;
+    packagePrefix?: string;
+    localRunId?: string;
+    testCaseId?: string;
+    module?: string;
+    status?: string;
+    durationMs?: number;
+    primarySpecPath?: string;
+  }) =>
+    authFetch<E2EArtifactsSyncResult>("/e2e-artifacts-sync", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };
 
 /** AI xếp hạng path theo TC — chỉ gửi path, không gửi source */
@@ -403,13 +696,25 @@ export const audit = {
     authFetch<unknown>("/audit/verify-report", { method: "POST", body: JSON.stringify(body) }),
   postApplyAudit: (body: Record<string, unknown>) =>
     authFetch<unknown>("/audit/apply", { method: "POST", body: JSON.stringify(body) }),
-  listWorkspaceRuns: (projectId: string, page = 1, pageSize = 50) =>
+  listWorkspaceRuns: (
+    projectId: string,
+    page = 1,
+    pageSize = 50,
+    opts?: { testType?: "unit" | "e2e" | "api" | string }
+  ) =>
     authFetch<{
       items: import("./types").WorkspaceRunAudit[];
       page: number;
       pageSize: number;
       total: number;
-    }>(`/audit/workspace-runs${qs({ projectId, page, pageSize })}`),
+    }>(
+      `/audit/workspace-runs${qs({
+        projectId,
+        page,
+        pageSize,
+        testType: opts?.testType,
+      })}`
+    ),
   getWorkspaceRunDetail: (projectId: string, runKey: string) =>
     authFetch<import("./types").WorkspaceRunDetail>(
       `/audit/workspace-runs/${encodeURIComponent(runKey)}${qs({ projectId })}`
@@ -443,9 +748,14 @@ export const audit = {
       `/campaigns/${campaignId}/tasks`,
       { method: "POST", body: JSON.stringify({ tasks }) }
     ),
-  listCampaigns: (projectId: string, page = 1, pageSize = 30) =>
+  listCampaigns: (
+    projectId: string,
+    page = 1,
+    pageSize = 30,
+    opts?: { kind?: string }
+  ) =>
     authFetch<Paged<import("./types").GenerationCampaignAudit>>(
-      `/campaigns${qs({ projectId, page, pageSize })}`
+      `/campaigns${qs({ projectId, page, pageSize, kind: opts?.kind })}`
     ),
 };
 
@@ -687,14 +997,29 @@ export const requirementStudio = {
         }),
       }
     ),
-  generateTcFromSnapshot: (snapshotId: string, mode: "append" | "replace" = "append") =>
+  generateTcFromSnapshot: (
+    snapshotId: string,
+    opts?: {
+      mode?: "append" | "replace";
+      preferredEngine?: "unit" | "e2e";
+      targetUrl?: string;
+      authHint?: string;
+      focusModules?: string;
+    }
+  ) =>
     authFetch<{
       job: import("./types").Job;
       snapshotId: string;
       knowledgeVersion: number;
     }>(`/requirement-snapshots/${snapshotId}/generate-tc`, {
       method: "POST",
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({
+        mode: opts?.mode ?? "append",
+        preferredEngine: opts?.preferredEngine,
+        targetUrl: opts?.targetUrl,
+        authHint: opts?.authHint,
+        focusModules: opts?.focusModules,
+      }),
     }),
   freezeAndGenerate: (
     workspaceId: string,
@@ -702,6 +1027,10 @@ export const requirementStudio = {
       acknowledgeMissing?: boolean;
       note?: string;
       mode?: "append" | "replace";
+      preferredEngine?: "unit" | "e2e";
+      targetUrl?: string;
+      authHint?: string;
+      focusModules?: string;
     }
   ) =>
     authFetch<import("./types").FreezeAndGenerateResult>(
@@ -712,6 +1041,10 @@ export const requirementStudio = {
           acknowledgeMissing: opts?.acknowledgeMissing ?? false,
           note: opts?.note ?? null,
           mode: opts?.mode ?? "append",
+          preferredEngine: opts?.preferredEngine,
+          targetUrl: opts?.targetUrl,
+          authHint: opts?.authHint,
+          focusModules: opts?.focusModules,
         }),
       }
     ),
