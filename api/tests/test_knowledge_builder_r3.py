@@ -70,11 +70,72 @@ def test_build_knowledge_user_prompt_contains_all_required_types():
     prompt = build_knowledge_user_prompt(
         [("Feature: Login", "User phải đăng nhập bằng email/password.")],
         file_names=["SRS_Login.md"],
+        pass1=False,
     )
     assert "SRS nguồn tải lên cần phân tích đầy đủ" in prompt
     for criterion in ANALYSIS_CRITERIA_GUIDE:
         assert criterion["type"] in prompt
         assert criterion["json_key"] in prompt
+
+
+def test_build_knowledge_user_prompt_pass1_is_slimmer():
+    from app.features.requirement_studio.knowledge_builder import (
+        PASS1_JSON_KEYS,
+        MAX_CHUNK_CHARS_FOR_BUILD_PASS1,
+        merge_knowledge_payloads,
+        rank_chunks_for_build,
+    )
+
+    prompt = build_knowledge_user_prompt(
+        [("Feature: Login", "User phải đăng nhập bằng email/password.")],
+        file_names=["SRS_Login.md"],
+        pass1=True,
+    )
+    assert "pass 1" in prompt.lower() or "TC-critical" in prompt
+    assert "FEATURES" in prompt or "features" in prompt.lower()
+    # Full guide types not all required in pass1 prompt text for every key label
+    assert "SUMMARY_SCOPE" in prompt or "summary" in prompt.lower()
+    for key in PASS1_JSON_KEYS:
+        assert key in prompt
+
+    big = [("Noise", "x" * 5000), ("Feature: Auth", "User phải login. Actor: Admin")]
+    ranked = rank_chunks_for_build(big)
+    assert ranked[0][0] == "Feature: Auth"
+
+    merged = merge_knowledge_payloads(
+        {
+            "summary": "heuristic",
+            "features": [{"name": "A"}],
+            "apiSummary": [{"method": "GET", "path": "/a", "note": ""}],
+            "actors": [],
+            "useCases": [],
+            "businessRules": [],
+            "validationRules": [],
+            "exceptions": [],
+            "acceptanceCriteria": [],
+            "constraints": [],
+            "gaps": [],
+        },
+        {
+            "summary": "llm",
+            "features": [{"name": "B"}],
+            "apiSummary": [],
+            "actors": [{"name": "Admin"}],
+            "useCases": [],
+            "businessRules": [],
+            "validationRules": [],
+            "exceptions": [],
+            "acceptanceCriteria": [],
+            "constraints": [],
+            "gaps": [],
+        },
+    )
+    assert merged["summary"] == "llm"
+    assert [f["name"] for f in merged["features"]] == ["B", "A"]
+    assert merged["actors"][0]["name"] == "Admin"
+    # empty overlay api keeps heuristic
+    assert merged["apiSummary"][0]["path"] == "/a"
+    assert len(prompt) < MAX_CHUNK_CHARS_FOR_BUILD_PASS1 + 8000
 
 
 def test_normalize_splits_mixed_lines_into_separate_criteria():

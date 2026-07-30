@@ -84,9 +84,10 @@ export function useCoverageBoard(opts: Options = {}) {
     error:
       (boardQuery.error instanceof Error ? boardQuery.error.message : null) ||
       (casesQuery.error instanceof Error ? casesQuery.error.message : null),
-    refresh: () => {
-      void boardQuery.refetch();
-      if (includeCases) void casesQuery.refetch();
+    refresh: async () => {
+      const tasks = [boardQuery.refetch()];
+      if (includeCases) tasks.push(casesQuery.refetch());
+      await Promise.all(tasks);
     },
     invalidate,
     hasLocalPath,

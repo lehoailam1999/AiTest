@@ -222,6 +222,9 @@ export type KnowledgeWorkspaceView = {
   error?: string | null;
   builtAt?: string | null;
   updatedAt?: string;
+  /** True while background Cursor/LLM enrich is running after heuristic ready */
+  enrichPending?: boolean;
+  enrichError?: string | null;
 };
 
 export type FreezeWarning = {

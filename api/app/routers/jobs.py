@@ -31,6 +31,7 @@ from app.services.connection_service import (
 from app.llm.base import GenerateContext
 from app.services.ai_service import (
     RUNNER_AI_CLI,
+    connection_is_cursor_cli,
     connection_runner_mode,
     generate_test_cases_for_connection,
 )
@@ -108,6 +109,149 @@ def _coerce_draft_type(raw: str | None, preferred: str | None) -> str:
     if canon == "E2E":
         return "E2E"
     return "Unit"
+
+
+def _load_existing_tc_keys(
+    db: Session,
+    *,
+    project_id: uuid.UUID,
+    mode: str,
+    source_id: uuid.UUID | None,
+    snap_id: uuid.UUID | None,
+    snap: RequirementSnapshot | None,
+    default_module: str | None,
+    preferred_engine: str | None,
+) -> set[str]:
+    """Dedup keys for append mode (same scope filters as final persist)."""
+    if mode != "append" or not (source_id or snap_id):
+        return set()
+    prior_q = db.query(TestCase).filter(TestCase.project_id == project_id)
+    if snap and snap.workspace_id:
+        sibling_ids = [
+            row[0]
+            for row in db.query(RequirementSnapshot.id)
+            .filter(
+                RequirementSnapshot.workspace_id == snap.workspace_id,
+                RequirementSnapshot.deleted_at.is_(None),
+            )
+            .all()
+        ]
+        if sibling_ids:
+            prior_q = prior_q.filter(TestCase.requirement_snapshot_id.in_(sibling_ids))
+        else:
+            prior_q = prior_q.filter(TestCase.requirement_snapshot_id == snap_id)
+    elif snap_id:
+        prior_q = prior_q.filter(TestCase.requirement_snapshot_id == snap_id)
+    else:
+        prior_q = prior_q.filter(TestCase.source_id == source_id)
+    prior = prior_q.all()
+    if default_module:
+        prior = [t for t in prior if tc_matches_module_scope(t.module, default_module)]
+    if preferred_engine:
+        prior = [
+            t
+            for t in prior
+            if _tc_matches_preferred_engine(t.type, preferred_engine)
+        ]
+    return {dup_key(t.title, t.steps) for t in prior}
+
+
+def _replace_draft_tcs(
+    db: Session,
+    *,
+    project_id: uuid.UUID,
+    source_id: uuid.UUID | None,
+    snap_id: uuid.UUID | None,
+    default_module: str | None,
+    preferred_engine: str | None,
+) -> int:
+    """Delete draft TCs in scope before replace-mode generate. Returns deleted count."""
+    q = db.query(TestCase).filter(
+        TestCase.project_id == project_id,
+        TestCase.review_status == C.REVIEW_DRAFT,
+    )
+    if snap_id:
+        q = q.filter(TestCase.requirement_snapshot_id == snap_id)
+    elif source_id:
+        q = q.filter(TestCase.source_id == source_id)
+    to_remove = q.all()
+    if default_module:
+        to_remove = [
+            t for t in to_remove if tc_matches_module_scope(t.module, default_module)
+        ]
+    if preferred_engine:
+        to_remove = [
+            t
+            for t in to_remove
+            if _tc_matches_preferred_engine(t.type, preferred_engine)
+        ]
+    n = len(to_remove)
+    for t in to_remove:
+        db.delete(t)
+    if n:
+        db.commit()
+    return n
+
+
+def _persist_generated_drafts(
+    db: Session,
+    *,
+    project_id: uuid.UUID,
+    job_id: uuid.UUID,
+    source_id: uuid.UUID | None,
+    snap_id: uuid.UUID | None,
+    drafts: list,
+    existing_keys: set[str],
+    default_module: str | None,
+    preferred_engine: str | None,
+    doc_hash: str | None,
+    doc_version: int,
+) -> int:
+    """
+    Insert new TestCase rows from drafts (dedupe via existing_keys, mutated in-place).
+    Same mapping rules as legacy end-of-job persist — Unit/E2E type coerce unchanged.
+    Returns number of rows inserted.
+    """
+    if not drafts:
+        return 0
+    count = db.query(TestCase).filter(TestCase.project_id == project_id).count()
+    inserted = 0
+    for d in drafts:
+        key = dup_key(d.title, d.steps)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        count += 1
+        inserted += 1
+        mod = normalize_function_label(d.module or default_module or "") or default_module
+        tc_type = _coerce_draft_type(d.type, preferred_engine)
+        db.add(
+            TestCase(
+                project_id=project_id,
+                source_id=source_id,
+                requirement_snapshot_id=snap_id,
+                job_id=job_id,
+                test_case_code=f"TC-{count:03d}",
+                title=d.title,
+                module=mod,
+                type=tc_type,
+                priority=d.priority,
+                severity=d.severity,
+                precondition=d.precondition,
+                steps=d.steps,
+                expected_result=d.expected_result,
+                test_data=d.test_data,
+                automation_ready=d.automation_ready,
+                is_ai_generated=True,
+                review_status=C.REVIEW_DRAFT,
+                execution_status="Pending",
+                generated_from_hash=doc_hash,
+                generated_from_version=doc_version,
+            )
+        )
+    if inserted:
+        db.commit()
+    return inserted
 
 
 def _engine_readiness_issues(bundle: dict | None, preferred: str | None) -> list[str]:
@@ -670,27 +814,117 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         drafts: list = []
         fan_errors: list[str] = []
         runner_meta: dict = {"runnerUsed": "API_DIRECT", "cliSessionKey": None}
+        saved_total = [0]
+        persist_lock = asyncio.Lock()
+        used_fanout = False
+
+        # Replace-mode wipe once before any progressive insert (Unit/E2E same)
+        if mode == "replace" and (job.source_id or snap_id):
+            deleted = _replace_draft_tcs(
+                db,
+                project_id=job.project_id,
+                source_id=job.source_id,
+                snap_id=snap_id,
+                default_module=default_module,
+                preferred_engine=preferred_engine,
+            )
+            if deleted:
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] Replace: đã xóa {deleted} draft TC trong phạm vi",
+                )
+
+        existing_keys = _load_existing_tc_keys(
+            db,
+            project_id=job.project_id,
+            mode=mode,
+            source_id=job.source_id,
+            snap_id=snap_id,
+            snap=snap,
+            default_module=default_module,
+            preferred_engine=preferred_engine,
+        )
 
         def _cli_progress(msg: str) -> None:
             set_job_progress(job_id, msg, persist=True)
 
+        async def _persist_module_drafts(feat_title: str, part: list) -> int:
+            if not part:
+                return 0
+            async with persist_lock:
+                n = _persist_generated_drafts(
+                    db,
+                    project_id=job.project_id,
+                    job_id=job.id,
+                    source_id=job.source_id,
+                    snap_id=snap_id,
+                    drafts=part,
+                    existing_keys=existing_keys,
+                    default_module=default_module,
+                    preferred_engine=preferred_engine,
+                    doc_hash=doc_hash,
+                    doc_version=doc_version,
+                )
+                saved_total[0] += n
+                if n:
+                    set_job_progress(
+                        job_id,
+                        f"[progressive] «{feat_title}» đã lưu +{n} TC · tổng đã lưu {saved_total[0]}",
+                        persist=True,
+                    )
+                return n
+
         try:
             # Nhiều Feature → fan-out 1 LLM call / module.
-            # Chạy song song (giới hạn concurrency) + prompt thu gọn theo module → nhanh hơn, coverage giữ.
+            # Cursor CLI: oneshot độc lập / module (không --resume chung — resume từng thiếu TC).
+            # CLI khác: song song + warm interactive session pool.
             titles_for_fan = [t for t in feature_titles if t]
+            is_cursor = connection_is_cursor_cli(conn)
             if len(titles_for_fan) > 1 and not topic_scope_text:
+                used_fanout = True
                 total = len(titles_for_fan)
-                try:
-                    concurrency = max(1, min(4, int(os.environ.get("AITEST_TC_FANOUT_CONCURRENCY", "3"))))
-                except ValueError:
-                    concurrency = 3
+                if is_cursor:
+                    # Parallel oneshot độc lập (không --resume chung). Default 2 ≈ ~½ wall time.
+                    try:
+                        concurrency = max(
+                            1,
+                            min(
+                                2,
+                                int(
+                                    os.environ.get(
+                                        "AITEST_TC_FANOUT_CONCURRENCY_CURSOR",
+                                        "2",
+                                    )
+                                ),
+                            ),
+                        )
+                    except ValueError:
+                        concurrency = 2
+                    # Budget đủ SRS/analysis (~6–15 TC/module); progressive persist vẫn giữ.
+                    content_soft_max = 20_000
+                    source_soft_max = 14_000
+                    analysis_soft_max = 10_000
+                else:
+                    try:
+                        concurrency = max(
+                            1, min(4, int(os.environ.get("AITEST_TC_FANOUT_CONCURRENCY", "3")))
+                        )
+                    except ValueError:
+                        concurrency = 3
+                    content_soft_max = 20_000
+                    source_soft_max = 14_000
+                    analysis_soft_max = 10_000
+
                 sem = asyncio.Semaphore(concurrency)
                 warm_key = f"tc-job-{job_id}"
                 warm_lock = asyncio.Lock()
                 warm_ready = asyncio.Event()
+
                 set_job_progress(
                     job_id,
-                    f"Fan-out {total} module · concurrency={concurrency} — bắt đầu…",
+                    f"Fan-out {total} module · concurrency={concurrency}"
+                    + (" · cursor-oneshot" if is_cursor else " · warm-pool")
+                    + " — bắt đầu…",
                 )
 
                 async def _gen_one(idx: int, feat_title: str):
@@ -700,17 +934,17 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             f"Module {idx}/{total}: {feat_title} — đang gọi AI CLI…",
                         )
                         scoped_content = _filter_text_for_module(
-                            content, feat_title, soft_max=20_000
+                            content, feat_title, soft_max=content_soft_max
                         )
                         # Prefer module-filtered source; fall back to analysis-only if empty
                         scoped_src = _filter_text_for_module(
                             merged_source_context or "",
                             feat_title,
-                            soft_max=14_000,
+                            soft_max=source_soft_max,
                         )
                         if not scoped_src.strip() and analysis_ctx:
                             scoped_src = _filter_text_for_module(
-                                analysis_ctx, feat_title, soft_max=10_000
+                                analysis_ctx, feat_title, soft_max=analysis_soft_max
                             )
                         set_job_progress(
                             job_id,
@@ -733,34 +967,55 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             feature_titles=[feat_title],
                             preferred_engine=preferred_engine,
                         )
-                        # First module(s): cold oneshot. After one success: warm interactive
-                        # session (serialized) to avoid Cursor cold-start per module.
-                        prefer_oneshot = not warm_ready.is_set()
                         try:
-                            async def _call():
-                                return await generate_test_cases_for_connection(
+                            if is_cursor:
+                                # Oneshot độc lập / module — đủ context, không resume chung
+                                # (resume chung từng làm thiếu TC so với Phân tích).
+                                part, meta = await generate_test_cases_for_connection(
                                     conn,
                                     title,
                                     scoped_content,
                                     scoped,
                                     api_key=api_key,
                                     on_progress=_cli_progress,
-                                    prefer_oneshot=prefer_oneshot,
-                                    session_topic_key=warm_key,
+                                    prefer_oneshot=True,
+                                    session_topic_key=f"{warm_key}-{idx}",
+                                    create_chat=False,
                                 )
-
-                            if prefer_oneshot:
-                                part, meta = await _call()
                             else:
-                                async with warm_lock:
+                                # First module(s): cold oneshot. After one success: warm interactive
+                                prefer_oneshot = not warm_ready.is_set()
+
+                                async def _call():
+                                    return await generate_test_cases_for_connection(
+                                        conn,
+                                        title,
+                                        scoped_content,
+                                        scoped,
+                                        api_key=api_key,
+                                        on_progress=_cli_progress,
+                                        prefer_oneshot=prefer_oneshot,
+                                        session_topic_key=warm_key,
+                                    )
+
+                                if prefer_oneshot:
                                     part, meta = await _call()
+                                else:
+                                    async with warm_lock:
+                                        part, meta = await _call()
                             for d in part:
                                 if not d.module:
                                     d.module = feat_title
                             warm_ready.set()
+                            await _persist_module_drafts(feat_title, part)
                             set_job_progress(
                                 job_id,
-                                f"Module {idx}/{total}: {feat_title} — xong (+{len(part)} TC)",
+                                f"Module {idx}/{total}: {feat_title} — xong (+{len(part)} TC)"
+                                + (
+                                    f" · tổng đã lưu {saved_total[0]}"
+                                    if saved_total[0]
+                                    else ""
+                                ),
                             )
                             return idx, feat_title, part, meta, None
                         except Exception as exc:  # noqa: BLE001
@@ -770,6 +1025,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             )
                             return idx, feat_title, [], None, str(exc)
 
+                # Cursor & other CLI: semaphore giới hạn concurrency; persist có lock.
                 gathered = await asyncio.gather(
                     *[_gen_one(i, t) for i, t in enumerate(titles_for_fan, 1)]
                 )
@@ -803,6 +1059,8 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     ctx,
                     api_key=api_key,
                     on_progress=_cli_progress,
+                    prefer_oneshot=True if is_cursor else None,
+                    create_chat=bool(is_cursor),
                 )
         except Exception as exc:  # noqa: BLE001
             _fail_job(db, job_id, str(exc))
@@ -817,101 +1075,29 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             db.rollback()
             job = db.query(Job).filter(Job.id == job_id).first()
 
-        if mode == "replace" and (job.source_id or snap_id):
-            q = db.query(TestCase).filter(
-                TestCase.project_id == job.project_id,
-                TestCase.review_status == C.REVIEW_DRAFT,
+        # Single-call path: persist once. Fan-out already persisted per module.
+        if not used_fanout:
+            n = _persist_generated_drafts(
+                db,
+                project_id=job.project_id,
+                job_id=job.id,
+                source_id=job.source_id,
+                snap_id=snap_id,
+                drafts=drafts,
+                existing_keys=existing_keys,
+                default_module=default_module,
+                preferred_engine=preferred_engine,
+                doc_hash=doc_hash,
+                doc_version=doc_version,
             )
-            if snap_id:
-                q = q.filter(TestCase.requirement_snapshot_id == snap_id)
-            elif job.source_id:
-                q = q.filter(TestCase.source_id == job.source_id)
-            to_remove = q.all()
-            if default_module:
-                to_remove = [
-                    t for t in to_remove if tc_matches_module_scope(t.module, default_module)
-                ]
-            if preferred_engine:
-                to_remove = [
-                    t
-                    for t in to_remove
-                    if _tc_matches_preferred_engine(t.type, preferred_engine)
-                ]
-            for t in to_remove:
-                db.delete(t)
-            db.commit()
+            saved_total[0] += n
 
-        count = db.query(TestCase).filter(TestCase.project_id == job.project_id).count()
-
-        existing_keys: set[str] = set()
-        if mode == "append" and (job.source_id or snap_id):
-            prior_q = db.query(TestCase).filter(TestCase.project_id == job.project_id)
-            if snap and snap.workspace_id:
-                sibling_ids = [
-                    row[0]
-                    for row in db.query(RequirementSnapshot.id)
-                    .filter(
-                        RequirementSnapshot.workspace_id == snap.workspace_id,
-                        RequirementSnapshot.deleted_at.is_(None),
-                    )
-                    .all()
-                ]
-                if sibling_ids:
-                    prior_q = prior_q.filter(
-                        TestCase.requirement_snapshot_id.in_(sibling_ids)
-                    )
-                else:
-                    prior_q = prior_q.filter(TestCase.requirement_snapshot_id == snap_id)
-            elif snap_id:
-                prior_q = prior_q.filter(TestCase.requirement_snapshot_id == snap_id)
-            else:
-                prior_q = prior_q.filter(TestCase.source_id == job.source_id)
-            prior = prior_q.all()
-            if default_module:
-                prior = [t for t in prior if tc_matches_module_scope(t.module, default_module)]
-            if preferred_engine:
-                prior = [
-                    t
-                    for t in prior
-                    if _tc_matches_preferred_engine(t.type, preferred_engine)
-                ]
-            existing_keys = {dup_key(t.title, t.steps) for t in prior}
-
-        for d in drafts:
-            key = dup_key(d.title, d.steps)
-            if key in existing_keys:
-                continue
-            existing_keys.add(key)
-            count += 1
-            mod = normalize_function_label(d.module or default_module or "") or default_module
-            tc_type = _coerce_draft_type(d.type, preferred_engine)
-            db.add(
-                TestCase(
-                    project_id=job.project_id,
-                    source_id=job.source_id,
-                    requirement_snapshot_id=snap_id,
-                    job_id=job.id,
-                    test_case_code=f"TC-{count:03d}",
-                    title=d.title,
-                    module=mod,
-                    type=tc_type,
-                    priority=d.priority,
-                    severity=d.severity,
-                    precondition=d.precondition,
-                    steps=d.steps,
-                    expected_result=d.expected_result,
-                    test_data=d.test_data,
-                    automation_ready=d.automation_ready,
-                    is_ai_generated=True,
-                    review_status=C.REVIEW_DRAFT,
-                    execution_status="Pending",
-                    generated_from_hash=doc_hash,
-                    generated_from_version=doc_version,
-                )
-            )
         job.status = C.JOB_COMPLETED
         job.completed_at = datetime.now(timezone.utc)
-        job.progress_message = f"Hoàn tất — {len(drafts)} test case"
+        job.progress_message = (
+            f"Hoàn tất — {len(drafts)} test case"
+            + (f" · tổng đã lưu {saved_total[0]}" if saved_total[0] else "")
+        )
         # Partial fan-out: vẫn Completed nhưng ghi chú chức năng lỗi
         if fan_errors:
             job.error = (
@@ -922,7 +1108,11 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         else:
             job.error = None
         db.commit()
-        set_job_progress(job_id, f"Hoàn tất — {len(drafts)} test case", persist=True)
+        set_job_progress(
+            job_id,
+            f"Hoàn tất — {len(drafts)} test case · tổng đã lưu {saved_total[0]}",
+            persist=True,
+        )
         clear_job_progress(job_id)
     except Exception as exc:  # noqa: BLE001
         db.rollback()

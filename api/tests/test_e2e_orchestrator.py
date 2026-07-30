@@ -18,6 +18,8 @@ from app.services.e2e_orchestrator import (
     E2EOrchestrator,
     PLAYWRIGHT_INSTALL_HINT,
     _inject_node_path_for_prefixed_playwright,
+    _merge_env,
+    _sanitize_playwright_env,
     build_e2e_heal_prompt_context,
     check_playwright_ready,
     ensure_playwright_config,
@@ -285,6 +287,27 @@ def test_resolve_e2e_work_cwd_unicode_module(tmp_path):
     )
     assert mod in work
     assert spec_arg.replace("\\", "/") == "specs/get-all-todos.spec.ts"
+
+
+def test_sanitize_playwright_env_strips_cursor_sandbox_cache():
+    env = {
+        "PLAYWRIGHT_BROWSERS_PATH": r"C:\Users\x\AppData\Local\Temp\cursor-sandbox-cache\abc\playwright",
+        "PATH": "/usr/bin",
+    }
+    out = _sanitize_playwright_env(dict(env))
+    # Bad sandbox path removed; may be replaced by real Local\ms-playwright if present
+    assert "cursor-sandbox-cache" not in (out.get("PLAYWRIGHT_BROWSERS_PATH") or "")
+
+
+def test_merge_env_does_not_keep_empty_sandbox_override(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        str(tmp_path / "cursor-sandbox-cache" / "playwright"),
+    )
+    # empty dir → not usable
+    (tmp_path / "cursor-sandbox-cache" / "playwright").mkdir(parents=True)
+    out = _merge_env()
+    assert "cursor-sandbox-cache" not in (out.get("PLAYWRIGHT_BROWSERS_PATH") or "")
 
 
 def test_check_playwright_ready_missing(tmp_path):

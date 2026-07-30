@@ -10,6 +10,7 @@ Priority for Verify: auth artifact → storageState → .env fallback.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -30,6 +31,20 @@ logger = logging.getLogger("aitest.e2e.auth_seed")
 
 _AUTH_MARKER_ROLE = re.compile(r"(?im)^\s*authRole\s*[:=]\s*(\S+)\s*$")
 _AUTH_MARKER_REF = re.compile(r"(?im)^\s*authRef\s*[:=]\s*(\S+)\s*$")
+
+# Parallel E2E generate can race on the same role artifact — serialize per root+role.
+_auth_seed_locks: dict[str, asyncio.Lock] = {}
+_auth_seed_locks_guard = asyncio.Lock()
+
+
+async def _auth_seed_lock(project_root: str, role: str) -> asyncio.Lock:
+    key = f"{Path(project_root).resolve()}::{_role_slug(role)}"
+    async with _auth_seed_locks_guard:
+        lock = _auth_seed_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _auth_seed_locks[key] = lock
+        return lock
 
 
 @dataclass
@@ -243,6 +258,31 @@ def _run_node_seed(
 
 
 async def ensure_auth_seed(
+    *,
+    project_root: str,
+    conn: AiBackendConnection | None,
+    role: str = "default",
+    target_url: str = "",
+    source_code: str = "",
+    dom_snapshot: str = "",
+    source_file_name: str = "",
+    force: bool = False,
+) -> AuthSeedResult:
+    lock = await _auth_seed_lock(project_root, role)
+    async with lock:
+        return await _ensure_auth_seed_unlocked(
+            project_root=project_root,
+            conn=conn,
+            role=role,
+            target_url=target_url,
+            source_code=source_code,
+            dom_snapshot=dom_snapshot,
+            source_file_name=source_file_name,
+            force=force,
+        )
+
+
+async def _ensure_auth_seed_unlocked(
     *,
     project_root: str,
     conn: AiBackendConnection | None,

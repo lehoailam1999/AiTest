@@ -25,8 +25,10 @@ class DirectAPIAdapter(BaseLLMAdapter):
         on_progress: Any | None = None,
         prefer_oneshot: bool | None = None,
         session_topic_key: str | None = None,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
     ) -> list[TestCaseDraft]:
-        del context, prefer_oneshot, session_topic_key
+        del context, prefer_oneshot, session_topic_key, resume_chat_id, create_chat
         if on_progress:
             on_progress("Đang gọi API Direct…")
         ctx = ctx or GenerateContext()
@@ -41,7 +43,15 @@ class DirectAPIAdapter(BaseLLMAdapter):
         except Exception:
             return False
 
-    async def chat(self, system: str, user: str) -> str:
+    async def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
+    ) -> str:
+        del resume_chat_id, create_chat
         return await self.provider.chat(self.api_key, system, user)
 
     async def generate_unit(self, req: UnitRequest) -> UnitResult:

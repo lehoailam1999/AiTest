@@ -502,11 +502,44 @@ def check_playwright_ready(project_root: str) -> PlaywrightCheck:
     )
 
 
+def _sanitize_playwright_env(env: dict[str, str]) -> dict[str, str]:
+    """
+    Cursor/sandbox shells often inject PLAYWRIGHT_BROWSERS_PATH →
+    ``…/cursor-sandbox-cache/…/playwright`` without Chromium. Playwright then
+    fails with "Executable doesn't exist" even though browsers exist under
+    ``%LOCALAPPDATA%\\ms-playwright``. Strip bad overrides; prefer real cache.
+    """
+    key = "PLAYWRIGHT_BROWSERS_PATH"
+    raw = str(env.get(key) or "").strip()
+    norm = raw.replace("\\", "/").lower()
+    bad = ("cursor-sandbox-cache", "/sandbox-cache/", "\\sandbox-cache\\")
+    local = Path(os.environ.get("LOCALAPPDATA") or "") / "ms-playwright"
+
+    def _has_chromium(root: Path) -> bool:
+        try:
+            if not root.is_dir():
+                return False
+            return any(root.glob("chromium-*"))
+        except OSError:
+            return False
+
+    if raw and any(b in norm for b in bad):
+        env.pop(key, None)
+        raw = ""
+    elif raw and not _has_chromium(Path(raw)):
+        env.pop(key, None)
+        raw = ""
+
+    if not raw and _has_chromium(local):
+        env[key] = str(local.resolve())
+    return env
+
+
 def _merge_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
-    return env
+    return _sanitize_playwright_env(env)
 
 
 def _inject_node_path_for_prefixed_playwright(
@@ -878,6 +911,20 @@ def _map_module_spec_results(
     return out
 
 
+def _annotate_playwright_browser_errors(log: str) -> str:
+    low = (log or "").lower()
+    if "executable doesn't exist" in low or "browserType.launch" in low:
+        hint = (
+            "\n\n[AITest] Chromium không tìm thấy — thường do PLAYWRIGHT_BROWSERS_PATH "
+            "trỏ vào Cursor sandbox cache. Đã cố tự sửa env khi chạy Verify; "
+            "nếu vẫn lỗi: restart API ngoài terminal Cursor, hoặc bấm "
+            "«Cài Playwright trên AITest», rồi Verify lại."
+        )
+        if hint.strip() not in log:
+            return (log or "") + hint
+    return log or ""
+
+
 async def _run_one_e2e_root(
     *,
     runner: RunCommandFn,
@@ -940,6 +987,7 @@ async def _run_one_e2e_root(
         ]
         return failed, cmd, detail, work_cwd
 
+    log = _annotate_playwright_browser_errors(log)
     parsed = parse_playwright_json_report(log)
     return (
         _map_module_spec_results(

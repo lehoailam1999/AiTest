@@ -86,7 +86,14 @@ def chunk_dto(c: DocumentChunk) -> dict:
     }
 
 
-def knowledge_dto(k: KnowledgeWorkspace | None) -> dict:
+def knowledge_dto(
+    k: KnowledgeWorkspace | None,
+    *,
+    enrich: dict | None = None,
+) -> dict:
+    enrich = enrich or {}
+    enrich_pending = bool(enrich.get("enrichPending"))
+    enrich_error = enrich.get("enrichError")
     if k is None:
         return {
             "status": "empty",
@@ -99,6 +106,8 @@ def knowledge_dto(k: KnowledgeWorkspace | None) -> dict:
             "sourceChunkCount": 0,
             "error": None,
             "builtAt": None,
+            "enrichPending": False,
+            "enrichError": None,
         }
     payload = None
     if k.payload_json:
@@ -123,17 +132,20 @@ def knowledge_dto(k: KnowledgeWorkspace | None) -> dict:
         "id": k.id,
         "workspaceId": k.workspace_id,
         "projectId": k.project_id,
-        "status": k.status,
+        "status": "building" if enrich_pending else k.status,
         "version": k.version,
         "builder": k.builder,
-        "summary": k.summary,
-        "payload": payload,
-        "coverage": coverage,
+        "summary": None if enrich_pending else k.summary,
+        # Không trả payload heuristic ra UI khi đang enrich — tránh hiện bản tạm trước
+        "payload": None if enrich_pending else payload,
+        "coverage": None if enrich_pending else coverage,
         "sourceFileCount": k.source_file_count,
         "sourceChunkCount": k.source_chunk_count,
         "error": k.error,
         "builtAt": k.built_at,
         "updatedAt": k.updated_at,
+        "enrichPending": enrich_pending,
+        "enrichError": enrich_error,
     }
 
 

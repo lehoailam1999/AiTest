@@ -300,22 +300,82 @@ export default function RequirementStudioPage({
       return;
     }
     setBuilding(true);
+    let keepBuildingForEnrich = false;
     try {
       const kw = await requirementStudio.buildKnowledge(workspace.id, true);
       setKnowledge(kw);
       emitStatus(files, kw);
+      setFocus("knowledge");
+      if (kw.enrichPending || kw.status === "building") {
+        keepBuildingForEnrich = true;
+        message.info("Đang phân tích bằng AI…");
+        return;
+      }
       message.success(
         kw.builder === "llm" || kw.builder === "llm-cli"
           ? `Phân tích v${kw.version} (${kw.builder === "llm-cli" ? "AI CLI" : "LLM"})`
-          : `Phân tích v${kw.version} (heuristic)`
+          : `Phân tích v${kw.version}`
       );
-      setFocus("knowledge");
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
     } finally {
-      setBuilding(false);
+      if (!keepBuildingForEnrich) setBuilding(false);
     }
   };
+
+  // Progressive enrich: poll until Cursor/LLM merge finishes (không hiện heuristic giữa chừng)
+  useEffect(() => {
+    if (!workspace?.id || !knowledge?.enrichPending) return;
+    let cancelled = false;
+    const wid = workspace.id;
+    const started = Date.now();
+    const maxMs = 10 * 60 * 1000;
+    setBuilding(true);
+    const tick = async () => {
+      try {
+        const kw = await requirementStudio.getKnowledge(wid);
+        if (cancelled) return;
+        setKnowledge(kw);
+        emitStatus(files, kw);
+        if (!kw.enrichPending) {
+          setBuilding(false);
+          if (kw.builder === "llm" || kw.builder === "llm-cli") {
+            message.success(
+              `Phân tích v${kw.version} (${kw.builder === "llm-cli" ? "AI CLI" : "LLM"})`
+            );
+          } else if (kw.enrichError) {
+            message.warning(
+              `Phân tích AI không hoàn tất — dùng bản dự phòng. (${kw.enrichError})`
+            );
+          } else {
+            message.success(`Phân tích v${kw.version}`);
+          }
+          return;
+        }
+        if (Date.now() - started > maxMs) {
+          setBuilding(false);
+          message.warning("Phân tích AI quá lâu — bạn có thể Phân tích lại sau.");
+          return;
+        }
+        window.setTimeout(() => {
+          void tick();
+        }, 2500);
+      } catch {
+        if (!cancelled) {
+          window.setTimeout(() => {
+            void tick();
+          }, 4000);
+        }
+      }
+    };
+    const t = window.setTimeout(() => {
+      void tick();
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [workspace?.id, knowledge?.enrichPending, knowledge?.version, emitStatus, files, message]);
 
   if (!project) {
     return <Alert type="info" showIcon title="Chọn project để mở Requirement Studio" />;
@@ -396,9 +456,16 @@ export default function RequirementStudioPage({
               message.success("Đã tạo TC E2E từ snapshot. Chuyển sang duyệt.");
               onNavigateReview?.({ engine: "e2e" });
             } else {
-              message.success("Đã tạo test case từ snapshot. Chuyển sang duyệt.");
-              onNavigateReview?.();
+              message.success("Đã tạo test case Unit từ snapshot. Chuyển sang duyệt.");
+              onNavigateReview?.({ engine: "unit" });
             }
+          }}
+          onPartialGenerated={(info) => {
+            setHasSnapshot(true);
+            message.info(
+              `Đã lưu sớm ${info.savedCount} TC ${info.preferredEngine === "e2e" ? "E2E" : "Unit"} — bảng bên dưới đang cập nhật…`,
+              3
+            );
           }}
         />
       ) : focus === "knowledge" ? (

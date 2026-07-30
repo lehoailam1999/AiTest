@@ -88,7 +88,8 @@ export default function KnowledgePanel({
   onOpenFreeze,
 }: KnowledgePanelProps) {
   const status = knowledge?.status ?? "empty";
-  const payload = knowledge?.payload;
+  const enrichPending = Boolean(knowledge?.enrichPending);
+  const payload = enrichPending ? null : knowledge?.payload;
   const [active, setActive] = useState<SectionKey>("summary");
 
   const nav = useMemo(() => {
@@ -104,6 +105,29 @@ export default function KnowledgePanel({
     const prefer = nav.find((n) => n.key !== "summary" && n.count > 0);
     if (prefer && sectionCount(payload, "summary") === 0) setActive(prefer.key);
   }, [knowledge?.version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (enrichPending || status === "building" || building) {
+    return (
+      <div className="knowledge-panel">
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={
+            <span>
+              Đang phân tích bằng AI…
+              <br />
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Kết quả sẽ hiện khi hoàn tất — không dùng bản tạm.
+              </Typography.Text>
+            </span>
+          }
+        >
+          <Button type="primary" icon={<ThunderboltOutlined />} loading disabled>
+            Đang phân tích tài liệu…
+          </Button>
+        </Empty>
+      </div>
+    );
+  }
 
   if (status === "empty" || !payload) {
     return (
@@ -146,6 +170,15 @@ export default function KnowledgePanel({
 
   return (
     <div className={`knowledge-panel knowledge-panel--split${loading ? " is-loading" : ""}`}>
+      {knowledge?.enrichError ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          showIcon
+          title="Phân tích AI không hoàn tất"
+          description={knowledge.enrichError}
+        />
+      ) : null}
       <div className="knowledge-toolbar">
         <Space wrap>
           <Tag color={status === "ready" ? "success" : status === "stale" ? "warning" : "default"}>

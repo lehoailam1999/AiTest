@@ -16,9 +16,22 @@ from typing import Any
 from app.llm.base import strip_code_fences
 
 MAX_CHUNK_CHARS_FOR_BUILD = 24_000
+# Pass-1 LLM enrich — smaller budget for faster Cursor oneshot
+MAX_CHUNK_CHARS_FOR_BUILD_PASS1 = 12_000
 MAX_ITEMS = 40
 MAX_GAPS = 20
 MAX_EVIDENCE_PER_ITEM = 3
+
+# Keys LLM must fill well for Generate TC; rest filled from heuristic when empty
+PASS1_JSON_KEYS: tuple[str, ...] = (
+    "summary",
+    "features",
+    "actors",
+    "useCases",
+    "businessRules",
+    "validationRules",
+    "gaps",
+)
 
 _API_RE = re.compile(
     r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_\-./{}:]+)",
@@ -699,11 +712,169 @@ def parse_knowledge_llm_json(raw: str) -> dict[str, Any] | None:
     return normalize_knowledge_payload(base)
 
 
-def knowledge_system_prompt() -> str:
-    criteria_lines = "\n".join(
-        f"- {c['type']} ({c['json_key']}): {c['instruction']}"
-        for c in ANALYSIS_CRITERIA_GUIDE
+def _chunk_rank_score(heading: str | None, text: str) -> int:
+    h = (heading or "").strip()
+    body = (text or "").strip()
+    blob = f"{h}\n{body}"
+    score = 0
+    if h:
+        score += 2
+        if _FEATURE_HEAD_SIMPLE.search(h) or _FEATURE_HEAD.match(h):
+            score += 6
+        if _USECASE_HEAD.search(h):
+            score += 6
+    if _ACTOR_LINE_RE.search(blob) or _USER_STORY_ACTOR_RE.search(blob):
+        score += 4
+    if _RULE_HINT.search(blob):
+        score += 3
+    if _VALIDATION_HINT.search(blob):
+        score += 3
+    if _API_RE.search(blob):
+        score += 2
+    if _ACCEPTANCE_HINT.search(blob):
+        score += 3
+    if _EXCEPTION_HINT.search(blob):
+        score += 2
+    if _AUTH_HINT.search(blob):
+        score += 2
+    if _FLOW_STEP_HINT.search(blob):
+        score += 2
+    # Prefer denser chunks slightly
+    score += min(3, len(body) // 800)
+    return score
+
+
+def rank_chunks_for_build(
+    chunks: list[tuple[str | None, str]],
+) -> list[tuple[str | None, str]]:
+    """Prioritize TC-critical chunks; stable order among equal scores."""
+    scored: list[tuple[int, int, str | None, str]] = []
+    for i, (heading, text) in enumerate(chunks):
+        scored.append((_chunk_rank_score(heading, text), i, heading, text or ""))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [(h, t) for _, _, h, t in scored]
+
+
+def chunks_to_prompt_text(
+    chunks: list[tuple[str | None, str]],
+    *,
+    max_chars: int | None = None,
+    rank: bool = False,
+) -> str:
+    budget = max_chars if max_chars is not None else MAX_CHUNK_CHARS_FOR_BUILD
+    ordered = rank_chunks_for_build(chunks) if rank else list(chunks)
+    parts: list[str] = []
+    total = 0
+    for i, (heading, text) in enumerate(ordered):
+        block = (
+            f"[Chunk {i + 1}"
+            + (f" | {heading}" if heading else "")
+            + f"]\n{text.strip()}"
+        )
+        if total + len(block) > budget:
+            remain = budget - total
+            if remain > 200:
+                parts.append(block[:remain] + "\n…")
+            break
+        parts.append(block)
+        total += len(block)
+    return "\n\n".join(parts)
+
+
+def _list_item_identity(item: Any) -> str:
+    if not isinstance(item, dict):
+        return str(item).strip().lower() if item is not None else ""
+    method = str(item.get("method") or "").strip().upper()
+    path = str(item.get("path") or "").strip().lower()
+    if method or path:
+        return f"{method}:{path}"
+    field = str(item.get("field") or "").strip().lower()
+    rule = str(item.get("rule") or "").strip().lower()
+    if field or rule:
+        return f"{field}:{rule}"
+    for k in ("name", "id", "title", "text", "criterion"):
+        v = item.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip().lower()
+    return _text_item(item).lower()
+
+
+def _union_knowledge_lists(
+    base_list: list[Any],
+    overlay_list: list[Any],
+    *,
+    limit: int = MAX_ITEMS,
+) -> list[Any]:
+    """LLM items first, then heuristic extras not already covered (by identity)."""
+    out: list[Any] = []
+    seen: set[str] = set()
+    for it in list(overlay_list) + list(base_list):
+        if not isinstance(it, dict):
+            continue
+        ident = _list_item_identity(it)
+        if not ident or ident in seen:
+            continue
+        seen.add(ident)
+        out.append(it)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def merge_knowledge_payloads(
+    base: dict[str, Any] | None,
+    overlay: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Merge LLM overlay onto heuristic base.
+    Non-empty overlay summary wins. List keys are unioned (LLM first) so a
+    thinner Cursor pass cannot wipe heuristic features / rules / APIs.
+    Empty overlay lists keep base.
+    """
+    out = normalize_knowledge_payload(base if isinstance(base, dict) else empty_payload())
+    if not isinstance(overlay, dict):
+        return out
+    over = normalize_knowledge_payload(overlay)
+    if (over.get("summary") or "").strip():
+        out["summary"] = over["summary"]
+    for key in PRIMARY_LIST_KEYS + LEGACY_LIST_KEYS:
+        ov = over.get(key) or []
+        if not isinstance(ov, list) or len(ov) == 0:
+            continue
+        base_list = out.get(key) or []
+        if not isinstance(base_list, list) or len(base_list) == 0:
+            out[key] = ov
+        else:
+            out[key] = _union_knowledge_lists(base_list, ov)
+    return normalize_knowledge_payload(out)
+
+
+def knowledge_system_prompt(*, pass1: bool = True) -> str:
+    guide = (
+        tuple(c for c in ANALYSIS_CRITERIA_GUIDE if c["json_key"] in PASS1_JSON_KEYS)
+        if pass1
+        else ANALYSIS_CRITERIA_GUIDE
     )
+    criteria_lines = "\n".join(
+        f"- {c['type']} ({c['json_key']}): {c['instruction']}" for c in guide
+    )
+    if pass1:
+        return (
+            "You are a requirements analyst preparing Knowledge for QA test-case generation. "
+            "From uploaded SRS excerpts, return ONLY one JSON object (no markdown) with keys:\n"
+            "- summary (string)\n"
+            "- features ([{name,description}])\n"
+            "- actors ([{name,description,permissions}])\n"
+            "- useCases ([{name,steps}])\n"
+            "- businessRules ([{id,text}])\n"
+            "- validationRules ([{field,rule}])\n"
+            "- gaps ([{text}]): ONLY real missing info that blocks accurate TCs (max ~10)\n"
+            "Focus criteria:\n"
+            f"{criteria_lines}\n"
+            "CRITICAL: split mixed SRS paragraphs into separate items per key. "
+            "Do NOT invent facts. Be concise. No evidence quotes required. "
+            "Use the document language (often Vietnamese)."
+        )
     return (
         "You are a requirements analyst preparing Knowledge for QA test-case generation. "
         "From uploaded SRS excerpts, build a structured Knowledge Workspace for database persistence. "
@@ -724,8 +895,6 @@ def knowledge_system_prompt() -> str:
         f"{criteria_lines}\n"
         "CRITICAL: If one SRS paragraph mixes multiple criteria, split it into separate items "
         "for each relevant key (do not keep mixed/combined items).\n"
-        "For list items (except gaps), attach 1..3 evidence snippets from SRS when available: "
-        "evidence: [\"<quote>\", ...]. Keep each quote short and verbatim.\n"
         "Use the document language (often Vietnamese). Be concise; do not invent facts. "
         "Prefer Features + Use Cases + Validation + Exceptions + Acceptance over trivia."
     )
@@ -735,12 +904,37 @@ def build_knowledge_user_prompt(
     chunks: list[tuple[str | None, str]],
     *,
     file_names: list[str] | None = None,
+    pass1: bool = True,
 ) -> str:
     files = ", ".join((file_names or [])[:20]) or "(unknown)"
+    guide = (
+        tuple(c for c in ANALYSIS_CRITERIA_GUIDE if c["json_key"] in PASS1_JSON_KEYS)
+        if pass1
+        else ANALYSIS_CRITERIA_GUIDE
+    )
     criteria = "\n".join(
         f"{idx + 1}. {c['label']} [{c['type']}] -> JSON key '{c['json_key']}'"
-        for idx, c in enumerate(ANALYSIS_CRITERIA_GUIDE)
+        for idx, c in enumerate(guide)
     )
+    excerpt = chunks_to_prompt_text(
+        chunks,
+        max_chars=MAX_CHUNK_CHARS_FOR_BUILD_PASS1 if pass1 else MAX_CHUNK_CHARS_FOR_BUILD,
+        rank=True,
+    )
+    if pass1:
+        return (
+            "SRS nguồn — phân tích nhanh (pass 1) theo checklist TC-critical.\n"
+            f"Files: {files}\n\n"
+            "Checklist:\n"
+            f"{criteria}\n\n"
+            "Quy tắc:\n"
+            "- Trả về DUY NHẤT 1 JSON object hợp lệ (các key ở trên; list thiếu → []).\n"
+            "- Không markdown, không giải thích.\n"
+            "- Tách item đúng key; không bịa.\n\n"
+            "Document excerpts:\n\n"
+            f"{excerpt}\n\n"
+            "Return the Knowledge JSON now."
+        )
     return (
         "SRS nguồn tải lên cần phân tích đầy đủ theo checklist bắt buộc dưới đây.\n"
         f"Files: {files}\n\n"
@@ -751,28 +945,8 @@ def build_knowledge_user_prompt(
         "- Không markdown, không giải thích thêm ngoài JSON.\n"
         "- Mỗi tiêu chí phải tách item riêng; không gộp Validation/Rule/Exception/Acceptance vào cùng 1 item.\n"
         "- Nếu 1 đoạn SRS chứa nhiều ý, phải tách thành nhiều item và map đúng key tương ứng.\n"
-        "- Nếu không đủ dữ liệu cho tiêu chí nào, ghi lý do vào gaps.\n"
-        "- Ưu tiên trích dẫn đúng câu từ tài liệu (evidence) để tăng độ chính xác.\n\n"
+        "- Nếu không đủ dữ liệu cho tiêu chí nào, ghi lý do vào gaps.\n\n"
         "Document excerpts:\n\n"
-        f"{chunks_to_prompt_text(chunks)}\n\n"
+        f"{excerpt}\n\n"
         "Return the Knowledge JSON now."
     )
-
-
-def chunks_to_prompt_text(chunks: list[tuple[str | None, str]]) -> str:
-    parts: list[str] = []
-    total = 0
-    for i, (heading, text) in enumerate(chunks):
-        block = (
-            f"[Chunk {i + 1}"
-            + (f" | {heading}" if heading else "")
-            + f"]\n{text.strip()}"
-        )
-        if total + len(block) > MAX_CHUNK_CHARS_FOR_BUILD:
-            remain = MAX_CHUNK_CHARS_FOR_BUILD - total
-            if remain > 200:
-                parts.append(block[:remain] + "\n…")
-            break
-        parts.append(block)
-        total += len(block)
-    return "\n\n".join(parts)

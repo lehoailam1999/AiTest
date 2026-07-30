@@ -87,6 +87,10 @@ import {
   createBatchRunControl,
   type BatchRunStatus,
 } from "../lib/batchRunControl";
+import { runPool } from "../lib/runPool";
+
+/** Parallel Cursor/API generate — mỗi TC 1 request + workspace riêng; cap 3. */
+const UNIT_GEN_CONCURRENCY = 3;
 import {
   buildGenerateContext,
   buildIdeLocalGenerateBody,
@@ -768,7 +772,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     void resolveScope();
   }
 
-  async function runForTestCase(tc: TestCase) {
+  async function runForTestCase(tc: TestCase, opts?: { batch?: boolean }) {
     if (!project || !localPath || !isTauri()) {
       throw new Error(
         isApiKind
@@ -776,9 +780,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           : "Cần Desktop + thư mục local để sinh unit theo module."
       );
     }
-    setManualSourcePick(false);
-    manualSourcePickRef.current = false;
-    setTestCaseId(tc.id);
+    const batch = Boolean(opts?.batch);
+    if (!batch) {
+      setManualSourcePick(false);
+      manualSourcePickRef.current = false;
+      setTestCaseId(tc.id);
+    }
 
     const wsId = await ensureWorkspaceOpen(project.id, localPath);
     const paths =
@@ -807,6 +814,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       );
     }
     const relName = primaryRel || (isApiKind ? "openapi.yaml" : "snippet.txt");
+    // Context packet + API body luôn khóa theo tc.id — không dùng shared UI selection.
     const ctx = await buildGenerateContext({
       projectRoot: localPath,
       projectId: project.id,
@@ -819,8 +827,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       broadLocalContext,
       codeAliases: aliases,
     });
-    setContextPacket(ctx.view);
-    setUnitPacketV1(ctx.packet);
+    if (!batch) {
+      setContextPacket(ctx.view);
+      setUnitPacketV1(ctx.packet);
+    }
     const classHint =
       guessClassFromCode(ctx.primaryContent, relName) ||
       ctx.packet.sourceUnderTest?.symbol ||
@@ -870,7 +880,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           testCaseTitle: tc.title,
           packagePrefix,
         });
-    // FE owns folder layout (Requirement/TC title); keep file name from FE hint.
+    // FE owns folder layout (Requirement/TC title); uniquify bằng tc.id → không đụng file TC khác.
     const targetPath = uniquifyTestTargetRel(feHint.relativePath, tc.id);
 
     let manifest = await createUnitWorkspaceRun({
@@ -898,28 +908,30 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       runnerUsed: res.runnerUsed,
       ideConnected: false,
     });
-    message.success(
-      `Unit Job đã tạo · ${manifest.runId.slice(0, 8)}… — xem Job Board`
-    );
-    const previews = await loadWorkspacePreviews(localPath, manifest);
+    if (!batch) {
+      message.success(
+        `Unit Job đã tạo · ${manifest.runId.slice(0, 8)}… — xem Job Board`
+      );
+      const previews = await loadWorkspacePreviews(localPath, manifest);
 
-    setUnitPacketV1(null);
-    setContextPacket(view);
-    setSourceCode(primaryContent);
-    const primaryMatch = matchSourceFile(view.primaryPath) ?? view.primaryPath;
-    setSourceFile(primaryMatch);
-    sourceFileRef.current = primaryMatch;
-    const relatedMatches = view.related
-      .filter((r) => r.role === "dependency")
-      .map((r) => matchSourceFile(r.pathRel) ?? r.pathRel)
-      .filter((p): p is string => Boolean(p) && p !== primaryMatch);
-    setRelatedSourceFiles(relatedMatches);
-    relatedSourceFilesRef.current = relatedMatches;
-    setResult(res);
-    setWritePath(targetPath);
-    setWsManifest(manifest);
-    setWsPreviews(previews);
-    setWsSelectedRel(added.entry.targetRel);
+      setUnitPacketV1(null);
+      setContextPacket(view);
+      setSourceCode(primaryContent);
+      const primaryMatch = matchSourceFile(view.primaryPath) ?? view.primaryPath;
+      setSourceFile(primaryMatch);
+      sourceFileRef.current = primaryMatch;
+      const relatedMatches = view.related
+        .filter((r) => r.role === "dependency")
+        .map((r) => matchSourceFile(r.pathRel) ?? r.pathRel)
+        .filter((p): p is string => Boolean(p) && p !== primaryMatch);
+      setRelatedSourceFiles(relatedMatches);
+      relatedSourceFilesRef.current = relatedMatches;
+      setResult(res);
+      setWritePath(targetPath);
+      setWsManifest(manifest);
+      setWsPreviews(previews);
+      setWsSelectedRel(added.entry.targetRel);
+    }
     return { runId: manifest.runId, packagePrefix: manifest.packagePrefix };
   }
 
@@ -1034,57 +1046,71 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         return next;
       };
 
-      for (let i = 0; i < workList.length; i++) {
-        await control.waitIfPaused();
-        const tc = workList[i];
-        setBatchProgress({ current: i + 1, total: workList.length, label: tc.title });
-        rowMap.set(tc.id, {
-          key: tc.id,
-          testCaseId: tc.testCaseId,
-          title: tc.title,
-          status: "fail",
-          error: BATCH_NOTE_RUNNING,
-        });
-        flushRows();
-        try {
-          const out = await runForTestCase(tc);
-          rowMap.set(tc.id, {
-            key: tc.id,
-            testCaseId: tc.testCaseId,
-            title: tc.title,
-            status: "ok",
-            workspaceRunId: out?.runId,
-            packagePrefix: out?.packagePrefix,
-            verifyStatus: "pending",
-            applyStatus: "pending",
+      let done = 0;
+      await runPool(
+        workList,
+        UNIT_GEN_CONCURRENCY,
+        async (tc, i) => {
+          setBatchProgress({
+            current: done + 1,
+            total: workList.length,
+            label: tc.title,
           });
-          if (campaignId) {
-            void audit.addCampaignTasks(campaignId, [
-              {
-                testCaseId: tc.id,
-                localRunId: out?.runId,
-                status: "ok",
-                sortOrder: i,
-              },
-            ]);
-          }
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : "Lỗi";
           rowMap.set(tc.id, {
             key: tc.id,
             testCaseId: tc.testCaseId,
             title: tc.title,
             status: "fail",
-            error: errMsg,
+            error: BATCH_NOTE_RUNNING,
           });
-          if (campaignId) {
-            void audit.addCampaignTasks(campaignId, [
-              { testCaseId: tc.id, status: "fail", error: errMsg, sortOrder: i },
-            ]);
+          flushRows();
+          try {
+            const out = await runForTestCase(tc, { batch: true });
+            rowMap.set(tc.id, {
+              key: tc.id,
+              testCaseId: tc.testCaseId,
+              title: tc.title,
+              status: "ok",
+              workspaceRunId: out?.runId,
+              packagePrefix: out?.packagePrefix,
+              verifyStatus: "pending",
+              applyStatus: "pending",
+            });
+            if (campaignId) {
+              void audit.addCampaignTasks(campaignId, [
+                {
+                  testCaseId: tc.id,
+                  localRunId: out?.runId,
+                  status: "ok",
+                  sortOrder: i,
+                },
+              ]);
+            }
+          } catch (e) {
+            const errMsg = e instanceof Error ? e.message : "Lỗi";
+            rowMap.set(tc.id, {
+              key: tc.id,
+              testCaseId: tc.testCaseId,
+              title: tc.title,
+              status: "fail",
+              error: errMsg,
+            });
+            if (campaignId) {
+              void audit.addCampaignTasks(campaignId, [
+                { testCaseId: tc.id, status: "fail", error: errMsg, sortOrder: i },
+              ]);
+            }
           }
-        }
-        void refreshBatchStaging(flushRows());
-      }
+          done += 1;
+          setBatchProgress({
+            current: done,
+            total: workList.length,
+            label: tc.title,
+          });
+          void refreshBatchStaging(flushRows());
+        },
+        { waitGate: () => control.waitIfPaused() }
+      );
     } finally {
       control.reset();
       setBatchProgress(null);
@@ -1168,57 +1194,71 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         return next;
       };
 
-      for (let i = 0; i < workList.length; i++) {
-        await control.waitIfPaused();
-        const tc = workList[i];
-        setBatchProgress({ current: i + 1, total: workList.length, label: tc.title });
-        rowMap.set(tc.id, {
-          key: tc.id,
-          testCaseId: tc.testCaseId,
-          title: tc.title,
-          status: "fail",
-          error: BATCH_NOTE_RUNNING,
-        });
-        flushRows();
-        try {
-          const out = await runForTestCase(tc);
-          rowMap.set(tc.id, {
-            key: tc.id,
-            testCaseId: tc.testCaseId,
-            title: tc.title,
-            status: "ok",
-            workspaceRunId: out?.runId,
-            packagePrefix: out?.packagePrefix,
-            verifyStatus: "pending",
-            applyStatus: "pending",
+      let done = 0;
+      await runPool(
+        workList,
+        UNIT_GEN_CONCURRENCY,
+        async (tc, i) => {
+          setBatchProgress({
+            current: done + 1,
+            total: workList.length,
+            label: tc.title,
           });
-          if (campaignId) {
-            void audit.addCampaignTasks(campaignId, [
-              {
-                testCaseId: tc.id,
-                localRunId: out?.runId,
-                status: "ok",
-                sortOrder: i,
-              },
-            ]);
-          }
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : "Lỗi";
           rowMap.set(tc.id, {
             key: tc.id,
             testCaseId: tc.testCaseId,
             title: tc.title,
             status: "fail",
-            error: errMsg,
+            error: BATCH_NOTE_RUNNING,
           });
-          if (campaignId) {
-            void audit.addCampaignTasks(campaignId, [
-              { testCaseId: tc.id, status: "fail", error: errMsg, sortOrder: i },
-            ]);
+          flushRows();
+          try {
+            const out = await runForTestCase(tc, { batch: true });
+            rowMap.set(tc.id, {
+              key: tc.id,
+              testCaseId: tc.testCaseId,
+              title: tc.title,
+              status: "ok",
+              workspaceRunId: out?.runId,
+              packagePrefix: out?.packagePrefix,
+              verifyStatus: "pending",
+              applyStatus: "pending",
+            });
+            if (campaignId) {
+              void audit.addCampaignTasks(campaignId, [
+                {
+                  testCaseId: tc.id,
+                  localRunId: out?.runId,
+                  status: "ok",
+                  sortOrder: i,
+                },
+              ]);
+            }
+          } catch (e) {
+            const errMsg = e instanceof Error ? e.message : "Lỗi";
+            rowMap.set(tc.id, {
+              key: tc.id,
+              testCaseId: tc.testCaseId,
+              title: tc.title,
+              status: "fail",
+              error: errMsg,
+            });
+            if (campaignId) {
+              void audit.addCampaignTasks(campaignId, [
+                { testCaseId: tc.id, status: "fail", error: errMsg, sortOrder: i },
+              ]);
+            }
           }
-        }
-        void refreshBatchStaging(flushRows());
-      }
+          done += 1;
+          setBatchProgress({
+            current: done,
+            total: workList.length,
+            label: tc.title,
+          });
+          void refreshBatchStaging(flushRows());
+        },
+        { waitGate: () => control.waitIfPaused() }
+      );
       const finalRows = [...rowMap.values()];
       setBatchResults(finalRows);
       const failN = finalRows.filter(

@@ -60,6 +60,8 @@ export default function CoverageBoardPage() {
   });
   const [journeySnapIds, setJourneySnapIds] = useState<Set<string>>(new Set());
 
+  const [reviewEpoch, setReviewEpoch] = useState(0);
+
   const { project, allCases, loading, refresh, invalidate, hasLocalPath } = useCoverageBoard({
     page: 1,
     pageSize: 50,
@@ -134,6 +136,7 @@ export default function CoverageBoardPage() {
     q.set("tab", "review");
     q.set("workspaceId", id);
     if (engine) q.set("engine", engine);
+    else q.set("engine", "all");
     setSearchParams(q, { replace: true });
   }
 
@@ -268,6 +271,7 @@ export default function CoverageBoardPage() {
               />
             ) : (
               <ReviewQueuePanel
+                key={`review-${workspaceId}-${reviewEngine ?? "all"}-${reviewEpoch}`}
                 projectId={project.id}
                 cases={allCases}
                 moduleFilter={reviewModule}
@@ -288,8 +292,12 @@ export default function CoverageBoardPage() {
             onStatusChange={setStudioStatus}
             onBackToHub={setHome}
             onNavigateReview={(opts) => {
-              void refresh();
-              openReview(workspaceId, opts?.engine);
+              invalidate();
+              void (async () => {
+                await refresh();
+                setReviewEpoch((n) => n + 1);
+                openReview(workspaceId, opts?.engine);
+              })();
             }}
           />
         )}

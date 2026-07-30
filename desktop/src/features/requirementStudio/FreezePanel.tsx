@@ -2,7 +2,7 @@
  * Freeze Snapshot rồi Sinh TC.
  * Cả Unit và E2E đều gửi preferredEngine để BE đồng bộ prompt + lưu type DB.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -10,16 +10,21 @@ import {
   Input,
   Space,
   Spin,
+  Table,
+  Tag,
   Typography,
 } from "antd";
+import type { ColumnsType } from "antd/es/table";
 import { LockOutlined, ThunderboltOutlined } from "@ant-design/icons";
-import { requirementStudio } from "../../api";
+import { requirementStudio, testcases } from "../../api";
 import type {
   KnowledgeWorkspaceView,
   RequirementSnapshot,
+  TestCase,
 } from "../../api/types";
 import { EnginePicker } from "../../components/EnginePicker";
 import { waitForJob } from "../../lib/waitForJob";
+import { labelOf, priorityLabel, typeLabel } from "../../i18n/labels";
 
 type PreferredEngine = "unit" | "e2e";
 
@@ -32,13 +37,66 @@ type Props = {
     jobId: string;
     preferredEngine: PreferredEngine;
   }) => void;
+  /** Gọi khi đã có TC lưu sớm (progressive) — có thể mở duyệt trước khi job xong */
+  onPartialGenerated?: (info: {
+    snapshotId: string;
+    jobId: string;
+    preferredEngine: PreferredEngine;
+    savedCount: number;
+  }) => void;
 };
+
+function parseSavedCount(msg: string): number | null {
+  const m = msg.match(/tổng đã lưu\s+(\d+)/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+const LIVE_TC_COLUMNS: ColumnsType<TestCase> = [
+  {
+    title: "Mã",
+    dataIndex: "testCaseId",
+    key: "code",
+    width: 88,
+    render: (v: string) => v || "—",
+  },
+  {
+    title: "Tiêu đề",
+    dataIndex: "title",
+    key: "title",
+    ellipsis: true,
+  },
+  {
+    title: "Module",
+    dataIndex: "module",
+    key: "module",
+    width: 120,
+    ellipsis: true,
+    render: (v: string) => v || "—",
+  },
+  {
+    title: "Loại",
+    dataIndex: "type",
+    key: "type",
+    width: 90,
+    render: (v: string) => labelOf(typeLabel, v) || v || "—",
+  },
+  {
+    title: "Ưu tiên",
+    dataIndex: "priority",
+    key: "priority",
+    width: 100,
+    render: (v: string) => labelOf(priorityLabel, v) || v || "—",
+  },
+];
 
 export default function FreezePanel({
   workspaceId,
   knowledge,
   onOpenKnowledge,
   onGenerated,
+  onPartialGenerated,
 }: Props) {
   const [snapshots, setSnapshots] = useState<RequirementSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
@@ -48,14 +106,29 @@ export default function FreezePanel({
   const [targetUrl, setTargetUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  const [savedCount, setSavedCount] = useState(0);
+  const [liveCases, setLiveCases] = useState<TestCase[]>([]);
+  const [livePage, setLivePage] = useState(1);
+  const [activeJob, setActiveJob] = useState<{
+    jobId: string;
+    snapshotId: string;
+    preferredEngine: PreferredEngine;
+  } | null>(null);
+  const partialNotified = useRef(false);
   const [cliLog, setCliLog] = useState<string[]>([]);
   const [lastWarnings, setLastWarnings] = useState<{ code?: string; message?: string }[]>(
     []
   );
   const logEndRef = useRef<HTMLDivElement | null>(null);
+  const logBodyRef = useRef<HTMLPreElement | null>(null);
 
   const knowledgeOk =
     knowledge?.status === "ready" || knowledge?.status === "stale";
+
+  const livePageData = useMemo(() => {
+    const start = (livePage - 1) * 20;
+    return liveCases.slice(start, start + 20);
+  }, [liveCases, livePage]);
 
   const reload = async (wid: string) => {
     setLoading(true);
@@ -77,9 +150,40 @@ export default function FreezePanel({
     void reload(workspaceId);
   }, [workspaceId, knowledgeOk, knowledge?.version]);
 
+  // Chỉ scroll trong khung nhật ký — không kéo cả trang / nền ngoài
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const el = logBodyRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [cliLog]);
+
+  // Poll TC theo jobId khi đang sinh — bảng cập nhật ngay khi có TC mới
+  useEffect(() => {
+    if (!activeJob?.jobId || (!running && liveCases.length === 0)) return;
+    let cancelled = false;
+    const jobId = activeJob.jobId;
+
+    const tick = async () => {
+      try {
+        const rows = await testcases.listAll({ jobId });
+        if (cancelled) return;
+        setLiveCases(rows);
+        setSavedCount((prev) => Math.max(prev, rows.length));
+      } catch {
+        /* ignore poll errors */
+      }
+    };
+
+    void tick();
+    if (!running) return;
+    const id = window.setInterval(() => {
+      void tick();
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [activeJob?.jobId, running]);
 
   const runFreezeAndGenerate = async () => {
     if (!workspaceId || running) return;
@@ -88,6 +192,11 @@ export default function FreezePanel({
     setProgress("Đang chốt snapshot…");
     setCliLog(["--- Chốt snapshot & tạo job ---"]);
     setLastWarnings([]);
+    setSavedCount(0);
+    setLiveCases([]);
+    setLivePage(1);
+    setActiveJob(null);
+    partialNotified.current = false;
     try {
       const res = await requirementStudio.freezeAndGenerate(workspaceId, {
         acknowledgeMissing: true,
@@ -100,6 +209,7 @@ export default function FreezePanel({
       setSnapshots((prev) => [res.snapshot, ...prev]);
       const jobId = res.job.id;
       const snapshotId = String(res.snapshot.id);
+      setActiveJob({ jobId, snapshotId, preferredEngine: engine });
       setProgress(res.job.progressMessage || "Đã tạo job — đang gọi AI CLI…");
       setCliLog((prev) => [
         ...prev,
@@ -109,8 +219,23 @@ export default function FreezePanel({
       const job = await waitForJob(jobId, {
         onProgress: (msg) => {
           setProgress(msg);
-          // Highlight fan-out module lines in live status
-          if (/^Module\s+\d+\s*\/\s*\d+/i.test(msg.trim())) {
+          const n = parseSavedCount(msg);
+          if (n != null && n > 0) {
+            setSavedCount((prev) => Math.max(prev, n));
+            if (!partialNotified.current) {
+              partialNotified.current = true;
+              onPartialGenerated?.({
+                snapshotId,
+                jobId,
+                preferredEngine: engine,
+                savedCount: n,
+              });
+            }
+          }
+          if (
+            /^Module\s+\d+\s*\/\s*\d+/i.test(msg.trim()) ||
+            /^\[progressive\]/i.test(msg.trim())
+          ) {
             setCliLog((prev) => {
               const last = prev[prev.length - 1];
               if (last === msg) return prev;
@@ -123,6 +248,13 @@ export default function FreezePanel({
       if (job.progressLog?.length) setCliLog(job.progressLog);
       if (job.status === "Failed") {
         throw new Error(job.error || "Tạo test case thất bại");
+      }
+      try {
+        const rows = await testcases.listAll({ jobId });
+        setLiveCases(rows);
+        setSavedCount(rows.length);
+      } catch {
+        /* keep polled state */
       }
       setProgress(job.progressMessage || "Hoàn tất");
       onGenerated?.({ snapshotId, jobId, preferredEngine: engine });
@@ -246,6 +378,32 @@ export default function FreezePanel({
               {cliLog.length} dòng
             </Typography.Text>
           </div>
+          {running && savedCount > 0 ? (
+            <Alert
+              style={{ marginBottom: 8 }}
+              type="success"
+              showIcon
+              title={`Đã có ${savedCount} test case`}
+              description="TC được lưu dần theo từng module — bảng bên dưới cập nhật realtime."
+              action={
+                activeJob && onGenerated ? (
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={() =>
+                      onGenerated({
+                        snapshotId: activeJob.snapshotId,
+                        jobId: activeJob.jobId,
+                        preferredEngine: activeJob.preferredEngine,
+                      })
+                    }
+                  >
+                    Xem TC đã có
+                  </Button>
+                ) : null
+              }
+            />
+          ) : null}
           {running ? (
             <Typography.Text type="secondary" className="cli-log-panel__status">
               <Spin size="small" />{" "}
@@ -255,10 +413,38 @@ export default function FreezePanel({
                   : "Đang tổng hợp tài liệu, phân tích và test case hiện có…")}
             </Typography.Text>
           ) : null}
-          <pre className="cli-log-panel__body">
+          <pre className="cli-log-panel__body" ref={logBodyRef}>
             {cliLog.length ? cliLog.join("\n\n") : "Chưa có log…"}
             <div ref={logEndRef} />
           </pre>
+        </div>
+      ) : null}
+
+      {liveCases.length > 0 || (running && activeJob) ? (
+        <div className="freeze-live-tc">
+          <div className="freeze-live-tc__head">
+            <Typography.Text strong>Test case đã sinh</Typography.Text>
+            <Tag color={running ? "processing" : "success"}>
+              {liveCases.length} TC
+              {running ? " · đang cập nhật" : ""}
+            </Tag>
+          </div>
+          <Table<TestCase>
+            size="small"
+            rowKey={(r) => r.id}
+            columns={LIVE_TC_COLUMNS}
+            dataSource={livePageData}
+            loading={running && liveCases.length === 0}
+            pagination={{
+              current: livePage,
+              pageSize: 20,
+              total: liveCases.length,
+              showSizeChanger: false,
+              showTotal: (t) => `${t} test case`,
+              onChange: (p) => setLivePage(p),
+            }}
+            locale={{ emptyText: running ? "Đang chờ TC đầu tiên…" : "Chưa có TC" }}
+          />
         </div>
       ) : null}
 

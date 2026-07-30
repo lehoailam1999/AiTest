@@ -24,6 +24,8 @@ class BaseLLMAdapter(ABC):
         on_progress: ProgressCb | None = None,
         prefer_oneshot: bool | None = None,
         session_topic_key: str | None = None,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
     ) -> list[TestCaseDraft]:
         """Sinh danh sách TestCaseDraft từ requirement."""
 
@@ -32,7 +34,14 @@ class BaseLLMAdapter(ABC):
         """Kiểm tra kết nối / CLI executable sẵn sàng."""
 
     @abstractmethod
-    async def chat(self, system: str, user: str) -> str:
+    async def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
+    ) -> str:
         """Chat / JSON enrich (Phân tích Knowledge, v.v.)."""
 
     @abstractmethod

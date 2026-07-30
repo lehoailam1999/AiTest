@@ -4,6 +4,7 @@
  */
 import { generateE2e, type E2EFileDto } from "../../api";
 import type { TestCase } from "../../api/types";
+import { createAsyncMutex, runPool } from "../runPool";
 import { buildE2EEnvConfig, playwrightEnvFromConfig } from "./env";
 import {
   syncE2eModuleBatchCampaign,
@@ -11,6 +12,9 @@ import {
   syncE2eWorkspaceRun,
 } from "./auditSync";
 import { newE2eRunId } from "./stagingApply";
+
+/** Parallel oneshot / TC — mỗi request gắn testCaseId riêng; cap 3 để tránh overload Cursor. */
+const E2E_GEN_CONCURRENCY = 3;
 
 export type E2eBatchItemResult = {
   testCaseId: string;
@@ -233,7 +237,7 @@ export async function generateE2eForTestCase(opts: {
   };
 }
 
-/** Step: Generate N TCs sequentially (no Playwright). */
+/** Step: Generate N TCs in parallel (bounded). Each call is scoped to one testCaseId. */
 export async function generateE2eBatch(opts: {
   projectId: string;
   projectRoot: string;
@@ -276,66 +280,96 @@ export async function generateE2eBatch(opts: {
     status: "pending",
   }));
   let allFiles: E2EFileDto[] = [];
-  const genItems: E2eGenItem[] = [];
+  const genItemsSlot: (E2eGenItem | null)[] = cases.map(() => null);
+  const mergeLock = createAsyncMutex();
+  let done = 0;
 
-  for (let i = 0; i < cases.length; i++) {
-    await opts.waitIfPaused?.();
-    const tc = cases[i];
-    rows[i] = { ...rows[i], status: "running" };
-    progress({
-      phase: "generate",
-      current: i,
-      total,
-      label: `Generate ${i + 1}/${total}: ${tc.title}`,
-    });
+  log(
+    `→ Generate batch parallel ×${Math.min(E2E_GEN_CONCURRENCY, total)} · ${total} TC (mỗi TC 1 request riêng)\n`
+  );
 
-    try {
-      const gen = await generateE2eForTestCase({
-        projectId: opts.projectId,
-        projectRoot: opts.projectRoot,
-        testCase: tc,
-        targetUrl: env.targetUrl,
-        module: opts.module,
-        requirementTitle: opts.requirementTitle,
-        domSnapshot: opts.domSnapshot,
-        useStorageState: opts.useStorageState,
-        username: opts.username,
-        password: opts.password,
-        seedCommand: opts.seedCommand,
-        teardownCommand: opts.teardownCommand,
-        existingFiles: allFiles.filter(
-          (f) => f.kind === "page" || /\/pages\//.test(f.path)
-        ),
-        provider: opts.provider,
-        onLog: log,
+  await runPool(
+    cases,
+    E2E_GEN_CONCURRENCY,
+    async (tc, i) => {
+      await mergeLock.run(() => {
+        rows[i] = { ...rows[i], status: "running" };
+        progress({
+          phase: "generate",
+          current: done,
+          total,
+          label: `Generate: ${tc.title}`,
+        });
       });
-      allFiles = mergeFiles(allFiles, gen.files);
-      genItems.push({
-        testCaseId: tc.id,
-        title: tc.title,
-        runId: gen.runId,
-        primarySpecPath: gen.primarySpecPath,
-        files: gen.files,
-      });
-      rows[i] = {
-        ...rows[i],
-        status: "generated",
-        files: gen.files.length,
-        runId: gen.runId,
-      };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      rows[i] = { ...rows[i], status: "fail", error: msg };
-      log(`  generate fail: ${msg}\n`);
-    }
-    progress({
-      phase: "generate",
-      current: i + 1,
-      total,
-      label: `Generate ${i + 1}/${total}`,
-    });
-  }
 
+      // Snapshot POM pages under lock so parallel workers don't race merge;
+      // each generate still binds API to this tc.id → files map về đúng TC.
+      const existingPages = await mergeLock.run(() =>
+        allFiles.filter((f) => f.kind === "page" || /\/pages\//.test(f.path))
+      );
+
+      try {
+        const gen = await generateE2eForTestCase({
+          projectId: opts.projectId,
+          projectRoot: opts.projectRoot,
+          testCase: tc,
+          targetUrl: env.targetUrl,
+          module: opts.module,
+          requirementTitle: opts.requirementTitle,
+          domSnapshot: opts.domSnapshot,
+          useStorageState: opts.useStorageState,
+          username: opts.username,
+          password: opts.password,
+          seedCommand: opts.seedCommand,
+          teardownCommand: opts.teardownCommand,
+          existingFiles: existingPages,
+          provider: opts.provider,
+          onLog: log,
+        });
+        // Paths đã resolve theo Requirement/TC trên BE; giữ đúng file của request này.
+        const ownedFiles = gen.files;
+        await mergeLock.run(() => {
+          allFiles = mergeFiles(allFiles, ownedFiles);
+          genItemsSlot[i] = {
+            testCaseId: tc.id,
+            title: tc.title,
+            runId: gen.runId,
+            primarySpecPath: gen.primarySpecPath,
+            files: ownedFiles,
+          };
+          rows[i] = {
+            ...rows[i],
+            status: "generated",
+            files: ownedFiles.length,
+            runId: gen.runId,
+          };
+          done += 1;
+          progress({
+            phase: "generate",
+            current: done,
+            total,
+            label: `Generate ${done}/${total}`,
+          });
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await mergeLock.run(() => {
+          rows[i] = { ...rows[i], status: "fail", error: msg };
+          done += 1;
+          progress({
+            phase: "generate",
+            current: done,
+            total,
+            label: `Generate ${done}/${total}`,
+          });
+        });
+        log(`  generate fail [${tc.testCaseId || tc.id}]: ${msg}\n`);
+      }
+    },
+    { waitGate: opts.waitIfPaused }
+  );
+
+  const genItems = genItemsSlot.filter((x): x is E2eGenItem => Boolean(x));
   progress({
     phase: "done",
     current: total,

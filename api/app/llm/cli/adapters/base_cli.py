@@ -103,6 +103,8 @@ class BaseCLIAdapter(BaseLLMAdapter):
         on_progress: ProgressCb | None = None,
         prefer_oneshot: bool | None = None,
         session_topic_key: str | None = None,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
     ) -> list[TestCaseDraft]:
         del context
         self._on_progress = on_progress
@@ -114,6 +116,19 @@ class BaseCLIAdapter(BaseLLMAdapter):
         if topic_key is None and ctx.topic_scope:
             topic_key = (ctx.topic_scope.splitlines()[0] or "")[:80]
         self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
+
+        chat_id = resume_chat_id
+        if self.vendor == "cursor-cli" and create_chat and not chat_id:
+            create_fn = getattr(self, "create_chat", None)
+            if callable(create_fn):
+                try:
+                    chat_id = await create_fn()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Cursor create-chat for TC failed: %s", e)
+                    self._progress(f"Cursor CLI: create-chat lỗi — tiếp tục không resume ({e})")
+                    chat_id = None
+        if isinstance(chat_id, str) and chat_id.strip():
+            setattr(self, "last_cursor_chat_id", chat_id.strip())
 
         sys_p = system_prompt(ctx)
         usr_p = user_prompt(title, requirement_text, ctx)
@@ -135,6 +150,8 @@ class BaseCLIAdapter(BaseLLMAdapter):
             f"title={title[:120]} | modules=[{feat}] | "
             f"topic={scope_line[:100] or '(none)'} | existing_tc={len(ctx.existing_cases or [])}"
         )
+        if chat_id:
+            self._progress(f"cursor_resume={str(chat_id)[:24]}…")
         self._progress(
             f"sizes: system={len(sys_p):,} | user={len(usr_p):,} | "
             f"source_ctx={src_len:,} | total_prompt={len(prompt):,} chars"
@@ -146,7 +163,10 @@ class BaseCLIAdapter(BaseLLMAdapter):
         self._progress(f"[user preview]\n{usr_preview}\n…")
         self._progress(f"AI CLI ({self.vendor}): đang gửi prompt (~{len(prompt):,} ký tự)…")
         raw = await self._run_prompt(
-            prompt, topic_key=topic_key, prefer_oneshot=prefer_oneshot
+            prompt,
+            topic_key=topic_key,
+            prefer_oneshot=prefer_oneshot,
+            resume_chat_id=chat_id,
         )
         self._progress(
             f"AI CLI ({self.vendor}): đã nhận phản hồi (~{len(raw):,} ký tự), đang parse JSON…"
@@ -165,8 +185,16 @@ class BaseCLIAdapter(BaseLLMAdapter):
             self._progress(f"Parse (salvage) OK — {len(drafts)} test case")
             return drafts
 
-    async def chat(self, system: str, user: str) -> str:
+    async def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
+    ) -> str:
         """Generic system+user prompt via CLI (Knowledge / chat enrich)."""
+        del resume_chat_id, create_chat  # Cursor overrides; other CLIs use session pool
         prompt = f"{system}\n\n---\n\n{user}"
         topic_key = "knowledge-chat"
         self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
@@ -236,6 +264,7 @@ class BaseCLIAdapter(BaseLLMAdapter):
         *,
         topic_key: str | None,
         prefer_oneshot: bool | None = None,
+        resume_chat_id: str | None = None,
     ) -> str:
         use_oneshot = self.prefer_oneshot if prefer_oneshot is None else prefer_oneshot
         # Cursor Agent must stay oneshot --mode ask (interactive can write the workspace).
@@ -244,6 +273,8 @@ class BaseCLIAdapter(BaseLLMAdapter):
         if use_oneshot:
             try:
                 self._progress(f"AI CLI ({self.vendor}): oneshot — đang chờ model…")
+                if self.vendor == "cursor-cli":
+                    return await self._run_oneshot(prompt, resume_chat_id=resume_chat_id)
                 return await self._run_oneshot(prompt)
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
@@ -271,6 +302,9 @@ class BaseCLIAdapter(BaseLLMAdapter):
                     self._progress(
                         f"AI CLI ({self.vendor}): oneshot hết thời gian — dừng (không fallback interactive)."
                     )
+                    raise
+                # Cursor: never fall back to interactive
+                if self.vendor == "cursor-cli":
                     raise
                 logger.warning("%s oneshot failed, try interactive: %s", self.vendor, e)
                 self._progress(

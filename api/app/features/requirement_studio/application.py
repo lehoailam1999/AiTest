@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -36,6 +39,7 @@ from app.features.requirement_studio.knowledge_builder import (
     build_knowledge_user_prompt,
     build_knowledge_heuristic,
     knowledge_system_prompt,
+    merge_knowledge_payloads,
     normalize_knowledge_payload,
     parse_knowledge_llm_json,
 )
@@ -62,6 +66,8 @@ from app.models.domain import (
 )
 from app.services.requirement_file_parse import parse_requirement_file
 
+logger = logging.getLogger(__name__)
+
 MAX_FILE_BYTES = 15_000_000
 MAX_FILES_PER_REQUEST = 20
 ANALYSIS_RECORD_TYPES: tuple[str, ...] = (
@@ -77,6 +83,40 @@ ANALYSIS_RECORD_TYPES: tuple[str, ...] = (
     "NFR_CONSTRAINTS",
     "GAPS",
 )
+
+# In-memory enrich progress (no migration). Key = workspace_id str.
+_enrich_state: dict[str, dict[str, Any]] = {}
+
+
+def get_enrich_state(workspace_id: uuid.UUID | str) -> dict[str, Any]:
+    row = _enrich_state.get(str(workspace_id)) or {}
+    return {
+        "enrichPending": bool(row.get("enrichPending")),
+        "enrichError": row.get("enrichError"),
+        "cursorChatId": row.get("cursorChatId"),
+    }
+
+
+def set_enrich_state(
+    workspace_id: uuid.UUID | str,
+    *,
+    enrich_pending: bool,
+    enrich_error: str | None = None,
+    cursor_chat_id: str | None = None,
+) -> None:
+    key = str(workspace_id)
+    prev = _enrich_state.get(key) or {}
+    _enrich_state[key] = {
+        "enrichPending": enrich_pending,
+        "enrichError": enrich_error,
+        "cursorChatId": cursor_chat_id
+        if cursor_chat_id is not None
+        else prev.get("cursorChatId"),
+    }
+
+
+def clear_enrich_state(workspace_id: uuid.UUID | str) -> None:
+    _enrich_state.pop(str(workspace_id), None)
 
 
 def _alive(model):
@@ -640,7 +680,10 @@ def get_knowledge_row(
 
 
 def get_knowledge(db: Session, workspace_id: uuid.UUID) -> dict:
-    return knowledge_dto(get_knowledge_row(db, workspace_id))
+    return knowledge_dto(
+        get_knowledge_row(db, workspace_id),
+        enrich=get_enrich_state(workspace_id),
+    )
 
 
 def mark_knowledge_stale(db: Session, workspace_id: uuid.UUID) -> None:
@@ -649,6 +692,7 @@ def mark_knowledge_stale(db: Session, workspace_id: uuid.UUID) -> None:
         return
     if row.status in ("ready", "building"):
         row.status = "stale"
+        clear_enrich_state(workspace_id)
         db.commit()
 
 
@@ -675,6 +719,221 @@ def _load_chunk_pairs(
     return pairs, file_names, len(files), len(chunks)
 
 
+def _persist_knowledge_payload(
+    db: Session,
+    row: KnowledgeWorkspace,
+    workspace: RequirementWorkspace,
+    payload: dict,
+    *,
+    builder: str,
+    file_count: int,
+    chunk_count: int,
+    bump_version: bool = True,
+) -> None:
+    payload = normalize_knowledge_payload(payload)
+    row.payload_json = json.dumps(payload, ensure_ascii=False)
+    row.summary = (payload.get("summary") or "")[:4000] or None
+    row.builder = builder
+    row.status = "ready"
+    if bump_version:
+        row.version = int(row.version or 0) + 1
+    row.source_file_count = file_count
+    row.source_chunk_count = chunk_count
+    row.error = None
+    row.built_at = datetime.now(timezone.utc)
+    pairs_text = []
+    try:
+        pairs, _, _, _ = _load_chunk_pairs(db, workspace.id)
+        pairs_text = [t for _, t in pairs]
+    except Exception:
+        pairs_text = []
+    coverage = analyze_requirement_coverage(payload, chunk_texts=pairs_text)
+    row.coverage_json = json.dumps(coverage, ensure_ascii=False)
+    _replace_analysis_records(
+        db,
+        workspace_id=workspace.id,
+        project_id=workspace.project_id,
+        knowledge_id=row.id,
+        knowledge_version=row.version,
+        payload=payload,
+    )
+
+
+async def enrich_knowledge_background(
+    workspace_id: uuid.UUID,
+    project_id: uuid.UUID,
+    *,
+    expected_version: int,
+) -> None:
+    """Background Cursor/LLM enrich after heuristic ready. Own DB session."""
+    from app.database import SessionLocal
+    from app.services.ai_service import RUNNER_AI_CLI, chat_for_connection
+
+    set_enrich_state(workspace_id, enrich_pending=True, enrich_error=None)
+    db = SessionLocal()
+    try:
+        workspace = get_workspace(db, workspace_id)
+        row = get_knowledge_row(db, workspace_id)
+        if workspace is None or row is None:
+            set_enrich_state(
+                workspace_id,
+                enrich_pending=False,
+                enrich_error="Knowledge/workspace missing",
+            )
+            return
+        if int(row.version or 0) != int(expected_version):
+            # Newer build superseded this enrich
+            set_enrich_state(workspace_id, enrich_pending=False, enrich_error=None)
+            return
+
+        pairs, file_names, file_count, chunk_count = _load_chunk_pairs(db, workspace_id)
+        heuristic = normalize_knowledge_payload(
+            parse_json_field(row.payload_json) or {}
+        )
+
+        conn = db.scalar(
+            select(AiBackendConnection).where(
+                AiBackendConnection.project_id == project_id
+            )
+        )
+        if conn is None:
+            set_enrich_state(
+                workspace_id,
+                enrich_pending=False,
+                enrich_error="AI connection missing",
+            )
+            return
+
+        # Full checklist (không pass1 slim) — pass1 từng cắt api/exceptions/AC/constraints
+        # và merge replace làm mất nhiều item heuristic so với phân tích cũ.
+        user_prompt = build_knowledge_user_prompt(
+            pairs, file_names=file_names, pass1=False
+        )
+        raw, meta = await chat_for_connection(
+            conn,
+            knowledge_system_prompt(pass1=False),
+            user_prompt,
+            create_chat=True,
+        )
+        chat_id = meta.get("cursorChatId")
+        if isinstance(chat_id, str) and chat_id.strip():
+            set_enrich_state(
+                workspace_id,
+                enrich_pending=True,
+                cursor_chat_id=chat_id.strip(),
+            )
+
+        llm_payload = parse_knowledge_llm_json(raw)
+        useful = bool(
+            llm_payload
+            and (
+                llm_payload.get("summary")
+                or any(
+                    llm_payload.get(k)
+                    for k in (
+                        "features",
+                        "businessRules",
+                        "actors",
+                        "useCases",
+                        "validationRules",
+                        "apiSummary",
+                        "exceptions",
+                        "acceptanceCriteria",
+                        "constraints",
+                    )
+                )
+            )
+        )
+        if not useful:
+            gaps = list(heuristic.get("gaps") or [])
+            gaps.insert(
+                0,
+                {
+                    "text": "LLM enrich không trả JSON hữu ích — giữ bản heuristic.",
+                },
+            )
+            heuristic["gaps"] = gaps
+            _persist_knowledge_payload(
+                db,
+                row,
+                workspace,
+                heuristic,
+                builder="heuristic-v1",
+                file_count=file_count,
+                chunk_count=chunk_count,
+                bump_version=False,
+            )
+            db.commit()
+            set_enrich_state(
+                workspace_id,
+                enrich_pending=False,
+                enrich_error="LLM enrich empty",
+                cursor_chat_id=chat_id if isinstance(chat_id, str) else None,
+            )
+            return
+
+        merged = merge_knowledge_payloads(heuristic, llm_payload)
+        builder = (
+            "llm-cli" if meta.get("runnerUsed") == RUNNER_AI_CLI else "llm"
+        )
+        # Re-check version before write
+        db.refresh(row)
+        if int(row.version or 0) != int(expected_version):
+            set_enrich_state(workspace_id, enrich_pending=False)
+            return
+        _persist_knowledge_payload(
+            db,
+            row,
+            workspace,
+            merged,
+            builder=builder,
+            file_count=file_count,
+            chunk_count=chunk_count,
+            bump_version=True,
+        )
+        db.commit()
+        set_enrich_state(
+            workspace_id,
+            enrich_pending=False,
+            enrich_error=None,
+            cursor_chat_id=chat_id if isinstance(chat_id, str) else None,
+        )
+        logger.info(
+            "Knowledge enrich OK workspace=%s v%s→%s builder=%s chat=%s",
+            workspace_id,
+            expected_version,
+            row.version,
+            builder,
+            (chat_id or "")[:16],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Knowledge enrich failed workspace=%s: %s", workspace_id, e)
+        try:
+            row = get_knowledge_row(db, workspace_id)
+            workspace = get_workspace(db, workspace_id)
+            if row is not None and workspace is not None:
+                payload = normalize_knowledge_payload(
+                    parse_json_field(row.payload_json) or {}
+                )
+                gaps = list(payload.get("gaps") or [])
+                gaps.insert(
+                    0,
+                    {"text": f"LLM enrich lỗi — giữ heuristic. ({e})"},
+                )
+                payload["gaps"] = gaps
+                row.payload_json = json.dumps(payload, ensure_ascii=False)
+                db.commit()
+        except Exception:
+            db.rollback()
+        set_enrich_state(
+            workspace_id,
+            enrich_pending=False,
+            enrich_error=str(e)[:500],
+        )
+    finally:
+        db.close()
+
+
 async def build_knowledge(
     db: Session,
     workspace: RequirementWorkspace,
@@ -682,12 +941,15 @@ async def build_knowledge(
     use_llm: bool = True,
 ) -> dict:
     """
-    Build / rebuild Knowledge Workspace from ChunkStore.
-    Heuristic always runs; LLM enrichment when project AI is configured.
+    Progressive Knowledge build:
+    1) Heuristic → status=ready immediately (enrichPending if LLM scheduled)
+    2) Background Cursor/LLM enrich merges + bumps version
     """
     pairs, file_names, file_count, chunk_count = _load_chunk_pairs(db, workspace.id)
     if chunk_count == 0:
-        raise ValueError("Chưa có đoạn tài liệu — upload và tách đoạn trước khi dựng Knowledge")
+        raise ValueError(
+            "Chưa có đoạn tài liệu — upload và tách đoạn trước khi dựng Knowledge"
+        )
 
     row = get_knowledge_row(db, workspace.id)
     if row is None:
@@ -705,77 +967,55 @@ async def build_knowledge(
     db.refresh(row)
 
     payload = build_knowledge_heuristic(pairs, file_names=file_names)
-    builder = "heuristic-v1"
-
-    if use_llm:
-        try:
-            from app.services.ai_service import (
-                RUNNER_AI_CLI,
-                chat_for_connection,
-            )
-
-            conn = db.scalar(
-                select(AiBackendConnection).where(
-                    AiBackendConnection.project_id == workspace.project_id
-                )
-            )
-            if conn is not None:
-                user_prompt = build_knowledge_user_prompt(pairs, file_names=file_names)
-                raw, meta = await chat_for_connection(
-                    conn, knowledge_system_prompt(), user_prompt
-                )
-                llm_payload = parse_knowledge_llm_json(raw)
-                if llm_payload and (llm_payload.get("summary") or any(
-                    llm_payload.get(k) for k in (
-                        "features",
-                        "businessRules",
-                        "actors",
-                        "useCases",
-                        "validationRules",
-                        "apiSummary",
-                        "acceptanceCriteria",
-                    )
-                )):
-                    payload = llm_payload
-                    builder = (
-                        "llm-cli"
-                        if meta.get("runnerUsed") == RUNNER_AI_CLI
-                        else "llm"
-                    )
-        except Exception as e:
-            # Keep heuristic; surface note in gaps
-            gaps = list(payload.get("gaps") or [])
-            gaps.insert(
-                0,
-                {"text": f"LLM không dùng được — Knowledge heuristic. ({e})"},
-            )
-            payload["gaps"] = gaps
-
-    payload = normalize_knowledge_payload(payload)
-    row.payload_json = json.dumps(payload, ensure_ascii=False)
-    row.summary = (payload.get("summary") or "")[:4000] or None
-    row.builder = builder
-    row.status = "ready"
-    row.version = int(row.version or 0) + 1
-    row.source_file_count = file_count
-    row.source_chunk_count = chunk_count
-    row.error = None
-    row.built_at = datetime.now(timezone.utc)
-    coverage = analyze_requirement_coverage(
-        payload, chunk_texts=[t for _, t in pairs]
-    )
-    row.coverage_json = json.dumps(coverage, ensure_ascii=False)
-    _replace_analysis_records(
+    _persist_knowledge_payload(
         db,
-        workspace_id=workspace.id,
-        project_id=workspace.project_id,
-        knowledge_id=row.id,
-        knowledge_version=row.version,
-        payload=payload,
+        row,
+        workspace,
+        payload,
+        builder="heuristic-v1",
+        file_count=file_count,
+        chunk_count=chunk_count,
+        bump_version=True,
     )
     db.commit()
     db.refresh(row)
-    return knowledge_dto(row)
+    expected_version = int(row.version or 0)
+
+    schedule_enrich = False
+    if use_llm:
+        conn = db.scalar(
+            select(AiBackendConnection).where(
+                AiBackendConnection.project_id == workspace.project_id
+            )
+        )
+        schedule_enrich = conn is not None
+
+    if schedule_enrich:
+        # Keep status=building so UI/Freeze không hiện heuristic trước khi AI xong
+        row.status = "building"
+        db.commit()
+        db.refresh(row)
+        set_enrich_state(workspace.id, enrich_pending=True, enrich_error=None)
+        try:
+            asyncio.get_running_loop().create_task(
+                enrich_knowledge_background(
+                    workspace.id,
+                    workspace.project_id,
+                    expected_version=expected_version,
+                )
+            )
+        except RuntimeError:
+            # No running loop — enrich inline (tests / sync context)
+            await enrich_knowledge_background(
+                workspace.id,
+                workspace.project_id,
+                expected_version=expected_version,
+            )
+            db.refresh(row)
+    else:
+        clear_enrich_state(workspace.id)
+
+    return knowledge_dto(row, enrich=get_enrich_state(workspace.id))
 
 
 def analyze_coverage(db: Session, workspace_id: uuid.UUID) -> dict:
@@ -804,7 +1044,7 @@ def analyze_coverage(db: Session, workspace_id: uuid.UUID) -> dict:
     )
     db.commit()
     db.refresh(row)
-    return knowledge_dto(row)
+    return knowledge_dto(row, enrich=get_enrich_state(workspace_id))
 
 
 def coverage_summary(db: Session, workspace_id: uuid.UUID) -> dict:

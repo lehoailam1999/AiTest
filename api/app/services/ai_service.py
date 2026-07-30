@@ -46,6 +46,14 @@ def connection_runner_mode(conn: AiBackendConnection) -> str:
     return RUNNER_API_DIRECT
 
 
+def connection_is_cursor_cli(conn: AiBackendConnection) -> bool:
+    """True when project AI is Cursor Agent CLI (oneshot --mode ask only)."""
+    if connection_runner_mode(conn) != RUNNER_AI_CLI:
+        return False
+    cli_type = (getattr(conn, "cli_type", None) or "").strip().lower()
+    return cli_type in ("cursor", "cursor-cli", "cursor-agent", "agent")
+
+
 def build_cli_adapter(conn: AiBackendConnection) -> BaseLLMAdapter:
     cli_type = (getattr(conn, "cli_type", None) or "gemini-cli").strip().lower()
     cli_path = (getattr(conn, "cli_path", None) or "").strip() or None
@@ -104,10 +112,16 @@ async def generate_test_cases_for_connection(
     on_progress: Any | None = None,
     prefer_oneshot: bool | None = None,
     session_topic_key: str | None = None,
+    resume_chat_id: str | None = None,
+    create_chat: bool = False,
 ) -> tuple[list[TestCaseDraft], dict[str, Any]]:
-    """Returns (drafts, meta) with runnerUsed / cliSessionKey."""
+    """Returns (drafts, meta) with runnerUsed / cliSessionKey / cursorChatId."""
     mode = connection_runner_mode(conn)
-    meta: dict[str, Any] = {"runnerUsed": mode, "cliSessionKey": None}
+    meta: dict[str, Any] = {
+        "runnerUsed": mode,
+        "cliSessionKey": None,
+        "cursorChatId": None,
+    }
     adapter = get_adapter_for_connection(conn, api_key=api_key, provider=provider)
     kwargs: dict[str, Any] = {"ctx": ctx, "on_progress": on_progress}
     if isinstance(adapter, BaseCLIAdapter):
@@ -115,9 +129,18 @@ async def generate_test_cases_for_connection(
             kwargs["prefer_oneshot"] = prefer_oneshot
         if session_topic_key is not None:
             kwargs["session_topic_key"] = session_topic_key
+        if resume_chat_id is not None:
+            kwargs["resume_chat_id"] = resume_chat_id
+        if create_chat:
+            kwargs["create_chat"] = True
     drafts = await adapter.generate_test_cases(title, content, **kwargs)
     if isinstance(adapter, BaseCLIAdapter):
         meta["cliSessionKey"] = adapter.last_session_key
+        chat_id = getattr(adapter, "last_cursor_chat_id", None)
+        if isinstance(chat_id, str) and chat_id.strip():
+            meta["cursorChatId"] = chat_id.strip()
+        elif resume_chat_id:
+            meta["cursorChatId"] = resume_chat_id
     return drafts, meta
 
 
@@ -128,22 +151,37 @@ async def chat_for_connection(
     *,
     api_key: str | None = None,
     provider: Provider | None = None,
+    resume_chat_id: str | None = None,
+    create_chat: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """
     Chat / Knowledge enrich via API_DIRECT or AI_CLI.
     Returns (raw_text, meta) with runnerUsed.
+    Optional create_chat / resume_chat_id — Cursor hidden conversation (--mode ask).
     """
     mode = connection_runner_mode(conn)
-    meta: dict[str, Any] = {"runnerUsed": mode, "cliSessionKey": None}
+    meta: dict[str, Any] = {
+        "runnerUsed": mode,
+        "cliSessionKey": None,
+        "cursorChatId": None,
+    }
     key = api_key
     if mode == RUNNER_AI_CLI:
         key = None  # CLI không cần API key
     elif key is None:
         key = connection_api_key(conn)
     adapter = get_adapter_for_connection(conn, api_key=key, provider=provider)
-    raw = await adapter.chat(system, user)
+    raw = await adapter.chat(
+        system,
+        user,
+        resume_chat_id=resume_chat_id,
+        create_chat=create_chat,
+    )
     if isinstance(adapter, BaseCLIAdapter):
         meta["cliSessionKey"] = adapter.last_session_key
+        chat_id = getattr(adapter, "last_cursor_chat_id", None)
+        if isinstance(chat_id, str) and chat_id.strip():
+            meta["cursorChatId"] = chat_id.strip()
     return raw, meta
 
 

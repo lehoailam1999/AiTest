@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -72,6 +71,9 @@ class CursorCLIAdapter(BaseCLIAdapter):
 
     One-shot headless with live progress:
       agent --print --mode ask --output-format stream-json --stream-partial-output --trust
+
+    Long prompts go via stdin (no temp-file tool-read). Optional --resume chatId
+    keeps a hidden ask-mode conversation across turns.
     """
 
     vendor = "cursor-cli"
@@ -88,8 +90,28 @@ class CursorCLIAdapter(BaseCLIAdapter):
     ]
     prefer_oneshot = True
 
-    def build_command(self, *, oneshot: bool = False) -> list[str]:
+    def __init__(
+        self,
+        project_id: str,
+        *,
+        cli_path: str | None = None,
+        cli_args: list[str] | None = None,
+        model_name: str | None = None,
+    ) -> None:
+        super().__init__(
+            project_id,
+            cli_path=cli_path,
+            cli_args=cli_args,
+            model_name=model_name,
+        )
+        self.last_cursor_chat_id: str | None = None
+
+    def build_command(
+        self, *, oneshot: bool = False, resume_chat_id: str | None = None
+    ) -> list[str]:
         cmd = super().build_command(oneshot=oneshot)
+        if resume_chat_id:
+            cmd.extend(["--resume", str(resume_chat_id)])
         if "--model" not in cmd:
             cmd.extend(["--model", self.model_name or "auto"])
         return cmd
@@ -107,60 +129,121 @@ class CursorCLIAdapter(BaseCLIAdapter):
                 return True
         return False
 
-    async def _run_oneshot(self, prompt: str) -> str:
+    async def create_chat(self) -> str:
+        """Create a hidden Cursor chat; return chat id for --resume."""
+        cmd = resolve_command([self.cli_path, "create-chat"])
+        self._progress("Cursor CLI: create-chat (conversation ngầm)…")
+
+        def _run() -> str:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                creationflags=_CREATE_NO_WINDOW,
+                env=os.environ.copy(),
+            )
+            out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            if proc.returncode not in (0, None) and not out:
+                raise RuntimeError(
+                    f"Cursor create-chat exit {proc.returncode}: {(proc.stderr or '')[:400]}"
+                )
+            # Prefer JSON {"id": "..."} / {"chatId": "..."}; else first UUID-like token.
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    for key in ("id", "chatId", "chat_id", "sessionId", "threadId"):
+                        val = obj.get(key)
+                        if isinstance(val, str) and val.strip():
+                            return val.strip()
+                # bare id
+                token = line.split()[0].strip().strip("\"'")
+                if len(token) >= 8 and not token.lower().startswith("error"):
+                    return token
+            raise RuntimeError(f"Cursor create-chat: không parse được chat id — {out[:400]}")
+
+        chat_id = await asyncio.to_thread(_run)
+        self.last_cursor_chat_id = chat_id
+        self._progress(f"Cursor CLI: chatId={chat_id[:24]}…")
+        return chat_id
+
+    async def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        resume_chat_id: str | None = None,
+        create_chat: bool = False,
+    ) -> str:
+        """Knowledge/chat via oneshot ask; optional hidden conversation via --resume."""
+        prompt = f"{system}\n\n---\n\n{user}"
+        topic_key = "knowledge-chat"
+        self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
+        chat_id = resume_chat_id
+        if create_chat and not chat_id:
+            try:
+                chat_id = await self.create_chat()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Cursor create-chat failed, continue without resume: %s", e)
+                self._progress(f"Cursor CLI: create-chat lỗi — oneshot không resume ({e})")
+                chat_id = None
+        self.last_cursor_chat_id = chat_id
+        self._progress(
+            f"Cursor CLI: knowledge chat oneshot"
+            + (f" resume={chat_id[:16]}…" if chat_id else " (no resume)")
+            + f" · prompt={len(prompt):,} chars"
+        )
+        return await self._run_oneshot(prompt, resume_chat_id=chat_id)
+
+    def _text_mode_command(self, cmd: list[str]) -> list[str]:
+        fixed: list[str] = []
+        skip_next = False
+        for i, a in enumerate(cmd):
+            if skip_next:
+                skip_next = False
+                continue
+            if a == "--output-format" and i + 1 < len(cmd):
+                fixed.extend(["--output-format", "text"])
+                skip_next = True
+                continue
+            if a == "--stream-partial-output":
+                continue
+            fixed.append(a)
+        if "--output-format" not in fixed:
+            fixed.extend(["--output-format", "text"])
+        return fixed
+
+    async def _run_oneshot(
+        self, prompt: str, *, resume_chat_id: str | None = None
+    ) -> str:
         """
-        Prompt Sinh TC thường rất dài (>8k) → không nhét vào argv Windows.
-        Ghi temp file rồi truyền path ngắn; stream stdout NDJSON để theo dõi.
+        Short prompts: argv. Long prompts: stdin (avoid temp-file + agent tool-read).
+        Optional --resume keeps ask-mode conversation without interactive write access.
         """
-        cmd = self.build_command(oneshot=True)
+        cmd = self.build_command(oneshot=True, resume_chat_id=resume_chat_id)
         if len(prompt) <= 3500:
             return await self._stream_oneshot([*cmd, prompt], stdin_text=None)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".txt",
-            delete=False,
-            encoding="utf-8",
-        ) as fh:
-            fh.write(prompt)
-            prompt_path = fh.name
-
+        self._progress(
+            f"Cursor CLI: stdin mode ({len(prompt):,} chars, không file-ref)…"
+        )
         try:
-            wrapper = (
-                f"Đọc toàn bộ nội dung file sau (UTF-8) và trả lời ĐÚNG theo yêu cầu trong đó. "
-                f"File: {prompt_path}\n"
-                f"Tuân thủ định dạng output mà file yêu cầu "
-                f"(JSON / mã trong fence ``` / …). Không thêm lời giải thích ngoài định dạng đó."
-            )
-            try:
-                return await self._stream_oneshot([*cmd, wrapper], stdin_text=None)
-            except TimeoutError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                logger.warning("cursor stream file-ref failed, try stdin text mode: %s", e)
-                fixed: list[str] = []
-                skip_next = False
-                for i, a in enumerate(cmd):
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if a == "--output-format" and i + 1 < len(cmd):
-                        fixed.extend(["--output-format", "text"])
-                        skip_next = True
-                        continue
-                    if a == "--stream-partial-output":
-                        continue
-                    fixed.append(a)
-                if "--output-format" not in fixed:
-                    fixed.extend(["--output-format", "text"])
-                runner = CLIProcessRunner(command=fixed)
-                self._progress("Cursor CLI: fallback text mode (không stream)…")
-                return await runner.run_oneshot(prompt)
-        finally:
-            try:
-                Path(prompt_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            return await self._stream_oneshot(list(cmd), stdin_text=prompt)
+        except TimeoutError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cursor stream stdin failed, try text-mode stdin: %s", e)
+            self._progress("Cursor CLI: fallback text mode stdin…")
+            runner = CLIProcessRunner(command=self._text_mode_command(cmd))
+            return await runner.run_oneshot(prompt)
 
     async def _stream_oneshot(
         self,
