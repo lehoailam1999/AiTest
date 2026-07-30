@@ -323,10 +323,9 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         )
     elif ctx.topic_scope:
         base += (
-            "\nSinh đủ test case cho ĐÚNG một chức năng trong phạm vi chủ đề "
-            "(tối thiểu 6–15 case tùy số FR/AC/rule trong module — không giới hạn cứng ở 10). "
-            "Mỗi FR/AC/business rule/validation trong phạm vi phải có ≥1 test case tương ứng. "
-            "Đọc HẾT tài liệu + phân tích DB + source context — không bỏ qua mục nào. "
+            "\nSinh test case cho ĐÚNG một chức năng trong phạm vi chủ đề. "
+            "Cover từng FR/AC/business rule/validation trong phạm vi (≥1 TC mỗi tín hiệu). "
+            "Ưu tiên 5–10 case (happy + negative + biên); chỉ tăng thêm khi FR/AC còn thiếu. "
             "Toàn bộ nội dung tiếng Việt."
         )
     else:
@@ -334,16 +333,17 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         if n > 1:
             base += (
                 f"\nTài liệu có {n} chức năng (Feature). "
-                "Mỗi chức năng cần ít nhất 6–15 test case (happy path + negative + biên + exception). "
+                "Mỗi chức năng: cover FR/AC trong phạm vi (ưu tiên 5–10 case; "
+                "happy + negative + biên + exception khi có tín hiệu). "
                 "Trường module PHẢI khớp đúng tên từng Feature. "
                 "Không được chỉ sinh TC cho 1–2 module rồi bỏ qua phần còn lại. "
                 "Toàn bộ nội dung tiếng Việt."
             )
         else:
             base += (
-                "\nSinh đủ test case phủ FR/AC/business rule/validation trong tài liệu "
-                "(tối thiểu 8–20 case với SRS lớn — không dừng sớm ở ~10 case). "
-                "Bám sát toàn bộ tài liệu + phân tích DB — không bỏ sót luồng nghiệp vụ. "
+                "\nSinh test case phủ FR/AC/business rule/validation trong tài liệu "
+                "(ưu tiên 6–12 case; tăng khi SRS lớn còn gap). "
+                "Bám sát tài liệu + phân tích — không bỏ sót luồng nghiệp vụ chính. "
                 "Toàn bộ nội dung tiếng Việt."
             )
     if ctx.custom_rules:
@@ -351,6 +351,116 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         cap = 3500 if eng in ("unit", "e2e") else 4000
         base += f"\n\nQUY TẮC BỔ SUNG (ưu tiên cao — cấu hình BE):\n{truncate(ctx.custom_rules, cap)}\n"
     return base
+
+
+def cursor_tc_hidden_chat_enabled() -> bool:
+    """Env AITEST_TC_CURSOR_HIDDEN_CHAT default on — per-module create-chat + 2-turn."""
+    import os
+
+    raw = (os.environ.get("AITEST_TC_CURSOR_HIDDEN_CHAT") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
+    """
+    Turn 0 for Cursor hidden chat — rules + schema only (no Knowledge/source).
+    Keep under ~3–4k chars so resume turns can send delta only.
+    """
+    ctx = ctx or GenerateContext()
+    eng = (ctx.preferred_engine or "").strip().lower()
+    if eng == "unit":
+        type_schema = "Unit"
+        type_line = "ENGINE=UNIT: mọi TC type=Unit (hàm/service/API handler — không browser UI)."
+        example = _VIETNAMESE_TC_EXAMPLE_UNIT
+    elif eng == "e2e":
+        type_schema = "E2E"
+        type_line = "ENGINE=E2E: mọi TC type=E2E (user journey UI theo tài liệu)."
+        example = _VIETNAMESE_TC_EXAMPLE_E2E
+    else:
+        type_schema = "Unit|E2E|API|Chức năng|Phủ định|Biên"
+        type_line = "Phân loại type theo tài liệu (Unit/E2E/API) — không gộp Unit+E2E trong 1 TC."
+        example = _VIETNAMESE_TC_EXAMPLE
+
+    seed = (
+        "Bạn là QA senior. Đây là TURN SEED (conversation ngầm) — ghi nhớ quy tắc; "
+        "CHƯA sinh test case. Turn sau sẽ gửi đúng 1 module + tài liệu liên quan.\n\n"
+        f"{type_line}\n"
+        "Ngôn ngữ: title/steps/expectedResult/precondition/testData/module = TIẾNG VIỆT.\n"
+        "Chỉ dựa vào tài liệu turn sau cung cấp — không bịa domain.\n"
+        "Mỗi lần gen (turn sau): CHỈ 1 module trong scope; 3–6 TC "
+        "(happy + negative + biên nếu có tín hiệu); không tham chiếu module khác.\n\n"
+        "Output turn sau: CHỈ JSON "
+        f'{{"testCases":[{{"title","type":"{type_schema}",'
+        '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
+        '"module","precondition","steps","expectedResult","testData","automationReady":false}]}}\n'
+        f"Ví dụ schema (placeholder):\n{example}\n"
+        "Trả lời turn này đúng 1 dòng: READY"
+    )
+    if ctx.custom_rules:
+        seed += (
+            "\n\nQUY TẮC BỔ SUNG (engine):\n"
+            + truncate(ctx.custom_rules, 2500)
+            + "\n"
+        )
+    return seed
+
+
+def tc_module_gen_user_prompt(
+    title: str, content: str, ctx: GenerateContext | None = None
+) -> str:
+    """
+    Turn 1 for Cursor hidden chat — module slice + source only (rules already seeded).
+    Anti-lazy: force ONLY this module, 3–6 new cases.
+    """
+    ctx = ctx or GenerateContext()
+    module = ""
+    if ctx.feature_titles:
+        module = str(ctx.feature_titles[0] or "").strip()
+    if not module and ctx.topic_scope:
+        import re as _re
+
+        m = _re.search(r"\*\*(.+?)\*\*", ctx.topic_scope or "")
+        if m:
+            module = m.group(1).strip()
+        else:
+            module = (ctx.topic_scope or "").splitlines()[0].strip()[:120]
+    module = module or "(module)"
+
+    parts = [
+        f"## GEN TURN — Sinh TC cho ĐÚNG một module",
+        f"Requirement: {title}",
+        f"Module BẮT BUỘC: «{module}» (trường module trên mọi TC = đúng tên này).",
+        "",
+        "ANTI-LAZY (bắt buộc):",
+        f"- CHỈ sinh TC cho «{module}» — bỏ qua / không tham chiếu module khác.",
+        "- Sinh 3–6 test case MỚI (happy + negative + biên khi có tín hiệu FR/AC).",
+        "- Không nói «đã cover», không trả mảng rỗng, không tóm tắt thay vì JSON.",
+        "- Toàn bộ nội dung tiếng Việt. Trả CHỈ JSON {\"testCases\":[...]}.",
+    ]
+    if ctx.topic_scope:
+        parts.append("## Phạm vi chủ đề\n" + truncate(ctx.topic_scope, 2000))
+    body = (content or "").strip()
+    if body:
+        parts.append(
+            "## Tài liệu / Knowledge (slice module)\n" + truncate(body, 12_000)
+        )
+    if ctx.source_context:
+        parts.append("## Source context\n" + truncate(ctx.source_context, 8_000))
+    if ctx.existing_cases:
+        lines = [f"- {t} ({typ})" for t, typ in ctx.existing_cases[:15]]
+        parts.append(
+            "## TC đã có (không trùng title)\n"
+            + "\n".join(lines)
+            + (
+                f"\n… và {len(ctx.existing_cases) - 15} case khác"
+                if len(ctx.existing_cases) > 15
+                else ""
+            )
+        )
+    parts.append(
+        f"Sinh ngay JSON testCases cho module «{module}» (3–6 case)."
+    )
+    return "\n\n".join(parts)
 
 
 def user_prompt(title: str, content: str, ctx: GenerateContext | None = None) -> str:
@@ -1251,7 +1361,7 @@ def unit_user_prompt(req: UnitRequest) -> str:
     )
     if req.source_under_test_summary.strip():
         base += f"\n### Extracted surface\n{req.source_under_test_summary.strip()}\n"
-    base += f"\n{truncate(req.source_code, 14000)}\n"
+    base += f"\n{truncate(req.source_code, 10000)}\n"
 
     if req.unit_strategy_summary.strip():
         base = (
@@ -1269,8 +1379,8 @@ def unit_user_prompt(req: UnitRequest) -> str:
         )
     if req.related_sources:
         parts = ["\n## Related source (dependencies)\n"]
-        for path, content in req.related_sources[:12]:
-            parts.append(f"### {path}\n{truncate(content, 4000)}\n")
+        for path, content in req.related_sources[:6]:
+            parts.append(f"### {path}\n{truncate(content, 2500)}\n")
         base = base.rstrip() + "\n" + "\n".join(parts)
     if req.test_samples:
         parts = ["\n## Style sample (existing tests — match style only)\n"]
@@ -1406,134 +1516,56 @@ class E2EResult:
     primary_spec_path: str
 
 
-def e2e_system_prompt(*, heal: bool = False) -> str:
+def e2e_system_prompt(*, heal: bool = False, has_storage_state: bool = False) -> str:
     locator_rules = (
-        "- LOCATOR PRIORITY (mandatory — never invent labels):\n"
-        "  1) getByTestId from DOM/source `data-testid` / selector_candidates\n"
-        "  2) getByRole(role, { name }) when role+accessible name exist in DOM snapshot\n"
-        "  3) getByLabel / getByPlaceholder from aria-label / placeholder in DOM or FE source\n"
-        "  4) getByText only for unique visible copy grounded in TC/DOM — never for duplicated verbs\n"
-        "  5) CSS / XPath last resort; never class-hash or layout-only selectors\n"
-        "- When ## DOM snapshot lists `selector_candidates` for an element, prefer the first "
-        "Playwright-style candidate (getByTestId / getByRole / getByLabel) verbatim.\n"
-        "- Scope duplicates: form / getByRole('main') / getByTestId(list) — never bare "
-        "page.getByRole('button', { name }) if DOM shows the same name twice (tab vs submit).\n"
-        "- Map FE source: if ## FE source hint has data-testid / aria-label / name / placeholder, "
-        "use those for Page Object locators — same discipline as Unit tests using SUT source.\n"
-        "- Do NOT invent UI fields (e.g. description, tags) unless they appear in Steps, Expected, "
-        "DOM snapshot, or FE source. If TC mentions a field missing from DOM/source: assert what "
-        "exists and note skip in comment, or use the closest grounded control — do not guess.\n"
+        "- LOCATOR: getByTestId → getByRole+name → getByLabel/Placeholder → getByText (unique) → CSS last. "
+        "Prefer DOM `selector_candidates` / FE attributes; never invent fields.\n"
+        "- Scope duplicates with form/main/testId; no bare button name if DOM shows duplicates.\n"
     )
     step_rules = (
-        "- TC STEPS → CODE (mandatory):\n"
-        "  Parse numbered Steps 1..N and Expected. Spec MUST use test.step('1. …') … matching each "
-        "action step; Expected maps to final expect* / expectSuccess (not skipped).\n"
-        "  Each action step: [action] → locator grounded above → data from Test data / step text.\n"
-        "  Do not merge unrelated steps; do not add login steps inside feature POM when "
-        "ensureAuthenticated / storageState already handles auth.\n"
-        "  Precondition «đã đăng nhập» ⇒ ensureAuthenticated or storageState — not fillEmail in feature page.\n"
-        "- VALIDATION / NEGATIVE TESTS:\n"
-        "  When TC tests form validation (empty field, invalid input, boundary), the submit button "
-        "may be disabled by client-side validation. In that case:\n"
-        "  • PREFERRED: assert the button is disabled: `await expect(submitBtn).toBeDisabled()` — "
-        "this IS the expected result for missing/invalid input.\n"
-        "  • Do NOT use `click({ force: true })` on disabled buttons — browsers ignore forced clicks "
-        "on disabled elements, so no error message will appear.\n"
-        "  • If the TC expects an error message after submit, the form must actually be submittable "
-        "(button enabled). If button is disabled, the validation result IS the disabled state itself.\n"
-        "  • Pattern for validation specs: fill partial data → assert submit button is disabled "
-        "OR assert inline validation text (HTML5 constraint, aria-invalid, etc.).\n"
-        "- ERROR MESSAGE ASSERTIONS:\n"
-        "  • NEVER hardcode exact error message text. App messages vary across projects/languages.\n"
-        "  • Use regex partial match: `page.getByText(/thất bại|fail/i)` or `page.getByText(/lỗi|error/i)`.\n"
-        "  • For `expectErrorMessage()` in page objects, use: "
-        "`await this.page.getByText(/keyword/i).first().waitFor({ state: 'visible', timeout: 5000 })`\n"
-        "  • Pick 1-2 short keywords from the expected message (e.g. 'thất bại', 'error', 'lỗi').\n"
-        "- IMPORT RULE:\n"
-        "  • Each TC has its own folder with its own pages/ and specs/ subfolders.\n"
-        "  • Spec MUST ONLY import from its own ../pages/ folder — NEVER from ../../OtherTC/pages/.\n"
-        "  • Every method called in Spec must exist in the imported Page Object class.\n"
+        "- Map numbered Steps → test.step('1. …'); Expected → final expect. "
+        "Validation: prefer expect(submit).toBeDisabled() over force-click. "
+        "Error text: regex keywords only (no hardcoded full message).\n"
+        "- Spec imports ONLY ../pages/ of this TC folder; every Spec method must exist on POM.\n"
     )
     if heal:
         return (
             "You are a senior Playwright E2E engineer fixing broken selectors.\n"
             "Rules:\n"
             f"{locator_rules}"
-            "- Update Page Object files first; only change the Spec if necessary.\n"
-            "- Method contract is mandatory: every method called in Spec on page object must exist in that page object class.\n"
-            "- If current Spec calls a missing method (e.g. fillEmail), either add that method in page object or rename Spec call to an existing method. Never leave mismatch.\n"
-            "- Prefer stable locators from source/DOM hint (data-testid, name, aria-label, form scope) over plain duplicated text.\n"
-            "- Keep Spec step order; only change locators/method bodies unless a step is impossible with current DOM.\n"
-            "- Return ALL updated files using this format for each file:\n"
-            "  ### FILE: relative/path/to/file.ts\n"
-            "  ```ts\n  ...full file content...\n  ```\n"
-            "- Do not rewrite business journey steps unless the selector force requires it.\n"
-            "- Output only FILE sections (no prose outside fences).\n"
+            "- Update Page Object first; Spec only if needed. Keep method contract.\n"
+            "- Return ALL updated files:\n"
+            "  ### FILE: relative/path.ts\n"
+            "  ```ts\n  ...full file...\n  ```\n"
+            "- Output only FILE sections.\n"
         )
+    auth_short = (
+        "- AUTH: storageState set → no UI login in feature Specs. "
+        "Else post-login journey → fixtures/auth.helper.ts ensureAuthenticated "
+        "(E2E_* env) before POM.goto. Login/Logout TCs stay UI-driven.\n"
+        if not has_storage_state
+        else "- AUTH: storageState present — feature Specs must NOT repeat login UI.\n"
+    )
     return (
-        "You are a senior Playwright TypeScript E2E engineer using Page Object Model.\n"
+        "You are a senior Playwright TypeScript E2E engineer (Page Object Model).\n"
         "Rules:\n"
-        "- Produce SEPARATE Page Object (*.page.ts) and Spec (*.spec.ts) files.\n"
+        "- Emit separate *.page.ts + *.spec.ts (optional minimal playwright.config.ts).\n"
         f"{locator_rules}"
         f"{step_rules}"
-        "- Method contract is mandatory: every method used in Spec must be implemented in the corresponding Page Object class.\n"
-        "- Use one naming convention and keep it consistent (e.g. fillUsername/fillPassword/clickSubmit). Do not invent method names in Spec without implementation.\n"
-        "- Host places files under [{pkg}/]AItest/E2ETest/{Module}/pages|specs/.\n"
-        "- Spec MUST import page objects via relative path from specs folder.\n"
-        "- Do NOT import from node_modules absolute paths or project-internal build folders.\n"
-        "- Keep playwright.config.ts minimal and import only from '@playwright/test'.\n"
-        "- Type portability (mandatory): when importing '@playwright/test', include local shim reference "
-        "header for generated files (`/// <reference path=\"../types/playwright-shim.d.ts\" />` for "
-        "spec/page, `./types/...` for config).\n"
-        "- Include a minimal playwright.config.ts if useful (video on, trace on-first-retry).\n"
-        "- Use baseURL from config; do not hardcode full URLs when target URL is given.\n"
-        "- Navigation: prefer page.goto(path, { waitUntil: 'domcontentloaded' }) — "
-        "NEVER waitUntil: 'networkidle' (SPA/websocket treo rất lâu).\n"
-        "- Prefer expect(locator).toBeVisible() over waitForTimeout / networkidle.\n"
-        "- Page Object baseline: goto() ONLY navigates (page.goto + optional waitForLoadState). "
-        "NEVER assert feature widgets (listitem, todo, table rows, dashboard) inside goto() — "
-        "those belong in expectFormVisible / selectX / expectSuccess after auth.\n"
-        "- If `## Current E2E files` lists an existing page object, REUSE its public methods verbatim — do not invent alternate names (gotoLogin vs goto).\n"
-        "- Before output: self-check — (a) every Spec method exists on POM; "
-        "(b) every locator string appears in DOM selector_candidates or FE source attributes; "
-        "(c) every numbered TC step has a matching test.step.\n"
-        "- NEVER hardcode app-specific routes, labels, or URL regex defaults. Only assert paths/URLs that are explicitly grounded in the provided test case, source hints, or DOM snapshot.\n"
-        "- Keep navigation assertions project-aware: if exact destination path is unknown, verify with stable post-action UI outcomes and state transitions instead of guessed URLs.\n"
-        "- Prefer resilient URL checks derived from input context; avoid brittle assumptions about route naming conventions.\n"
-        "- AUTH / SESSION (bypass login for feature journeys):\n"
-        "  1) If ## Auth storageState is present AND the file is a real Playwright state "
-        "(cookies/origins non-empty) → set use.storageState to `./fixtures/storageState.json` "
-        "(path RELATIVE to playwright.config.ts — never AItest/... from repo root).\n"
-        "  2) If no valid storageState yet but journey is post-login / DOM shows login wall at `/`: "
-        "emit `fixtures/auth.helper.ts` with `ensureAuthenticated(page)` using "
-        "role-aware env resolution: E2E_ROLE + E2E_<ROLE>_USERNAME/PASSWORD, fallback E2E_USERNAME/E2E_PASSWORD, "
-        "and generic getByRole(email|password|login). "
-        "Helper MUST: switch to Login tab if present; fill → wait enabled → click form submit; "
-        "if login returns 401 and Sign-up UI exists, auto-register then retry login once; "
-        "wait for login form/heading hidden; on failure throw clear credential error (do not assert todos). "
-        "Feature Specs MUST `await ensureAuthenticated(page)` BEFORE feature PageObject.goto/select. "
-        "Do NOT emit empty `{}` storageState.json; do NOT put storageState in config until file is real.\n"
-        "  3) Pure Login/Logout / Auth-permission TCs stay UI-driven (no ensureAuthenticated skip).\n"
-        "  4) Prefer one shared Auth helper/page; reuse it — do not duplicate fillEmail/fillPassword in every feature page.\n"
-        "  5) Never write a .spec.ts that only contains `declare module '@playwright/test'` — specs must call test().\n"
-        "  6) If after goto the app shows login UI, failing on missing listitem is wrong — treat as missing auth, not wrong todo locator.\n"
-        "- Feature Spec step order (mandatory, use test.step):\n"
-        "  1) ensureAuthenticated(page) — leave login wall only\n"
-        "  2) pageObject.goto() — navigate only, no feature expects\n"
-        "  3) arrange (selectExisting / open form) — mirrors early TC steps\n"
-        "  4) act (fill + clickSubmit) — mirrors action steps + Test data\n"
-        "  5) assert expectSuccess — mirrors Expected (count/id/title only if TC/DOM supports)\n"
-        "- Return files using this format for EACH file:\n"
-        "  ### FILE: pages/login.page.ts\n"
-        "  ```ts\n  ...\n  ```\n"
-        "  ### FILE: specs/login.spec.ts\n"
-        "  ```ts\n  ...\n  ```\n"
-        "- Paths may be relative to the module folder (pages/…, specs/…) or full AItest/… paths.\n"
-        "- Output only FILE sections (no prose outside fences).\n"
+        f"{auth_short}"
+        "- Host path: [{pkg}/]AItest/E2ETest/{Module}/pages|specs/. Relative imports only.\n"
+        "- Shim: `/// <reference path=\"../types/playwright-shim.d.ts\" />` on generated TS.\n"
+        "- goto: waitUntil domcontentloaded (never networkidle). goto() navigates only — "
+        "no feature asserts inside goto().\n"
+        "- Reuse existing page methods from ## Current E2E files; extend if missing.\n"
+        "- Spec order: auth (if needed) → goto → arrange → act → assert.\n"
+        "- Output only:\n"
+        "  ### FILE: pages/….page.ts\n```ts\n...\n```\n"
+        "  ### FILE: specs/….spec.ts\n```ts\n...\n```\n"
     )
 
 
-def _compact_dom_for_e2e_prompt(dom_snapshot: str, *, limit: int = 8000) -> str:
+def _compact_dom_for_e2e_prompt(dom_snapshot: str, *, limit: int = 6000) -> str:
     """Keep interactive elements + selector_candidates for grounded locators."""
     text = (dom_snapshot or "").strip()
     if not text:
@@ -1546,7 +1578,7 @@ def _compact_dom_for_e2e_prompt(dom_snapshot: str, *, limit: int = 8000) -> str:
         return truncate(text, limit)
     elements = data.get("elements") if isinstance(data.get("elements"), list) else []
     slim_els = []
-    for el in elements[:80]:
+    for el in elements[:50]:
         if not isinstance(el, dict):
             continue
         slim: dict = {}
@@ -1566,13 +1598,13 @@ def _compact_dom_for_e2e_prompt(dom_snapshot: str, *, limit: int = 8000) -> str:
         if isinstance(cands, list) and cands:
             # Prefer Playwright helpers over raw CSS when both exist
             pw = [str(c) for c in cands if str(c).startswith("getBy")]
-            slim["selector_candidates"] = (pw or [str(c) for c in cands])[:4]
+            slim["selector_candidates"] = (pw or [str(c) for c in cands])[:3]
         if slim:
             slim_els.append(slim)
     slim_doc = {
         "targetUrl": data.get("targetUrl"),
         "source": data.get("source"),
-        "routes": (data.get("routes") or [])[:20],
+        "routes": (data.get("routes") or [])[:12],
         "elements": slim_els,
         "locatorHint": (
             "Use selector_candidates / test_id / role+name from this list. "
@@ -1662,19 +1694,10 @@ def e2e_user_prompt(req: E2ERequest) -> str:
         )
     else:
         parts.append(
-            "## Auth strategy (no storageState path provided yet)\n"
-            "Host AITest auto-discovers credentials from the SUT project "
-            "(.ai-test/auth artifact first; fallback .env/.env.e2e E2E_USERNAME+E2E_PASSWORD, role keys E2E_ADMIN_USERNAME, "
-            "fixtures/auth/roles.json, or existing storageState) — Specs must NOT require "
-            "typing login into AITest UI.\n"
-            "If this journey is NOT Login/Logout: emit fixtures/auth.helper.ts with "
-            "ensureAuthenticated(page) using process.env E2E_* (injected by host from discovery), "
-            "supporting both single-role and multi-role (E2E_ROLE + E2E_<ROLE>_*). "
-            "If storageState already valid: feature Specs skip login UI entirely.\n"
-            "Auth helper steps: Login tab → fill → enabled submit → click → login wall hidden. "
-            "Feature Specs MUST call ensureAuthenticated BEFORE feature PageObject actions "
-            "only when storageState is absent.\n"
-            "If this IS a Login/Logout TC: drive the login UI in the Spec; no ensureAuthenticated.\n"
+            "## Auth strategy (no storageState yet)\n"
+            "Post-login journeys: emit fixtures/auth.helper.ts ensureAuthenticated(page) "
+            "using E2E_* env (role-aware). Call before POM.goto. "
+            "Login/Logout TCs: drive login UI in Spec — no ensureAuthenticated skip.\n"
         )
     if req.seed_command.strip() or req.teardown_command.strip():
         parts.append(
@@ -1685,47 +1708,52 @@ def e2e_user_prompt(req: E2ERequest) -> str:
     if req.dom_snapshot.strip():
         parts.append(
             "## DOM / interactive elements snapshot (GROUND TRUTH for locators)\n"
-            + _compact_dom_for_e2e_prompt(req.dom_snapshot, limit=10000)
+            + _compact_dom_for_e2e_prompt(req.dom_snapshot, limit=6000)
             + "\n"
-            "If this snapshot only shows Login/Auth controls, still generate the feature journey "
-            "using FE source below + TC steps — but auth first via ensureAuthenticated/storageState.\n"
+            "If snapshot is mostly Login, still generate the feature journey from FE source + TC "
+            "with auth first via ensureAuthenticated/storageState.\n"
         )
     else:
         parts.append(
             "## DOM snapshot\n(none — derive locators from FE source / TC labels only; "
             "prefer getByRole+name from Steps; do not invent testids).\n"
         )
+    src_cap = 4000 if req.dom_snapshot.strip() else 8000
     if req.source_code.strip():
         parts.append(
             f"## FE source hint (`{req.source_file_name or 'source'}`)\n"
-            "Extract data-testid, aria-label, name, placeholder, button text, routes from this code "
-            "the same way Unit generation reads SUT APIs — use them in Page Object locators.\n"
-            + truncate(req.source_code, 8000)
+            "Extract data-testid, aria-label, name, placeholder, button text, routes.\n"
+            + truncate(req.source_code, src_cap)
             + "\n"
         )
-    for path, content in req.related_sources[:4]:
-        parts.append(f"## Related `{path}`\n{truncate(content, 2500)}\n")
+    for path, content in req.related_sources[:3]:
+        parts.append(f"## Related `{path}`\n{truncate(content, 2000)}\n")
     if req.existing_files:
         heal = bool(req.repair_context.strip())
         parts.append(
             "## Current E2E files (REUSE page object API — extend, do not rename methods)\n"
         )
-        # Heal needs full bodies; fresh generate in batch only needs page API surface.
+        # Fresh gen: page API only (no other TCs' specs). Heal: full bodies.
+        n = 0
         for path, content in req.existing_files[:8]:
             low = path.replace("\\", "/").lower()
-            if heal or "/specs/" in f"/{low}/" or low.endswith(".spec.ts"):
+            is_spec = "/specs/" in f"/{low}/" or low.endswith(".spec.ts")
+            if not heal and is_spec:
+                continue
+            if heal or is_spec:
                 body = truncate(content, 5000 if heal else 2500)
             else:
-                body = _page_api_summary(content, max_chars=2000)
+                body = _page_api_summary(content, max_chars=1500)
             parts.append(f"### FILE: {path}\n```ts\n{body}\n```\n")
+            n += 1
+            if n >= 6:
+                break
     if req.repair_context.strip():
         parts.append(f"## Repair context\n{truncate(req.repair_context.strip(), 5000)}\n")
     parts.append(
         "Generate Playwright Page Object + Spec (and config if needed) for this journey.\n"
-        "If Current E2E files already define the page object, prefer adding a Spec only "
-        "(or minimal page extend) — do not rewrite the whole page unless required.\n"
-        "Important: every locator must be grounded in DOM selector_candidates, FE source attributes, "
-        "or explicit TC step labels — no invented fields/URLs.\n"
+        "Prefer Spec-only or minimal page extend when Current E2E files already define the POM.\n"
+        "Every locator must be grounded in DOM selector_candidates, FE attributes, or TC steps.\n"
     )
     return "\n".join(parts)
 

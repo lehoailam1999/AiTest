@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
@@ -37,6 +38,37 @@ from app.services.project_inspector import (
     ProjectInspector,
     apply_stack_to_generate_fields,
 )
+
+# Short-lived cache — batch generate hits same projectRoot repeatedly
+_INSPECT_CACHE: dict[str, tuple[float, Any]] = {}
+_INSPECT_TTL_SEC = 120.0
+
+
+def _cached_inspect_project(
+    project_root: str,
+    *,
+    source_relative_path: str | None,
+    module: str,
+    package_prefix: str | None,
+):
+    key = f"{project_root}|{source_relative_path or ''}|{module}|{package_prefix or ''}"
+    now = time.monotonic()
+    hit = _INSPECT_CACHE.get(key)
+    if hit and now - hit[0] < _INSPECT_TTL_SEC:
+        return hit[1]
+    stack = ProjectInspector.inspect_project(
+        project_root,
+        source_relative_path=source_relative_path,
+        module=module,
+        package_prefix=package_prefix,
+    )
+    _INSPECT_CACHE[key] = (now, stack)
+    if len(_INSPECT_CACHE) > 64:
+        # Drop oldest
+        oldest = sorted(_INSPECT_CACHE.items(), key=lambda kv: kv[1][0])[:16]
+        for k, _ in oldest:
+            _INSPECT_CACHE.pop(k, None)
+    return stack
 
 router = APIRouter(
     prefix="/api", tags=["generate-unit"], dependencies=[Depends(get_current_user)]
@@ -187,7 +219,7 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
     if project_root:
         try:
             pkg_prefix = body.get("packagePrefix", body.get("package_prefix"))
-            stack_inspect = ProjectInspector.inspect_project(
+            stack_inspect = _cached_inspect_project(
                 project_root,
                 source_relative_path=source_file_name
                 or str(body.get("sourceFileName") or "")

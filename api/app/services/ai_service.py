@@ -257,7 +257,9 @@ async def generate_e2e_for_connection(
         meta["provider"] = adapter.vendor
         return result, meta
 
-    sys_p = e2e_system_prompt(heal=heal)
+    sys_p = e2e_system_prompt(
+        heal=heal, has_storage_state=bool((req.storage_state_rel or "").strip())
+    )
     usr_p = e2e_user_prompt(req)
     raw = await adapter.chat(sys_p, usr_p)
     if isinstance(adapter, BaseCLIAdapter):

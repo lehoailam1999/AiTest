@@ -49,10 +49,14 @@ def test_steps_checklist_numbers_and_mentions_test_step():
 
 def test_e2e_system_prompt_has_locator_and_step_rules():
     sys_p = e2e_system_prompt()
-    assert "LOCATOR PRIORITY" in sys_p
-    assert "TC STEPS" in sys_p
+    assert "LOCATOR" in sys_p
+    assert "test.step" in sys_p or "Map numbered" in sys_p
+    assert len(sys_p) < 3500  # slim vs legacy wall-of-text
     heal = e2e_system_prompt(heal=True)
-    assert "LOCATOR PRIORITY" in heal
+    assert "LOCATOR" in heal
+    slim_auth = e2e_system_prompt(has_storage_state=True)
+    assert "storageState present" in slim_auth
+    assert "ensureAuthenticated" not in slim_auth or "AUTH: storageState" in slim_auth
 
 
 def test_e2e_user_prompt_grounds_dom_and_steps():

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from app.llm.base import truncate
 
-MAX_FILES = 40
-MAX_PER_FILE = 5_000
-MAX_TOTAL = 24_000
+MAX_FILES = 24
+MAX_PER_FILE = 2_500
+MAX_TOTAL = 20_000
 
 
 def _files_from_packet(data: dict) -> list[tuple[str, str, str, str]]:

@@ -15,25 +15,25 @@ export type ContextBudgetPolicy = {
   maxReferenceFiles: number;
 };
 
-/** Default IDE-first budget (unit generate) */
+/** Default IDE-first budget (unit generate) — slim for token/speed */
 export const IDE_CONTEXT_BUDGET: ContextBudgetPolicy = {
-  maxTotalChars: 48_000,
-  maxPrimaryChars: 16_000,
-  maxDependencyChars: 6_000,
-  maxOverviewChars: 3_500,
-  maxDependencyFiles: 8,
-  maxOverviewFiles: 2,
-  maxReferenceFiles: 4,
+  maxTotalChars: 28_000,
+  maxPrimaryChars: 10_000,
+  maxDependencyChars: 2_500,
+  maxOverviewChars: 2_000,
+  maxDependencyFiles: 6,
+  maxOverviewFiles: 0,
+  maxReferenceFiles: 2,
 };
 
-/** FS fallback — tighter overview to avoid module floods */
+/** FS fallback — narrow by default (broadLocal opt-in) */
 export const FS_CONTEXT_BUDGET: ContextBudgetPolicy = {
-  maxTotalChars: 56_000,
-  maxPrimaryChars: 12_000,
-  maxDependencyChars: 6_000,
-  maxOverviewChars: 3_500,
-  maxDependencyFiles: 10,
-  maxOverviewFiles: 3,
+  maxTotalChars: 32_000,
+  maxPrimaryChars: 10_000,
+  maxDependencyChars: 2_500,
+  maxOverviewChars: 2_000,
+  maxDependencyFiles: 6,
+  maxOverviewFiles: 0,
   maxReferenceFiles: 0,
 };
 

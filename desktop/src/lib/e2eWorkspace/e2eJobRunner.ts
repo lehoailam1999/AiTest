@@ -305,7 +305,9 @@ export async function generateE2eBatch(opts: {
       // Snapshot POM pages under lock so parallel workers don't race merge;
       // each generate still binds API to this tc.id → files map về đúng TC.
       const existingPages = await mergeLock.run(() =>
-        allFiles.filter((f) => f.kind === "page" || /\/pages\//.test(f.path))
+        allFiles
+          .filter((f) => f.kind === "page" || /\/pages\//.test(f.path))
+          .slice(0, 6)
       );
 
       try {

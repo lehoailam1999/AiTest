@@ -55,18 +55,18 @@ export type ContextBuildPolicy = {
 };
 
 export const DEFAULT_CONTEXT_POLICY: ContextBuildPolicy = {
-  maxDependencyFiles: 10,
-  maxBytesPerFile: 6_000,
-  maxDependencyDepth: 3,
+  maxDependencyFiles: 6,
+  maxBytesPerFile: 2_500,
+  maxDependencyDepth: 2,
   broadLocalContext: false,
-  maxModuleRelatedFiles: 24,
+  maxModuleRelatedFiles: 12,
 };
 
 /** Policy khi bật «Đọc rộng source local theo module» */
 export const BROAD_CONTEXT_POLICY: ContextBuildPolicy = {
-  maxDependencyFiles: 18,
-  maxBytesPerFile: 8_000,
-  maxDependencyDepth: 4,
+  maxDependencyFiles: 12,
+  maxBytesPerFile: 5_000,
+  maxDependencyDepth: 3,
   broadLocalContext: true,
-  maxModuleRelatedFiles: 40,
+  maxModuleRelatedFiles: 24,
 };

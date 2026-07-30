@@ -2,6 +2,8 @@
 
 from app.features.requirement_studio.snapshot_prompt import (
     build_freeze_bundle,
+    module_scoped_snapshot_prompt,
+    slice_freeze_content_for_module,
     snapshot_payload_to_prompt,
 )
 
@@ -110,3 +112,66 @@ def test_freeze_prompt_dedup_helpers():
     assert "TC1" not in stripped
     assert "Knowledge workspace" in stripped
     assert "hi" in stripped
+
+def test_module_scoped_freeze_is_slimmer_than_full():
+    huge_doc = "x" * 20_000
+    bundle = build_freeze_bundle(
+        knowledge_payload={
+            "features": [
+                {"name": "Login", "description": "Auth flow"},
+                {"name": "Todos", "description": "CRUD"},
+            ],
+            "useCases": [
+                {"name": "Login happy", "steps": "1. Open\n2. Submit"},
+                {"name": "Create todo", "steps": "1. Add"},
+            ],
+            "businessRules": [{"id": "BR1", "text": "Login max 5 attempts"}],
+            "validationRules": [{"field": "email", "rule": "required"}],
+            "acceptanceCriteria": [{"text": "User reaches dashboard after Login"}],
+            "gaps": [],
+        },
+        knowledge_summary="App with Login and Todos",
+        uploaded_files=[{"fileName": "big.md", "text": huge_doc}],
+        chat_transcript=[],
+        existing_test_cases=[{"title": "Old", "type": "E2E"}],
+    )
+    full = snapshot_payload_to_prompt(
+        title="App", summary="App", payload=bundle, knowledge_version=2
+    )
+    slim = module_scoped_snapshot_prompt(
+        title="App",
+        summary="App",
+        payload=bundle,
+        knowledge_version=2,
+        module="Login",
+        soft_max=12_000,
+    )
+    assert "Login" in slim
+    assert len(slim) < len(full)
+    assert len(slim) <= 12_000
+    # Fan-out skips full uploaded docs
+    assert huge_doc[:100] not in slim
+
+
+def test_slice_freeze_content_uses_payload_when_present():
+    bundle = build_freeze_bundle(
+        knowledge_payload={
+            "features": [{"name": "Reports", "description": "Export"}],
+            "useCases": [{"name": "Export PDF", "steps": "1. Click"}],
+        },
+        knowledge_summary="Reports",
+        uploaded_files=[{"fileName": "a.md", "text": "noise " * 5000}],
+        chat_transcript=[],
+        existing_test_cases=[],
+    )
+    out = slice_freeze_content_for_module(
+        "ignored full text",
+        "Reports",
+        soft_max=8_000,
+        snap_payload=bundle,
+        title="R",
+        summary="Reports",
+        knowledge_version=1,
+    )
+    assert "Reports" in out
+    assert "Export" in out or "PDF" in out

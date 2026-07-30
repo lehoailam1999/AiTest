@@ -14,12 +14,15 @@ from app.llm.base import (
     TestCaseDraft,
     UnitRequest,
     UnitResult,
+    cursor_tc_hidden_chat_enabled,
     e2e_result_from_raw,
     e2e_system_prompt,
     e2e_user_prompt,
     infer_language,
     parse_test_cases_json,
     system_prompt,
+    tc_module_gen_user_prompt,
+    tc_seed_prompt,
     unit_result_from_raw,
     unit_system_prompt,
     unit_user_prompt,
@@ -117,6 +120,18 @@ class BaseCLIAdapter(BaseLLMAdapter):
             topic_key = (ctx.topic_scope.splitlines()[0] or "")[:80]
         self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
 
+        # Cursor per-module hidden chat: create-chat → seed → gen (no cross-module resume).
+        use_hidden = (
+            self.vendor == "cursor-cli"
+            and create_chat
+            and not resume_chat_id
+            and cursor_tc_hidden_chat_enabled()
+        )
+        if use_hidden:
+            return await self._generate_test_cases_cursor_hidden(
+                title, requirement_text, ctx=ctx, topic_key=topic_key
+            )
+
         chat_id = resume_chat_id
         if self.vendor == "cursor-cli" and create_chat and not chat_id:
             create_fn = getattr(self, "create_chat", None)
@@ -130,6 +145,110 @@ class BaseCLIAdapter(BaseLLMAdapter):
         if isinstance(chat_id, str) and chat_id.strip():
             setattr(self, "last_cursor_chat_id", chat_id.strip())
 
+        return await self._generate_test_cases_oneshot_full(
+            title,
+            requirement_text,
+            ctx=ctx,
+            topic_key=topic_key,
+            prefer_oneshot=prefer_oneshot,
+            resume_chat_id=chat_id,
+        )
+
+    async def _generate_test_cases_cursor_hidden(
+        self,
+        title: str,
+        requirement_text: str,
+        *,
+        ctx: GenerateContext,
+        topic_key: str | None,
+    ) -> list[TestCaseDraft]:
+        """Per-module: create-chat → turn0 seed → turn1 gen; fallback full oneshot."""
+        create_fn = getattr(self, "create_chat", None)
+        chat_id: str | None = None
+        if callable(create_fn):
+            try:
+                chat_id = await create_fn()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Cursor create-chat for TC hidden chat failed: %s", e)
+                self._progress(
+                    f"Cursor CLI: create-chat lỗi — fallback oneshot full ({e})"
+                )
+                chat_id = None
+
+        if not (isinstance(chat_id, str) and chat_id.strip()):
+            return await self._generate_test_cases_oneshot_full(
+                title,
+                requirement_text,
+                ctx=ctx,
+                topic_key=topic_key,
+                prefer_oneshot=True,
+                resume_chat_id=None,
+            )
+
+        chat_id = chat_id.strip()
+        setattr(self, "last_cursor_chat_id", chat_id)
+
+        seed = tc_seed_prompt(ctx)
+        gen_user = tc_module_gen_user_prompt(title, requirement_text, ctx)
+        feat = ", ".join((ctx.feature_titles or [])[:6]) or "(all)"
+        self._progress("--- CURSOR HIDDEN CHAT (per-module) ---")
+        self._progress(
+            f"cursor_chat={chat_id[:24]}… · turn0 seed · turn1 gen · "
+            f"modules=[{feat}] · sizes: seed={len(seed):,} | gen={len(gen_user):,}"
+        )
+        self._progress(f"[seed preview]\n{chr(10).join(seed.splitlines()[:8])}\n…")
+        self._progress(f"[gen preview]\n{chr(10).join(gen_user.splitlines()[:14])}\n…")
+
+        try:
+            self._progress("Cursor CLI: turn0 seed (rules/schema)…")
+            await self._run_oneshot(seed, resume_chat_id=chat_id)
+            self._progress("Cursor CLI: turn1 gen (module slice)…")
+            raw = await self._run_oneshot(gen_user, resume_chat_id=chat_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Cursor hidden 2-turn failed, fallback oneshot: %s", e)
+            self._progress(f"Cursor CLI: 2-turn lỗi — fallback oneshot full ({e})")
+            return await self._generate_test_cases_oneshot_full(
+                title,
+                requirement_text,
+                ctx=ctx,
+                topic_key=topic_key,
+                prefer_oneshot=True,
+                resume_chat_id=None,
+            )
+
+        self._progress(
+            f"Cursor CLI: turn1 xong (~{len(raw):,} ký tự), đang parse JSON…"
+        )
+        try:
+            drafts = self._parse_tc_raw(raw)
+            self._progress(f"Parse OK — {len(drafts)} test case")
+            return drafts
+        except Exception as parse_exc:  # noqa: BLE001
+            logger.warning(
+                "Cursor hidden turn1 parse failed, retry oneshot full: %s", parse_exc
+            )
+            self._progress(
+                "Cursor CLI: parse turn1 thất bại — retry oneshot full (không resume)…"
+            )
+            return await self._generate_test_cases_oneshot_full(
+                title,
+                requirement_text,
+                ctx=ctx,
+                topic_key=topic_key,
+                prefer_oneshot=True,
+                resume_chat_id=None,
+            )
+
+    async def _generate_test_cases_oneshot_full(
+        self,
+        title: str,
+        requirement_text: str,
+        *,
+        ctx: GenerateContext,
+        topic_key: str | None,
+        prefer_oneshot: bool | None = None,
+        resume_chat_id: str | None = None,
+    ) -> list[TestCaseDraft]:
         sys_p = system_prompt(ctx)
         usr_p = user_prompt(title, requirement_text, ctx)
         prompt = (
@@ -137,7 +256,6 @@ class BaseCLIAdapter(BaseLLMAdapter):
             "Trả về CHỈ JSON hợp lệ (object có testCases hoặc array)."
         )
 
-        # Nhật ký: mô tả hệ thống đang gửi gì (không dump full prompt)
         scope_line = (ctx.topic_scope or "").splitlines()[0] if ctx.topic_scope else ""
         feat = ", ".join((ctx.feature_titles or [])[:6]) or "(all)"
         src_len = len(ctx.source_context or "")
@@ -150,13 +268,12 @@ class BaseCLIAdapter(BaseLLMAdapter):
             f"title={title[:120]} | modules=[{feat}] | "
             f"topic={scope_line[:100] or '(none)'} | existing_tc={len(ctx.existing_cases or [])}"
         )
-        if chat_id:
-            self._progress(f"cursor_resume={str(chat_id)[:24]}…")
+        if resume_chat_id:
+            self._progress(f"cursor_resume={str(resume_chat_id)[:24]}…")
         self._progress(
             f"sizes: system={len(sys_p):,} | user={len(usr_p):,} | "
             f"source_ctx={src_len:,} | total_prompt={len(prompt):,} chars"
         )
-        # Preview đầu system + user để người dùng thấy đang yêu cầu gì
         sys_preview = "\n".join(sys_p.splitlines()[:8])
         usr_preview = "\n".join(usr_p.splitlines()[:14])
         self._progress(f"[system preview]\n{sys_preview}\n…")
@@ -166,7 +283,7 @@ class BaseCLIAdapter(BaseLLMAdapter):
             prompt,
             topic_key=topic_key,
             prefer_oneshot=prefer_oneshot,
-            resume_chat_id=chat_id,
+            resume_chat_id=resume_chat_id,
         )
         self._progress(
             f"AI CLI ({self.vendor}): đã nhận phản hồi (~{len(raw):,} ký tự), đang parse JSON…"
@@ -174,16 +291,17 @@ class BaseCLIAdapter(BaseLLMAdapter):
         raw_preview = (raw or "").strip()[:500].replace("\r", "")
         if raw_preview:
             self._progress(f"[response preview]\n{raw_preview}\n…")
+        drafts = self._parse_tc_raw(raw)
+        self._progress(f"Parse OK — {len(drafts)} test case")
+        return drafts
+
+    def _parse_tc_raw(self, raw: str) -> list[TestCaseDraft]:
         try:
-            drafts = parse_test_cases_json(raw)
-            self._progress(f"Parse OK — {len(drafts)} test case")
-            return drafts
+            return parse_test_cases_json(raw)
         except Exception:
             rows = clean_and_parse_json_array(raw)
             wrapped = json.dumps({"testCases": rows}, ensure_ascii=False)
-            drafts = parse_test_cases_json(wrapped)
-            self._progress(f"Parse (salvage) OK — {len(drafts)} test case")
-            return drafts
+            return parse_test_cases_json(wrapped)
 
     async def chat(
         self,
@@ -208,7 +326,9 @@ class BaseCLIAdapter(BaseLLMAdapter):
         Cursor Agent must stay on oneshot ``--mode ask`` so it cannot write into
         the AITest product workspace; host applies files under projectRoot only.
         """
-        sys_p = e2e_system_prompt(heal=heal)
+        sys_p = e2e_system_prompt(
+            heal=heal, has_storage_state=bool((req.storage_state_rel or "").strip())
+        )
         usr_p = e2e_user_prompt(req)
         prompt = (
             f"{sys_p}\n\n---\n\n{usr_p}\n\n"

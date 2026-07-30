@@ -28,7 +28,7 @@ from app.serializers import connection_dto, job_dto, source_dto
 from app.services.connection_service import (
     connection_api_key,
 )
-from app.llm.base import GenerateContext
+from app.llm.base import GenerateContext, cursor_tc_hidden_chat_enabled
 from app.services.ai_service import (
     RUNNER_AI_CLI,
     connection_is_cursor_cli,
@@ -437,6 +437,7 @@ def _source_scan_prompt_block(
     max_files: int = 36,
     module_hint: str | None = None,
     char_budget: int = 55_000,
+    prefer_ui: bool = False,
 ) -> str:
     """
     Build compact source context from bound workspace root.
@@ -464,14 +465,33 @@ def _source_scan_prompt_block(
     }
     candidates = [f for f in items if (f.extension or "").lower() in allowed_ext]
     tokens = _module_tokens(module_hint or "")
-    if tokens:
+    ui_hints = (
+        "page",
+        "pages",
+        "component",
+        "components",
+        "route",
+        "routes",
+        "view",
+        "views",
+        "screen",
+        "ui",
+        "frontend",
+        "web",
+    )
+
+    def _ui_bonus(path_l: str) -> int:
+        if not prefer_ui:
+            return 0
+        return sum(1 for h in ui_hints if h in path_l)
+
+    if tokens or prefer_ui:
         scored: list[tuple[int, object]] = []
         for f in candidates:
             path_l = (f.relative_path or "").lower()
-            score = sum(1 for t in tokens if t in path_l)
+            score = sum(1 for t in tokens if t in path_l) + _ui_bonus(path_l)
             scored.append((score, f))
         scored.sort(key=lambda x: (-x[0], x[1].relative_path or ""))
-        # Prefer matching paths, then fill remaining slots
         matched = [f for s, f in scored if s > 0][:max_files]
         if len(matched) < max(8, max_files // 3):
             rest = [f for s, f in scored if s == 0]
@@ -645,17 +665,18 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         auth_hint = str(engine_hint.get("authHint") or "").strip()
         focus_modules = str(engine_hint.get("focusModules") or "").strip()
 
-        # Source scan: keep full for Unit; slightly tighter for E2E (UI journey needs less code dump)
-        scan_files, scan_budget = (36, 55_000)
+        # Source scan: tighter budgets (token/speed). Prefer UI paths for E2E.
+        scan_files, scan_budget = (24, 28_000)
         if preferred_engine == "e2e":
-            scan_files, scan_budget = (24, 36_000)
+            scan_files, scan_budget = (16, 18_000)
         elif preferred_engine == "unit":
-            scan_files, scan_budget = (36, 55_000)
+            scan_files, scan_budget = (24, 28_000)
         source_scan_ctx = _source_scan_prompt_block(
             job.project_id,
             max_files=scan_files,
             module_hint=default_module or focus_modules or None,
             char_budget=scan_budget,
+            prefer_ui=preferred_engine == "e2e",
         )
 
         from app.features.requirement_studio.snapshot_prompt import (
@@ -876,34 +897,35 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
 
         try:
             # Nhiều Feature → fan-out 1 LLM call / module.
-            # Cursor CLI: oneshot độc lập / module (không --resume chung — resume từng thiếu TC).
+            # Cursor: per-module create-chat + 2-turn (seed→gen); không resume chung job.
             # CLI khác: song song + warm interactive session pool.
             titles_for_fan = [t for t in feature_titles if t]
             is_cursor = connection_is_cursor_cli(conn)
+            cursor_hidden = bool(is_cursor and cursor_tc_hidden_chat_enabled())
             if len(titles_for_fan) > 1 and not topic_scope_text:
                 used_fanout = True
                 total = len(titles_for_fan)
                 if is_cursor:
-                    # Parallel oneshot độc lập (không --resume chung). Default 2 ≈ ~½ wall time.
+                    # Parallel per-module (hidden 2-turn hoặc oneshot). Default concurrency 3.
                     try:
                         concurrency = max(
                             1,
                             min(
-                                2,
+                                4,
                                 int(
                                     os.environ.get(
                                         "AITEST_TC_FANOUT_CONCURRENCY_CURSOR",
-                                        "2",
+                                        "3",
                                     )
                                 ),
                             ),
                         )
                     except ValueError:
-                        concurrency = 2
-                    # Budget đủ SRS/analysis (~6–15 TC/module); progressive persist vẫn giữ.
-                    content_soft_max = 20_000
-                    source_soft_max = 14_000
-                    analysis_soft_max = 10_000
+                        concurrency = 3
+                    # Slimmer per-module budgets (module-scoped freeze slice)
+                    content_soft_max = 12_000
+                    source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
+                    analysis_soft_max = 6_000
                 else:
                     try:
                         concurrency = max(
@@ -911,19 +933,35 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         )
                     except ValueError:
                         concurrency = 3
-                    content_soft_max = 20_000
-                    source_soft_max = 14_000
-                    analysis_soft_max = 10_000
+                    content_soft_max = 12_000
+                    source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
+                    analysis_soft_max = 6_000
+
+                from app.features.requirement_studio.snapshot_prompt import (
+                    parse_json_field,
+                    slice_freeze_content_for_module,
+                )
+
+                snap_bundle = parse_json_field(snap.payload_json) if snap else None
+                snap_title = (snap.title if snap else None) or title
+                snap_summary = getattr(snap, "summary", None) if snap else None
+                snap_kv = int(getattr(snap, "knowledge_version", 0) or 0) if snap else 0
 
                 sem = asyncio.Semaphore(concurrency)
                 warm_key = f"tc-job-{job_id}"
                 warm_lock = asyncio.Lock()
                 warm_ready = asyncio.Event()
 
+                if is_cursor:
+                    cursor_mode_label = (
+                        "cursor-hidden-chat" if cursor_hidden else "cursor-oneshot"
+                    )
+                else:
+                    cursor_mode_label = "warm-pool"
                 set_job_progress(
                     job_id,
                     f"Fan-out {total} module · concurrency={concurrency}"
-                    + (" · cursor-oneshot" if is_cursor else " · warm-pool")
+                    + f" · {cursor_mode_label}"
                     + " — bắt đầu…",
                 )
 
@@ -933,9 +971,19 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             job_id,
                             f"Module {idx}/{total}: {feat_title} — đang gọi AI CLI…",
                         )
-                        scoped_content = _filter_text_for_module(
-                            content, feat_title, soft_max=content_soft_max
+                        scoped_content = slice_freeze_content_for_module(
+                            content,
+                            feat_title,
+                            soft_max=content_soft_max,
+                            snap_payload=snap_bundle,
+                            title=snap_title,
+                            summary=snap_summary,
+                            knowledge_version=snap_kv,
                         )
+                        if not scoped_content.strip():
+                            scoped_content = _filter_text_for_module(
+                                content, feat_title, soft_max=content_soft_max
+                            )
                         # Prefer module-filtered source; fall back to analysis-only if empty
                         scoped_src = _filter_text_for_module(
                             merged_source_context or "",
@@ -969,8 +1017,8 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         )
                         try:
                             if is_cursor:
-                                # Oneshot độc lập / module — đủ context, không resume chung
-                                # (resume chung từng làm thiếu TC so với Phân tích).
+                                # Per-module chat (create_chat) khi hidden bật; env=0 → oneshot full.
+                                # Không bao giờ resume chung giữa các module.
                                 part, meta = await generate_test_cases_for_connection(
                                     conn,
                                     title,
@@ -980,7 +1028,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                                     on_progress=_cli_progress,
                                     prefer_oneshot=True,
                                     session_topic_key=f"{warm_key}-{idx}",
-                                    create_chat=False,
+                                    create_chat=cursor_hidden,
                                 )
                             else:
                                 # First module(s): cold oneshot. After one success: warm interactive
@@ -1051,7 +1099,12 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     clear_job_progress(job_id)
                     return
             else:
-                set_job_progress(job_id, "Đang gọi AI CLI sinh test case…")
+                if is_cursor and cursor_hidden:
+                    set_job_progress(
+                        job_id, "Đang gọi AI CLI sinh test case (cursor-hidden-chat)…"
+                    )
+                else:
+                    set_job_progress(job_id, "Đang gọi AI CLI sinh test case…")
                 drafts, runner_meta = await generate_test_cases_for_connection(
                     conn,
                     title,
@@ -1060,7 +1113,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     api_key=api_key,
                     on_progress=_cli_progress,
                     prefer_oneshot=True if is_cursor else None,
-                    create_chat=bool(is_cursor),
+                    create_chat=cursor_hidden,
                 )
         except Exception as exc:  # noqa: BLE001
             _fail_job(db, job_id, str(exc))

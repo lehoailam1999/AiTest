@@ -156,6 +156,13 @@ async function resolveTcSourcePrimary(opts: {
   return { primary, related, reason };
 }
 
+function tcHasExplicitSourceHint(tc: TestCase): boolean {
+  const blob = `${tc.testData || ""}\n${tc.precondition || ""}\n${tc.steps || ""}`;
+  return /\b(code|path)\s*:/i.test(blob);
+}
+
+type ScopeRank = { primary: string | null; related: string[]; reason: string };
+
 /** Requirement Studio workspace (+ optional legacy) for Unit Engine selectors. */
 type ReqOption = {
   id: string;
@@ -239,7 +246,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const sourceFileRef = useRef<string | undefined>(undefined);
   const relatedSourceFilesRef = useRef<string[]>([]);
   /** Đọc rộng file local theo module — gửi kèm job, không lưu DB */
-  const [broadLocalContext, setBroadLocalContext] = useState(true);
+  const [broadLocalContext, setBroadLocalContext] = useState(false);
   /** FE lọc ứng viên → AI xếp hạng path */
   const [useAiScope, setUseAiScope] = useState(true);
   /** P2: hiện file combobox (fallback) khi scope auto chưa khớp */
@@ -268,10 +275,29 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const [sourceRootTick, setSourceRootTick] = useState(0);
   const [batchRunStatus, setBatchRunStatus] = useState<BatchRunStatus>("idle");
   const batchControlRef = useRef(createBatchRunControl());
+  /** Batch: reuse AI/heuristic scope per module (unless TC has code:/path: hint). */
+  const moduleScopeCacheRef = useRef<Map<string, ScopeRank>>(new Map());
 
   useEffect(() => {
     return batchControlRef.current.subscribe(setBatchRunStatus);
   }, []);
+
+  async function resolveTcSourcePrimaryCached(
+    opts: Parameters<typeof resolveTcSourcePrimary>[0]
+  ): Promise<ScopeRank> {
+    const modKey = (opts.testCase.module || "").trim().toLowerCase() || "__none__";
+    if (!tcHasExplicitSourceHint(opts.testCase)) {
+      const hit = moduleScopeCacheRef.current.get(modKey);
+      if (hit?.primary) {
+        return { ...hit, reason: `${hit.reason} · module-cache` };
+      }
+    }
+    const ranked = await resolveTcSourcePrimary(opts);
+    if (!tcHasExplicitSourceHint(opts.testCase) && ranked.primary) {
+      moduleScopeCacheRef.current.set(modKey, ranked);
+    }
+    return ranked;
+  }
 
   const [requirementsList, setRequirementsList] = useState<ReqOption[]>([]);
   const [allTestCases, setAllTestCases] = useState<TestCase[]>([]);
@@ -794,7 +820,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         : await ideListSourceFiles(localPath, sourceExtensionsForLanguage(language));
     const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
       ?.codeAliases;
-    const ranked = await resolveTcSourcePrimary({
+    const ranked = await resolveTcSourcePrimaryCached({
       projectId: project.id,
       workspaceId: wsId,
       testCase: tc,
@@ -1019,6 +1045,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setBusy(true);
     const control = batchControlRef.current;
     control.start();
+    moduleScopeCacheRef.current.clear();
     setBatchProgress({ current: 0, total: workList.length, label: workList[0].title });
 
     let campaignId: string | undefined;
@@ -1168,6 +1195,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setBusy(true);
     const control = batchControlRef.current;
     control.start();
+    moduleScopeCacheRef.current.clear();
     setBatchProgress({ current: 0, total: workList.length, label: workList[0].title });
 
     let campaignId: string | undefined;
