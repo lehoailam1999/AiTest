@@ -28,8 +28,14 @@
       }
     ],
     "bundle": {
-      "active": false,
-      "identifier": "com.aitest.desktop"
+      "active": true,
+      "targets": [
+        "msi"
+      ],
+      "identifier": "com.aitest.desktop",
+      "icon": [
+        "icons/icon.ico"
+      ]
     }
   }
 }

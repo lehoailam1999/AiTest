@@ -49,14 +49,44 @@ def test_steps_checklist_numbers_and_mentions_test_step():
 
 def test_e2e_system_prompt_has_locator_and_step_rules():
     sys_p = e2e_system_prompt()
-    assert "LOCATOR" in sys_p
-    assert "test.step" in sys_p or "Map numbered" in sys_p
-    assert len(sys_p) < 3500  # slim vs legacy wall-of-text
+    assert "E2ECG" in sys_p
+    assert "LOCATOR" in sys_p or "data-cy" in sys_p
+    assert "SELECT" in sys_p or "selectOption" in sys_p or "Implementation Mapping" in sys_p
+    assert "Feature journey" in sys_p or "FEATURE ENTRY" in sys_p or "Feature entry" in sys_p
+    assert "Anti-patterns" in sys_p or "invent" in sys_p.lower()
+    assert len(sys_p) < 9000  # E2ECG + slim journey; still bounded
+    # No legacy locator essay / host path duplicate of E2ECG 15.
+    assert "LOCATOR (HTML-first)" not in sys_p
+    assert sys_p.count("domcontentloaded") <= 2  # E2ECG + optional thin host
     heal = e2e_system_prompt(heal=True)
-    assert "LOCATOR" in heal
+    assert "E2ECG" in heal
+    assert "selectOption" in heal or "LOCATOR" in heal or "data-cy" in heal
+    assert "Feature journey" in heal or "FEATURE ENTRY" in heal
+    assert "AUTH" in heal or "storageState" in heal or "ensureAuthenticated" in heal
+    assert "domcontentloaded" in heal or "networkidle" in heal
     slim_auth = e2e_system_prompt(has_storage_state=True)
-    assert "storageState present" in slim_auth
-    assert "ensureAuthenticated" not in slim_auth or "AUTH: storageState" in slim_auth
+    assert "storageState" in slim_auth
+    assert "AUTH overlay" in slim_auth
+    assert "{Req}" in sys_p or "Requirement" in sys_p or "E2ETest" in sys_p
+
+
+def test_e2e_user_prompt_includes_journey_checklist():
+    req = E2ERequest(
+        test_case_title="Boundary max 255 — Không chấp nhận",
+        test_case_type="E2E-Boundary",
+        priority="P1",
+        steps="1. Mo form\n2. Nhap 256 ky tu",
+        expected_result="Khong chap nhan",
+        precondition="Da dang nhap; vao /admin/evidence",
+        target_url="http://localhost:9000",
+    )
+    up = e2e_user_prompt(req)
+    assert "Feature entry checklist" in up or "Feature entry" in up
+    assert "VALIDATION" in up or "BOUNDARY" in up or "Validation" in up
+    assert "Auth resolved" in up
+    # No long auth-strategy essay (lives in E2ECG + AUTH overlay).
+    assert "Auth strategy (no storageState yet)" not in up
+    assert up.count("ensureAuthenticated") <= 2
 
 
 def test_e2e_user_prompt_grounds_dom_and_steps():

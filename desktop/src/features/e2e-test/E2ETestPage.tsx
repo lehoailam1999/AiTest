@@ -64,9 +64,10 @@ import {
   refreshE2eOverlayFromFiles,
   rollbackE2eTargets,
   stagingDirHint,
-  writeE2eOverlay,
+  writeE2eOverlayReplacingPrevious,
   type E2eStagingSession,
 } from "../../lib/e2eWorkspace/stagingApply";
+import { cleanupWorkspaceRunAfterApply } from "../../lib/unitWorkspace/cleanup";
 import { activityUrl, ROUTES } from "../../lib/productRoutes";
 import { normalizeProjectMeta } from "../../lib/projectSync";
 import { isE2eTestCaseType } from "../../lib/testEngine";
@@ -74,12 +75,15 @@ import { useProject } from "../../state/ProjectContext";
 import { isTauri } from "../../tauri/bridge";
 import { workspace } from "../../workspace";
 import { E2eGateBanner } from "./E2eGateBanner";
+import { aiConnectionDisplayLabel } from "../../lib/aiConnectionLabel";
 import { E2ePipelineStrip } from "./E2ePipelineStrip";
 import { E2eResultTabs } from "./E2eResultTabs";
 import {
   E2eBatchConsole,
   type E2eBatchPipelineRow,
 } from "./E2eBatchConsole";
+import { E2eBatchStagingPreview } from "./E2eBatchStagingPreview";
+import { E2eVerifyApplyConsole } from "./E2eVerifyApplyConsole";
 import {
   BATCH_NOTE_PAUSED,
   BATCH_NOTE_RUNNING,
@@ -266,6 +270,7 @@ export default function E2ETestPage() {
   const [batchSelected, setBatchSelected] = useState<string[]>([]);
   const [batchResults, setBatchResults] = useState<E2eBatchPipelineRow[]>([]);
   const [batchGenItems, setBatchGenItems] = useState<E2eGenItem[]>([]);
+  const [stagingPreviewPath, setStagingPreviewPath] = useState<string | null>(null);
   const [singleRunId, setSingleRunId] = useState<string | null>(null);
   const [singlePrimarySpec, setSinglePrimarySpec] = useState<string>("");
   const [inputMode, setInputMode] = useState<"requirement" | "single">("requirement");
@@ -280,6 +285,9 @@ export default function E2ETestPage() {
     label: string;
   } | null>(null);
   const batchControlRef = useRef(createBatchRunControl());
+  /** One staging runId per Generate batch — never mint a new folder per TC. */
+  const e2eStagingRunIdRef = useRef<string | null>(null);
+  const e2eStagingSessionRef = useRef<E2eStagingSession | null>(null);
   /** Reuse Inspect DOM for ~5 phút cùng Target URL (skip cold Chromium). */
   const inspectCacheRef = useRef<{
     targetUrl: string;
@@ -467,6 +475,8 @@ export default function E2ETestPage() {
         targetUrl: targetUrl.trim() || undefined,
         domSnapshot: domSnapshot || undefined,
         module: tc?.module || selectedBatchReq?.title || undefined,
+        // Manual click re-seeds (stale password → 401). Silent auto-seed stays idempotent.
+        force: !opts?.silent,
       });
       pushPhaseLog(
         "generate",
@@ -653,27 +663,39 @@ export default function E2ETestPage() {
   async function stageFilesFromGen(
     batchFiles: E2EFileDto[],
     moduleName: string,
-    tcId: string
+    tcId: string,
+    fixedRunId?: string
   ) {
     if (!project?.id || !localPath || batchFiles.length === 0) return;
     setFiles(batchFiles);
     setResultTab("files");
     if (!isTauri()) return;
-    const batchRunId = newE2eRunId(tcId || "batch");
+    // Reuse batch/single runId — creating a new e2e-* folder per TC was the
+    // root cause of stacked overlays (1 TC, then 2, then 4…) under .ai-test/staging.
+    const runId =
+      fixedRunId ||
+      e2eStagingRunIdRef.current ||
+      newE2eRunId(tcId || "batch");
+    e2eStagingRunIdRef.current = runId;
     try {
       const staged = buildE2eStagedFiles(batchFiles, {
-        runId: batchRunId,
+        runId,
         module: moduleName,
       });
       const session: E2eStagingSession = {
-        runId: batchRunId,
+        runId,
         projectId: project.id,
         testCaseId: tcId,
         module: moduleName,
         files: staged,
         backups: [],
       };
-      await writeE2eOverlay(localPath, session);
+      await writeE2eOverlayReplacingPrevious(
+        localPath,
+        session,
+        e2eStagingSessionRef.current
+      );
+      e2eStagingSessionRef.current = session;
       setStaging(session);
       setAppliedPaths([]);
     } catch {
@@ -736,6 +758,27 @@ export default function E2ETestPage() {
     }
 
     const batchModule = resolveBatchModuleFolder(cases, selectedBatchReq.title);
+    // Mint ONE staging run for the whole batch before any TC finishes.
+    const batchStagingRunId = newE2eRunId(cases[0]?.id || "batch");
+    if (
+      e2eStagingRunIdRef.current &&
+      e2eStagingRunIdRef.current !== batchStagingRunId &&
+      localPath
+    ) {
+      try {
+        await cleanupWorkspaceRunAfterApply(
+          localPath,
+          e2eStagingRunIdRef.current,
+          e2eStagingSessionRef.current?.packagePrefix
+        );
+      } catch {
+        /* best-effort clear prior batch staging */
+      }
+    }
+    e2eStagingRunIdRef.current = batchStagingRunId;
+    e2eStagingSessionRef.current = null;
+    setStaging(null);
+
     const control = batchControlRef.current;
     control.start();
     setBusy(true);
@@ -783,18 +826,61 @@ export default function E2ETestPage() {
             total: p.total,
             label: p.label,
           });
-          setBatchResults((prev) => {
-            const idx = Math.min(p.current, cases.length - 1);
-            return prev.map((r, i) => {
-              if (i === idx && p.current < p.total) {
+          if (!p.testCaseId) return;
+          setBatchResults((prev) =>
+            prev.map((r) => {
+              if (r.testCaseId !== p.testCaseId) return r;
+              if (p.itemStatus === "running") {
                 return { ...r, status: "fail", error: BATCH_NOTE_RUNNING };
               }
-              if (i < p.current && r.error === BATCH_NOTE_RUNNING) {
-                return r;
-              }
               return r;
-            });
+            })
+          );
+        },
+        onItemDone: (item) => {
+          setBatchProgress({
+            current: item.done,
+            total: item.total,
+            label:
+              item.status === "generated"
+                ? `Đã gen «${item.title}» (${item.done}/${item.total})`
+                : `Gen lỗi «${item.title}» (${item.done}/${item.total})`,
           });
+          setBatchResults((prev) =>
+            prev.map((r) => {
+              if (r.testCaseId !== item.testCaseId) return r;
+              if (item.status === "generated") {
+                return {
+                  ...r,
+                  status: "ok",
+                  error: undefined,
+                  runId: item.row.runId,
+                  files: item.row.files,
+                  verifyStatus: "pending",
+                };
+              }
+              return {
+                ...r,
+                status: "fail",
+                error: item.row.error || "Generate fail",
+                runId: item.row.runId,
+              };
+            })
+          );
+          if (item.genItem) {
+            setBatchGenItems((prev) => {
+              const rest = prev.filter((g) => g.testCaseId !== item.genItem!.testCaseId);
+              return [...rest, item.genItem!];
+            });
+            setFiles(item.filesSoFar);
+            void stageFilesFromGen(
+              item.filesSoFar,
+              batchModule,
+              item.testCaseId,
+              batchStagingRunId
+            );
+            message.success(`Đã gen: ${item.title}`, 2);
+          }
         },
         onLog: (line) => pushPhaseLog("generate", line),
       });
@@ -805,7 +891,13 @@ export default function E2ETestPage() {
           : pipeline
       );
       setBatchGenItems(genItems);
-      await stageFilesFromGen(batchFiles, batchModule, cases[0]?.id || "");
+      setFiles(batchFiles);
+      await stageFilesFromGen(
+        batchFiles,
+        batchModule,
+        cases[0]?.id || "",
+        batchStagingRunId
+      );
       setRun((r) => ({
         ...finishPhase(r, "generate", {
           status: genItems.length > 0 ? "finish" : "error",
@@ -827,20 +919,29 @@ export default function E2ETestPage() {
         })
       );
     } finally {
-      control.reset();
-      setBusy(false);
-      setBatchProgress(null);
+      // If still paused mid-batch (shouldn't happen after pool drain), keep busy.
+      if (control.getStatus() === "paused") {
+        setBatchProgress((p) =>
+          p
+            ? { ...p, label: `Tạm dừng · đã gen — có thể Kiểm thử phần đã gen` }
+            : p
+        );
+      } else {
+        control.reset();
+        setBusy(false);
+        setBatchProgress(null);
+      }
     }
   }
 
-  /** Step 3 — Verify Playwright (no AI heal). Allowed while Generate paused. */
+  /** Step 3 — Verify Playwright hàng loạt (module batch, no AI heal). Allowed while Generate paused. */
   async function runStepVerifyBatch() {
     if (!project?.id || !localPath) {
       message.warning("Cần project + root");
       return;
     }
     if (files.length === 0 || batchGenItems.length === 0) {
-      message.warning("Chưa Generate — bấm Chạy E2E Job trước");
+      message.warning("Chưa Generate — bấm Chạy E2E Job trước (hoặc chờ TC gen xong)");
       return;
     }
     const batchModule = selectedBatchReq
@@ -850,13 +951,20 @@ export default function E2ETestPage() {
         )
       : "E2E";
 
+    const control = batchControlRef.current;
+    const preserveGeneratePause = control.getStatus() === "paused";
     setBusy(true);
+    if (!preserveGeneratePause) control.start();
     setActivePhase("headless");
     setResultTab("log");
     setBatchProgress({
       current: 0,
       total: batchGenItems.length,
-      label: "Kiểm thử…",
+      label: preserveGeneratePause
+        ? `Kiểm thử ${batchGenItems.length} TC đã gen (Generate đang tạm dừng)`
+        : showBrowser
+          ? `Kiểm thử hàng loạt — Chromium (${batchGenItems.length} TC)…`
+          : `Kiểm thử hàng loạt (${batchGenItems.length} TC)…`,
     });
 
     try {
@@ -919,6 +1027,7 @@ export default function E2ETestPage() {
       });
       setBatchResults((prev) => mergeVerifyStatus(prev, rows));
       setFiles(outFiles);
+
       if (isTauri() && session && outFiles.length > 0) {
         try {
           session = await refreshE2eOverlayFromFiles(localPath, session, outFiles);
@@ -932,6 +1041,8 @@ export default function E2ETestPage() {
         }
       }
       const allPassed = okCount === batchGenItems.length;
+      const firstVerifyError =
+        rows.find((r) => r.status !== "ok")?.error || "";
       setRun((r) => ({
         ...finishPhase(r, "headless", {
           status: allPassed ? "finish" : "error",
@@ -943,11 +1054,10 @@ export default function E2ETestPage() {
       if (allPassed) {
         message.success(`Kiểm thử: ${okCount}/${batchGenItems.length} PASS`);
       } else {
-        const firstErr = rows.find((r) => r.status === "fail" && r.error)?.error;
         setResultTab("log");
         message.error(
-          firstErr
-            ? `Kiểm thử FAIL — xem tab Log. ${firstErr.slice(0, 180)}`
+          firstVerifyError
+            ? `Kiểm thử FAIL — xem tab Log. ${firstVerifyError.slice(0, 180)}`
             : `Kiểm thử: ${okCount}/${batchGenItems.length} PASS — xem Log chi tiết`
         );
       }
@@ -960,8 +1070,14 @@ export default function E2ETestPage() {
         })
       );
     } finally {
-      setBusy(false);
       setBatchProgress(null);
+      if (preserveGeneratePause) {
+        if (control.getStatus() === "running") control.pause();
+        // Keep busy — Generate vẫn chờ Tiếp tục
+      } else {
+        control.reset();
+        setBusy(false);
+      }
     }
   }
 
@@ -990,7 +1106,10 @@ export default function E2ETestPage() {
         )
       : "E2E";
 
+    const control = batchControlRef.current;
+    const preserveGeneratePause = control.getStatus() === "paused";
     setBusy(true);
+    if (!preserveGeneratePause) control.start();
     setActivePhase("heal");
     setResultTab("log");
 
@@ -1058,8 +1177,13 @@ export default function E2ETestPage() {
         })
       );
     } finally {
-      setBusy(false);
       setBatchProgress(null);
+      if (preserveGeneratePause) {
+        if (control.getStatus() === "running") control.pause();
+      } else {
+        control.reset();
+        setBusy(false);
+      }
     }
   }
 
@@ -1110,7 +1234,12 @@ export default function E2ETestPage() {
           files: gen.files,
         },
       ]);
-      await stageFilesFromGen(gen.files, selected.module || "E2E", selected.id);
+      await stageFilesFromGen(
+        gen.files,
+        selected.module || "E2E",
+        selected.id,
+        newE2eRunId(selected.id)
+      );
       setRun((r) => ({
         ...finishPhase(r, "generate", {
           status: gen.files.length > 0 ? "finish" : "error",
@@ -1279,6 +1408,9 @@ export default function E2ETestPage() {
     setBatchResults(
       (prev) => markBatchRowsPaused(prev as BatchPipelineRow[]) as E2eBatchPipelineRow[]
     );
+    message.info(
+      "Đã tạm dừng TC chưa chạy — TC đang gen sẽ xong. Có thể Kiểm thử phần đã gen."
+    );
   }
 
   function resumeE2eBatch() {
@@ -1289,6 +1421,19 @@ export default function E2ETestPage() {
   }
 
   async function onDiscardStaging() {
+    if (localPath && e2eStagingRunIdRef.current) {
+      try {
+        await cleanupWorkspaceRunAfterApply(
+          localPath,
+          e2eStagingRunIdRef.current,
+          e2eStagingSessionRef.current?.packagePrefix
+        );
+      } catch {
+        /* best-effort */
+      }
+    }
+    e2eStagingRunIdRef.current = null;
+    e2eStagingSessionRef.current = null;
     setStaging(null);
     setFiles([]);
     setBatchGenItems([]);
@@ -1344,7 +1489,7 @@ export default function E2ETestPage() {
       <Space orientation="vertical" size="middle" style={{ width: "100%", marginTop: 12 }}>
         <E2eGateBanner
           aiReady={Boolean(aiReady)}
-          aiProvider={conn?.provider}
+          aiProvider={aiConnectionDisplayLabel(conn)}
           localPath={localPath}
           targetUrl={targetUrl}
           testCaseId={testCaseId || batchSelected[0] || ""}
@@ -1659,20 +1804,29 @@ export default function E2ETestPage() {
                 </Button>
                 {batchStatus === "running" ? (
                   <Button icon={<PauseCircleOutlined />} onClick={() => pauseE2eBatch()}>
-                    Tạm dừng
+                    Dừng / Tạm dừng
                   </Button>
                 ) : null}
                 {batchStatus === "paused" ? (
-                  <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => resumeE2eBatch()}>
-                    Tiếp tục
-                  </Button>
+                  <Space wrap>
+                    <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => resumeE2eBatch()}>
+                      Tiếp tục Generate
+                    </Button>
+                    <Button
+                      icon={<PlayCircleOutlined />}
+                      disabled={batchGenItems.length === 0}
+                      onClick={() => void runStepVerifyBatch()}
+                    >
+                      Kiểm thử phần đã gen ({batchGenItems.length})
+                    </Button>
+                  </Space>
                 ) : null}
               </Space>
 
               {batchResults.length > 0 ? (
                 <E2eBatchConsole
                   variant="table"
-                  title="Kết quả Generate (batch)"
+                  title="1. Kết quả Generate (batch)"
                   rows={batchResults}
                   busy={busy}
                   batchRunStatus={batchStatus}
@@ -1743,73 +1897,107 @@ export default function E2ETestPage() {
         {(files.length > 0 || genOkCount > 0) && (
           <>
             {inputMode === "requirement" && batchResults.length > 0 ? (
-              <E2eBatchConsole
-                variant="verifyApply"
-                title="3. Verify & Apply"
+              <E2eBatchStagingPreview
                 rows={batchResults}
+                genItems={batchGenItems}
+                files={files}
+                runId={staging?.runId || batchGenItems[0]?.runId}
+                selectedPath={stagingPreviewPath}
+                onSelectPath={setStagingPreviewPath}
+              />
+            ) : files.length > 0 ? (
+              <E2eBatchStagingPreview
+                rows={
+                  batchResults.length
+                    ? batchResults
+                    : [
+                        {
+                          key: testCaseId || "single",
+                          testCaseId: testCaseId || "single",
+                          title: selected?.title || "E2E",
+                          status: "ok",
+                          files: files.length,
+                          runId: staging?.runId,
+                        },
+                      ]
+                }
+                genItems={
+                  batchGenItems.length
+                    ? batchGenItems
+                    : [
+                        {
+                          testCaseId: testCaseId || "single",
+                          title: selected?.title || "E2E",
+                          runId: staging?.runId || "single",
+                          primarySpecPath: files.find((f) => f.kind === "spec")?.path || "",
+                          files,
+                        },
+                      ]
+                }
+                files={files}
+                runId={staging?.runId}
+                selectedPath={stagingPreviewPath}
+                onSelectPath={setStagingPreviewPath}
+              />
+            ) : null}
+            {inputMode === "requirement" && batchResults.length > 0 ? (
+              <E2eVerifyApplyConsole
+                rows={batchResults}
+                fileCount={files.length}
+                genOkCount={genOkCount}
                 busy={busy}
                 batchRunStatus={batchStatus}
-                generateFailCount={batchFailCount}
-                onRetryGenerateFails={() => void runStepGenerateBatch()}
+                jobPassed={run.jobPassed}
+                hasStaging={!!staging}
+                applied={appliedPaths.length > 0}
+                canHeal={run.jobPassed === false}
+                canApply={run.jobPassed === true && !!staging && appliedPaths.length === 0}
+                verifyLoading={busy && activePhase === "headless"}
+                healLoading={busy && activePhase === "heal"}
+                applyLoading={applyBusy}
                 onVerify={() => void runStepVerifyBatch()}
                 onHeal={() => void runStepHealBatch()}
                 onApply={() => void onApplyStaging()}
                 onDiscard={() => void onDiscardStaging()}
+              />
+            ) : (
+              <E2eVerifyApplyConsole
+                rows={
+                  batchResults.length
+                    ? batchResults
+                    : [
+                        {
+                          key: testCaseId || "single",
+                          testCaseId: testCaseId || "single",
+                          title: selected?.title || "E2E",
+                          status: files.length > 0 ? "ok" : "fail",
+                          files: files.length,
+                          verifyStatus:
+                            run.jobPassed === true
+                              ? "pass"
+                              : run.jobPassed === false
+                                ? "fail"
+                                : "pending",
+                        },
+                      ]
+                }
+                fileCount={files.length}
+                genOkCount={files.length > 0 ? 1 : 0}
+                busy={busy}
+                batchRunStatus={batchStatus}
+                jobPassed={run.jobPassed}
+                hasStaging={!!staging}
+                applied={appliedPaths.length > 0}
+                canHeal={run.jobPassed === false}
+                canApply={run.jobPassed === true && !!staging && appliedPaths.length === 0}
                 verifyLoading={busy && activePhase === "headless"}
                 healLoading={busy && activePhase === "heal"}
                 applyLoading={applyBusy}
-                canHeal={run.jobPassed === false}
-                canApply={run.jobPassed === true && !!staging && appliedPaths.length === 0}
-                hasStaging={!!staging}
+                onVerify={() => void runStepVerifySingle(false)}
+                onHeal={() => void runStepVerifySingle(true)}
+                onApply={() => void onApplyStaging()}
+                onDiscard={() => void onDiscardStaging()}
               />
-            ) : (
-              <Card id="aitest-e2e-verify-apply" title="3. Verify & Apply" style={{ marginTop: 8 }}>
-                <Space wrap>
-                  <Button
-                    type="primary"
-                    icon={<PlayCircleOutlined />}
-                    loading={busy && activePhase === "headless"}
-                    disabled={busy || files.length === 0}
-                    onClick={() => void runStepVerifySingle(false)}
-                  >
-                    Chạy Verify
-                  </Button>
-                  {run.jobPassed === false ? (
-                    <Button
-                      loading={busy && activePhase === "heal"}
-                      disabled={busy || files.length === 0}
-                      onClick={() => void runStepVerifySingle(true)}
-                    >
-                      Heal (AI sửa)
-                    </Button>
-                  ) : null}
-                  <Button
-                    icon={<SaveOutlined />}
-                    loading={applyBusy}
-                    disabled={busy || run.jobPassed !== true || !staging}
-                    onClick={() => void onApplyStaging()}
-                  >
-                    Áp dụng vào AItest/E2ETest
-                  </Button>
-                  {staging ? (
-                    <Button danger disabled={busy} onClick={() => void onDiscardStaging()}>
-                      Hủy bỏ & xóa staging
-                    </Button>
-                  ) : null}
-                  {run.jobPassed === true ? (
-                    <Tag color="success">
-                      PASS {run.healCount > 0 ? `· Heal ${run.healCount}×` : ""}
-                    </Tag>
-                  ) : null}
-                  {run.jobPassed === false ? <Tag color="error">FAIL</Tag> : null}
-                  {files.length > 0 && run.jobPassed == null ? (
-                    <Tag color="processing">Tiếp theo: Chạy Verify</Tag>
-                  ) : null}
-                </Space>
-                <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-                  Kiểm thử chạy Playwright. Heal chỉ khi FAIL. Apply chỉ sau PASS — giống Unit.
-                </Typography.Paragraph>
-              </Card>
             )}
           </>
         )}
@@ -1839,7 +2027,7 @@ export default function E2ETestPage() {
             type="success"
             showIcon
             title="Sẵn sàng Apply"
-            description="Kiểm thử PASS — bấm Áp dụng trong card Verify & Apply."
+            description="Kiểm thử PASS — bấm Apply trong card Verify & Apply."
           />
         ) : null}
 

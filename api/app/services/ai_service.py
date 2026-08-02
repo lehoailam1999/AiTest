@@ -235,6 +235,7 @@ async def generate_e2e_for_connection(
         e2e_system_prompt,
         e2e_user_prompt,
     )
+    from app.services.e2e_auth_mode import is_login_or_auth_tc, resolve_auth_mode
 
     mode = connection_runner_mode(conn)
     meta: dict[str, Any] = {
@@ -257,8 +258,16 @@ async def generate_e2e_for_connection(
         meta["provider"] = adapter.vendor
         return result, meta
 
+    auth_mode = resolve_auth_mode(
+        use_storage=bool((req.storage_state_rel or "").strip()),
+        has_valid_storage_json=False,
+        is_login_tc=is_login_or_auth_tc(req.test_case_title),
+    )
     sys_p = e2e_system_prompt(
-        heal=heal, has_storage_state=bool((req.storage_state_rel or "").strip())
+        heal=heal,
+        has_storage_state=(auth_mode == "storage"),
+        project_rules=req.project_rules,
+        user_rules=req.user_rules,
     )
     usr_p = e2e_user_prompt(req)
     raw = await adapter.chat(sys_p, usr_p)

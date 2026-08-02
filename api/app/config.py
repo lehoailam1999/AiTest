@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     jwt_access_hours: int = 8
     cors_origins: str = (
         "http://localhost:5173,http://127.0.0.1:5173,"
-        "http://localhost:4200,http://localhost:4300"
+        "http://localhost:4200,http://localhost:4300,"
+        "tauri://localhost,http://tauri.localhost,https://tauri.localhost"
     )
     # Workspace metadata SQLite (paths only — never source content)
     workspace_meta_db: str | None = None

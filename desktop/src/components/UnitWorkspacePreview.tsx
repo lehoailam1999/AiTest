@@ -3,7 +3,7 @@ import { CheckOutlined, FileAddOutlined, FileOutlined, EditOutlined } from "@ant
 import { Alert, Card, List, Space, Tag, Typography } from "antd";
 import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWorkspace/types";
 import { groupFilesByOp } from "../lib/unitWorkspace/manager";
-import { aiTestDir } from "../lib/unitWorkspace/paths";
+import { aiTestDir, AI_TEST_STAGING_DIR } from "../lib/unitWorkspace/paths";
 
 type Props = {
   manifest: UnitWorkspaceManifest;
@@ -63,7 +63,7 @@ export function UnitWorkspacePreview({
           <>
             Thư mục tạm{" "}
             <Typography.Text code>
-              {aiTestDir(manifest.packagePrefix)}/workspace/{manifest.runId}/
+              {aiTestDir(manifest.packagePrefix)}/{AI_TEST_STAGING_DIR}/{manifest.runId}/
             </Typography.Text>
             {" — "}
             chạy <strong>Verify</strong> trước khi <strong>Apply</strong> vào package

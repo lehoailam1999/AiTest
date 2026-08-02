@@ -6,7 +6,7 @@ import type { UnitWorkspaceManifest } from "./types";
 
 /**
  * Discard a workspace run: remove generated targets under AItest/ (if present)
- * and delete staging `.ai-test/workspace/{runId}`. Does not Apply.
+ * and delete staging `.ai-test/staging/{runId}`. Does not Apply.
  */
 export async function discardWorkspaceRun(
   projectRoot: string,

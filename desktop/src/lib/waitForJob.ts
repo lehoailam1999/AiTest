@@ -7,6 +7,8 @@ type WaitOpts = {
   maxMs?: number;
   onProgress?: (message: string, job: Job) => void;
   onLog?: (lines: string[], job: Job) => void;
+  /** When true (default), Paused is a terminal wait result (caller may resume). */
+  stopOnPaused?: boolean;
 };
 
 /** Default 15 phút — TC fan-out / Cursor CLI thường > 2 phút. */
@@ -17,6 +19,7 @@ export async function waitForJob(
   const opts: WaitOpts =
     typeof maxMsOrOpts === "number" ? { maxMs: maxMsOrOpts } : maxMsOrOpts ?? {};
   const maxMs = opts.maxMs ?? 900_000;
+  const stopOnPaused = opts.stopOnPaused !== false;
   const start = Date.now();
   let lastProgress = "";
   let lastLogLen = 0;
@@ -36,7 +39,11 @@ export async function waitForJob(
       if (log.length) opts.onLog?.(log, job);
       return job;
     }
-    if (!JOB_ACTIVE.has(job.status)) return job;
+    if (stopOnPaused && job.status === "Paused") {
+      if (log.length) opts.onLog?.(log, job);
+      return job;
+    }
+    if (!JOB_ACTIVE.has(job.status) && job.status !== "Paused") return job;
     await new Promise((r) => setTimeout(r, 1200));
   }
   throw new Error(

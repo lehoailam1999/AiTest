@@ -128,6 +128,12 @@ export const jobs = {
     contextPacket?: Record<string, unknown>;
     topicScope?: Record<string, unknown>;
   }) => authFetch<Job>("/jobs", { method: "POST", body: JSON.stringify(body) }),
+  /** Cooperative pause — giữ TC đã lưu; module còn lại chờ resume. */
+  pause: (id: string) =>
+    authFetch<Job>(`/jobs/${id}/pause`, { method: "POST", body: "{}" }),
+  /** Tiếp tục job Paused — chỉ sinh bổ sung module còn lại. */
+  resume: (id: string) =>
+    authFetch<Job>(`/jobs/${id}/resume`, { method: "POST", body: "{}" }),
 };
 
 export type TestCaseInput = {
@@ -1005,6 +1011,8 @@ export const requirementStudio = {
       targetUrl?: string;
       authHint?: string;
       focusModules?: string;
+      speed?: "fast" | "full";
+      maxPerModule?: number;
     }
   ) =>
     authFetch<{
@@ -1019,6 +1027,8 @@ export const requirementStudio = {
         targetUrl: opts?.targetUrl,
         authHint: opts?.authHint,
         focusModules: opts?.focusModules,
+        speed: opts?.speed,
+        maxPerModule: opts?.maxPerModule,
       }),
     }),
   freezeAndGenerate: (
@@ -1031,6 +1041,8 @@ export const requirementStudio = {
       targetUrl?: string;
       authHint?: string;
       focusModules?: string;
+      speed?: "fast" | "full";
+      maxPerModule?: number;
     }
   ) =>
     authFetch<import("./types").FreezeAndGenerateResult>(
@@ -1045,6 +1057,8 @@ export const requirementStudio = {
           targetUrl: opts?.targetUrl,
           authHint: opts?.authHint,
           focusModules: opts?.focusModules,
+          speed: opts?.speed,
+          maxPerModule: opts?.maxPerModule,
         }),
       }
     ),

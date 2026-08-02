@@ -1,0 +1,42 @@
+---
+description: E2E TC gen Output-driven từ Phân tích DB/Knowledge — không đọc lại SRS/source
+globs: api/app/llm/tc_generation_rules.py,api/app/llm/e2e_tc_analysis_rules.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/features/requirement_studio/snapshot_prompt.py,desktop/src/features/e2e-test/**,desktop/src/pages/GenerateHubPage.tsx
+alwaysApply: false
+---
+
+# Rules E2E TC ← Phân tích (Output-driven)
+
+> **Một nguồn runtime:** [`e2e_tc_analysis_rules.py`](api/app/llm/e2e_tc_analysis_rules.py) — prepend trong [`engine_generation_rules("e2e")`](api/app/llm/tc_generation_rules.py).  
+> Không copy lại 10 rule / map bucket vào `system_prompt` / COMPACT / freeze / analysis-DB header.
+
+Pipeline: Tài liệu → Phân tích (DB) → Freeze → **Sinh TC E2E** (chỉ từ Output).
+
+Không nhầm với codegen Playwright ([`e2e_journey_rules.py`](api/app/llm/e2e_journey_rules.py) / `e2e-feature-journey.mdc`) — đó là bước sau khi đã có TC.
+
+## Phân tầng prompt (tránh lặp)
+
+| Tầng | Nội dung |
+|------|----------|
+| `E2E ← PHÂN TÍCH` | SoT Output + completeness gate + Rules 1–9 + `trace:` + Step/Expected/Coverage |
+| Engine E2E overlay | Tags, auth/storageState, target_url, focus, soft-cap — **không** restates Step/Expected |
+| E2E COMPACT/SPEED | Chỉ format title/module/priority (không coverage) |
+| system_prompt E2E | Lock type=E2E + trỏ sang khối SoT |
+| Freeze / DB block | **Data** Knowledge — header ngắn |
+| `e2e_journey_rules` | **Codegen** Playwright (sau TC) — không lẫn với sinh TC |
+
+## 10 rule (tóm tắt)
+
+0. **Output Completeness** — gate trước khi sinh (FEATURES + FLOWS|AC).  
+1. Approved Output = SoT.  
+2. Traceability (`trace:`).  
+3. Workflow-based (BUSINESS_FLOWS).  
+4. Business Rule Expansion.  
+5. Scenario Expansion (Happy/Validation/Permission/Boundary/Error — chỉ có tín hiệu).  
+6. Step Expansion.  
+7. Expected Result Binding.  
+8. Coverage Validation.  
+9. Requirement Lock.
+
+## Khi sửa
+
+Chỉ sửa contract trong `e2e_tc_analysis_rules.py` (+ `.mdc` này). Overlay E2E giữ ngắn.

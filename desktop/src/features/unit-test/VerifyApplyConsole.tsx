@@ -368,7 +368,7 @@ export function VerifyApplyConsole({
       setApplyOpen(false);
       message.success(
         result.stagingCleaned
-          ? `Đã Apply ${result.appliedPaths.length} file vào AItest/ · đã dọn .ai-test/workspace`
+          ? `Đã Apply ${result.appliedPaths.length} file vào AItest/ · đã dọn .ai-test/staging`
           : `Đã Apply ${result.appliedPaths.length} file vào AItest/`
       );
     } catch (e) {
@@ -450,11 +450,11 @@ export function VerifyApplyConsole({
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        title="Verify trên staging · Apply chỉ ghi AItest/"
+        title="Verify trên staging · Apply ghi đủ file vào AItest/"
         description={
           stackInspect?.is_monorepo_package
-            ? `Monorepo · ${stackInspect.workspace_kind || "package"} · ${stackInspect.package_name || manifest.packageName || manifest.packagePrefix} — lệnh test khoanh vùng package. Sau Apply dọn .ai-test/workspace.`
-            : `Staging tạm rồi rollback cho đến Apply. Apply ghi ${aitestHint} trên disk — không đụng src production. Sau Apply dọn .ai-test/workspace.`
+            ? `Monorepo · ${stackInspect.workspace_kind || "package"} · ${stackInspect.package_name || manifest.packageName || manifest.packagePrefix} — Apply giữ nguyên folder staging dưới package/AItest/. Sau Apply dọn .ai-test/staging.`
+            : `Staging tạm rồi rollback đến khi Apply. Apply ghi toàn bộ overlay vào ${aitestHint} (test + scaffold) — không đụng src production. Sau Apply dọn .ai-test/staging.`
         }
       />
 
@@ -823,7 +823,7 @@ export function VerifyApplyConsole({
         <Typography.Paragraph>
           Ghi <strong>{targetPaths.length}</strong> file dưới{" "}
           <Typography.Text code>{aitestHint}</Typography.Text>. Không đụng production src. Sau
-          Apply, staging <Typography.Text code>.ai-test/workspace</Typography.Text> sẽ được dọn.
+          Apply, staging <Typography.Text code>.ai-test/staging</Typography.Text> sẽ được dọn.
         </Typography.Paragraph>
         <ul style={{ margin: 0, paddingLeft: 20 }}>
           {manifest.files

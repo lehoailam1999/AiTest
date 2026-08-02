@@ -3,6 +3,7 @@ import {
   Alert,
   App,
   Button,
+  Checkbox,
   Col,
   Empty,
   Form,
@@ -19,13 +20,16 @@ import {
   ReloadOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
-import { connection } from "../api";
-import type { Connection } from "../api/types";
+import { connection, projects } from "../api";
+import type { Connection, ProjectMeta } from "../api/types";
 import { useProject } from "../state/ProjectContext";
 import { Link } from "react-router-dom";
 import { ROUTES } from "../lib/productRoutes";
+import { normalizeProjectMeta } from "../lib/projectSync";
+import { aiConnectionDisplayLabel } from "../lib/aiConnectionLabel";
 
 const { Title, Paragraph, Text } = Typography;
+const { TextArea } = Input;
 
 const CLI_TYPES = [
   {
@@ -84,16 +88,26 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  const [rulesSaving, setRulesSaving] = useState(false);
+  const [projectMeta, setProjectMeta] = useState<ProjectMeta | null>(null);
+  const [userRules, setUserRules] = useState("");
+  const [projectExtra, setProjectExtra] = useState("");
+  const [lockProjectAuto, setLockProjectAuto] = useState(false);
 
   const load = useCallback(async () => {
     if (!project) return;
     setBusy(true);
     try {
-      const c = await connection.get(project.id);
+      const [c, p] = await Promise.all([connection.get(project.id), projects.get(project.id)]);
       setConn(c);
       setModelName(c.modelName ?? "");
       setCliType(c.cliType || "gemini-cli");
       setCliPath(c.cliPath ?? "");
+      const meta = normalizeProjectMeta(p.meta);
+      setProjectMeta(meta);
+      setUserRules(meta?.aiRules?.user ?? "");
+      setProjectExtra(meta?.aiRules?.projectExtra ?? "");
+      setLockProjectAuto(Boolean(meta?.aiRules?.lockProjectAuto));
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Không tải được cấu hình AI");
     } finally {
@@ -162,6 +176,34 @@ export default function SettingsPage() {
     }
   }
 
+  async function onSaveRules() {
+    if (!project) return;
+    setRulesSaving(true);
+    try {
+      const prev = projectMeta ?? {};
+      const nextMeta: ProjectMeta = {
+        ...prev,
+        aiRules: {
+          ...(prev.aiRules ?? {}),
+          user: userRules.trim(),
+          projectExtra: projectExtra.trim(),
+          lockProjectAuto,
+        },
+      };
+      const updated = await projects.update(project.id, { meta: nextMeta });
+      const meta = normalizeProjectMeta(updated.meta) ?? nextMeta;
+      setProjectMeta(meta);
+      setUserRules(meta.aiRules?.user ?? "");
+      setProjectExtra(meta.aiRules?.projectExtra ?? "");
+      setLockProjectAuto(Boolean(meta.aiRules?.lockProjectAuto));
+      message.success("Đã lưu AI Rules (Project / User)");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "Lưu AI Rules thất bại");
+    } finally {
+      setRulesSaving(false);
+    }
+  }
+
   if (!project) {
     return (
       <div className="page settings-ai-page">
@@ -207,7 +249,9 @@ export default function SettingsPage() {
                 conn.status === "Ready" ? <CheckCircleOutlined /> : <SafetyCertificateOutlined />
               }
             >
-              {conn.status}
+              {conn.status === "Ready"
+                ? `Ready · ${aiConnectionDisplayLabel(conn) || "AI CLI"}`
+                : conn.status}
             </Tag>
           ) : null}
           <Tag icon={<CodeOutlined />}>AI CLI</Tag>
@@ -307,6 +351,79 @@ export default function SettingsPage() {
               Lưu → Test CLI → Ready trước khi Sinh TC / Phân tích
             </Text>
           </div>
+        </Form>
+      </section>
+
+      <section className="settings-ai-shell" aria-label="AI Rules" style={{ marginTop: 24 }}>
+        <Title level={4} style={{ marginTop: 0 }}>
+          AI Rules (3 tầng)
+        </Title>
+        <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+          System cố định trên BE. Project + User lưu theo dự án — ưu tiên khi xung đột:{" "}
+          <Text code>System &gt; Project &gt; User</Text>.
+        </Paragraph>
+        {projectMeta?.aiRules?.projectAuto ? (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="Project Auto (từ stack scan)"
+            description={
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontSize: 12, maxHeight: 160, overflow: "auto" }}>
+                {projectMeta.aiRules.projectAuto}
+              </pre>
+            }
+          />
+        ) : (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="Chưa có Project Auto"
+            description="Gắn project root và Đồng bộ stack để seed quy tắc từ ngôn ngữ / framework / test runner."
+          />
+        )}
+        <Form layout="vertical" size="middle" requiredMark={false}>
+          <Form.Item
+            label="Project Extra"
+            tooltip="Ghi chú bền của dự án (naming, auth, domain constraints) — không bị xóa khi sync stack."
+          >
+            <TextArea
+              rows={4}
+              value={projectExtra}
+              onChange={(e) => setProjectExtra(e.target.value)}
+              placeholder="VD: Unit cấm import src/main.ts, src/bootstrap.ts; NestJS test ValidationPipe trực tiếp; E2E không hardcode password…"
+              disabled={locked || rulesSaving}
+              maxLength={2000}
+              showCount
+            />
+          </Form.Item>
+          <Form.Item
+            label="User Rules"
+            tooltip="Quy tắc cá nhân khi sinh TC / Unit / E2E trên dự án này."
+          >
+            <TextArea
+              rows={4}
+              value={userRules}
+              onChange={(e) => setUserRules(e.target.value)}
+              placeholder="VD: Ưu tiên tiếng Việt trong title TC; luôn assert message lỗi cụ thể…"
+              disabled={locked || rulesSaving}
+              maxLength={2000}
+              showCount
+            />
+          </Form.Item>
+          <Form.Item>
+            <Checkbox
+              checked={lockProjectAuto}
+              onChange={(e) => setLockProjectAuto(e.target.checked)}
+              disabled={locked || rulesSaving}
+            >
+              Khóa Project Auto (không ghi đè khi sync stack)
+            </Checkbox>
+          </Form.Item>
+          <Button type="primary" loading={rulesSaving} disabled={locked && !rulesSaving} onClick={() => void onSaveRules()}>
+            Lưu AI Rules
+          </Button>
         </Form>
       </section>
     </div>

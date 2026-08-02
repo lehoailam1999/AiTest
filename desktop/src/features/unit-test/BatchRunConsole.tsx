@@ -18,8 +18,8 @@ import {
   SaveOutlined,
 } from "@ant-design/icons";
 import type { BatchRunControl, BatchRunStatus } from "../../lib/batchRunControl";
-import { loadManifest } from "../../lib/unitWorkspace/manager";
-import { applyWorkspaceToRepo } from "../../lib/unitWorkspace/applyManager";
+import { loadManifest, saveManifest } from "../../lib/unitWorkspace/manager";
+import { applyManyWorkspacesToRepo } from "../../lib/unitWorkspace/applyManager";
 import { runCombinedBatchVerify } from "../../lib/unitWorkspace/combinedBatchVerify";
 import { discardWorkspaceRuns } from "../../lib/unitWorkspace/discardManager";
 import {
@@ -99,6 +99,18 @@ function rowMatchesFailedTokens(
     }
   }
   return false;
+}
+
+/** Batch verify PASS for one row (shared by table + log units). */
+function batchVerifyPass(
+  row: BatchPipelineRow,
+  manifest: UnitWorkspaceManifest | undefined,
+  failedTokens: string[],
+  hasMappedFailure: boolean
+): boolean {
+  if (manifest?.verify?.overallPass) return true;
+  if (!hasMappedFailure) return false;
+  return !rowMatchesFailedTokens(row, manifest, failedTokens);
 }
 
 /** Mark not-yet-started rows as paused (current RUNNING row keeps running until done). */
@@ -202,19 +214,6 @@ export function BatchRunConsole({
   const [logTab, setLogTab] = useState<"units" | "summary" | "full">("units");
   const [activeLogStage, setActiveLogStage] = useState<string>("test");
 
-  const hints = useMemo(
-    () =>
-      suggestWorkspaceVerifyCommands({
-        language,
-        framework: framework === "auto" ? "" : framework,
-        meta,
-        targetRelPaths: [],
-        packagePrefix: rows.find((r) => r.packagePrefix)?.packagePrefix,
-        stackInspect,
-      }),
-    [language, framework, meta, rows, stackInspect]
-  );
-
   const visible = useMemo(() => {
     if (filter === "unverified") {
       return rows.filter(
@@ -262,29 +261,6 @@ export function BatchRunConsole({
       logSummary.total < unitSummary.total
   );
 
-  async function applyOne(row: BatchPipelineRow): Promise<BatchPipelineRow> {
-    if (row.verifyStatus !== "pass" || !row.workspaceRunId) {
-      return { ...row, applyStatus: "skipped" };
-    }
-    const manifest = await loadManifest(
-      projectRoot,
-      row.workspaceRunId,
-      row.packagePrefix
-    );
-    if (!manifest || manifest.status !== "pass") {
-      // Allow apply if verify just passed but status on disk is pass
-      if (!manifest || !manifest.verify?.overallPass) {
-        return { ...row, applyStatus: "skipped", error: "Chưa Verify PASS" };
-      }
-    }
-    const toApply =
-      manifest.status === "pass"
-        ? manifest
-        : { ...manifest, status: "pass" as const };
-    await applyWorkspaceToRepo(projectRoot, toApply);
-    return { ...row, applyStatus: "done", error: undefined };
-  }
-
   /**
    * Khi Generate đang tạm dừng: giữ batchControl + busy, chỉ Verify/Apply phần đã gen.
    * Không start/reset — tránh đánh thức / kết thúc sớm vòng Generate.
@@ -314,10 +290,6 @@ export function BatchRunConsole({
       message.info("Không có job Generate OK để Verify.");
       return;
     }
-    if (!hints.test.trim()) {
-      message.error("Chưa có lệnh test — kiểm tra framework / stack.");
-      return;
-    }
     const { preserveGeneratePause } = beginSidePhase();
     setProgress({
       current: 0,
@@ -337,6 +309,25 @@ export function BatchRunConsole({
         message.error("Không load được staging nào.");
         return;
       }
+      // Resolve commands from real overlay paths (batch UI often has targetRelPaths=[]).
+      const targetRelPaths = manifests.flatMap((m) =>
+        m.files.filter((f) => f.op !== "delete").map((f) => f.targetRel)
+      );
+      const packagePrefix =
+        manifests.find((m) => m.packagePrefix)?.packagePrefix ||
+        rows.find((r) => r.packagePrefix)?.packagePrefix;
+      const verifyHints = suggestWorkspaceVerifyCommands({
+        language,
+        framework: framework === "auto" ? "" : framework,
+        meta,
+        targetRelPaths,
+        packagePrefix,
+        stackInspect,
+      });
+      if (!verifyHints.test.trim()) {
+        message.error("Chưa có lệnh test — kiểm tra framework / stack.");
+        return;
+      }
       setProgress({
         current: manifests.length,
         total: work.length,
@@ -346,8 +337,8 @@ export function BatchRunConsole({
       const result = await runCombinedBatchVerify({
         projectRoot,
         manifests,
-        compileCommand: hints.compile,
-        testCommand: hints.test,
+        compileCommand: verifyHints.compile,
+        testCommand: verifyHints.test,
       });
       const byRun = new Map(result.updatedManifests.map((m) => [m.runId, m]));
       const testStageLog =
@@ -355,6 +346,7 @@ export function BatchRunConsole({
       const failedTokens = extractFailedPathTokens(testStageLog);
       const hasMappedFailure = failedTokens.length > 0;
 
+      const promotions: Promise<void>[] = [];
       const nextRows = rows.map((r) => {
         if (!r.workspaceRunId || r.status !== "ok") {
           return { ...r, verifyStatus: "skipped" as const };
@@ -367,30 +359,38 @@ export function BatchRunConsole({
             error: "Thiếu staging sau verify",
           };
         }
-        if (m.verify?.overallPass) {
-          return {
-            ...r,
-            verifyStatus: "pass" as const,
-            error: undefined,
-            applyStatus: r.applyStatus ?? ("pending" as const),
-          };
+        const pass = batchVerifyPass(r, m, failedTokens, hasMappedFailure);
+        if (pass && !m.verify?.overallPass) {
+          promotions.push(
+            saveManifest(projectRoot, {
+              ...m,
+              status: "pass",
+              verify: {
+                ...(m.verify || {
+                  ranAt: new Date().toISOString(),
+                  overallPass: false,
+                  stages: [],
+                }),
+                overallPass: true,
+              },
+            })
+          );
         }
-        const matchedFail = rowMatchesFailedTokens(r, m, failedTokens);
-        const treatAsFail = hasMappedFailure ? matchedFail : true;
         return {
           ...r,
-          verifyStatus: (treatAsFail ? "fail" : "pass") as "pass" | "fail",
-          error: treatAsFail ? "Verify FAIL (batch)" : undefined,
+          verifyStatus: (pass ? "pass" : "fail") as "pass" | "fail",
+          error: pass ? undefined : "Verify FAIL (batch)",
           applyStatus: r.applyStatus ?? ("pending" as const),
         };
       });
+      if (promotions.length) {
+        await Promise.all(promotions);
+      }
       onRowsChange(nextRows);
 
       const units = work.map((r) => {
         const m = byRun.get(r.workspaceRunId!);
-        const pass = m?.verify?.overallPass
-          ? true
-          : !rowMatchesFailedTokens(r, m, failedTokens);
+        const pass = batchVerifyPass(r, m, failedTokens, hasMappedFailure);
         return {
           testCaseId: r.testCaseId,
           title: r.title,
@@ -440,7 +440,7 @@ export function BatchRunConsole({
     modal.confirm({
       title: `Hủy bỏ ${work.length} Unit Job?`,
       content:
-        "Không Apply. Xóa file đã gen dưới AItest/ (nếu còn trên đĩa) và dọn toàn bộ staging .ai-test/workspace. Production src không bị đụng.",
+        "Không Apply. Xóa file đã gen dưới AItest/ (nếu còn trên đĩa) và dọn toàn bộ staging .ai-test/staging. Production src không bị đụng.",
       okText: "Hủy bỏ & xóa file gen",
       okType: "danger",
       onOk: async () => {
@@ -499,41 +499,97 @@ export function BatchRunConsole({
     modal.confirm({
       title: `Apply ${work.length} job vào AItest/?`,
       content:
-        "Mỗi job ghi file dưới AItest/ và dọn staging. Không đụng production src.",
+        "Ghi đủ file vào AItest/, rồi dọn từng staging. Không đụng production src.",
       okText: "Apply tất cả",
       onOk: async () => {
         const { preserveGeneratePause } = beginSidePhase();
         setProgress({
           current: 0,
           total: work.length,
-          label: work[0].title,
+          label: "Chuẩn bị overlay…",
           phase: "apply",
         });
         const map = new Map(rows.map((r) => [r.key, r]));
         try {
-          for (let i = 0; i < work.length; i++) {
-            // Đang tạm dừng Generate: không waitIfPaused (sẽ treo mãi).
-            if (!preserveGeneratePause) await batchControl.waitIfPaused();
-            const row = work[i];
-            setProgress({
-              current: i + 1,
-              total: work.length,
-              label: row.title,
-              phase: "apply",
-            });
+          if (!preserveGeneratePause) await batchControl.waitIfPaused();
+
+          const toApply: UnitWorkspaceManifest[] = [];
+          const runKey = new Map<string, string>(); // runId → row.key
+
+          for (const row of work) {
+            const cur = map.get(row.key) || row;
+            if (!cur.workspaceRunId) {
+              map.set(row.key, { ...cur, applyStatus: "skipped" });
+              continue;
+            }
             try {
-              const next = await applyOne(map.get(row.key) || row);
-              map.set(row.key, next);
+              const manifest = await loadManifest(
+                projectRoot,
+                cur.workspaceRunId,
+                cur.packagePrefix
+              );
+              if (!manifest) {
+                map.set(row.key, {
+                  ...cur,
+                  applyStatus: "skipped",
+                  error: "Thiếu staging",
+                });
+                continue;
+              }
+              // Gate PASS nằm trong applyMany (prepare) — tránh check trùng ở UI.
+              toApply.push(manifest);
+              runKey.set(manifest.runId, row.key);
             } catch (e) {
               map.set(row.key, {
-                ...(map.get(row.key) || row),
+                ...cur,
                 applyStatus: "skipped",
-                error: e instanceof Error ? e.message : "Apply lỗi",
+                error: e instanceof Error ? e.message : "Load staging lỗi",
               });
             }
-            onRowsChange([...map.values()]);
           }
-          message.success("Đã Apply xong các job PASS.");
+          onRowsChange([...map.values()]);
+
+          if (toApply.length === 0) {
+            message.warning("Không có staging để Apply.");
+            return;
+          }
+
+          setProgress({
+            current: toApply.length,
+            total: work.length,
+            label: `Ghi ${toApply.length} overlay → AItest/`,
+            phase: "apply",
+          });
+
+          const { results } = await applyManyWorkspacesToRepo(projectRoot, toApply);
+          for (const r of results) {
+            const key = runKey.get(r.runId);
+            if (!key) continue;
+            const cur = map.get(key);
+            if (!cur) continue;
+            if (r.ok) {
+              map.set(key, {
+                ...cur,
+                applyStatus: "done",
+                error: undefined,
+                // Staging removed with .ai-test — clear pointer so UI doesn't reload ghosts.
+                workspaceRunId: undefined,
+              });
+            } else {
+              map.set(key, {
+                ...cur,
+                applyStatus: "skipped",
+                error: r.error || "Apply lỗi",
+              });
+            }
+          }
+          onRowsChange([...map.values()]);
+          const okN = results.filter((r) => r.ok).length;
+          message.success(
+            `Đã Apply ${okN}/${toApply.length} job vào AItest/ · đã xóa .ai-test staging`
+          );
+        } catch (e) {
+          message.error(e instanceof Error ? e.message : "Apply batch lỗi");
         } finally {
           endSidePhase(preserveGeneratePause);
         }

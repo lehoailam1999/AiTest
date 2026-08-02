@@ -53,6 +53,54 @@ describe("P5 AItest path jail", () => {
     assert.equal(out, "AItest/UnitTest/Order/OrderServiceTests.cs");
   });
 
+  it("coerce collapses duplicated nested AItest/E2ETest path", () => {
+    const out = coerceAitestApplyPath(
+      "backend/AItest/E2ETest/To-do/tmp/AItest/E2ETest/Cap-nhat/fixtures/storageState.json",
+      {
+        kind: "e2e",
+        module: "To-do",
+        sourceFileName: "backend/src/todo/todo.service.ts",
+        packagePrefix: "backend",
+      }
+    );
+    assert.equal(out, "backend/AItest/E2ETest/Cap-nhat/fixtures/storageState.json");
+  });
+
+  it("Apply coerce PRESERVES uniquify + Requirement folder (never rebuild from basename)", () => {
+    const staged =
+      "backend/AItest/UnitTest/Todo-App-SRS/package-lock.1b899cf6.test.ts";
+    const out = coerceAitestApplyPath(staged, {
+      kind: "unit",
+      // Intentionally wrong/missing module — Apply must not invent a new folder.
+      module: null,
+      sourceFileName: "backend/src/todos/todos.service.ts",
+      packagePrefix: "backend",
+      preserveLayout: true,
+    });
+    assert.equal(out, staged);
+  });
+
+  it("Apply coerce relocates package root but keeps AItest tail", () => {
+    const out = coerceAitestApplyPath(
+      "AItest/UnitTest/Req/foo.abc12345.test.ts",
+      {
+        kind: "unit",
+        packagePrefix: "apps/api",
+        preserveLayout: true,
+      }
+    );
+    assert.equal(out, "apps/api/AItest/UnitTest/Req/foo.abc12345.test.ts");
+  });
+
+  it("Apply coerce with empty packagePrefix strips nested pkg prefix", () => {
+    const out = coerceAitestApplyPath("backend/AItest/UnitTest/X/a.test.ts", {
+      kind: "unit",
+      packagePrefix: "",
+      preserveLayout: true,
+    });
+    assert.equal(out, "AItest/UnitTest/X/a.test.ts");
+  });
+
   it("underGeneratedTestFolder nests under any src package", () => {
     const path = underGeneratedTestFolder("unit", "home.test.tsx", null, {
       module: "Home",
@@ -131,21 +179,20 @@ describe("P5 AItest path jail", () => {
     );
   });
 
-  it("Requirement folder nests TC title under UnitTest", () => {
+  it("Unit output keeps Requirement parent only", () => {
     assert.equal(
       buildRequirementTcModule("Todo App SRS", "Lọc tất cả - Happy path", "FeatureX"),
-      "Todo App SRS/Lọc tất cả - Happy path"
+      "Todo-App-SRS/Lọc-tất-cả-Happy-path"
     );
+    assert.equal(buildRequirementTcModule("To do", "AC-00 PATCH", null), "To-do/AC-00-PATCH");
     const path = underGeneratedTestFolder("unit", "todos.service.test.ts", null, {
       requirementTitle: "Todo App SRS",
       testCaseTitle: "Lọc tất cả - Happy path",
       packagePrefix: "",
     });
-    assert.equal(
-      path,
-      "AItest/UnitTest/Todo App SRS/Lọc tất cả - Happy path/todos.service.test.ts"
-    );
+    assert.equal(path, "AItest/UnitTest/Todo-App-SRS/todos.service.test.ts");
   });
+
 });
 
 describe("AItest Jest tsconfig scaffold", () => {

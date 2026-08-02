@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 
 # Root folder at project path (Apply target)
 AITEST_ROOT = "AItest"
@@ -165,13 +166,126 @@ def _norm_rel(path: str | None) -> str:
 
 
 def sanitize_module_label(module: str | None) -> str:
-    """TC.module → safe single/short folder (no path traversal)."""
+    """TC.module → safe short folder (no path traversal, no spaces for shell/pytest)."""
     mod = (module or "").replace("\\", "/").strip().strip("/")
     mod = re.sub(r'[<>:"|?*]', "", mod)
-    parts = [p for p in mod.split("/") if p and p not in (".", "..")]
-    # Keep at most 2 segments from TC label
-    parts = parts[:_MAX_MODULE_DEPTH]
-    return "/".join(parts)
+    parts: list[str] = []
+    for p in mod.split("/"):
+        if not p or p in (".", ".."):
+            continue
+        seg = re.sub(r"\s+", "-", p.strip())
+        seg = re.sub(r"-+", "-", seg).strip("-")
+        if seg and seg not in (".", ".."):
+            parts.append(seg)
+    return "/".join(parts[:_MAX_MODULE_DEPTH])
+
+
+# Windows MAX_PATH is 260; keep each title folder short so
+# {root}/AItest/E2ETest/{req}/{tc}/specs/{file}.spec.ts stays safe on any OS.
+_MAX_PATH_SEGMENT_LEN = 48
+
+# Keep Playwright/test + POM compound suffixes when truncating long filenames.
+_COMPOUND_FILE_EXTS = (
+    ".spec.ts",
+    ".spec.tsx",
+    ".test.ts",
+    ".test.tsx",
+    ".page.ts",
+    ".page.tsx",
+    ".setup.ts",
+    ".helper.ts",
+    ".d.ts",
+)
+
+
+def _stable_seg_hash(s: str) -> str:
+    """FNV-1a 32-bit → 8 hex (matches desktop testOutputLayout; no crypto dep)."""
+    h = 0x811C9DC5
+    for b in s.encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}"
+
+
+def truncate_path_segment(seg: str, *, max_len: int = _MAX_PATH_SEGMENT_LEN) -> str:
+    """Stable shorten: readable prefix + 8-char hash (deterministic across runs)."""
+    s = (seg or "").strip()
+    if not s or len(s) <= max_len:
+        return s
+    digest = _stable_seg_hash(s)
+    keep = max(8, max_len - 9)
+    prefix = s[:keep].rstrip("-._ ")
+    return f"{prefix}-{digest}"
+
+
+def split_e2e_filename(name: str) -> tuple[str, str]:
+    """Split ``foo.bar.spec.ts`` → (``foo.bar``, ``.spec.ts``); preserve POM/test suffixes."""
+    n = name or ""
+    low = n.lower()
+    for ext in _COMPOUND_FILE_EXTS:
+        if low.endswith(ext):
+            return n[: -len(ext)], n[-len(ext) :]
+    if "." in n:
+        stem, _, ext = n.rpartition(".")
+        return stem, f".{ext}"
+    return n, ""
+
+
+def sanitize_path_segment(raw: str | None, *, max_len: int = _MAX_PATH_SEGMENT_LEN) -> str:
+    """
+    Safe single folder segment for title-like labels.
+    - never creates nested dirs from `/` or `\\`
+    - strips shell/glob-sensitive brackets
+    - caps length (Windows MAX_PATH; long Vietnamese TC titles)
+    """
+    s = (raw or "").replace("\\", "/").strip()
+    if not s:
+        return ""
+    s = re.sub(r'[<>:"|?*\[\]]', "", s)
+    s = s.replace("/", "-")
+    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    if s in {".", ".."}:
+        return ""
+    return truncate_path_segment(s, max_len=max_len)
+
+
+def shorten_e2e_rel_path(rel: str, *, max_seg: int = _MAX_PATH_SEGMENT_LEN) -> str:
+    """
+    Shorten oversized path segments under AItest/E2ETest (already-generated long titles).
+    Leaves structural names (AItest, E2ETest, pages, specs, fixtures) alone.
+    File leaves keep compound suffixes (``.spec.ts``, ``.page.ts``, …).
+    """
+    p = (rel or "").replace("\\", "/").strip()
+    if not p:
+        return p
+    parts = [x for x in p.split("/") if x]
+    structural = {
+        "aitest",
+        "e2etest",
+        "pages",
+        "specs",
+        "fixtures",
+        "helpers",
+        "unittest",
+        "apitest",
+        "integrationtest",
+    }
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        is_file = i == len(parts) - 1 and "." in part
+        if part.lower() in structural:
+            out.append(part)
+        elif is_file:
+            stem, ext = split_e2e_filename(part)
+            # Cap long stems; always re-attach full compound extension.
+            if stem and len(part) > max_seg + len(ext):
+                out.append(f"{truncate_path_segment(stem, max_len=max_seg)}{ext}")
+            else:
+                out.append(part)
+        else:
+            out.append(truncate_path_segment(part, max_len=max_seg))
+    return "/".join(out)
 
 
 def module_rel_from_source(source_rel: str | None) -> str:
@@ -545,15 +659,15 @@ def _build_e2e_module(
       2) requirement_title only               → {Requirement}
       3) module (legacy fallback)             → {Module}
     """
-    req = sanitize_module_label(requirement_title)
-    tc = sanitize_module_label(test_case_title)
+    req = sanitize_path_segment(requirement_title)
+    tc = sanitize_path_segment(test_case_title)
     if req and tc:
         return f"{req}/{tc}"
     if req:
         return req
     if tc:
         return tc
-    return sanitize_module_label(module)
+    return sanitize_path_segment(module)
 
 
 def e2e_module_root(
@@ -600,7 +714,33 @@ def resolve_e2e_file_paths(
     )
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", journey_slug or "journey").strip("-") or "journey"
     out: list[E2EFile] = []
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
+
+    def _normalize_under_root(raw_path: str) -> str:
+        """Collapse duplicated AItest/E2ETest prefixes into one canonical root."""
+        p = _norm_rel(raw_path)
+        if not p:
+            return ""
+        segs = [s for s in p.split("/") if s]
+        low = [s.lower() for s in segs]
+        kind_low = generated_test_root("e2e").lower()
+        pairs: list[tuple[int, int]] = []
+        for i in range(len(segs) - 1):
+            if low[i] == AITEST_ROOT.lower() and low[i + 1] == kind_low:
+                pairs.append((i, i + 1))
+        if not pairs:
+            return p
+        # Keep the deepest AItest/E2ETest suffix to avoid nested mirrors.
+        last_ai, last_kind = pairs[-1]
+        tail = segs[last_kind + 1 :]
+        base = root.split("/")
+        # Avoid duplicated first segment when root already includes it
+        # e.g. root=AItest/E2ETest/To-do and tail starts with To-do/...
+        if tail and base and tail[0].lower() == base[-1].lower():
+            tail = tail[1:]
+        if tail:
+            return "/".join(base + tail).replace("//", "/")
+        return root
 
     for item in files:
         if isinstance(item, E2EFile):
@@ -618,9 +758,31 @@ def resolve_e2e_file_paths(
             continue
 
         low = path.lower()
-        # Already under AItest/E2ETest
+        base_name = os.path.basename(path)
+        # Already under AItest/E2ETest => still normalize to canonical root.
         if "aitest/" in low and "e2etest" in low:
-            final = path
+            normalized = _normalize_under_root(path)
+            if normalized == path:
+                final = path
+            else:
+                low_norm = normalized.lower()
+                if low_norm.endswith("playwright.config.ts") or low_norm.endswith("playwright.config.js"):
+                    final = f"{root}/playwright.config.ts"
+                    kind = "config"
+                elif "/pages/" in f"/{low_norm}/" or kind == "page":
+                    final = f"{root}/pages/{base_name or f'{slug}.page.ts'}"
+                    kind = "page"
+                elif "/specs/" in f"/{low_norm}/" or kind == "spec":
+                    name = base_name or f"{slug}.spec.ts"
+                    if not name.endswith(".spec.ts") and not name.endswith(".test.ts"):
+                        name = f"{slug}.spec.ts"
+                    final = f"{root}/specs/{name}"
+                    kind = "spec"
+                elif "/fixtures/" in f"/{low_norm}/" or kind == "fixture":
+                    final = f"{root}/fixtures/{base_name or 'data.json'}"
+                    kind = "fixture"
+                else:
+                    final = normalized
         elif low.endswith("playwright.config.ts") or low.endswith("playwright.config.js"):
             final = f"{root}/playwright.config.ts"
             kind = "config"
@@ -653,9 +815,13 @@ def resolve_e2e_file_paths(
             kind = "spec"
 
         final = final.replace("//", "/")
+        # Same canonical path → last wins (overwrite). Salt-fork created duplicate
+        # specs/pages for one TC and broke Unit-like "one file per path" layout.
         if final in seen:
+            idx = seen[final]
+            out[idx] = E2EFile(path=final, content=content, kind=kind)
             continue
-        seen.add(final)
+        seen[final] = len(out)
         out.append(E2EFile(path=final, content=content, kind=kind))
 
     # TS portability guard:
@@ -673,7 +839,7 @@ def resolve_e2e_file_paths(
         "}\n"
     )
     if shim_path not in seen:
-        seen.add(shim_path)
+        seen[shim_path] = len(out)
         out.append(E2EFile(path=shim_path, content=shim_content, kind="fixture"))
 
     # Post-check: keep internal imports stable after relocating files under AItest/E2ETest/{Module}.
@@ -686,14 +852,21 @@ def resolve_e2e_file_paths(
         base = os.path.splitext(os.path.basename(p))[0].lower()
         by_page_base[base] = p
 
-    if not by_page_base:
-        return out
-
     import_re = re.compile(r"""(from\s+['"])([^'"]+)(['"])""", re.MULTILINE)
     req_re = re.compile(r"""(require\(\s*['"])([^'"]+)(['"]\s*\))""", re.MULTILINE)
 
     def _norm_no_ext(spec: str) -> str:
         return re.sub(r"\.(tsx?|jsx?)$", "", spec.replace("\\", "/"), flags=re.IGNORECASE)
+
+    def _normalize_spec_storage_state(text: str) -> str:
+        # Keep spec-level override compatible with per-TC config directory.
+        # If model emits absolute-ish AItest/... path, rewrite to local fixtures.
+        return re.sub(
+            r"""(storageState\s*:\s*)(['"])[^'"]*\2""",
+            r'\1"./fixtures/storageState.json"',
+            text,
+            flags=re.IGNORECASE,
+        )
 
     def _rewrite_to_page(spec_path: str, import_spec: str) -> str | None:
         raw = import_spec.strip()
@@ -737,6 +910,7 @@ def resolve_e2e_file_paths(
             if ref:
                 content = f"{ref}{content}"
         if f.kind == "spec" or "/specs/" in p:
+            content = _normalize_spec_storage_state(content)
             def _from_repl(m: re.Match[str]) -> str:
                 prefix, spec, suffix = m.group(1), m.group(2), m.group(3)
                 # only rewrite page-object imports; keep npm imports unchanged

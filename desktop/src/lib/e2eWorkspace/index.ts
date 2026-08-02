@@ -22,11 +22,20 @@ export type {
   E2eGenItem,
   E2eInspectResult,
   E2eBatchProgress,
+  E2eGenerateItemDone,
 } from "./e2eJobRunner";
+export { resolveE2eFeSources } from "./resolveE2eFeSources";
+export type { E2eFeSourceBundle } from "./resolveE2eFeSources";
+export {
+  e2eSpecPathsMatch,
+  findSpecReportForPrimary,
+  normalizeE2eSpecPath,
+} from "./e2eSpecPathMatch";
 export {
   newE2eRunId,
   buildE2eStagedFiles,
   writeE2eOverlay,
+  writeE2eOverlayReplacingPrevious,
   captureE2eBackups,
   rollbackE2eTargets,
   refreshE2eOverlayFromFiles,

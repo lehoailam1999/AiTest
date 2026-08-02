@@ -232,6 +232,27 @@ export function languageFamilyFromHints(
 }
 
 /**
+ * Prefer an existing *test* csproj for `dotnet add`.
+ * Never fall back to production csprojFiles[0] (would pollute the SUT).
+ */
+function looksLikeTestCsprojPath(rel: string): boolean {
+  const base = rel.replace(/\\/g, "/").split("/").pop()?.toLowerCase() || "";
+  return /(\.|_)(test|tests|spec)s?\.csproj$/i.test(base) || /(^|[^a-z])tests?\.csproj$/i.test(base);
+}
+
+function pickDotnetTestHostCsproj(input: {
+  preferredCsproj?: string | null;
+  scan?: ProjectScan | null;
+}): string | null {
+  const preferred = (input.preferredCsproj || "").trim().replace(/\\/g, "/");
+  if (preferred && looksLikeTestCsprojPath(preferred)) return preferred;
+  const fromScan = (input.scan?.testProjects ?? [])
+    .map((p) => p.replace(/\\/g, "/"))
+    .find(Boolean);
+  return fromScan || null;
+}
+
+/**
  * Resolve test framework from scan/meta + optional package.json / requirements / csproj.
  *
  * Priority (scoped by source language when known):
@@ -239,7 +260,7 @@ export function languageFamilyFromHints(
  * 2. Scan/meta testFrameworks
  * 3. Heuristic đề xuất theo ngôn ngữ / stack
  *
- * Forensic-style monorepo: C# + Angular ClientApp — không lấy Jest khi đang sinh unit cho .cs.
+ * Mixed monorepo (C# + Node ClientApp): không lấy Jest khi đang sinh unit cho .cs.
  */
 export function resolveTestFramework(input: {
   meta?: ProjectMeta | null;
@@ -394,13 +415,9 @@ export function resolveTestFramework(input: {
       return anyScan;
     }
 
-    const csproj =
-      input.preferredCsproj ||
-      input.scan?.testProjects?.[0] ||
-      input.scan?.csprojFiles?.[0] ||
-      null;
-    const cmd = csproj
-      ? `dotnet add "${csproj}" package Xunit && dotnet add "${csproj}" package xunit.runner.visualstudio`
+    const hostCsproj = pickDotnetTestHostCsproj(input);
+    const cmd = hostCsproj
+      ? `dotnet add "${hostCsproj}" package Xunit && dotnet add "${hostCsproj}" package xunit.runner.visualstudio`
       : `dotnet new xunit -n AItest.UnitTests -o AItest/UnitTest --force`;
     return {
       status: "missing",
@@ -472,14 +489,10 @@ export function resolveTestFramework(input: {
   }
 
   if (isDotnet) {
-    const csproj =
-      input.preferredCsproj ||
-      input.scan?.testProjects?.[0] ||
-      input.scan?.csprojFiles?.[0] ||
-      null;
+    const hostCsproj = pickDotnetTestHostCsproj(input);
     const pkg = "Xunit";
-    const cmd = csproj
-      ? `dotnet add "${csproj}" package ${pkg} && dotnet add "${csproj}" package xunit.runner.visualstudio`
+    const cmd = hostCsproj
+      ? `dotnet add "${hostCsproj}" package ${pkg} && dotnet add "${hostCsproj}" package xunit.runner.visualstudio`
       : `dotnet new xunit -n AItest.UnitTests -o AItest/UnitTest --force`;
     return {
       status: "missing",

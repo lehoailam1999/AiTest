@@ -1,8 +1,8 @@
-import { runDotnetTest, runTestCommand, writeTextFile, readTextFile, type TestRunResult } from "../../tauri/bridge";
+import { runDotnetTest, runTestCommand, writeTextFile, readTextFile, deleteTextFile, type TestRunResult } from "../../tauri/bridge";
 import { saveManifest } from "./manager";
 import { syncVerifyReport } from "./auditSync";
 import { syncCoverageAfterVerify } from "./coverageSync";
-import { captureStagingBackups, rollbackStaging, stageOverlayToTargets } from "./staging";
+import { preserveStagedOverlays, stageOverlayToTargets } from "./staging";
 import type {
   UnitWorkspaceManifest,
   VerifyReport,
@@ -17,6 +17,13 @@ import {
   looksLikeJestTsTest,
   manifestHasAitestTests,
 } from "./ensureAitestJestTsconfig";
+import {
+  buildAitestDotnetTestCommand,
+  ensureAitestDotnetInWorkspace,
+  isDefaultDotnetTestCommand,
+  manifestHasAitestCsharpTests,
+  parseCsharpErrorFileRels,
+} from "./ensureAitestDotnet";
 import { rewriteSutImports } from "../testOutputLayout";
 
 const LOG_MAX = 12_000;
@@ -24,6 +31,64 @@ const LOG_MAX = 12_000;
 function trimLog(log: string): string {
   if (log.length <= LOG_MAX) return log;
   return log.slice(-LOG_MAX);
+}
+
+/**
+ * When batch AItest compile fails, remove only the failing generated .cs files and retry once
+ * so healthy tests in the same host can still run (agnostic across .NET repos).
+ */
+async function quarantineCsharpCompileFailures(
+  projectRoot: string,
+  log: string
+): Promise<{ removed: string[]; note: string }> {
+  const rels = parseCsharpErrorFileRels(log, projectRoot);
+  const removed: string[] = [];
+  for (const rel of rels) {
+    try {
+      await deleteTextFile(projectRoot, rel);
+      removed.push(rel);
+    } catch {
+      /* already gone */
+    }
+  }
+  if (!removed.length) {
+    return { removed, note: "" };
+  }
+  return {
+    removed,
+    note:
+      `[AITest] Quarantined ${removed.length} compile-failing AItest file(s) and retrying:\n` +
+      removed.map((r) => `  - ${r}`).join("\n") +
+      "\n\n",
+  };
+}
+
+async function runCsharpShellWithQuarantine(
+  projectRoot: string,
+  command: string,
+  dotnetFilter: string | undefined,
+  enabled: boolean
+): Promise<TestRunResult> {
+  let result = await runShellCommand(projectRoot, command, dotnetFilter);
+  if (!enabled) return result;
+
+  const notes: string[] = [];
+  // Multi-pass: one bad file can hide others; keep removing until green or stuck.
+  for (let pass = 0; pass < 8; pass++) {
+    if (result.success) break;
+    if (!/\berror\s+CS\d+/i.test(result.log || "")) break;
+    const { removed, note } = await quarantineCsharpCompileFailures(projectRoot, result.log);
+    if (!removed.length) break;
+    if (note) notes.push(note.trimEnd());
+    result = await runShellCommand(projectRoot, command, dotnetFilter);
+  }
+
+  if (!notes.length) return result;
+  return {
+    ...result,
+    log: notes.join("\n\n") + "\n\n" + (result.log || ""),
+    command: result.command || command,
+  };
 }
 
 function stageFromRun(
@@ -63,7 +128,10 @@ async function runShellCommand(
     };
   }
   if (/^dotnet\s+test\b/i.test(cmd)) {
-    return runDotnetTest(projectRoot, dotnetFilter);
+    const fromCmd =
+      cmd.match(/dotnet\s+test\s+"([^"]+\.csproj)"/i)?.[1] ||
+      cmd.match(/dotnet\s+test\s+(\S+\.csproj)/i)?.[1];
+    return runDotnetTest(projectRoot, dotnetFilter || fromCmd);
   }
   return runTestCommand(projectRoot, cmd);
 }
@@ -90,7 +158,6 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
   await saveManifest(projectRoot, working);
 
   const stages: VerifyStageResult[] = [];
-  let backups: Awaited<ReturnType<typeof captureStagingBackups>> = [];
 
   try {
     // Refresh Jest scaffold + rewrite imports so verify works on any Nest/TS project.
@@ -132,12 +199,27 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
       await saveManifest(projectRoot, working);
     }
 
-    backups = await captureStagingBackups(projectRoot, working);
+    // C# / .NET: exclude AItest from production csproj + scaffold AItest.UnitTests.csproj
+    if (manifestHasAitestCsharpTests(working)) {
+      working = await ensureAitestDotnetInWorkspace({
+        projectRoot,
+        manifest: working,
+      });
+      await saveManifest(projectRoot, working);
+    }
+
     await stageOverlayToTargets(projectRoot, working);
+
+    const csharpHost = manifestHasAitestCsharpTests(working);
 
     const compileCmd = (input.compileCommand ?? "").trim();
     if (compileCmd) {
-      const compileRun = await runShellCommand(projectRoot, compileCmd);
+      const compileRun = await runCsharpShellWithQuarantine(
+        projectRoot,
+        compileCmd,
+        undefined,
+        csharpHost
+      );
       stages.push(stageFromRun("compile", compileCmd, compileRun));
       if (!compileRun.success) {
         const report: VerifyReport = {
@@ -157,11 +239,22 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
       throw new Error("Cần lệnh test để verify.");
     }
     // Safety net: Nest ``npm test`` only scans src/**/*.spec.ts — rewrite to AItest Jest.
-    const testCmd =
+    let testCmd =
       manifestHasAitestTests(working) && isDefaultNpmJestCommand(rawTestCmd)
         ? buildAitestJestCommand(projectRoot, working.packagePrefix)
         : rawTestCmd;
-    const testRun = await runShellCommand(projectRoot, testCmd, input.dotnetFilter);
+    // Safety net: bare `dotnet test` would build whole solution / wrong host — use AItest.UnitTests.
+    if (csharpHost && isDefaultDotnetTestCommand(testCmd)) {
+      testCmd = buildAitestDotnetTestCommand(working.packagePrefix);
+    }
+    // Prefer explicit filter; else parse .csproj from command (do not override custom hosts).
+    // When compile was skipped, quarantine on first failing `dotnet test` build as well.
+    const testRun = await runCsharpShellWithQuarantine(
+      projectRoot,
+      testCmd,
+      input.dotnetFilter,
+      csharpHost && !compileCmd
+    );
     stages.push(stageFromRun("test", testCmd, testRun));
 
     let overallPass = testRun.success;
@@ -203,6 +296,7 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
 
     return { manifest: working, report };
   } finally {
-    await rollbackStaging(projectRoot, working.runId, backups, working.packagePrefix);
+    // Keep staged AItest on disk until Apply / Discard.
+    await preserveStagedOverlays(projectRoot, [working]);
   }
 }

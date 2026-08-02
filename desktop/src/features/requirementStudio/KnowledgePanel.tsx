@@ -22,6 +22,7 @@ type SectionKey =
   | "features"
   | "actors"
   | "useCases"
+  | "executionContexts"
   | "businessRules"
   | "validationRules"
   | "apiSummary"
@@ -35,6 +36,7 @@ const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "features", label: "Chức năng" },
   { key: "actors", label: "Actors & quyền" },
   { key: "useCases", label: "Luồng nghiệp vụ" },
+  { key: "executionContexts", label: "Execution Context" },
   { key: "businessRules", label: "Business rules" },
   { key: "validationRules", label: "Validation & dữ liệu" },
   { key: "apiSummary", label: "API / giao diện" },
@@ -405,6 +407,42 @@ function renderSection(key: SectionKey, payload: KnowledgePayload) {
               {u.steps ? (
                 <Typography.Text type="secondary" style={{ whiteSpace: "pre-wrap" }}>
                   {u.steps}
+                </Typography.Text>
+              ) : null}
+            </Space>
+          </List.Item>
+        )}
+      />
+    );
+  }
+
+  if (key === "executionContexts") {
+    const rows = payload.executionContexts ?? [];
+    if (!rows.length) return <EmptyHint label="Chưa có Execution Context (WHO cho E2E)" />;
+    return (
+      <List
+        size="small"
+        dataSource={rows}
+        renderItem={(c) => (
+          <List.Item>
+            <Space orientation="vertical" size={0} style={{ width: "100%" }}>
+              <Typography.Text strong>{c.name}</Typography.Text>
+              <Typography.Text type="secondary">
+                {[
+                  c.actor ? `actor: ${c.actor}` : null,
+                  typeof c.authRequired === "boolean"
+                    ? `authRequired: ${c.authRequired}`
+                    : null,
+                  c.roles?.length ? `roles: ${c.roles.join(", ")}` : null,
+                  c.sessionHint ? `session: ${c.sessionHint}` : null,
+                  c.permissions || null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </Typography.Text>
+              {c.notes ? (
+                <Typography.Text type="secondary" style={{ whiteSpace: "pre-wrap" }}>
+                  {c.notes}
                 </Typography.Text>
               ) : null}
             </Space>

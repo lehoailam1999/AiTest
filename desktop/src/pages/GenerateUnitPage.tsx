@@ -19,8 +19,6 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { generateTcUrl } from "../lib/testingJourney";
 import { ROUTES, requirementUrl, activityUrl } from "../lib/productRoutes";
 import {
-  CodeOutlined,
-  FolderOpenOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   ThunderboltOutlined,
@@ -56,9 +54,6 @@ import {
   loadManifest,
 } from "../lib/unitWorkspace/manager";
 import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWorkspace/types";
-import { UnitWorkspacePreview } from "../components/UnitWorkspacePreview";
-import { UnitWorkspaceVerifyPanel } from "../components/UnitWorkspaceVerifyPanel";
-import { VERIFY_APPLY_CONSOLE_ID } from "../features/unit-test/VerifyApplyConsole";
 import {
   BatchRunConsole,
   BATCH_NOTE_RUNNING,
@@ -74,6 +69,7 @@ import {
 } from "../features/unit-test/BatchStagingPreview";
 import { UnitScopePanel } from "../components/UnitScopePanel";
 import { ReadyStrip } from "../components/ReadyStrip";
+import { aiConnectionDisplayLabel } from "../lib/aiConnectionLabel";
 import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
 import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
 import type { AITestContextPacket } from "../lib/contextPacket/types";
@@ -121,6 +117,18 @@ function displayRel(localPath: string | null, absOrRel: string): string {
   return absOrRel.replace(/^[\\/]+/, "");
 }
 
+function pathMatchesUnitFramework(path: string, fw?: string | null): boolean {
+  if (!fw || fw === "auto") return true;
+  const p = path.toLowerCase().replace(/\\/g, "/");
+  if (["jest", "vitest", "mocha"].includes(fw)) {
+    return /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(p);
+  }
+  if (fw === "pytest" || fw === "unittest") return p.endsWith(".py");
+  if (["xunit", "nunit", "mstest"].includes(fw)) return p.endsWith(".cs");
+  if (fw === "go test" || fw === "gotest") return p.endsWith(".go");
+  return true;
+}
+
 /** BE workspace resolve → FE heuristic/AI fallback khi primary trống (TC VI ≠ path Latin). */
 async function resolveTcSourcePrimary(opts: {
   projectId: string;
@@ -129,7 +137,14 @@ async function resolveTcSourcePrimary(opts: {
   allSourcePaths: string[];
   useAi: boolean;
   codeAliases?: CodeAliasMap | null;
+  /** Khi đã khóa Jest/pytest/… — bỏ primary lệch ngôn ngữ (docs/*.py trên Nest). */
+  preferredFramework?: string | null;
 }): Promise<{ primary: string | null; related: string[]; reason: string }> {
+  const fw = opts.preferredFramework || null;
+  const scopedPaths = fw
+    ? opts.allSourcePaths.filter((p) => pathMatchesUnitFramework(p, fw))
+    : opts.allSourcePaths;
+
   const ranked = await resolveWorkspaceScope(
     opts.workspaceId,
     opts.testCase.id,
@@ -139,19 +154,32 @@ async function resolveTcSourcePrimary(opts: {
   let related = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
   let reason = ranked.reason || "BE workspace resolve";
 
-  if (!primary && opts.allSourcePaths.length > 0) {
+  const primaryOk = primary && pathMatchesUnitFramework(primary, fw);
+  if ((!primary || !primaryOk) && (scopedPaths.length > 0 || opts.allSourcePaths.length > 0)) {
     const fe = await resolveScopeWithAi({
       projectId: opts.projectId,
       testCase: opts.testCase,
-      allSourcePaths: opts.allSourcePaths,
+      allSourcePaths: scopedPaths.length > 0 ? scopedPaths : opts.allSourcePaths,
       codeAliases: opts.codeAliases,
       useAi: opts.useAi,
     });
-    if (fe.primary) {
+    if (fe.primary && pathMatchesUnitFramework(fe.primary, fw)) {
       primary = fe.primary.replace(/\\/g, "/");
-      related = (fe.related || []).map((p) => p.replace(/\\/g, "/"));
-      reason = `FE fallback · ${fe.reason || "heuristic"}`;
+      related = (fe.related || [])
+        .map((p) => p.replace(/\\/g, "/"))
+        .filter((p) => pathMatchesUnitFramework(p, fw));
+      reason = primaryOk
+        ? `FE fallback · ${fe.reason || "heuristic"}`
+        : `FE · khớp ${fw || "stack"} · ${fe.reason || "heuristic"}`;
+    } else if (primary && !primaryOk) {
+      primary = null;
+      related = [];
+      reason = `Bỏ scope lệch framework (${fw})`;
     }
+  }
+
+  if (primary && fw) {
+    related = related.filter((p) => pathMatchesUnitFramework(p, fw));
   }
   return { primary, related, reason };
 }
@@ -414,9 +442,18 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   /**
    * Language theo file đang test trước (monorepo Forensic: .cs → C#, không để
    * ClientApp TS hoặc "C# + TypeScript" kéo framework sang Jest).
+   * Nếu Ready đã khóa Jest/Vitest — ưu tiên TypeScript; bỏ qua docs/*.py auto-scope.
    */
+  const lockedNodeFw =
+    Boolean(testFwResolution?.framework) &&
+    ["jest", "vitest", "mocha"].includes(testFwResolution!.framework);
+  const sourceLang = languageFromSourcePath(sourceFile);
   const language =
-    languageFromSourcePath(sourceFile) ||
+    (sourceLang &&
+    !(lockedNodeFw && sourceLang === "Python" && !manualSourcePick)
+      ? sourceLang
+      : null) ||
+    (lockedNodeFw ? "TypeScript" : null) ||
     (serverProject?.language && !serverProject.language.includes("+")
       ? serverProject.language
       : null) ||
@@ -661,6 +698,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           useAi: useAiScope && aiReady !== false,
           codeAliases: (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
             ?.codeAliases,
+          preferredFramework: framework === "auto" ? testFwResolution?.framework : framework,
         });
         primary = ranked.primary;
         related = ranked.related ?? [];
@@ -717,7 +755,19 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     } finally {
       setScopeLoading(false);
     }
-  }, [localPath, selectedTc, message, project?.id, useAiScope, aiReady, matchSourceFile]);
+  }, [
+    localPath,
+    selectedTc,
+    message,
+    project?.id,
+    useAiScope,
+    aiReady,
+    matchSourceFile,
+    sourceFiles,
+    framework,
+    testFwResolution?.framework,
+    serverProject?.meta,
+  ]);
 
   useEffect(() => {
     void resolveScope();
@@ -827,6 +877,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       allSourcePaths: paths.map((p) => displayRel(localPath, p)),
       useAi: useAiScope && aiReady !== false,
       codeAliases: aliases,
+      preferredFramework: framework === "auto" ? testFwResolution?.framework : framework,
     });
     const primaryRel = (ranked.primary || "").replace(/\\/g, "/");
     const relatedRels = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
@@ -965,7 +1016,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setSuggestVerify(true);
     window.setTimeout(() => {
       document
-        .getElementById(VERIFY_APPLY_CONSOLE_ID)
+        .getElementById("aitest-batch-verify-apply")
         ?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 120);
   }
@@ -1402,6 +1453,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       return;
     }
     setBusy(true);
+    setResult(null);
+    setWsManifest(null);
+    setWsPreviews([]);
+    setWsSelectedRel(null);
+    setBatchResults([]);
+    setBatchJobs([]);
     try {
       const wsId = await ensureWorkspaceOpen(project.id, localPath);
       const tc = selectedTc;
@@ -1577,6 +1634,17 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         setWsManifest(manifest);
         setWsPreviews(previews);
         setWsSelectedRel(added.entry.targetRel);
+        // Same pipeline as Theo Requirement: 1 TC = batch 1 phần tử → Staging + Verify & Apply.
+        const singleRow: BatchRow = {
+          key: tc.id,
+          testCaseId: tc.testCaseId,
+          title: tc.title,
+          status: "ok",
+          workspaceRunId: manifest.runId,
+          packagePrefix: manifest.packagePrefix,
+        };
+        setBatchResults([singleRow]);
+        await refreshBatchStaging([singleRow]);
         message.success(
           isApiKind
             ? `Đã sinh API test · Bản nháp (${added.entry.op})`
@@ -1589,6 +1657,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         setWsManifest(null);
         setWsPreviews([]);
         setWsSelectedRel(null);
+        setBatchResults([]);
+        setBatchJobs([]);
         message.success(
           `Đã sinh ${isApiKind ? "API" : "unit"} test bằng ${res.provider}${
             res.runnerUsed === "AI_CLI" ? " · AI CLI" : ""
@@ -1802,7 +1872,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       <Space orientation="vertical" size={12} style={{ width: "100%", marginTop: 12 }}>
         <ReadyStrip
           aiReady={Boolean(aiReady)}
-          aiProvider={conn?.provider}
+          aiProvider={aiConnectionDisplayLabel(conn)}
           localPath={localPath}
           syncedAt={syncedAt}
           project={project ? { id: project.id, name: project.name } : null}
@@ -2144,6 +2214,28 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               Chạy Unit Job
             </Button>
 
+            {batchResults.length > 0 ? (
+              <BatchRunConsole
+                variant="table"
+                title="Kết quả Generate"
+                rows={batchResults}
+                onRowsChange={(rows) => {
+                  setBatchResults(rows);
+                  void refreshBatchStaging(rows);
+                }}
+                projectRoot={localPath!}
+                language={language}
+                framework={framework}
+                meta={meta ?? undefined}
+                stackInspect={result?.stackInspect}
+                busy={busy}
+                onBusy={setBusy}
+                batchControl={batchControlRef.current}
+                batchRunStatus={batchRunStatus}
+                generateFailCount={batchFailCount}
+              />
+            ) : null}
+
             <Collapse
               size="small"
               style={{ marginTop: 4 }}
@@ -2243,62 +2335,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         )}
       </Card>
 
-      {result ? (
-        <Card
-          title={
-            <Space wrap>
-              <CodeOutlined />
-              Kết quả · {result.fileName}
-              {result.runnerUsed === "AI_CLI" ? <Tag color="blue">AI CLI</Tag> : null}
-              {result.stackInspect?.package_name ? (
-                <Tag>
-                  {result.stackInspect.is_monorepo_package
-                    ? `mono:${result.stackInspect.workspace_kind || "pkg"}`
-                    : "pkg"}
-                  {" · "}
-                  {result.stackInspect.package_name}
-                </Tag>
-              ) : null}
-              {result.stackInspect?.language ? (
-                <Tag>
-                  {result.stackInspect.language}/{result.stackInspect.framework}
-                </Tag>
-              ) : null}
-            </Space>
-          }
-          style={{ marginTop: 8 }}
-          extra={
-            <Space>
-              <Link to={activityUrl({ tab: "unit-jobs", runId: wsManifest?.runId })}>
-                <Button size="small" type="link">
-                  Job Board
-                </Button>
-              </Link>
-              <Typography.Text type="secondary">provider: {result.provider}</Typography.Text>
-            </Space>
-          }
-        >
-          <Space orientation="vertical" size={12} style={{ width: "100%" }}>
-            <div>
-              <Typography.Text strong>Đường dẫn trong repo (khi Apply)</Typography.Text>
-              <Input
-                style={{ marginTop: 6 }}
-                value={writePath}
-                onChange={(e) => setWritePath(e.target.value)}
-                onBlur={() => void updateWorkspacePath()}
-                prefix={<FolderOpenOutlined />}
-                placeholder="vd. tests/test_foo.py · src/foo.test.ts · Tests/FooTests.cs"
-              />
-              <Typography.Paragraph type="secondary" style={{ marginTop: 6, marginBottom: 0 }}>
-                Gợi ý Backend: <code>{result.suggestedPath}</code>
-                {wsManifest ? " · Sửa path rồi blur ô input để cập nhật bản nháp." : null}
-              </Typography.Paragraph>
-            </div>
-          </Space>
-        </Card>
-      ) : null}
-
-      {batchJobs.length > 0 || (batchResults.length > 0 && inputMode === "requirement") ? (
+      {/* Staging + Verify/Apply — cùng UI Requirement (batch) cho cả Theo Test Case. */}
+      {batchJobs.length > 0 || batchResults.length > 0 ? (
         <>
           <BatchStagingPreview
             jobs={
@@ -2338,66 +2376,15 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               batchControl={batchControlRef.current}
               batchRunStatus={batchRunStatus}
               generateFailCount={batchFailCount}
-              onRetryGenerateFails={() => void runRequirementBatch(true)}
+              onRetryGenerateFails={
+                inputMode === "requirement" ? () => void runRequirementBatch(true) : undefined
+              }
               onDiscarded={() => {
                 setBatchJobs([]);
                 setBatchResults([]);
                 setWsManifest(null);
                 setWsPreviews([]);
-              }}
-            />
-          ) : null}
-        </>
-      ) : null}
-
-      {batchResults.length === 0 && wsManifest && wsPreviews.length > 0 ? (
-        <>
-          <UnitWorkspacePreview
-            manifest={wsManifest}
-            previews={wsPreviews}
-            selectedTargetRel={wsSelectedRel}
-            onSelect={setWsSelectedRel}
-            projectRoot={localPath}
-          />
-          {localPath ? (
-            <UnitWorkspaceVerifyPanel
-              manifest={wsManifest}
-              projectRoot={localPath}
-              language={language}
-              framework={framework}
-              meta={meta ?? undefined}
-              stackInspect={result?.stackInspect}
-              busy={busy}
-              repairing={repairing}
-              suggestVerify={suggestVerify}
-              onBusy={setBusy}
-              onRepair={async () => {
-                const next = await repairWorkspaceWithAi();
-                if (next) message.success("AI đã sửa file trong bản nháp. Hãy chạy Verify lại.");
-              }}
-              onRepairAsync={async (m) => {
-                const next = await repairWorkspaceWithAi(m);
-                if (!next) throw new Error("Repair không trả về manifest");
-                return next;
-              }}
-              onManifestChange={(m) => {
-                setSuggestVerify(false);
-                if (m.status === "discarded") {
-                  setWsManifest(null);
-                  setWsPreviews([]);
-                  return;
-                }
-                setWsManifest(m);
-                if (m.status === "applied") {
-                  message.success("Đã Apply vào source code — về Requirement.");
-                  navigate(ROUTES.requirement);
-                } else if (m.status === "pass") {
-                  message.success("Verify PASS — có thể Apply.");
-                } else if (m.status === "fail") {
-                  message.warning(
-                    "Verify FAIL — bấm Repair with AI hoặc Verify + Auto-Repair."
-                  );
-                }
+                setResult(null);
               }}
             />
           ) : null}

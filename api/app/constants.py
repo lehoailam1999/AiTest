@@ -5,6 +5,7 @@ JOB_PENDING = "Pending"
 JOB_QUEUED = "Queued"
 JOB_PENDING_WORKER = "PendingWorker"
 JOB_RUNNING = "Running"
+JOB_PAUSED = "Paused"
 JOB_COMPLETED = "Completed"
 JOB_FAILED = "Failed"
 

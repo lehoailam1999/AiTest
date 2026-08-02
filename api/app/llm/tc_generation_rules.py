@@ -3,9 +3,12 @@
 Chỉnh file này để đổi hành vi AI toàn hệ thống. Không nhập từ UI.
 Rule phải DOCUMENT-AGNOSTIC: không giả định domain/app cụ thể (Todo, Login, …).
 Bám sát tài liệu/requirement/SRS/source context của job hiện tại.
+
+ĐỘ PHỦ: theo tín hiệu trong tài liệu — KHÔNG trần số lượng giả tạo.
 """
 
 from __future__ import annotations
+
 
 # Rule mặc định: cover đủ mọi Feature/file, không bỏ sót module.
 DEFAULT_TC_GENERATION_RULES = """\
@@ -23,10 +26,16 @@ QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
    - Nhiều màn hình/API/service: nhóm theo chức năng con trước khi viết TC.
    - Chỉ sinh TC sau khi đã tách rõ phạm vi; thiếu thông tin thì tận dụng SRS/Knowledge/TC hiện có;
      chỉ dùng [Giả định] khi thực sự cần và ghi rõ.
-4. Độ phủ cho mỗi module (nếu job không giới hạn 1 chủ đề):
-   - Tối thiểu khi tài liệu có tín hiệu tương ứng: 1 Happy Path + validation/negative (nếu có rule)
-     + boundary/permission/edge (chỉ khi tài liệu nêu).
-   - Không bịa thêm loại coverage chỉ vì checklist — chỉ cover tín hiệu có trong tài liệu.
+4. ĐỘ PHỦ THEO TÍN HIỆU (BẮT BUỘC — KHÔNG TRẦN SỐ LƯỢNG):
+   - KHÔNG giới hạn số lượng giả tạo. Số TC = số kịch bản độc lập cần cover.
+   - Mỗi tín hiệu độc lập trong tài liệu → ≥1 TC riêng (không gộp nhiều FR/AC/rule vào một TC dài):
+     FR/User Story · AC · Business rule · Validation/input · Permission/auth (nếu có actor/role) ·
+     State transition · Error/exception · Boundary/edge · Data integrity (C/U/D) ·
+     Integration (API/DB/event nếu nêu) · UI journey (E2E, nếu có UI).
+   - Floor tối thiểu khi có tín hiệu chức năng: ≥1 Happy Path; thêm negative/validation/boundary
+     chỉ khi tài liệu có rule tương ứng — không bịa coverage «cho đủ checklist».
+   - Module lớn / nhiều AC: sinh ĐỦ mọi case; ưu tiên tách theo module/fan-out nếu hệ thống đã chia —
+     không dừng sớm vì «đã đủ vài case».
 5. Trường `module` khớp tên chức năng/màn hình/heading trong tài liệu (không gộp nhiều chức năng).
 6. Chuẩn hóa thuộc tính Test Case (BẮT BUỘC tiếng Việt):
    - `title`: "[Chức năng] - [Hành động] - [Kết quả kỳ vọng]" (dùng tên chức năng từ tài liệu).
@@ -52,31 +61,70 @@ QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
    - Integration (API/DB/event nếu tài liệu/source nêu)
    - UI state (E2E, nếu có UI)
    - Negative & boundary
-11. TRƯỚC KHI TRẢ KẾT QUẢ:
-   - Mỗi tiêu chí mục 10 có tín hiệu trong tài liệu → ≥1 TC tương ứng.
+11. TRƯỚC KHI TRẢ KẾT QUẢ (SELF-CHECK):
+   - Liệt kê mental checklist: mọi FR/AC/rule/validation/API/use-case trong phạm vi đã có ≥1 TC?
+   - Thiếu → bổ sung trước khi trả JSON. Đủ → không thêm case bịa.
    - Không bỏ sót module/chức năng xuất hiện trong tài liệu hoặc output phân tích.
    - Thiếu dữ liệu để viết TC → ghi rõ trong precondition/testData hoặc [Giả định].
+   - Không trả mảng rỗng / «đã cover» / tóm tắt thay vì JSON đầy đủ.
 """
 
 
-# Shared skeleton when Studio locks Unit|E2E (engine overlay carries detail).
+# Shared skeleton when Studio locks Unit|E2E
+# (engine overlay + unit_tc_analysis / e2e_tc_analysis carry SoT detail).
+# Keep thin — do NOT restate bucket map / trace / completeness here.
 COMPACT_SHARED_TC_RULES = """\
 QUY TẮC CHUNG (BẮT BUỘC):
-1. Bám sát tài liệu job hiện tại — không giả định domain/app mẫu.
-2. Mỗi Feature/module riêng; module field khớp tên trong tài liệu.
-3. Title: "[Chức năng] - [Hành động] - [Kết quả kỳ vọng]" — tiếng Việt.
-4. Precondition / testData / steps / expectedResult cụ thể, kiểm thử được, lấy từ tài liệu.
-5. Coverage theo tín hiệu SRS: Happy Path + Validation/Negative + Boundary/Permission (chỉ nếu có).
-6. Không bịa; thiếu chi tiết ghi [Giả định].
-7. Không gộp Unit và E2E trong cùng một TC.
-8. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
+1. Bám Knowledge/Freeze của job — không domain mẫu; bucket rỗng → không invent.
+2. module = tên Feature trong phạm vi; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
+3. precondition / testData / steps / expectedResult cụ thể, kiểm được; thiếu → [Giả định].
+4. Mỗi tín hiệu độc lập trong phạm vi → ≥1 TC; không gộp nhiều tín hiệu; không trần giả tạo.
+5. Không gộp Unit+E2E trong 1 TC. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
+6. Self-check: còn tín hiệu chưa có TC → bổ sung; đủ → dừng (không pad).
+"""
+
+# E2E-only shared — SoT (e2e_tc_analysis_rules) owns coverage/trace/completeness/lock.
+# Do NOT restate Scenario/Workflow/BR/gate here (avoids triple with SoT + overlay).
+E2E_COMPACT_SHARED_TC_RULES = """\
+QUY TẮC CHUNG E2E (format):
+1. module = tên FEATURES; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
+2. precondition / testData / steps / expectedResult cụ thể; thiếu → [Giả định] / [Thiếu Output].
+3. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
+"""
+
+# Fan-out / speed=fast — shorter shared block (engine overlay + SPEED MODE addon carry detail).
+SPEED_SHARED_TC_RULES = """\
+QUY TẮC CHUNG (SPEED):
+1. Bám Knowledge/Freeze — không copy domain mẫu; không invent bucket rỗng.
+2. module = Feature trong phạm vi; title VN [Chức năng]-[Hành động]-[Kết quả].
+3. Steps/expected/precondition/testData cụ thể; thiếu → [Giả định].
+4. Không gộp Unit+E2E. priority/severity thang Việt.
+5. Tôn trọng SPEED MODE (trần mềm) trong system prompt — ưu tiên nhánh chính.
+"""
+
+E2E_SPEED_SHARED_TC_RULES = """\
+QUY TẮC CHUNG E2E (SPEED format):
+1. module = FEATURES; title VN [Chức năng]-[Hành động]-[Kết quả].
+2. Steps/expected/precondition/testData cụ thể; thiếu → [Giả định].
+3. Tôn trọng SPEED MODE (trần mềm) — ưu tiên journey chính trong SoT.
 """
 
 
-def get_tc_generation_rules(*, preferred_engine: str | None = None) -> str:
+def get_tc_generation_rules(
+    *,
+    preferred_engine: str | None = None,
+    speed: str | None = None,
+) -> str:
     """Entry point — khi lock engine dùng skeleton gọn + overlay riêng (tiết kiệm token)."""
     eng = (preferred_engine or "").strip().lower()
-    if eng in ("unit", "e2e"):
+    fast = (speed or "").strip().lower() == "fast"
+    if eng == "e2e":
+        return (
+            E2E_SPEED_SHARED_TC_RULES if fast else E2E_COMPACT_SHARED_TC_RULES
+        ).strip()
+    if eng == "unit":
+        if fast:
+            return SPEED_SHARED_TC_RULES.strip()
         return COMPACT_SHARED_TC_RULES.strip()
     return DEFAULT_TC_GENERATION_RULES.strip()
 
@@ -87,92 +135,119 @@ def engine_generation_rules(
     target_url: str = "",
     auth_hint: str = "",
     focus_modules: str = "",
+    speed: str | None = None,
+    max_per_module: int | None = None,
 ) -> str:
     """
     Extra rules when Studio generates Unit-only or E2E-only from the same SRS.
     preferred_engine: unit | e2e
     Document-agnostic: target_url / auth_hint / focus_modules chỉ gắn khi caller truyền.
+
+    Unit: SoT/map/trace trong unit_tc_analysis_rules (prepend) —
+    overlay chỉ AAA / bootstrap / focus.
+    E2E: SoT/completeness/trace trong e2e_tc_analysis_rules (prepend) —
+    overlay chỉ tags / auth / target_url / focus (không restates Step/Expected/Coverage).
     """
     eng = (preferred_engine or "").strip().lower()
     if eng not in ("unit", "e2e"):
         return ""
 
+    fast = (speed or "").strip().lower() == "fast"
+    cap = max_per_module if isinstance(max_per_module, int) and max_per_module > 0 else None
+
     if eng == "unit":
+        from app.llm.unit_tc_analysis_rules import append_unit_tc_from_analysis_rules
+
+        if fast:
+            parts = [
+                "=== PHIÊN SINH UNIT (SPEED) ===",
+                "1. type=`Unit` only — hàm/service/validator/handler; không UI.",
+                "2. Steps: Arrange mock → Act → Assert return/exception/side-effect.",
+                "3. Cấm SUT entrypoint bootstrap (main.ts, Program.cs, …).",
+            ]
+            if cap:
+                parts.append(
+                    f"4. Trần mềm ≤{cap} TC/module: FEATURES happy + VALIDATION/BR chính."
+                )
+            else:
+                parts.append("4. Ưu tiên nhánh chính có trong Phân tích.")
+            if focus_modules.strip():
+                parts.append(f"5. Focus module: {focus_modules.strip()}.")
+            return append_unit_tc_from_analysis_rules("\n".join(parts), speed=True)
+
         parts = [
-            "=== PHIÊN SINH UNIT (BẮT BUỘC) ===",
-            "1. TRƯỚC TIÊN phân tích/tổng hợp theo góc nhìn Unit từ tài liệu + source context (nếu có):",
-            "   - Xác định đơn vị kiểm thử: hàm/class/service/validator/API handler được mô tả hoặc suy ra từ tài liệu.",
-            "   - Liệt kê input, output, dependency, mock, biên, exception, side-effect, business rule tầng logic.",
-            "   - Tách logic thuần vs UI — KHÔNG đưa thao tác UI sang Unit.",
-            "2. OUTPUT chỉ type=`Unit`; mọi TC phải type=`Unit`.",
-            "3. Steps chuẩn: (1) Chuẩn bị input + mock -> (2) Gọi đơn vị cần test -> (3) Assert return/exception/side-effect.",
-            "4. Expected Result: giá trị trả về, exception, state change, tương tác dependency — theo tài liệu/code.",
-            "5. Coverage Unit theo tín hiệu tài liệu: happy path, validation, boundary, exception/fail path.",
-            "6. KHÔNG sinh type=E2E trong phiên này.",
-            "7. Không giả định tên class/file/domain mẫu; dùng tên module/API/hàm từ tài liệu hoặc source context.",
+            "=== PHIÊN SINH UNIT ===",
+            "1. type=`Unit` only — không E2E/UI click-fill.",
+            "2. Steps: (1) input+mock → (2) gọi SUT → (3) assert return/exception/side-effect.",
+            "3. Expected khớp rule/text Phân tích (+ code nếu có).",
+            "4. SUT = pipe/controller/service/validator/DTO/handler — "
+            "cấm bootstrap (main.ts/js, Program.cs, wsgi/asgi, Spring Boot Application.main).",
+            "5. testData: `trace:` (bắt buộc) + tùy chọn `code:`/`path:` map source "
+            "(tránh path entrypoint trừ Project Extra cho phép).",
         ]
         if focus_modules.strip():
+            parts.append(f"6. Focus module (khớp FEATURES): {focus_modules.strip()}.")
+        return append_unit_tc_from_analysis_rules("\n".join(parts), speed=False)
+
+    from app.llm.e2e_tc_analysis_rules import append_e2e_tc_from_analysis_rules
+
+    # Overlay = runtime hints only. Steps / Expected / Scenario / Coverage → SoT.
+    if fast:
+        parts = [
+            "=== PHIÊN SINH E2E (SPEED) ===",
+            "1. type=`E2E` only.",
+            "2. Tag khi khớp: [E2E-HappyPath], [E2E-Validation], [E2E-Auth/Permission], [E2E-Boundary].",
+        ]
+        if cap:
             parts.append(
-                f"8. Ưu tiên module/chức năng: {focus_modules.strip()} (bám sát tài liệu)."
+                f"3. Trần mềm ≤{cap} TC/module — dừng khi đủ tín hiệu chính, không bịa."
             )
-        parts.append(
-            "9. GỢI Ý GHÉP SOURCE (nếu source context có): trong testData/precondition có thể ghi "
-            "`code: <TênClassHoặcStem>` hoặc `path: <đường dẫn tương đối trong repo>` để Unit Engine map mã nguồn."
-        )
-        return "\n".join(parts)
+        else:
+            parts.append("3. Ưu tiên journey chính (FLOWS/FEATURES) theo SoT.")
+        if target_url.strip():
+            parts.append(
+                f"4. TARGET URL: baseURL trong precondition/testData: {target_url.strip()}"
+            )
+        else:
+            parts.append(
+                "4. TARGET URL: path/màn từ Output hoặc tên màn + [Giả định]."
+            )
+        if auth_hint.strip():
+            parts.append(f"5. AUTH HINT: {auth_hint.strip()}")
+        else:
+            parts.append(
+                "5. AUTH: TC sau login → precondition «phiên storageState/auth setup»; "
+                "chỉ TC Auth/Login mới mô tả bước đăng nhập UI."
+            )
+        if focus_modules.strip():
+            parts.append(f"6. FOCUS: {focus_modules.strip()}")
+        return append_e2e_tc_from_analysis_rules("\n".join(parts), speed=True)
 
     parts = [
-        "=== PHIÊN SINH E2E TEST CASE (BẮT BUỘC — QUY TRÌNH CHUẨN QA) ===",
-        "1. TRƯỚC TIÊN phân tích/tổng hợp theo góc nhìn E2E từ tài liệu:",
-        "   - Actor/role, màn hình/luồng bắt đầu, thao tác, điều hướng, dữ liệu nền, validation UI, business rule trên UI — nếu tài liệu có.",
-        "   - Tách journey độc lập: happy path, validation, permission, boundary, recovery/cancel — chỉ mục có tín hiệu.",
-        "   - Điểm quan sát UI chỉ khi tài liệu/UI mô tả: button/input/dropdown/modal/table/toast/url/loading/…",
-        "2. OUTPUT chỉ type=`E2E`; mọi TC phải type=`E2E`.",
-        "3. Mô tả user journey trên UI phù hợp nền tảng trong tài liệu (web/desktop/mobile) — không ép pattern app mẫu.",
-        "4. NGUYÊN TẮC STEPS:",
-        "   - Mỗi step: [Hành động] -> [Đối tượng/Element] -> [Dữ liệu nhập/Lựa chọn] (nếu có).",
-        "   - Nêu element rõ (label/định danh nếu tài liệu có); tránh bước mơ hồ.",
-        "5. EXPECTED RESULTS:",
-        "   - Assert những gì tài liệu cho phép kiểm: phản hồi UI, trạng thái element/dữ liệu hiển thị.",
-        "   - URL/điều hướng chỉ khi tài liệu hoặc target URL cho thấy có điều hướng.",
-        "   - Persistence/reload chỉ khi nghiệp vụ có lưu dữ liệu.",
-        "6. DANH MỤC KỊCH BẢN (gắn tag khi áp dụng):",
-        "   - [E2E-HappyPath], [E2E-Validation], [E2E-BusinessRules], [E2E-Auth/Permission], [E2E-UI State & Boundary].",
-        "7. PRECONDITION & TESTDATA:",
-        "   - Precondition: điểm bắt đầu (URL/màn hình nếu biết), auth/role chỉ khi tài liệu hoặc auth hint yêu cầu,",
-        "     dữ liệu nền cần thiết theo tài liệu — không bịa «đã đăng nhập» nếu không cần.",
-        "   - TestData: giá trị fill/chọn cụ thể, lấy từ/suy ra từ tài liệu (không dùng credential mẫu mặc định).",
-        "8. Mỗi TC = một kịch bản độc lập; không gộp nhiều luồng độc lập vào một TC dài.",
-        "9. Coverage tối thiểu theo tín hiệu SRS: 1 happy path + validation/business/permission/boundary nếu có.",
-        "10. KHÔNG sinh type=Unit/API thuần hàm trong phiên E2E.",
-        "11. Không copy domain/route/label từ ví dụ prompt — mọi tên màn hình/field/URL lấy từ tài liệu job.",
+        "=== PHIÊN SINH E2E ===",
+        "1. type=`E2E` only.",
+        "2. Tag khi khớp: [E2E-HappyPath], [E2E-Validation], [E2E-BusinessRules], "
+        "[E2E-Auth/Permission], [E2E-UI State & Boundary].",
+        "3. Precondition: điểm bắt đầu + auth/role chỉ khi Output/auth hint yêu cầu; "
+        "không credential mẫu.",
     ]
     if target_url.strip():
         parts.append(
-            f"12. TARGET URL: Đưa baseURL vào precondition/testData: {target_url.strip()}"
+            f"4. TARGET URL: baseURL trong precondition/testData: {target_url.strip()}"
         )
     else:
         parts.append(
-            "12. TARGET URL: Chưa có baseURL từ job — nếu tài liệu nêu URL/path thì dùng;"
-            " nếu không, ghi điểm bắt đầu theo tên màn hình/chức năng và đánh dấu [Giả định] khi cần."
+            "4. TARGET URL: chưa có baseURL job — dùng path/màn từ Output; thiếu → [Giả định]."
         )
     if auth_hint.strip():
         parts.append(
-            f"13. AUTH HINT: Bổ sung precondition đăng nhập/phân quyền: {auth_hint.strip()}"
+            f"5. AUTH HINT: precondition đăng nhập/phân quyền: {auth_hint.strip()}"
         )
     else:
         parts.append(
-            "13. AUTH (không bắt buộc điền Auth hint trên form):\n"
-            "   - KHÔNG yêu cầu user nhập credential trên form Freeze để sinh TC.\n"
-            "   - TC chức năng SAU đăng nhập: precondition ghi "
-            "«Phiên đã xác thực qua storageState / auth setup fixture» — "
-            "KHÔNG bịa username/password; KHÔNG nhét bước login dài vào mọi TC.\n"
-            "   - Chỉ TC [E2E-Auth/Permission] / luồng Login-Logout mới mô tả bước đăng nhập UI chi tiết "
-            "(credential lấy từ tài liệu hoặc đánh dấu [Giả định] + biến môi trường).\n"
-            "   - Khi chạy code: Desktop E2E dùng storageState (fixtures/storageState.json) để bỏ qua login UI."
+            "5. AUTH: TC sau login → «Phiên đã xác thực qua storageState / auth setup» — "
+            "không bịa credential; chỉ TC [E2E-Auth/Permission]/Login mô tả bước login UI."
         )
     if focus_modules.strip():
-        parts.append(
-            f"14. FOCUS MODULES: Ưu tiên kịch bản cho module/chức năng: {focus_modules.strip()}"
-        )
-    return "\n".join(parts)
+        parts.append(f"6. FOCUS MODULES (khớp FEATURES): {focus_modules.strip()}")
+    return append_e2e_tc_from_analysis_rules("\n".join(parts), speed=False)

@@ -1,0 +1,61 @@
+---
+description: Requirement Studio Phân tích — 12 tiêu chí hệ thống (gồm Execution Context), fidelity
+globs: api/app/features/requirement_studio/**/*,api/app/llm/analysis_rules.py,desktop/src/features/requirementStudio/**
+alwaysApply: false
+---
+
+# Rules Phân tích (Requirement Studio Knowledge)
+
+> Runtime inject: [`api/app/llm/analysis_rules.py`](api/app/llm/analysis_rules.py) + guide/fidelity trong [`knowledge_builder.py`](api/app/features/requirement_studio/knowledge_builder.py). **Giữ đồng bộ.**
+
+Pipeline: Tài liệu → **Phân tích** → Freeze Snapshot → Sinh TC → Sinh code E2E. Không invent tiêu chí ngoài 12 type dưới đây.
+Chuẩn tham chiếu: **BABOK** (scope / actors / BR / AC) + **IEEE 29148** (FR / NFR kiểm thử được).
+
+## 12 tiêu chí (ANALYSIS_RECORD_TYPES)
+
+| type | json_key | Đủ khi (chuẩn BA) | Cấm |
+|------|----------|-------------------|-----|
+| SUMMARY_SCOPE | summary | 2–5 câu Scope: in/out + actor trong SRS | Vision/marketing; «Hệ thống cho phép…» |
+| FEATURES | features | Atomic FR; name = động từ+đối tượng; ≥1 tín hiệu test | Mục lục; epic rỗng; dump markdown |
+| ACTORS_PERMISSIONS | actors | 1 role/item đúng SRS; permissions = thao tác cụ thể | Bịa Admin/User; suy diễn RBAC |
+| BUSINESS_FLOWS | useCases | Main Success Scenario `1. 2.` hành động cụ thể | «hoàn tất quy trình»; nhét validation |
+| EXECUTION_CONTEXT | executionContexts | WHO cho scenario: actor/authRequired/roles/sessionHint | Bịa role; chọn cơ chế login (storageState/API) |
+| BUSINESS_RULES | businessRules | 1 policy atomic must/shall gần nguyên văn | «đảm bảo đúng đắn»; nhét field-rule |
+| VALIDATION_DATA | validationRules | 1 cặp field+rule đo được | «dữ liệu hợp lệ»; thiếu tên field |
+| API_UI | apiSummary | 1 interface: method+path hoặc UI entry tường minh | Đoán `/api/...`; gộp nhiều endpoint |
+| ERROR_HANDLING | exceptions | Điều kiện + phản hồi quan sát được như SRS | Thêm 401/500 «cho đủ» |
+| ACCEPTANCE | acceptanceCriteria | 1 outcome GWT/AC/Done-when thật | Heading trống; «dùng thành công» |
+| NFR_CONSTRAINTS | constraints | 1 NFR SMART (có ngưỡng/điều kiện) | «bảo mật/hiệu năng tốt» |
+| GAPS | gaps | 1 thiếu sót chặn TC (TBD / thiếu key) | Brainstorm hỏi mở / wishlist |
+
+## Fidelity A–K (mọi bucket)
+
+- **A** Nguồn = excerpts SRS upload — không domain mẫu / kiến thức ngoài.
+- **B** Quét → tách 1 ý/item (atomic) → gần nguyên văn → self-check truy vết.
+- **C** Cấm câu mơ hồ / paraphrase mất field/số/path.
+- **D** Item **kiểm chứng được** (testable); thiếu trong SRS → giữ mức SRS, không pad.
+- **E** Đúng key; đoạn lẫn loại → tách nhiều item.
+- **F** Không tín hiệu → `[]`; gaps chỉ TBD/thiếu thật cản TC.
+- **G** Ngôn ngữ = tài liệu; JSON only.
+- **H** Chính xác > số lượng (Knowledge nuôi Sinh TC + E2E codegen).
+- **I** Cấm placeholder / mục lục / markdown dump.
+- **J** Phân tầng: features=FR · api=interface · useCases=MSS · executionContexts=WHO · BR=policy · validation=field · exceptions=lỗi · AC=outcome · constraints=NFR SMART.
+- **K** Feature cần ≥1 tín hiệu kiểm thử (FR/path/field/status).
+
+## Chat Knowledge (`knowledgeDiff`)
+
+- Ops chỉ `add|update|remove|set` trên đúng `json_key` thuộc 12 bucket (+ legacy → gaps).
+- Câu hỏi thuần → `ops: []`; không nhét narrative dài thay ops.
+- Không tạo FEATURES từ câu chat nếu không có căn SRS.
+
+## Bridge Sinh TC / E2E
+
+- Validation TC ← `validationRules` + `exceptions`
+- RBAC / WHO ← `actors` + `executionContexts`
+- Flow / entry ← `useCases` + `apiSummary` (không invent path ngoài Knowledge)
+- E2E **HOW** (login mechanism, locator) ← Source/DOM/convention — không nằm trong Analysis
+- Không AC trong SRS → `acceptanceCriteria: []` (không bịa)
+
+## Khi sửa
+
+Đổi contract Phân tích → cập nhật **cả** `analysis_rules.py`, prompts trong `knowledge_builder` / `chat_orchestrator`, và file `.mdc` này.

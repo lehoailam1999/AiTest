@@ -2,7 +2,7 @@
 
 Công cụ Desktop hỗ trợ QA/Developer sinh Test Case, sinh Unit Test, chạy kiểm thử và tổng hợp kết quả bằng AI, theo kiến trúc **Hybrid**: Desktop (React + Tauri) ↔ Backend (Python FastAPI) ↔ PostgreSQL, với Backend là trung tâm điều phối PostgreSQL và LLM.
 
-Kiến trúc: [`KIEN_TRUC_DU_AN.md`](KIEN_TRUC_DU_AN.md) · **Phase / lộ trình:** [`docs/PHASES_TRIEN_KHAI.md`](docs/PHASES_TRIEN_KHAI.md) · **Hướng dẫn dùng:** [`docs/GUIDE_SU_DUNG.md`](docs/GUIDE_SU_DUNG.md) · **Refactor Coverage flow:** [`docs/REFACTOR_COVERAGE_FLOW.md`](docs/REFACTOR_COVERAGE_FLOW.md)
+**Tài liệu hệ thống tổng hợp (Single Source of Truth):** [`docs/SYSTEM_MASTER_DOCUMENTATION.md`](docs/SYSTEM_MASTER_DOCUMENTATION.md)
 
 ## Kiến trúc repo
 

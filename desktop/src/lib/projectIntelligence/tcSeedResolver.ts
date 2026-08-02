@@ -56,9 +56,50 @@ const STOP = new Set(
 );
 
 const LAYER_BONUS = [
+  { re: /(^|\/)(src|lib|app|backend|server|api)(\/|$)/i, pts: 22 },
   { re: /(controller|service|handler|manager|usecase|use-case|repository|repo|api|page|viewmodel|view)\b/i, pts: 14 },
   { re: /\b(dto|model|entity|domain)\b/i, pts: 4 },
 ];
+
+/** Không lấy tài liệu / script phụ làm SUT (vd. docs/generate_srs.py trên Nest+Jest). */
+const LAYER_PENALTY = [
+  {
+    re: /(^|\/)(docs?|documentation|scripts?|tools?|examples?|samples?|fixtures?|tmp|temp|migrations?)(\/|$)/i,
+    pts: -90,
+  },
+  { re: /(generate_srs|openapi|swagger|readme)/i, pts: -55 },
+];
+
+type ExtFamily = "node" | "python" | "dotnet" | "other";
+
+function extFamilyOf(pathRel: string): ExtFamily {
+  const p = pathRel.toLowerCase().replace(/\\/g, "/");
+  if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(p)) return "node";
+  if (p.endsWith(".py")) return "python";
+  if (p.endsWith(".cs")) return "dotnet";
+  return "other";
+}
+
+function dominantExtFamily(index: ProjectFileIndex): ExtFamily {
+  const counts: Record<ExtFamily, number> = {
+    node: 0,
+    python: 0,
+    dotnet: 0,
+    other: 0,
+  };
+  for (const f of index.files) {
+    counts[extFamilyOf(f.pathRel)] += 1;
+  }
+  let best: ExtFamily = "other";
+  let n = 0;
+  for (const k of ["node", "dotnet", "python"] as ExtFamily[]) {
+    if (counts[k] > n) {
+      n = counts[k];
+      best = k;
+    }
+  }
+  return best;
+}
 
 function uniq(xs: string[]): string[] {
   const seen = new Set<string>();
@@ -151,7 +192,8 @@ function scorePath(
   moduleTokens: string[],
   titleTokens: string[],
   bodyTokens: string[],
-  hintTokens: string[] = []
+  hintTokens: string[] = [],
+  dominantFamily: ExtFamily = "other"
 ): { score: number; hits: string[] } {
   const { lower, stem, segments } = pathParts(pathRel);
   const stemAscii = stripDiacritics(stem).toLowerCase();
@@ -181,11 +223,24 @@ function scorePath(
   for (const layer of LAYER_BONUS) {
     if (layer.re.test(pathRel)) score += layer.pts;
   }
+  for (const layer of LAYER_PENALTY) {
+    if (layer.re.test(pathRel)) score += layer.pts;
+  }
 
   if (/\.(test|spec)\./i.test(pathRel) || /\/(test|tests|spec|__tests__|mocks?)\//i.test(lower)) {
     score -= 40;
   }
   if (/\/(bin|obj|dist|node_modules|vendor|\.git)\//i.test(lower)) score -= 100;
+
+  const fam = extFamilyOf(pathRel);
+  if (
+    dominantFamily !== "other" &&
+    fam !== "other" &&
+    fam !== dominantFamily
+  ) {
+    // Repo chủ yếu Nest/TS (Jest) → đừng chọn docs/*.py làm SUT.
+    score -= 70;
+  }
 
   score -= Math.min(6, Math.max(0, segments.length - 3));
 
@@ -228,6 +283,7 @@ export function resolveSeedCandidates(
   const effectiveAll = uniq([...effectiveHints, ...all]);
   if (!effectiveAll.length && !pathHints.length) return [];
 
+  const dominant = dominantExtFamily(index);
   const scored: SeedCandidate[] = [];
 
   // path: hints → ưu tiên tuyệt đối nếu khớp file local
@@ -253,7 +309,8 @@ export function resolveSeedCandidates(
       moduleTokens,
       titleTokens,
       bodyTokens,
-      effectiveHints
+      effectiveHints,
+      dominant
     );
     if (score < 8) continue;
     scored.push({

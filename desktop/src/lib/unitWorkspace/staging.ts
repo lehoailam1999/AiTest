@@ -78,7 +78,7 @@ export async function stageOverlayToTargets(
   }
 }
 
-/** Restore repo from backups after verify (success or fail). */
+/** Restore repo from backups (e.g. failed experimental stage). Unit Verify uses preserveStagedOverlays instead. */
 export async function rollbackStaging(
   projectRoot: string,
   runId: string,
@@ -95,6 +95,20 @@ export async function rollbackStaging(
       }
     } else {
       await writeTextFile(projectRoot, b.targetRel, b.previousContent);
+    }
+  }
+}
+
+/** After Unit Verify — disk = overlay until Apply/Discard (UUAS rule 8). */
+export async function preserveStagedOverlays(
+  projectRoot: string,
+  manifests: UnitWorkspaceManifest[]
+): Promise<void> {
+  for (const m of manifests) {
+    try {
+      await stageOverlayToTargets(projectRoot, m);
+    } catch {
+      /* best-effort */
     }
   }
 }

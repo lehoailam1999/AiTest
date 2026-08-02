@@ -1,0 +1,26 @@
+---
+description: E2E Feature entry skeleton — Phase A–F; auth/locator → e2e-codegen
+globs: api/app/llm/e2e_journey_rules.py
+alwaysApply: false
+---
+
+# E2E Feature Journey (Feature entry only)
+
+> Runtime: [`e2e_journey_rules.py`](api/app/llm/e2e_journey_rules.py).  
+> **Auth / role / locator / assert / session** → [`e2e-codegen.mdc`](e2e-codegen.mdc) (E2ECG). Không copy Rules 1–16 vào đây.
+
+## Giá trị duy nhất
+
+**Phase C Feature entry** sau auth, trước fill:
+
+1. Path từ TC Precondition / FE Routes / `E2E_FEATURE_PATH` / menu đúng label FE  
+2. Landmark visible trước Act  
+3. List vs form — mở Create/Edit nếu field chỉ có trong dialog  
+
+## Spec order
+
+`Auth (overlay) → Feature entry → Arrange → Act → Assert (E2ECG 14)`
+
+## Khi sửa
+
+Chỉ sửa Feature entry / Phase C. Mọi rule khác sửa trong `e2e_codegen_rules.py`.

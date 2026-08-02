@@ -47,7 +47,18 @@ from app.llm.tc_generation_rules import engine_generation_rules, get_tc_generati
 from app.services.job_context_stash import (
     pop_job_extras,
     stash_job_context_packet,
+    stash_job_engine_hint,
     stash_job_topic_scope,
+)
+from app.services.job_pause import (
+    clear_job_control,
+    clear_pause_request,
+    is_pause_requested,
+    load_checkpoint,
+    pending_modules_after_claim,
+    remaining_modules,
+    request_pause,
+    save_checkpoint,
 )
 from app.services.vietnamese_labels import normalize_engine_type
 from app.services.requirement_topics import (
@@ -71,6 +82,7 @@ def _uuid(value: str) -> uuid.UUID | None:
 def _fail_job(db: Session, job_id: uuid.UUID, msg: str) -> None:
     from app.services.job_progress import clear_job_progress, set_job_progress
 
+    clear_job_control(job_id)
     job = db.query(Job).filter(Job.id == job_id).first()
     if job:
         job.status = C.JOB_FAILED
@@ -302,11 +314,21 @@ def _engine_readiness_warnings(bundle: dict | None, preferred: str | None) -> li
         if not validations and not apis and not entities:
             warns.append("thiếu validation/API/entity (Unit vẫn chạy)")
     if preferred == "e2e":
+        use_cases = (
+            knowledge.get("useCases") if isinstance(knowledge.get("useCases"), list) else []
+        )
+        if not use_cases and not acceptance:
+            warns.append(
+                "Output Completeness: thiếu BUSINESS_FLOWS và ACCEPTANCE "
+                "(E2E vẫn chạy — coverage journey/expected có thể mỏng)"
+            )
+        elif not use_cases:
+            warns.append("thiếu BUSINESS_FLOWS / useCases (E2E vẫn chạy — thiếu xương sống journey)")
         if not actors:
             warns.append("thiếu actor/role (E2E vẫn chạy — precondition auth có thể chung)")
         if not validations:
             warns.append("thiếu validation UI (E2E vẫn chạy)")
-        if not acceptance:
+        if not acceptance and use_cases:
             warns.append("thiếu acceptance criteria (E2E vẫn chạy)")
     for row in gaps[:5]:
         text = str(row.get("text") if isinstance(row, dict) else row).strip()
@@ -328,6 +350,7 @@ def _analysis_records_prompt_block(
     *,
     workspace_id: uuid.UUID | None,
     knowledge_version: int | None,
+    preferred_engine: str | None = None,
 ) -> str:
     if workspace_id is None:
         return ""
@@ -340,9 +363,15 @@ def _analysis_records_prompt_block(
     rows = q.order_by(RequirementAnalysisRecord.created_at.asc()).all()
     if not rows:
         return ""
+    eng = (preferred_engine or "").strip().lower()
     parts: list[str] = [
         "## KẾT QUẢ PHÂN TÍCH ĐÃ LƯU DB (NGUỒN CHÍNH ĐỂ SINH TEST CASE)",
-        "Bắt buộc bám sát các mục sau, không bỏ sót tiêu chí nào:",
+        "Output Phân tích đã persist — bám itemCount>0; [] → bỏ (không invent). "
+        + (
+            "Coverage/trace theo khối UNIT ← PHÂN TÍCH trong QUY TẮC HỆ THỐNG."
+            if eng == "unit"
+            else "Mọi TC truy vết ≥1 mục bên dưới."
+        ),
     ]
     for r in rows:
         content = ""
@@ -356,9 +385,6 @@ def _analysis_records_prompt_block(
             f"- [{r.type}] {r.title} | itemCount={int(r.item_count or 0)}\n"
             f"{content[:5000]}"
         )
-    parts.append(
-        "Quy tắc coverage: mọi test case phải truy vết được về ít nhất một mục phân tích ở trên."
-    )
     return "\n\n".join(parts)
 
 
@@ -570,16 +596,36 @@ def _resolve_fan_out_titles(
 
 
 async def process_generate_job(job_id: uuid.UUID) -> None:
-    """Async worker — generate test cases from requirement source."""
+    """Async worker — generate test cases from requirement source.
+
+    Supports cooperative pause between fan-out modules: already-persisted TCs stay;
+    resume continues only pending modules (append) — same prompts/rules, no wipe.
+    """
     db = SessionLocal()
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if job is None:
             return
+        checkpoint = load_checkpoint(job_id)
+        is_resume = bool(
+            checkpoint
+            and isinstance(checkpoint.get("pendingModules"), list)
+            and len(checkpoint.get("pendingModules") or []) > 0
+        )
         mode: GenerateMode = (job.generate_strategy or "append")  # type: ignore[assignment]
+        if is_resume:
+            # Continuation must not wipe drafts; always append onto saved TCs.
+            mode = "append"
         job.status = C.JOB_RUNNING
-        job.started_at = datetime.now(timezone.utc)
-        job.progress_message = "Đang chuẩn bị ngữ cảnh (phân tích DB + source)…"
+        if job.started_at is None:
+            job.started_at = datetime.now(timezone.utc)
+        job.completed_at = None
+        job.error = None
+        job.progress_message = (
+            "Tiếp tục sinh TC (bổ sung module còn lại)…"
+            if is_resume
+            else "Đang chuẩn bị ngữ cảnh (phân tích DB + source)…"
+        )
         db.commit()
         from app.services.job_progress import (
             clear_job_progress,
@@ -587,9 +633,24 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             set_job_progress,
         )
 
-        clear_job_log(job_id)
-        set_job_progress(job_id, "--- Bắt đầu job sinh test case ---")
-        set_job_progress(job_id, "Đang chuẩn bị ngữ cảnh (phân tích DB + source)…")
+        clear_pause_request(job_id)
+        if not is_resume:
+            clear_job_log(job_id)
+            set_job_progress(job_id, "--- Bắt đầu job sinh test case ---")
+            set_job_progress(
+                job_id,
+                "Đang chuẩn bị ngữ cảnh (phân tích DB + source)…",
+            )
+        else:
+            set_job_progress(
+                job_id,
+                f"--- Tiếp tục job (còn {len(checkpoint.get('pendingModules') or [])} module) "
+                f"— không chạy lại module đã xong ---",
+            )
+            set_job_progress(
+                job_id,
+                "Đang nạp lại ngữ cảnh để sinh bổ sung module còn lại…",
+            )
 
         conn = (
             db.query(AiBackendConnection)
@@ -645,6 +706,14 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             return
 
         extras = pop_job_extras(job_id)
+        if is_resume and checkpoint:
+            # Restore engine hint / topic if FE resume re-stashed or checkpoint has them
+            if not extras.get("engineHint") and isinstance(checkpoint.get("engineHint"), dict):
+                extras["engineHint"] = checkpoint["engineHint"]
+            if not extras.get("topicScope") and isinstance(checkpoint.get("topicScope"), dict):
+                extras["topicScope"] = checkpoint["topicScope"]
+            if not extras.get("context") and isinstance(checkpoint.get("context"), str):
+                extras["context"] = checkpoint["context"]
         source_ctx = extras.get("context") if isinstance(extras.get("context"), str) else None
         analysis_ctx = ""
         topic_scope_text: str | None = None
@@ -665,19 +734,58 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         auth_hint = str(engine_hint.get("authHint") or "").strip()
         focus_modules = str(engine_hint.get("focusModules") or "").strip()
 
+        from app.llm.tc_speed import (
+            knowledge_enough_skip_source_scan,
+            resolve_max_tc_per_module,
+            resolve_tc_speed_mode,
+        )
+
+        speed_mode = resolve_tc_speed_mode(preferred_engine, engine_hint)
+        max_tc_per_module = resolve_max_tc_per_module(
+            preferred_engine, speed_mode, engine_hint
+        )
+        # Keep resolved speed on hint for checkpoint / resume
+        engine_hint = {
+            **engine_hint,
+            "speed": speed_mode,
+            "maxPerModule": max_tc_per_module,
+        }
+
         # Source scan: tighter budgets (token/speed). Prefer UI paths for E2E.
+        # Skip entirely for E2E when freeze Knowledge already has enough UI/AC signals.
+        skip_source_scan = False
+        snap_bundle_early = None
+        if snap is not None:
+            from app.features.requirement_studio.snapshot_prompt import parse_json_field
+
+            snap_bundle_early = parse_json_field(snap.payload_json)
+            skip_source_scan = knowledge_enough_skip_source_scan(
+                snap_bundle_early, preferred_engine
+            )
+
         scan_files, scan_budget = (24, 28_000)
         if preferred_engine == "e2e":
             scan_files, scan_budget = (16, 18_000)
         elif preferred_engine == "unit":
             scan_files, scan_budget = (24, 28_000)
-        source_scan_ctx = _source_scan_prompt_block(
-            job.project_id,
-            max_files=scan_files,
-            module_hint=default_module or focus_modules or None,
-            char_budget=scan_budget,
-            prefer_ui=preferred_engine == "e2e",
-        )
+
+        if skip_source_scan:
+            source_scan_ctx = ""
+            set_job_progress(
+                job_id,
+                "[hệ thống] Bỏ qua source scan (E2E) — Knowledge freeze đủ feature/AC/rule "
+                "(AITEST_TC_E2E_FORCE_SOURCE_SCAN=1 để ép scan)",
+            )
+        else:
+            # File scan can read dozens of files — keep event loop free for parallel fan-out.
+            source_scan_ctx = await asyncio.to_thread(
+                _source_scan_prompt_block,
+                job.project_id,
+                max_files=scan_files,
+                module_hint=default_module or focus_modules or None,
+                char_budget=scan_budget,
+                prefer_ui=preferred_engine == "e2e",
+            )
 
         from app.features.requirement_studio.snapshot_prompt import (
             freeze_prompt_has_knowledge,
@@ -692,6 +800,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                 db,
                 workspace_id=getattr(snap, "workspace_id", None),
                 knowledge_version=int(getattr(snap, "knowledge_version", 0) or 0),
+                preferred_engine=preferred_engine,
             )
             set_job_progress(
                 job_id,
@@ -715,7 +824,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         if snap and preferred_engine:
             from app.features.requirement_studio.snapshot_prompt import parse_json_field
 
-            bundle = parse_json_field(snap.payload_json)
+            bundle = snap_bundle_early if snap_bundle_early is not None else parse_json_field(snap.payload_json)
             issues = _engine_readiness_issues(bundle, preferred_engine)
             if issues:
                 _fail_job(
@@ -796,23 +905,109 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                 ]
             existing_for_prompt = [(t.title, t.type) for t in prior]
 
-        custom_rules = get_tc_generation_rules(preferred_engine=preferred_engine)
+        custom_rules = get_tc_generation_rules(
+            preferred_engine=preferred_engine,
+            speed=speed_mode,
+        )
         engine_rules = (
             engine_generation_rules(
                 preferred_engine,
                 target_url=target_url,
                 auth_hint=auth_hint,
                 focus_modules=focus_modules,
+                speed=speed_mode,
+                max_per_module=max_tc_per_module,
             )
             if preferred_engine
             else ""
         )
         if engine_rules:
-            custom_rules = f"{custom_rules}\n\n{engine_rules}".strip()
+            # Unit/E2E: analysis SoT is prepended inside engine_rules — put engine first
+            # so truncate(eng_cap) never drops the map/trace/completeness contract.
+            if preferred_engine in ("unit", "e2e"):
+                custom_rules = f"{engine_rules}\n\n{custom_rules}".strip()
+            else:
+                custom_rules = f"{custom_rules}\n\n{engine_rules}".strip()
+
+        from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+
+        proj_row = (
+            db.query(Project)
+            .filter(Project.id == job.project_id, Project.deleted_at.is_(None))
+            .first()
+        )
+        proj_meta = parse_project_meta(getattr(proj_row, "meta", None) if proj_row else None)
+        project_rules, user_rules = rules_pair_from_meta(
+            proj_meta,
+            language=getattr(proj_row, "language", None) if proj_row else None,
+        )
+
         feature_titles = _resolve_fan_out_titles(content, snap=snap, src=src)
+        # topicScope: hẹp danh sách module trước khi quyết định fan-out (tránh 1 call full SRS).
+        if (
+            not is_resume
+            and topic_scope_text
+            and default_module
+            and len(feature_titles) > 1
+        ):
+            dm = default_module.strip().lower()
+            matched = [
+                t
+                for t in feature_titles
+                if dm in t.lower() or t.lower() in dm
+            ]
+            if matched:
+                feature_titles = matched
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] topicScope «{default_module}» → "
+                    f"{len(feature_titles)} module khớp "
+                    f"({', '.join(feature_titles[:6])}{'…' if len(feature_titles) > 6 else ''})",
+                )
+            else:
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] topicScope «{default_module}» không khớp title — "
+                    f"fan-out toàn bộ {len(feature_titles)} module",
+                )
+        if is_resume and checkpoint:
+            pending = [
+                str(t).strip()
+                for t in (checkpoint.get("pendingModules") or [])
+                if str(t).strip()
+            ]
+            already_done = {
+                str(t).strip()
+                for t in (checkpoint.get("doneModules") or [])
+                if str(t).strip()
+            }
+            # Never re-run modules marked done in the pause checkpoint.
+            pending = [t for t in pending if t not in already_done]
+            if pending:
+                feature_titles = pending
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] Resume: chỉ sinh bổ sung {len(pending)} module còn lại "
+                    f"({', '.join(pending[:6])}{'…' if len(pending) > 6 else ''}) "
+                    f"— đã xong {len(already_done)} module, TC đã lưu giữ nguyên",
+                )
+            else:
+                set_job_progress(
+                    job_id,
+                    "[hệ thống] Resume: không còn module pending — hoàn tất.",
+                )
+                job.status = C.JOB_COMPLETED
+                job.completed_at = datetime.now(timezone.utc)
+                job.progress_message = "Không còn module chờ sinh (đã đủ)."
+                db.commit()
+                clear_job_control(job_id)
+                clear_job_progress(job_id)
+                return
         set_job_progress(
             job_id,
-            f"[hệ thống] Engine={preferred_engine or 'auto'} | mode={mode} | "
+            f"[hệ thống] Engine={preferred_engine or 'auto'} | speed={speed_mode}"
+            + (f" | max/module={max_tc_per_module}" if max_tc_per_module else "")
+            + f" | mode={mode} | "
             f"modules={len(feature_titles)}: {', '.join(feature_titles[:8]) or '(single call)'}"
             + (f" | focus={focus_modules}" if focus_modules else "")
             + (f" | existing_tc={len(existing_for_prompt)}" if existing_for_prompt else ""),
@@ -828,19 +1023,26 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             scope_topic_notes=scope_topic_notes,
             requirement_description=src.description if src else None,
             custom_rules=custom_rules,
+            project_rules=project_rules or None,
+            user_rules=user_rules or None,
             feature_titles=[t for t in feature_titles if t],
             preferred_engine=preferred_engine,
+            speed_mode=speed_mode,
+            max_tc_per_module=max_tc_per_module,
         )
 
         drafts: list = []
         fan_errors: list[str] = []
         runner_meta: dict = {"runnerUsed": "API_DIRECT", "cliSessionKey": None}
-        saved_total = [0]
+        saved_total = [
+            int(checkpoint.get("savedCount") or 0) if is_resume and checkpoint else 0
+        ]
         persist_lock = asyncio.Lock()
         used_fanout = False
 
-        # Replace-mode wipe once before any progressive insert (Unit/E2E same)
-        if mode == "replace" and (job.source_id or snap_id):
+        # Replace-mode wipe once before any progressive insert (Unit/E2E same).
+        # Never wipe on resume — keep TC đã lưu khi tạm dừng.
+        if mode == "replace" and not is_resume and (job.source_id or snap_id):
             deleted = _replace_draft_tcs(
                 db,
                 project_id=job.project_id,
@@ -902,9 +1104,32 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             titles_for_fan = [t for t in feature_titles if t]
             is_cursor = connection_is_cursor_cli(conn)
             cursor_hidden = bool(is_cursor and cursor_tc_hidden_chat_enabled())
-            if len(titles_for_fan) > 1 and not topic_scope_text:
+            # Fan-out when many modules. topicScope no longer blocks fan-out when
+            # multiple modules remain after filter (see above). Resume always fans out.
+            if len(titles_for_fan) > 1:
                 used_fanout = True
                 total = len(titles_for_fan)
+                # Absolute progress: prior done modules + current batch
+                prior_done = (
+                    list(checkpoint.get("doneModules") or [])
+                    if is_resume and checkpoint
+                    else []
+                )
+                all_modules = (
+                    list(checkpoint.get("allModules") or [])
+                    if is_resume and checkpoint and checkpoint.get("allModules")
+                    else (prior_done + titles_for_fan)
+                )
+                # Dedupe preserve order
+                _seen_all: set[str] = set()
+                all_modules_ordered: list[str] = []
+                for _t in all_modules:
+                    if _t and _t not in _seen_all:
+                        _seen_all.add(_t)
+                        all_modules_ordered.append(_t)
+                all_modules = all_modules_ordered
+                global_total = max(len(all_modules), total + len(prior_done))
+                done_offset = len(prior_done)
                 if is_cursor:
                     # Parallel per-module (hidden 2-turn hoặc oneshot). Default concurrency 3.
                     try:
@@ -949,146 +1174,210 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
 
                 sem = asyncio.Semaphore(concurrency)
                 warm_key = f"tc-job-{job_id}"
-                warm_lock = asyncio.Lock()
-                warm_ready = asyncio.Event()
 
                 if is_cursor:
                     cursor_mode_label = (
-                        "cursor-hidden-chat" if cursor_hidden else "cursor-oneshot"
+                        "cursor-hidden-chat (2-turn/module, chậm hơn — bật AITEST_TC_CURSOR_HIDDEN_CHAT=1)"
+                        if cursor_hidden
+                        else "cursor-oneshot (1 call/module — nhanh)"
                     )
                 else:
-                    cursor_mode_label = "warm-pool"
+                    cursor_mode_label = "oneshot-parallel (per-module session)"
                 set_job_progress(
                     job_id,
-                    f"Fan-out {total} module · concurrency={concurrency}"
+                    (
+                        f"Tiếp tục fan-out {total} module còn lại"
+                        f" (đã xong {done_offset}/{global_total})"
+                        if is_resume and done_offset
+                        else f"Fan-out {total} module"
+                    )
+                    + f" · concurrency={concurrency}"
+                    + f" · speed={speed_mode}"
                     + f" · {cursor_mode_label}"
                     + " — bắt đầu…",
                 )
 
-                async def _gen_one(idx: int, feat_title: str):
-                    async with sem:
-                        set_job_progress(
-                            job_id,
-                            f"Module {idx}/{total}: {feat_title} — đang gọi AI CLI…",
+                # Claim-index pool (not gather-all): pause stops claiming new modules.
+                # In-flight modules finish + persist; unclaimed titles become pendingModules.
+                claim_lock = asyncio.Lock()
+                next_claim = [0]
+                done_mods: list[str] = []
+                done_lock = asyncio.Lock()
+
+                async def _run_claimed(idx: int, feat_title: str):
+                    nonlocal runner_meta
+                    abs_idx = done_offset + idx
+                    set_job_progress(
+                        job_id,
+                        f"Module {abs_idx}/{global_total}: {feat_title} — đang gọi AI CLI…",
+                    )
+                    scoped_content = slice_freeze_content_for_module(
+                        content,
+                        feat_title,
+                        soft_max=content_soft_max,
+                        snap_payload=snap_bundle,
+                        title=snap_title,
+                        summary=snap_summary,
+                        knowledge_version=snap_kv,
+                    )
+                    if not scoped_content.strip():
+                        scoped_content = _filter_text_for_module(
+                            content, feat_title, soft_max=content_soft_max
                         )
-                        scoped_content = slice_freeze_content_for_module(
-                            content,
-                            feat_title,
-                            soft_max=content_soft_max,
-                            snap_payload=snap_bundle,
-                            title=snap_title,
-                            summary=snap_summary,
-                            knowledge_version=snap_kv,
-                        )
-                        if not scoped_content.strip():
-                            scoped_content = _filter_text_for_module(
-                                content, feat_title, soft_max=content_soft_max
-                            )
-                        # Prefer module-filtered source; fall back to analysis-only if empty
+                    scoped_src = _filter_text_for_module(
+                        merged_source_context or "",
+                        feat_title,
+                        soft_max=source_soft_max,
+                    )
+                    if not scoped_src.strip() and analysis_ctx:
                         scoped_src = _filter_text_for_module(
-                            merged_source_context or "",
-                            feat_title,
-                            soft_max=source_soft_max,
+                            analysis_ctx, feat_title, soft_max=analysis_soft_max
                         )
-                        if not scoped_src.strip() and analysis_ctx:
-                            scoped_src = _filter_text_for_module(
-                                analysis_ctx, feat_title, soft_max=analysis_soft_max
-                            )
+                    set_job_progress(
+                        job_id,
+                        f"[hệ thống] Module «{feat_title}»: "
+                        f"content_slice={len(scoped_content):,} chars | "
+                        f"source_ctx={len(scoped_src):,} chars — build prompt…",
+                    )
+                    scoped = GenerateContext(
+                        mode=mode,
+                        content_version=doc_version,
+                        change_summary=change_summary,
+                        existing_cases=existing_for_prompt if mode == "append" else [],
+                        source_context=scoped_src or None,
+                        topic_scope=format_topic_scope_for_prompt(
+                            {"title": feat_title, "notes": "", "items": []}
+                        ),
+                        scope_topic_notes=None,
+                        requirement_description=src.description if src else None,
+                        custom_rules=custom_rules,
+                        project_rules=project_rules or None,
+                        user_rules=user_rules or None,
+                        feature_titles=[feat_title],
+                        preferred_engine=preferred_engine,
+                        speed_mode=speed_mode,
+                        max_tc_per_module=max_tc_per_module,
+                    )
+                    try:
+                        # Always oneshot + per-module session key → true parallel
+                        # (warm interactive pool previously serialized non-Cursor via lock).
+                        part, meta = await generate_test_cases_for_connection(
+                            conn,
+                            title,
+                            scoped_content,
+                            scoped,
+                            api_key=api_key,
+                            on_progress=_cli_progress,
+                            prefer_oneshot=True,
+                            session_topic_key=f"{warm_key}-{idx}",
+                            create_chat=cursor_hidden if is_cursor else False,
+                        )
+                        for d in part:
+                            if not d.module:
+                                d.module = feat_title
+                        await _persist_module_drafts(feat_title, part)
                         set_job_progress(
                             job_id,
-                            f"[hệ thống] Module «{feat_title}»: "
-                            f"content_slice={len(scoped_content):,} chars | "
-                            f"source_ctx={len(scoped_src):,} chars — build prompt…",
-                        )
-                        scoped = GenerateContext(
-                            mode=mode,
-                            content_version=doc_version,
-                            change_summary=change_summary,
-                            existing_cases=existing_for_prompt if mode == "append" else [],
-                            source_context=scoped_src or None,
-                            topic_scope=format_topic_scope_for_prompt(
-                                {"title": feat_title, "notes": "", "items": []}
+                            f"Module {abs_idx}/{global_total}: {feat_title} — xong (+{len(part)} TC)"
+                            + (
+                                f" · tổng đã lưu {saved_total[0]}"
+                                if saved_total[0]
+                                else ""
                             ),
-                            scope_topic_notes=None,
-                            requirement_description=src.description if src else None,
-                            custom_rules=custom_rules,
-                            feature_titles=[feat_title],
-                            preferred_engine=preferred_engine,
                         )
-                        try:
-                            if is_cursor:
-                                # Per-module chat (create_chat) khi hidden bật; env=0 → oneshot full.
-                                # Không bao giờ resume chung giữa các module.
-                                part, meta = await generate_test_cases_for_connection(
-                                    conn,
-                                    title,
-                                    scoped_content,
-                                    scoped,
-                                    api_key=api_key,
-                                    on_progress=_cli_progress,
-                                    prefer_oneshot=True,
-                                    session_topic_key=f"{warm_key}-{idx}",
-                                    create_chat=cursor_hidden,
-                                )
-                            else:
-                                # First module(s): cold oneshot. After one success: warm interactive
-                                prefer_oneshot = not warm_ready.is_set()
+                        async with done_lock:
+                            done_mods.append(feat_title)
+                            drafts.extend(part)
+                            if meta:
+                                runner_meta = meta
+                    except Exception as exc:  # noqa: BLE001
+                        set_job_progress(
+                            job_id,
+                            f"Module {abs_idx}/{global_total}: {feat_title} — lỗi: {exc}",
+                        )
+                        async with done_lock:
+                            done_mods.append(feat_title)
+                            fan_errors.append(f"{feat_title}: {exc}")
 
-                                async def _call():
-                                    return await generate_test_cases_for_connection(
-                                        conn,
-                                        title,
-                                        scoped_content,
-                                        scoped,
-                                        api_key=api_key,
-                                        on_progress=_cli_progress,
-                                        prefer_oneshot=prefer_oneshot,
-                                        session_topic_key=warm_key,
-                                    )
+                async def _claim_next() -> tuple[int, str] | None:
+                    async with claim_lock:
+                        if is_pause_requested(job_id):
+                            return None
+                        i = next_claim[0]
+                        if i >= total:
+                            return None
+                        next_claim[0] = i + 1
+                        return i + 1, titles_for_fan[i]
 
-                                if prefer_oneshot:
-                                    part, meta = await _call()
-                                else:
-                                    async with warm_lock:
-                                        part, meta = await _call()
-                            for d in part:
-                                if not d.module:
-                                    d.module = feat_title
-                            warm_ready.set()
-                            await _persist_module_drafts(feat_title, part)
-                            set_job_progress(
-                                job_id,
-                                f"Module {idx}/{total}: {feat_title} — xong (+{len(part)} TC)"
-                                + (
-                                    f" · tổng đã lưu {saved_total[0]}"
-                                    if saved_total[0]
-                                    else ""
-                                ),
-                            )
-                            return idx, feat_title, part, meta, None
-                        except Exception as exc:  # noqa: BLE001
-                            set_job_progress(
-                                job_id,
-                                f"Module {idx}/{total}: {feat_title} — lỗi: {exc}",
-                            )
-                            return idx, feat_title, [], None, str(exc)
+                async def _worker():
+                    while True:
+                        if is_pause_requested(job_id):
+                            return
+                        async with sem:
+                            if is_pause_requested(job_id):
+                                return
+                            claimed = await _claim_next()
+                            if claimed is None:
+                                return
+                            idx, feat_title = claimed
+                            await _run_claimed(idx, feat_title)
 
-                # Cursor & other CLI: semaphore giới hạn concurrency; persist có lock.
-                gathered = await asyncio.gather(
-                    *[_gen_one(i, t) for i, t in enumerate(titles_for_fan, 1)]
+                await asyncio.gather(
+                    *[_worker() for _ in range(min(concurrency, total))]
                 )
-                for _idx, feat_title, part, meta, err in sorted(gathered, key=lambda r: r[0]):
-                    if meta:
-                        runner_meta = meta
-                    if err:
-                        fan_errors.append(f"{feat_title}: {err}")
-                    drafts.extend(part)
+
+                # Modules never claimed stay pending for resume (never re-queue done).
+                paused_mods = pending_modules_after_claim(
+                    titles_for_fan, next_claim[0], done=done_mods
+                )
+                prior_done_set = set(prior_done)
+                paused_mods = [t for t in paused_mods if t not in prior_done_set]
+
+                if paused_mods or is_pause_requested(job_id):
+                    merged_done = list(prior_done)
+                    for t in done_mods:
+                        if t and t not in merged_done:
+                            merged_done.append(t)
+                    save_checkpoint(
+                        job_id,
+                        {
+                            "pendingModules": paused_mods,
+                            "doneModules": merged_done,
+                            "allModules": all_modules
+                            if all_modules
+                            else (merged_done + list(paused_mods)),
+                            "engineHint": engine_hint if isinstance(engine_hint, dict) else {},
+                            "preferredEngine": preferred_engine,
+                            "savedCount": saved_total[0],
+                            "mode": mode,
+                            "topicScope": raw_topic if isinstance(raw_topic, dict) else None,
+                            "context": source_ctx,
+                        },
+                    )
+                    if paused_mods:
+                        job = db.query(Job).filter(Job.id == job_id).first()
+                        if job:
+                            job.status = C.JOB_PAUSED
+                            job.completed_at = None
+                            job.error = None
+                            db.commit()
+                        set_job_progress(
+                            job_id,
+                            f"Tạm dừng — đã lưu {saved_total[0]} TC · còn {len(paused_mods)} module "
+                            f"({', '.join(paused_mods[:6])}{'…' if len(paused_mods) > 6 else ''}). "
+                            "Bấm Tiếp tục để sinh bổ sung (không chạy lại từ đầu).",
+                            persist=True,
+                        )
+                        clear_job_progress(job_id)
+                        return
+                    # pause requested but nothing left pending → fall through to complete
+
                 set_job_progress(
                     job_id,
                     f"Fan-out xong — {len(drafts)} TC từ {total} module"
                     + (f" · {len(fan_errors)} lỗi" if fan_errors else ""),
                 )
-                if not drafts:
+                if not drafts and not saved_total[0]:
                     _fail_job(
                         db,
                         job_id,
@@ -1096,12 +1385,50 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         + "; ".join(fan_errors[:5])
                         + ("…" if len(fan_errors) > 5 else ""),
                     )
+                    clear_job_control(job_id)
                     clear_job_progress(job_id)
                     return
             else:
+                if is_pause_requested(job_id):
+                    save_checkpoint(
+                        job_id,
+                        {
+                            "pendingModules": [t for t in feature_titles if t]
+                            or ["(all)"],
+                            "doneModules": list(
+                                checkpoint.get("doneModules") or [] if checkpoint else []
+                            ),
+                            "engineHint": engine_hint if isinstance(engine_hint, dict) else {},
+                            "preferredEngine": preferred_engine,
+                            "savedCount": saved_total[0],
+                            "mode": mode,
+                            "topicScope": raw_topic if isinstance(raw_topic, dict) else None,
+                            "context": source_ctx,
+                        },
+                    )
+                    job = db.query(Job).filter(Job.id == job_id).first()
+                    if job:
+                        job.status = C.JOB_PAUSED
+                        job.completed_at = None
+                        job.error = None
+                        db.commit()
+                    set_job_progress(
+                        job_id,
+                        f"Tạm dừng trước khi gọi AI — đã lưu {saved_total[0]} TC. "
+                        "Bấm Tiếp tục để sinh bổ sung.",
+                        persist=True,
+                    )
+                    clear_job_progress(job_id)
+                    return
                 if is_cursor and cursor_hidden:
                     set_job_progress(
-                        job_id, "Đang gọi AI CLI sinh test case (cursor-hidden-chat)…"
+                        job_id,
+                        "Đang gọi AI CLI sinh test case (cursor-hidden-chat, 2-turn)…",
+                    )
+                elif is_cursor:
+                    set_job_progress(
+                        job_id,
+                        "Đang gọi AI CLI sinh test case (cursor-oneshot, 1 lần gọi)…",
                     )
                 else:
                     set_job_progress(job_id, "Đang gọi AI CLI sinh test case…")
@@ -1166,9 +1493,11 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             f"Hoàn tất — {len(drafts)} test case · tổng đã lưu {saved_total[0]}",
             persist=True,
         )
+        clear_job_control(job_id)
         clear_job_progress(job_id)
     except Exception as exc:  # noqa: BLE001
         db.rollback()
+        clear_job_control(job_id)
         _fail_job(db, job_id, str(exc))
     finally:
         db.close()
@@ -1285,6 +1614,90 @@ def get_job(job_id: str, db: Annotated[Session, Depends(get_db)]):
     job = db.query(Job).filter(Job.id == jid).first()
     if job is None:
         return errors(404, "not found")
+    return ok(job_dto(job))
+
+
+@router.post("/jobs/{job_id}/pause")
+def pause_generate_job(job_id: str, db: Annotated[Session, Depends(get_db)]):
+    """
+    Cooperative pause: modules đang chạy vẫn hoàn tất + lưu TC;
+    module chưa bắt đầu sẽ chờ resume (không regenerate từ đầu).
+    """
+    from app.services.job_progress import set_job_progress
+
+    jid = _uuid(job_id)
+    if jid is None:
+        return errors(400, "invalid id")
+    job = db.query(Job).filter(Job.id == jid).first()
+    if job is None:
+        return errors(404, "not found")
+    if job.status != C.JOB_RUNNING:
+        return errors(400, f"Chỉ tạm dừng khi job Running (hiện tại: {job.status})")
+    request_pause(jid)
+    set_job_progress(
+        jid,
+        "Đã yêu cầu tạm dừng — đợi module đang chạy xong, giữ TC đã lưu…",
+        persist=True,
+    )
+    db.refresh(job)
+    return ok(job_dto(job))
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_generate_job(job_id: str, db: Annotated[Session, Depends(get_db)]):
+    """
+    Tiếp tục job Paused: chỉ sinh bổ sung module còn lại (append).
+    Không xóa TC đã gen; cùng engine/rules — không ảnh hưởng chất lượng output.
+    """
+    from app.services.job_progress import set_job_progress
+
+    jid = _uuid(job_id)
+    if jid is None:
+        return errors(400, "invalid id")
+    job = db.query(Job).filter(Job.id == jid).first()
+    if job is None:
+        return errors(404, "not found")
+    if job.status != C.JOB_PAUSED:
+        return errors(400, f"Chỉ tiếp tục khi job Paused (hiện tại: {job.status})")
+    cp = load_checkpoint(jid)
+    pending = [
+        str(t).strip()
+        for t in ((cp or {}).get("pendingModules") or [])
+        if str(t).strip()
+    ]
+    if not pending:
+        return errors(
+            400,
+            "Không còn module chờ sinh (checkpoint trống — có thể API đã restart). "
+            "Hãy tạo job mới ở chế độ append để bổ sung.",
+        )
+    # Re-stash extras so process_generate_job nhận engineHint / context
+    hint = (cp or {}).get("engineHint")
+    if isinstance(hint, dict) and hint:
+        stash_job_engine_hint(jid, hint)
+    topic = (cp or {}).get("topicScope")
+    if isinstance(topic, dict) and topic.get("title"):
+        stash_job_topic_scope(jid, topic)
+    ctx = (cp or {}).get("context")
+    if isinstance(ctx, str) and ctx.strip():
+        from app.services.job_context_stash import stash_job_context
+
+        stash_job_context(jid, ctx)
+
+    clear_pause_request(jid)
+    # Keep checkpoint on disk/memory until process_generate_job finishes pending
+    # (do not pop here — resume worker loads it).
+    job.status = C.JOB_QUEUED
+    job.completed_at = None
+    job.error = None
+    job.progress_message = (
+        f"Đã xếp hàng tiếp tục — còn {len(pending)} module "
+        f"({', '.join(pending[:4])}{'…' if len(pending) > 4 else ''})"
+    )
+    db.commit()
+    db.refresh(job)
+    set_job_progress(jid, job.progress_message or "Tiếp tục…", persist=True)
+    asyncio.create_task(process_generate_job(jid))
     return ok(job_dto(job))
 
 

@@ -9,6 +9,21 @@ from unittest import mock
 from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
 
 
+def test_cursor_oneshot_uses_empty_workspace():
+    """Prevent agent from tool-scanning AITest monorepo during TC gen."""
+    from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
+
+    adapter = CursorCLIAdapter(project_id="p", cli_path="agent")
+    cmd = adapter.build_command(oneshot=True)
+    assert "--workspace" in cmd
+    ws = cmd[cmd.index("--workspace") + 1]
+    assert "aitest-cursor-empty" in ws.replace("\\", "/").lower() or "empty" in ws.lower()
+    # interactive path may omit workspace; oneshot must isolate
+    cmd2 = adapter.build_command(oneshot=False)
+    # not required for non-oneshot
+    assert isinstance(cmd2, list)
+
+
 def test_cursor_oneshot_timeout_default_240():
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_CURSOR_ONESHOT_TIMEOUT", None)
@@ -32,6 +47,16 @@ def test_fanout_concurrency_default_3():
         except ValueError:
             concurrency = 3
         assert concurrency == 3
+
+
+def test_e2e_speed_env_default_fast():
+    from app.llm.tc_speed import resolve_tc_speed_mode
+
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AITEST_TC_E2E_SPEED", None)
+        assert resolve_tc_speed_mode("e2e") == "fast"
+        os.environ["AITEST_TC_E2E_SPEED"] = "full"
+        assert resolve_tc_speed_mode("e2e") == "full"
 
 
 def test_cursor_fanout_concurrency_default_3():
@@ -74,12 +99,12 @@ def test_cursor_forces_oneshot_even_when_prefer_false():
     assert out2.startswith("{")
 
 
-def test_cursor_tc_hidden_chat_enabled_default_on():
+def test_cursor_tc_hidden_chat_enabled_default_off_for_speed():
     from app.llm.base import cursor_tc_hidden_chat_enabled
 
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_CURSOR_HIDDEN_CHAT", None)
-        assert cursor_tc_hidden_chat_enabled() is True
+        assert cursor_tc_hidden_chat_enabled() is False
         os.environ["AITEST_TC_CURSOR_HIDDEN_CHAT"] = "0"
         assert cursor_tc_hidden_chat_enabled() is False
         os.environ["AITEST_TC_CURSOR_HIDDEN_CHAT"] = "1"
@@ -126,7 +151,8 @@ def test_tc_module_gen_user_prompt_anti_lazy():
     )
     assert "Auth" in gen
     assert "ANTI-LAZY" in gen
-    assert "3–6" in gen or "3-6" in gen
+    assert "KHÔNG trần" in gen or "không trần" in gen.lower() or "≥1 TC" in gen
+    assert "3–6" not in gen and "3-6" not in gen
     assert "CHỈ sinh TC" in gen or "ONLY" in gen.upper() or "ĐÚNG một module" in gen
     assert "Knowledge slice for Auth" in gen
     assert "def login()" in gen

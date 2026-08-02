@@ -372,6 +372,8 @@ async def generate_unit(provider: Provider, api_key: str, req: UnitRequest) -> U
             testing_framework=req.testing_framework,
             mock_framework=req.mock_framework,
             assertion_library=req.assertion_library,
+            project_rules=req.project_rules,
+            user_rules=req.user_rules,
         ),
         unit_user_prompt(req),
     )

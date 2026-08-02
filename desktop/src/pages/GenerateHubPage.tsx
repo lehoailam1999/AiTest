@@ -17,6 +17,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircleOutlined,
   LoadingOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useTestingJourney } from "../hooks/useTestingJourney";
@@ -54,8 +56,15 @@ export default function GenerateHubPage() {
   const [useSourceContext, setUseSourceContext] = useState(false);
   const [aiReady, setAiReady] = useState<boolean | null>(null);
   const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  type GenQueueItem = { title: string; status: "pending" | "running" | "done" | "error" };
+  type GenQueueItem = {
+    title: string;
+    status: "pending" | "running" | "done" | "error" | "paused";
+  };
   const [genQueue, setGenQueue] = useState<GenQueueItem[] | null>(null);
   const [jobProgressHint, setJobProgressHint] = useState<string | null>(null);
   const [planTitles, setPlanTitles] = useState<string[]>([]);
@@ -196,6 +205,8 @@ export default function GenerateHubPage() {
       return;
     }
     setRunning(true);
+    setPaused(false);
+    let stayedPaused = false;
     try {
       let contextPacket: Record<string, unknown> | undefined;
       const localPath = workspace.getLocalPath(project.id);
@@ -256,6 +267,7 @@ export default function GenerateHubPage() {
         // Không gửi topicScope khi system multi-module → BE fan-out
         topicScope,
       });
+      setActiveJobId(job.id);
 
       const done = await waitForJob(job.id, {
         onProgress: (msg) => {
@@ -263,6 +275,22 @@ export default function GenerateHubPage() {
           setGenQueue((prev) => applyFanOutProgressToQueue(prev, msg));
         },
       });
+      if (done.status === "Paused") {
+        stayedPaused = true;
+        setPaused(true);
+        setGenQueue((prev) =>
+          prev?.map((row) =>
+            row.status === "pending" || row.status === "running"
+              ? { ...row, status: "paused" as const }
+              : row
+          ) ?? null
+        );
+        setJobProgressHint(
+          done.progressMessage || "Đã tạm dừng — TC đã lưu được giữ. Bấm Tiếp tục để bổ sung."
+        );
+        message.info("Đã tạm dừng — TC đã gen được giữ nguyên.");
+        return;
+      }
       if (done.status === "Failed") {
         setGenQueue((prev) =>
           prev?.map((row) =>
@@ -287,6 +315,7 @@ export default function GenerateHubPage() {
           : "Không có test case mới.",
       });
       setLastGenCount(totalCount);
+      setActiveJobId(null);
       setStep(2);
       await refreshJourney();
     } catch (e) {
@@ -294,10 +323,88 @@ export default function GenerateHubPage() {
         key: "hub",
         content: e instanceof Error ? e.message : "Sinh TC thất bại",
       });
+      setActiveJobId(null);
     } finally {
       setRunning(false);
-      setGenQueue(null);
-      setJobProgressHint(null);
+      if (!stayedPaused) {
+        setGenQueue(null);
+        setJobProgressHint(null);
+      }
+    }
+  }
+
+  async function onPauseTcJob() {
+    if (!activeJobId || pausing || !running) return;
+    setPausing(true);
+    try {
+      await jobs.pause(activeJobId);
+      setJobProgressHint("Đã yêu cầu tạm dừng — đợi module đang chạy xong, giữ TC đã lưu…");
+      message.info("Đã yêu cầu tạm dừng — đợi module hiện tại xong.");
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "Không tạm dừng được");
+    } finally {
+      setPausing(false);
+    }
+  }
+
+  async function onResumeTcJob() {
+    if (!activeJobId || resuming || !paused) return;
+    setResuming(true);
+    setPaused(false);
+    setRunning(true);
+    try {
+      const job = await jobs.resume(activeJobId);
+      setJobProgressHint(job.progressMessage || "Tiếp tục sinh bổ sung…");
+      setGenQueue((prev) =>
+        prev?.map((row) =>
+          row.status === "paused" ? { ...row, status: "pending" as const } : row
+        ) ?? null
+      );
+      const done = await waitForJob(activeJobId, {
+        onProgress: (msg) => {
+          setJobProgressHint(msg);
+          setGenQueue((prev) => applyFanOutProgressToQueue(prev, msg));
+        },
+      });
+      if (done.status === "Paused") {
+        setPaused(true);
+        setGenQueue((prev) =>
+          prev?.map((row) =>
+            row.status === "pending" || row.status === "running"
+              ? { ...row, status: "paused" as const }
+              : row
+          ) ?? null
+        );
+        setJobProgressHint(done.progressMessage || "Đã tạm dừng lại.");
+        return;
+      }
+      if (done.status === "Failed") {
+        throw new Error(done.error ?? "Tiếp tục sinh TC thất bại");
+      }
+      const totalCount = (await testcases.list({ jobId: activeJobId }, 1, 200)).items.length;
+      setGenQueue((prev) =>
+        prev?.map((row) =>
+          row.status === "error" ? row : { ...row, status: "done" as const }
+        ) ?? null
+      );
+      message.success(
+        totalCount ? `Đã sinh ${totalCount} test case (Draft).` : "Không có test case mới."
+      );
+      setLastGenCount(totalCount);
+      setActiveJobId(null);
+      setStep(2);
+      await refreshJourney();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "Tiếp tục thất bại");
+      try {
+        const cur = await jobs.get(activeJobId);
+        if (cur.status === "Paused") setPaused(true);
+      } catch {
+        setPaused(true);
+      }
+    } finally {
+      setResuming(false);
+      setRunning(false);
     }
   }
 
@@ -522,18 +629,27 @@ export default function GenerateHubPage() {
 
       {step === 1 ? (
         <Card
-          title={running ? "Đang sinh test case…" : "Xác nhận & sinh"}
+          title={
+            paused
+              ? "Đã tạm dừng sinh test case"
+              : running
+                ? "Đang sinh test case…"
+                : "Xác nhận & sinh"
+          }
           extra={
-            running && genQueue && genQueue.length > 1 ? (
+            (running || paused) && genQueue && genQueue.length > 1 ? (
               <Typography.Text type="secondary">
                 {genQueue.filter((x) => x.status === "done").length}/{genQueue.length} chức năng
               </Typography.Text>
             ) : null
           }
         >
-          {running && genQueue ? (
+          {running || paused ? (
             <div style={{ marginBottom: 20 }}>
-              <Progress percent={genProgressPercent} status="active" />
+              <Progress
+                percent={genProgressPercent}
+                status={paused ? "normal" : "active"}
+              />
               {jobProgressHint ? (
                 <Typography.Text
                   type="secondary"
@@ -542,33 +658,49 @@ export default function GenerateHubPage() {
                   {jobProgressHint}
                 </Typography.Text>
               ) : null}
-              <ul style={{ margin: "16px 0 0", paddingLeft: 0, listStyle: "none" }}>
-                {genQueue.map((row, idx) => (
-                  <li key={`${idx}-${row.title}`} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
-                    {row.status === "done" ? (
-                      <CheckCircleOutlined style={{ color: "#52c41a", marginTop: 3 }} />
-                    ) : row.status === "running" ? (
-                      <LoadingOutlined style={{ color: "#1677ff", marginTop: 3 }} />
-                    ) : row.status === "error" ? (
-                      <Typography.Text type="danger">✕</Typography.Text>
-                    ) : (
-                      <span style={{ width: 14, marginTop: 3, opacity: 0.35 }}>○</span>
-                    )}
-                    <span
-                      style={{
-                        fontWeight: row.status === "running" ? 600 : 400,
-                        opacity: row.status === "pending" ? 0.65 : 1,
-                      }}
-                    >
-                      {row.title}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              {paused ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 12 }}
+                  title="Đã tạm dừng — TC đã gen được giữ nguyên"
+                  description="Bấm Tiếp tục để sinh bổ sung các chức năng còn lại (không chạy lại từ đầu)."
+                />
+              ) : null}
+              {genQueue ? (
+                <ul style={{ margin: "16px 0 0", paddingLeft: 0, listStyle: "none" }}>
+                  {genQueue.map((row, idx) => (
+                    <li key={`${idx}-${row.title}`} style={{ marginBottom: 8, display: "flex", gap: 8 }}>
+                      {row.status === "done" ? (
+                        <CheckCircleOutlined style={{ color: "#52c41a", marginTop: 3 }} />
+                      ) : row.status === "running" ? (
+                        <LoadingOutlined style={{ color: "#1677ff", marginTop: 3 }} />
+                      ) : row.status === "error" ? (
+                        <Typography.Text type="danger">✕</Typography.Text>
+                      ) : row.status === "paused" ? (
+                        <PauseCircleOutlined style={{ color: "#fa8c16", marginTop: 3 }} />
+                      ) : (
+                        <span style={{ width: 14, marginTop: 3, opacity: 0.35 }}>○</span>
+                      )}
+                      <span
+                        style={{
+                          fontWeight: row.status === "running" ? 600 : 400,
+                          opacity: row.status === "pending" || row.status === "paused" ? 0.65 : 1,
+                        }}
+                      >
+                        {row.title}
+                        {row.status === "paused" ? " (tạm dừng)" : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
               <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
-                {genQueue.length > 1
-                  ? "Server chạy song song theo chức năng (fan-out). Vui lòng không đóng trang cho đến khi hoàn tất."
-                  : "Vui lòng không đóng trang cho đến khi hoàn tất."}
+                {paused
+                  ? "Job đang tạm dừng — có thể đóng trang; bấm Tiếp tục khi sẵn sàng."
+                  : genQueue && genQueue.length > 1
+                    ? "Server chạy song song theo chức năng (fan-out). Tạm dừng sẽ giữ TC đã lưu và chờ module đang chạy xong."
+                    : "Vui lòng không đóng trang cho đến khi hoàn tất (hoặc tạm dừng)."}
               </Typography.Text>
             </div>
           ) : (
@@ -618,16 +750,17 @@ export default function GenerateHubPage() {
               />
             </>
           )}
-          <Space>
-            <Button onClick={() => setStep(0)} disabled={running}>
+          <Space wrap>
+            <Button onClick={() => setStep(0)} disabled={running || paused}>
               Quay lại
             </Button>
             <Button
               type="primary"
               icon={<ThunderboltOutlined />}
-              loading={running}
+              loading={running && !pausing}
               disabled={
                 running ||
+                paused ||
                 (scopeLevel === "module" && topics.length > 0 && !selectedTopic) ||
                 aiReady === false
               }
@@ -635,6 +768,25 @@ export default function GenerateHubPage() {
             >
               Sinh test case
             </Button>
+            {running && !paused ? (
+              <Button
+                icon={<PauseCircleOutlined />}
+                loading={pausing}
+                onClick={() => void onPauseTcJob()}
+              >
+                Tạm dừng
+              </Button>
+            ) : null}
+            {paused ? (
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                loading={resuming}
+                onClick={() => void onResumeTcJob()}
+              >
+                Tiếp tục (bổ sung)
+              </Button>
+            ) : null}
           </Space>
         </Card>
       ) : null}

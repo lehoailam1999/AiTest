@@ -100,16 +100,17 @@ def on_startup() -> None:
 
 
 def _ensure_project_meta_columns() -> None:
+    """Best-effort schema patches. Use short lock_timeout so idle-in-transaction
+    sessions from a previous hung API cannot block startup forever."""
     from sqlalchemy import text
+    import logging
 
+    log = logging.getLogger("aitest.startup")
     stmts = [
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS language VARCHAR(50)",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS framework VARCHAR(100)",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS meta TEXT",
     ]
-    with engine.begin() as conn:
-        for sql in stmts:
-            conn.execute(text(sql))
     tc_stmts = [
         "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS generated_from_hash VARCHAR(64)",
         "ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS generated_from_version INTEGER",
@@ -137,10 +138,14 @@ def _ensure_project_meta_columns() -> None:
         "DEFAULT 'none'",
         "ALTER TABLE knowledge_workspaces ADD COLUMN IF NOT EXISTS coverage_json TEXT",
     ]
+    all_stmts = stmts + tc_stmts + job_stmts + conn_stmts + ws_stmts + studio_stmts
     with engine.begin() as conn:
-        for sql in tc_stmts + job_stmts + conn_stmts + ws_stmts + studio_stmts:
-            conn.execute(text(sql))
-
+        conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+        for sql in all_stmts:
+            try:
+                conn.execute(text(sql))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("schema patch skipped (%s): %s", sql.split()[2], exc)
 
 def _ensure_indexes() -> None:
     from sqlalchemy import text

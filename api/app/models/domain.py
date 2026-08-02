@@ -433,6 +433,7 @@ class RequirementAnalysisRecord(TimestampMixin, Base):
             "'FEATURES',"
             "'ACTORS_PERMISSIONS',"
             "'BUSINESS_FLOWS',"
+            "'EXECUTION_CONTEXT',"
             "'BUSINESS_RULES',"
             "'VALIDATION_DATA',"
             "'API_UI',"

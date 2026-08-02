@@ -24,6 +24,8 @@ from app.services.test_output_layout import (
     reports_dir,
     rewrite_sut_imports,
     file_name_from_source,
+    sanitize_path_segment,
+    shorten_e2e_rel_path,
     under_generated_test_folder,
 )
 
@@ -190,7 +192,7 @@ class TestOutputLayout(unittest.TestCase):
             source_file_name="src/Order/Services/OrderService.cs",
             module="Đăng nhập",
         )
-        self.assertEqual(path, "AItest/UnitTest/Đăng nhập/OrderServiceTests.cs")
+        self.assertEqual(path, "AItest/UnitTest/Đăng-nhập/OrderServiceTests.cs")
 
     def test_fallback_tc_module(self):
         path = under_generated_test_folder(
@@ -301,6 +303,43 @@ class TestOutputLayout(unittest.TestCase):
                 os.environ.pop("AITEST_SPA_SHELLS", None)
             else:
                 os.environ["AITEST_SPA_SHELLS"] = prev
+
+    def test_sanitize_path_segment_caps_long_titles(self):
+        long_tc = (
+            "E2E-Validation-Khai-báo-thiết-bị-kỹ-thuật-số-Nhập-IMEI-Số-Serial-"
+            "chứa-ký-tự-không-phải-chữ-và-số-Hệ-thống-không-chấp-nhận-dữ-liệu-không-hợp-lệ"
+        )
+        short = sanitize_path_segment(long_tc)
+        self.assertLessEqual(len(short), 48)
+        self.assertEqual(short, sanitize_path_segment(long_tc))  # stable
+        self.assertIn("-", short)
+
+    def test_shorten_e2e_rel_path_preserves_structure(self):
+        long_seg = "E2E-Validation-" + ("x" * 80)
+        rel = f"AItest/E2ETest/Tạo-vật-chứng/{long_seg}/specs/foo.spec.ts"
+        out = shorten_e2e_rel_path(rel)
+        parts = out.split("/")
+        self.assertEqual(parts[0], "AItest")
+        self.assertEqual(parts[1], "E2ETest")
+        self.assertEqual(parts[-2], "specs")
+        self.assertEqual(parts[-1], "foo.spec.ts")
+        self.assertLessEqual(len(parts[3]), 48)
+
+    def test_shorten_e2e_rel_path_keeps_spec_and_page_suffix(self):
+        long_spec = (
+            "them-tai-lieu-lien-quan-thong-tin-giay-to-khoang-trang-khong-chap-nhan.spec.ts"
+        )
+        long_page = (
+            "them-tai-lieu-lien-quan-thong-tin-giay-to-khoang-trang-khong-chap-nhan.page.ts"
+        )
+        spec_rel = f"AItest/E2ETest/Mod/specs/{long_spec}"
+        page_rel = f"AItest/E2ETest/Mod/pages/{long_page}"
+        out_spec = shorten_e2e_rel_path(spec_rel)
+        out_page = shorten_e2e_rel_path(page_rel)
+        self.assertTrue(out_spec.endswith(".spec.ts"), out_spec)
+        self.assertTrue(out_page.endswith(".page.ts"), out_page)
+        self.assertNotEqual(out_spec.rsplit("/", 1)[-1], long_spec)
+        self.assertNotEqual(out_page.rsplit("/", 1)[-1], long_page)
 
 
 if __name__ == "__main__":

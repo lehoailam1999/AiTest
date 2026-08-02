@@ -168,6 +168,13 @@ async def generate_api_test_route(request: Request, db: Annotated[Session, Depen
     else:
         framework = testing_fw or body_fw
 
+    from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+
+    proj_rules, usr_rules = rules_pair_from_meta(
+        parse_project_meta(getattr(project, "meta", None)),
+        language=language or project.language,
+    )
+
     req = UnitRequest(
         test_case_title=tc.title,
         test_case_type=tc.type,
@@ -198,6 +205,8 @@ async def generate_api_test_route(request: Request, db: Annotated[Session, Depen
         unit_strategy_summary=unit_strategy_summary(packet_dict),
         test_samples=test_samples_from_packet(packet_dict),
         context_gaps=gaps_from_packet(packet_dict),
+        project_rules=proj_rules,
+        user_rules=usr_rules,
     )
     try:
         result = await generate_api_test(provider, api_key, req)

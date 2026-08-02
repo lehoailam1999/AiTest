@@ -6,7 +6,7 @@
  *   Module 2/5: Foo — lỗi: …
  */
 
-export type FanOutQueueStatus = "pending" | "running" | "done" | "error";
+export type FanOutQueueStatus = "pending" | "running" | "done" | "error" | "paused";
 
 export type FanOutQueueItem = {
   title: string;

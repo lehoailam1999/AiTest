@@ -10,10 +10,12 @@ from app.routers.jobs import (
 def test_engine_rules_unit_focus():
     text = engine_generation_rules("unit", focus_modules="ValidateEmail")
     assert "PHIÊN SINH UNIT" in text
-    assert "KHÔNG sinh type=E2E" in text
     assert "ValidateEmail" in text
     assert "Todo" not in text
     assert "localhost" not in text
+    assert "trace:" in text
+    assert text.startswith("## UNIT ← PHÂN TÍCH")
+    assert "type=`Unit`" in text or "type=Unit" in text or "Unit` only" in text or "Unit only" in text
 
 
 def test_engine_rules_e2e_inputs():
@@ -27,12 +29,13 @@ def test_engine_rules_e2e_inputs():
     assert "http://localhost:3000" in text
     assert "đã login admin" in text
     assert "Checkout" in text
-    # Không ép «đã đăng nhập» khi không có auth_hint
+    assert text.startswith("## E2E ← PHÂN TÍCH")
+    assert "OUTPUT COMPLETENESS" in text
     bare = engine_generation_rules("e2e")
-    assert "không bịa «đã đăng nhập»" in bare or "không bịa" in bare
-    assert "TARGET URL: Chưa có baseURL" in bare
+    assert "không bịa" in bare
+    assert "TARGET URL" in bare and ("baseURL" in bare or "Giả định" in bare)
     assert "storageState" in bare
-    assert "AUTH (không bắt buộc" in bare
+    assert "trace:" in bare
 
 
 def test_rules_document_agnostic():
@@ -43,7 +46,7 @@ def test_rules_document_agnostic():
         assert "DOCUMENT-AGNOSTIC" not in text  # chỉ trong docstring module
         assert "Todo" not in text
         assert "localhost" not in text
-        assert "bám sát tài liệu" in text.lower() or "tài liệu" in text.lower()
+        assert "tài liệu" in text.lower() or "Knowledge" in text or "Feature" in text
 
 
 def test_coerce_draft_type():
@@ -64,16 +67,20 @@ def test_system_prompt_locks_engine():
     e = system_prompt(GenerateContext(preferred_engine="e2e"))
     assert "PHIÊN ENGINE = E2E" in e
     assert "type=E2E" in e or '"type":"E2E"' in e
-    assert "KHÔNG sinh type=Unit" in e or "KHÔNG sinh type=Unit/API" in e
+    assert "E2E ← PHÂN TÍCH" in e
+    assert "Output-driven" in e or "OUTPUT COMPLETENESS" in e
 
 
 def test_compact_rules_when_engine_locked():
-    from app.llm.tc_generation_rules import get_tc_generation_rules
-
-    compact = get_tc_generation_rules(preferred_engine="e2e")
+    compact_e2e = get_tc_generation_rules(preferred_engine="e2e")
+    compact_unit = get_tc_generation_rules(preferred_engine="unit")
     full = get_tc_generation_rules()
-    assert "QUY TẮC CHUNG" in compact
-    assert len(compact) < len(full)
+    assert "QUY TẮC CHUNG E2E" in compact_e2e
+    assert "OUTPUT COMPLETENESS" not in compact_e2e  # SoT only
+    assert "QUY TẮC CHUNG (BẮT BUỘC)" in compact_unit
+    assert len(compact_e2e) < len(compact_unit)
+    assert len(compact_e2e) < len(full)
+    assert len(compact_unit) < len(full)
 
 
 def test_tc_matches_preferred_engine():

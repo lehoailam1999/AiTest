@@ -53,6 +53,34 @@ export function newE2eRunId(testCaseId: string): string {
   return `e2e-${short}-${Date.now()}`;
 }
 
+/**
+ * Write overlay under a fixed runId. If `previous` has a different runId, delete that
+ * staging folder first — prevents orphan `.ai-test/staging/e2e-*` trees that accumulate
+ * every TC during batch generate (Unit uses one runId per job; E2E must match).
+ */
+export async function writeE2eOverlayReplacingPrevious(
+  projectRoot: string,
+  session: E2eStagingSession,
+  previous: E2eStagingSession | null | undefined
+): Promise<void> {
+  if (
+    previous &&
+    previous.runId &&
+    previous.runId !== session.runId
+  ) {
+    try {
+      await cleanupWorkspaceRunAfterApply(
+        projectRoot,
+        previous.runId,
+        previous.packagePrefix
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+  await writeE2eOverlay(projectRoot, session);
+}
+
 /** Coerce + jail generated paths into staging entries. */
 export function buildE2eStagedFiles(
   files: E2EFileDto[],
@@ -67,6 +95,8 @@ export function buildE2eStagedFiles(
       kind: "e2e",
       module: opts.module,
       packagePrefix: opts.packagePrefix,
+      // Unit-like: keep AI layout; do not rebuild from basename (duplicate folders).
+      preserveLayout: true,
     });
     const targetRel = assertE2eTarget(coerced);
     return {

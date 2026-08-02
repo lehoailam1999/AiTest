@@ -184,7 +184,9 @@ def parse_chat_llm_json(raw: str) -> dict[str, Any] | None:
 
 
 def chat_system_prompt() -> str:
-    return (
+    from app.llm.analysis_rules import append_analysis_chat_diff_rules
+
+    base = (
         "You are a requirements analyst assistant for AITest Requirement Studio. "
         "You may ONLY use the provided Knowledge Workspace JSON — never invent reading "
         "raw uploaded files. Answer in the user's language (often Vietnamese). "
@@ -198,6 +200,7 @@ def chat_system_prompt() -> str:
         "If the user only asks a question, keep ops empty. "
         "If they ask to add/fix knowledge, include precise ops."
     )
+    return append_analysis_chat_diff_rules(base)
 
 
 def heuristic_chat_turn(

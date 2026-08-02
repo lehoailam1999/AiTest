@@ -4,6 +4,7 @@
  * never at monorepo root for BE/FE sources.
  */
 export const AI_TEST_DIR = ".ai-test";
+export const AI_TEST_STAGING_DIR = "staging";
 
 function normPkg(packagePrefix?: string | null): string {
   return (packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
@@ -16,7 +17,7 @@ export function aiTestDir(packagePrefix?: string | null): string {
 }
 
 export function workspaceRunDir(runId: string, packagePrefix?: string | null): string {
-  return `${aiTestDir(packagePrefix)}/workspace/${runId}`;
+  return `${aiTestDir(packagePrefix)}/${AI_TEST_STAGING_DIR}/${runId}`;
 }
 
 export function manifestRelPath(runId: string, packagePrefix?: string | null): string {

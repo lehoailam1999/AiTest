@@ -101,6 +101,8 @@ const MAX_MODULE_DEPTH = 2;
  * Layout Unit/API under AItest:
  *   AItest/UnitTest/{Requirement}/{TestCaseTitle}/{file}
  * Shared config stays at AItest/jest.config.cjs + AItest/tsconfig.json (not inside modules).
+ *
+ * Segments collapse whitespace → `-` so Windows `cmd` / pytest không cắt path (vd. "To do").
  */
 export function buildRequirementTcModule(
   requirementTitle?: string | null,
@@ -111,7 +113,7 @@ export function buildRequirementTcModule(
     let mod = (raw || "").replace(/\\/g, "/").trim().replace(/^\/+|\/+$/g, "");
     mod = mod.replace(/[<>:"|?*]/g, "");
     const parts = mod.split("/").filter((p) => p && p !== "." && p !== "..");
-    return (parts[0] || "").trim();
+    return sanitizePathSegment(parts[0] || "");
   };
   const req = oneSeg(requirementTitle);
   const tc = oneSeg(testCaseTitle);
@@ -158,11 +160,101 @@ function normRel(path?: string | null): string {
   return p.replace(/^\/+|\/+$/g, "");
 }
 
+/** Safe folder segment: no traversal; length-capped for Windows MAX_PATH. */
+const MAX_PATH_SEGMENT_LEN = 48;
+
+/** Keep Playwright/test + POM compound suffixes when truncating long filenames. */
+const COMPOUND_FILE_EXTS = [
+  ".spec.ts",
+  ".spec.tsx",
+  ".test.ts",
+  ".test.tsx",
+  ".page.ts",
+  ".page.tsx",
+  ".setup.ts",
+  ".helper.ts",
+  ".d.ts",
+] as const;
+
+function truncatePathSegment(seg: string, maxLen = MAX_PATH_SEGMENT_LEN): string {
+  const s = (seg || "").trim();
+  if (!s || s.length <= maxLen) return s;
+  // FNV-1a over UTF-8 bytes — must match api truncate_path_segment
+  const bytes = new TextEncoder().encode(s);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i]!;
+    h = Math.imul(h, 0x01000193);
+  }
+  const digest = (h >>> 0).toString(16).padStart(8, "0").slice(0, 8);
+  const keep = Math.max(8, maxLen - 9);
+  const prefix = s.slice(0, keep).replace(/[-._\s]+$/g, "");
+  return `${prefix}-${digest}`;
+}
+
+export function sanitizePathSegment(raw?: string | null, maxLen = MAX_PATH_SEGMENT_LEN): string {
+  let s = (raw || "").trim();
+  if (!s) return "";
+  s = s.replace(/[<>:"|?*\[\]]/g, "");
+  s = s.replace(/\//g, "-");
+  s = s.replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  if (s === "." || s === "..") return "";
+  return truncatePathSegment(s, maxLen);
+}
+
+function splitE2eFilename(name: string): [string, string] {
+  const n = name || "";
+  const low = n.toLowerCase();
+  for (const ext of COMPOUND_FILE_EXTS) {
+    if (low.endsWith(ext)) {
+      return [n.slice(0, -ext.length), n.slice(-ext.length)];
+    }
+  }
+  const dot = n.lastIndexOf(".");
+  if (dot > 0) return [n.slice(0, dot), n.slice(dot)];
+  return [n, ""];
+}
+
+/** Shorten oversized segments in already-generated E2E rel paths. */
+export function shortenE2eRelPath(rel: string, maxSeg = MAX_PATH_SEGMENT_LEN): string {
+  const p = (rel || "").replace(/\\/g, "/").trim();
+  if (!p) return p;
+  const structural = new Set([
+    "aitest",
+    "e2etest",
+    "pages",
+    "specs",
+    "fixtures",
+    "helpers",
+    "unittest",
+    "apitest",
+    "integrationtest",
+  ]);
+  const parts = p.split("/").filter(Boolean);
+  return parts
+    .map((part, i) => {
+      const isFile = i === parts.length - 1 && part.includes(".");
+      if (structural.has(part.toLowerCase())) return part;
+      if (isFile) {
+        const [stem, ext] = splitE2eFilename(part);
+        if (stem && part.length > maxSeg + ext.length) {
+          return `${truncatePathSegment(stem, maxSeg)}${ext}`;
+        }
+        return part;
+      }
+      return truncatePathSegment(part, maxSeg);
+    })
+    .join("/");
+}
+
 /** TC.module → safe short folder. */
 export function sanitizeModuleLabel(module?: string | null): string {
   let mod = (module || "").replace(/\\/g, "/").trim().replace(/^\/+|\/+$/g, "");
   mod = mod.replace(/[<>:"|?*]/g, "");
-  const parts = mod.split("/").filter((p) => p && p !== "." && p !== "..");
+  const parts = mod
+    .split("/")
+    .map((p) => sanitizePathSegment(p))
+    .filter((p) => p && p !== "." && p !== "..");
   return parts.slice(0, MAX_MODULE_DEPTH).join("/");
 }
 
@@ -389,7 +481,8 @@ export function underGeneratedTestFolder(
     packagePrefix?: string | null;
   }
 ): string {
-  let kindRoot = aitestKindRoot(kind);
+  const normKind = normalizeKind(kind);
+  let kindRoot = aitestKindRoot(normKind);
   const srcKey = opts?.sourceFileName || sourceDir;
   const reqModule = buildRequirementTcModule(
     opts?.requirementTitle,
@@ -407,6 +500,17 @@ export function underGeneratedTestFolder(
   }
   if (mod.toLowerCase().startsWith(`${AITEST_ROOT.toLowerCase()}/`)) {
     mod = moduleRelFromSource(mod);
+  }
+
+  // Unit layout: keep one parent folder (Requirement/module), no nested TC tree.
+  if (normKind === "unit") {
+    const reqOnly =
+      sanitizePathSegment(opts?.requirementTitle) ||
+      sanitizePathSegment((reqModule || "").split("/")[0] || "") ||
+      sanitizePathSegment(opts?.module) ||
+      "";
+    if (reqOnly) return `${kindRoot}/${reqOnly}/${name}`.replace(/\/+/g, "/");
+    return `${kindRoot}/${name}`.replace(/\/+/g, "/");
   }
 
   if (mod) {
@@ -482,8 +586,34 @@ export function isFlatAitestTarget(targetRel: string): boolean {
 }
 
 /**
- * Force path into [{pkg}/]AItest/{Kind}/{Module}/file.
- * Never keep a bare repo-root AItest/ when the source lives under a package (backend/…).
+ * Keep everything from the AItest/ segment onward; optionally relocate package prefix.
+ * Universal monorepo rule: never rebuild Requirement/TC folders from filename alone.
+ */
+export function relocateAitestPackagePrefix(
+  targetRel: string,
+  packagePrefix?: string | null
+): string {
+  const raw = (targetRel || "").replace(/\\/g, "/").trim().replace(/^\/+/, "");
+  assertSafeAitestTargetRel(raw);
+  const parts = raw.split("/").filter(Boolean);
+  const low = parts.map((s) => s.toLowerCase());
+  const aitIdx = low.indexOf(AITEST_ROOT.toLowerCase());
+  if (aitIdx < 0) {
+    throw new Error(`Path jail: missing ${AITEST_ROOT}/ in ${raw}`);
+  }
+  const tail = parts.slice(aitIdx).join("/"); // AItest/...
+  const pkg = (packagePrefix ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!pkg) return assertSafeAitestTargetRel(tail);
+  return assertSafeAitestTargetRel(`${pkg}/${tail}`.replace(/\/+/g, "/"));
+}
+
+/**
+ * Normalize Apply target into [{pkg}/]AItest/{Kind}/… .
+ *
+ * When `targetRel` is already a valid flat AItest path (from staging/manifest),
+ * PRESERVE the full path under AItest/ (Requirement folder, uniquify id, scaffolds).
+ * Only relocate the package prefix. Never rebuild from basename — that drops files
+ * into the wrong folder on Apply (any monorepo / any language).
  */
 export function coerceAitestApplyPath(
   targetRel: string,
@@ -492,29 +622,55 @@ export function coerceAitestApplyPath(
     module?: string | null;
     sourceFileName?: string | null;
     packagePrefix?: string | null;
+    /** When true (Apply/Verify), never rebuild path from filename. Default true if raw is safe. */
+    preserveLayout?: boolean;
   }
 ): string {
   const raw = (targetRel || "").replace(/\\/g, "/").trim().replace(/^\/+/, "");
   const kind = normalizeKind(opts?.kind);
+  const pkgOpt =
+    opts?.packagePrefix !== undefined && opts?.packagePrefix !== null
+      ? opts.packagePrefix
+      : undefined;
+
+  const collapseDuplicateAnchors = (path: string): string => {
+    const segments = path.split("/").filter(Boolean);
+    const low = segments.map((s) => s.toLowerCase());
+    const kindName = generatedTestRoot(kind).toLowerCase();
+    const anchors: number[] = [];
+    for (let i = 0; i < low.length - 1; i += 1) {
+      if (low[i] === AITEST_ROOT.toLowerCase() && low[i + 1] === kindName) {
+        anchors.push(i);
+      }
+    }
+    if (anchors.length <= 1) return path;
+    const lastAi = anchors[anchors.length - 1];
+    const prefix = segments.slice(0, anchors[0]).join("/");
+    const tail = segments.slice(lastAi).join("/"); // starts with AItest
+    return (prefix ? `${prefix}/${tail}` : tail).replace(/\/+/g, "/");
+  };
+
+  if (raw && isFlatAitestTarget(raw)) {
+    const collapsed = assertSafeAitestTargetRel(collapseDuplicateAnchors(raw));
+    const preserve = opts?.preserveLayout !== false;
+    if (preserve) {
+      // Explicit packagePrefix (including "") relocates; undefined keeps existing root.
+      if (pkgOpt !== undefined) {
+        return relocateAitestPackagePrefix(collapsed, pkgOpt);
+      }
+      return collapsed;
+    }
+  }
+
+  // Unsafe / missing layout — build from kind + module + source (generate path).
   const base = raw.split("/").pop() || "GeneratedTests.txt";
-  const preferred = assertSafeAitestTargetRel(
+  return assertSafeAitestTargetRel(
     underGeneratedTestFolder(kind, base, null, {
       module: opts?.module,
       sourceFileName: opts?.sourceFileName || raw,
-      packagePrefix: opts?.packagePrefix,
+      packagePrefix: pkgOpt,
     })
   );
-
-  if (!raw || !isFlatAitestTarget(raw)) {
-    return preferred;
-  }
-
-  const preferredRoot = (preferred.match(/^(.*?\/)?AItest(?=\/|$)/i) || [])[0] || AITEST_ROOT;
-  const rawRoot = (raw.match(/^(.*?\/)?AItest(?=\/|$)/i) || [])[0] || AITEST_ROOT;
-  if (preferredRoot.replace(/\\/g, "/").toLowerCase() === rawRoot.replace(/\\/g, "/").toLowerCase()) {
-    return assertSafeAitestTargetRel(raw);
-  }
-  return preferred;
 }
 
 /** AItest folder root for a target, e.g. backend/AItest or AItest. */

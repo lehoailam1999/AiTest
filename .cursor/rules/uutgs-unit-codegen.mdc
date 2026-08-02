@@ -1,0 +1,33 @@
+---
+description: UUTGS — Specification sinh code Unit Test đa ngôn ngữ/framework
+globs: api/app/llm/uutgs_rules.py,api/app/llm/base.py,api/app/routers/generate_unit.py,api/app/services/unit_test_orchestrator.py,desktop/src/lib/unitWorkspace/**
+alwaysApply: false
+---
+
+# UUTGS — Universal Unit Test Generation Specification
+
+> Runtime: [`api/app/llm/uutgs_rules.py`](api/app/llm/uutgs_rules.py) inject **một lần** trong `unit_system_prompt`.  
+> User prompt chỉ mang **data** (TC + source + stack) — không lặp Specification.
+
+Áp dụng cho **sinh code** Unit Test (mọi ngôn ngữ / framework). Khác với rule Sinh TC từ Phân tích (`unit-tc-from-analysis.mdc`).
+
+## Cốt lõi
+
+1. **Source = SoT** — hành vi lấy từ implementation; TC chỉ định *intent* kịch bản.
+2. **Analyze → Generate** — CFG/DFG/deps/exception trước khi emit.
+3. **Mock ngoài unit** — không mock pure/DTO/validator/utility.
+4. **Deterministic + isolated** — không flake, không phụ thuộc thứ tự.
+5. **Convention + stack detected** — match project samples.
+6. **Cấm bootstrap entrypoint** — test pipe/service/handler, không `import main`.
+
+## Phân tầng
+
+| Tầng | Nội dung |
+|------|----------|
+| UUTGS | Specification SHALL/MUST |
+| Language overlay | Import path AItest/, Jest types, C# usings |
+| User prompt | TC + SUT + related + samples (data only) |
+
+## Khi sửa
+
+Chỉ sửa contract trong `uutgs_rules.py` (+ file này). Giữ `unit_system_prompt` mỏng.

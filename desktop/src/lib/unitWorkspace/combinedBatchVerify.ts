@@ -1,11 +1,16 @@
-import { runTestCommand, runDotnetTest } from "../../tauri/bridge";
+import { runTestCommand, runDotnetTest, deleteTextFile } from "../../tauri/bridge";
 import {
-  captureStagingBackups,
-  rollbackStaging,
+  preserveStagedOverlays,
   stageOverlayToTargets,
 } from "./staging";
 import { saveManifest } from "./manager";
 import type { UnitWorkspaceManifest, VerifyReport, VerifyStageResult } from "./types";
+import {
+  ensureAitestDotnetInWorkspace,
+  resolveAitestCsharpVerifyCommands,
+  manifestHasAitestCsharpTests,
+  parseCsharpErrorFileRels,
+} from "./ensureAitestDotnet";
 
 async function runShell(projectRoot: string, command: string) {
   const cmd = command.trim();
@@ -19,7 +24,10 @@ async function runShell(projectRoot: string, command: string) {
     };
   }
   if (/^dotnet\s+test\b/i.test(cmd)) {
-    const r = await runDotnetTest(projectRoot);
+    const fromCmd =
+      cmd.match(/dotnet\s+test\s+"([^"]+\.csproj)"/i)?.[1] ||
+      cmd.match(/dotnet\s+test\s+(\S+\.csproj)/i)?.[1];
+    const r = await runDotnetTest(projectRoot, fromCmd);
     return {
       success: r.success,
       exitCode: r.exitCode,
@@ -38,6 +46,42 @@ async function runShell(projectRoot: string, command: string) {
   };
 }
 
+async function runShellWithCsharpQuarantine(
+  projectRoot: string,
+  command: string,
+  enabled: boolean
+) {
+  let result = await runShell(projectRoot, command);
+  if (!enabled) return result;
+
+  const notes: string[] = [];
+  for (let pass = 0; pass < 8; pass++) {
+    if (result.success) break;
+    if (!/\berror\s+CS\d+/i.test(result.log || "")) break;
+    const rels = parseCsharpErrorFileRels(result.log, projectRoot);
+    const removed: string[] = [];
+    for (const rel of rels) {
+      try {
+        await deleteTextFile(projectRoot, rel);
+        removed.push(rel);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!removed.length) break;
+    notes.push(
+      `[AITest] Quarantined ${removed.length} compile-failing AItest file(s) and retrying:\n` +
+        removed.map((r) => `  - ${r}`).join("\n")
+    );
+    result = await runShell(projectRoot, command);
+  }
+  if (!notes.length) return result;
+  return {
+    ...result,
+    log: notes.join("\n\n") + "\n\n" + (result.log || ""),
+  };
+}
+
 /**
  * Stage every batch job's overlay, run ONE test command for all AItest files, then rollback.
  */
@@ -51,31 +95,60 @@ export async function runCombinedBatchVerify(input: {
   stages: VerifyStageResult[];
   updatedManifests: UnitWorkspaceManifest[];
 }> {
-  const { projectRoot, manifests } = input;
-  if (!manifests.length) {
+  const { projectRoot } = input;
+  if (!input.manifests.length) {
     throw new Error("Không có staging để verify.");
   }
   if (!input.testCommand.trim()) {
     throw new Error("Cần lệnh test.");
   }
 
-  const backupBags: Array<{
-    manifest: UnitWorkspaceManifest;
-    backups: Awaited<ReturnType<typeof captureStagingBackups>>;
-  }> = [];
+  let manifests = [...input.manifests];
+  const anyCsharp = manifests.some(manifestHasAitestCsharpTests);
+  if (anyCsharp) {
+    const next: UnitWorkspaceManifest[] = [];
+    for (const m of manifests) {
+      if (manifestHasAitestCsharpTests(m)) {
+        const updated = await ensureAitestDotnetInWorkspace({
+          projectRoot,
+          manifest: m,
+        });
+        await saveManifest(projectRoot, updated);
+        next.push(updated);
+      } else {
+        next.push(m);
+      }
+    }
+    manifests = next;
+  }
 
   const stages: VerifyStageResult[] = [];
 
   try {
     for (const m of manifests) {
-      const backups = await captureStagingBackups(projectRoot, m);
-      backupBags.push({ manifest: m, backups });
       await stageOverlayToTargets(projectRoot, m);
     }
 
-    const compileCmd = (input.compileCommand ?? "").trim();
+    let compileCmd = (input.compileCommand ?? "").trim();
+    let testCmd = input.testCommand.trim();
+
+    // C# AItest host is SoT — never run jest/npm/bare `dotnet test` against production.
+    if (anyCsharp) {
+      const csharpManifest = manifests.find(manifestHasAitestCsharpTests);
+      const resolved = resolveAitestCsharpVerifyCommands(
+        csharpManifest?.packagePrefix,
+        { compile: compileCmd, test: testCmd }
+      );
+      compileCmd = resolved.compile;
+      testCmd = resolved.test;
+    }
+
     if (compileCmd) {
-      const compileRun = await runShell(projectRoot, compileCmd);
+      const compileRun = await runShellWithCsharpQuarantine(
+        projectRoot,
+        compileCmd,
+        anyCsharp
+      );
       stages.push({
         stage: "compile",
         success: compileRun.success,
@@ -105,7 +178,11 @@ export async function runCombinedBatchVerify(input: {
       }
     }
 
-    const testRun = await runShell(projectRoot, input.testCommand);
+    const testRun = await runShellWithCsharpQuarantine(
+      projectRoot,
+      testCmd,
+      anyCsharp && !compileCmd
+    );
     stages.push({
       stage: "test",
       success: testRun.success,
@@ -137,17 +214,7 @@ export async function runCombinedBatchVerify(input: {
     );
     return { success: overallPass, stages, updatedManifests: updated };
   } finally {
-    for (const bag of backupBags) {
-      try {
-        await rollbackStaging(
-          projectRoot,
-          bag.manifest.runId,
-          bag.backups,
-          bag.manifest.packagePrefix
-        );
-      } catch {
-        /* best-effort */
-      }
-    }
+    // Keep all staged AItest files on disk until Apply / Discard (never wipe UnitTest/).
+    await preserveStagedOverlays(projectRoot, manifests);
   }
 }

@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  Checkbox,
   Empty,
   Input,
   Space,
@@ -15,8 +16,13 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { LockOutlined, ThunderboltOutlined } from "@ant-design/icons";
-import { requirementStudio, testcases } from "../../api";
+import {
+  LockOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
+import { jobs, requirementStudio, testcases } from "../../api";
 import type {
   KnowledgeWorkspaceView,
   RequirementSnapshot,
@@ -71,7 +77,7 @@ const LIVE_TC_COLUMNS: ColumnsType<TestCase> = [
     title: "Module",
     dataIndex: "module",
     key: "module",
-    width: 200,
+    width: 300,
     ellipsis: true,
     render: (v: string) => v || "—",
   },
@@ -101,9 +107,14 @@ export default function FreezePanel({
   const [snapshots, setSnapshots] = useState<RequirementSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [note, setNote] = useState("");
   const [engine, setEngine] = useState<PreferredEngine>("unit");
   const [targetUrl, setTargetUrl] = useState("");
+  /** E2E: mặc định nhanh (trần mềm). Bật full = cover đủ mọi tín hiệu (chậm hơn). */
+  const [e2eFullCoverage, setE2eFullCoverage] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [savedCount, setSavedCount] = useState(0);
@@ -157,9 +168,9 @@ export default function FreezePanel({
     el.scrollTop = el.scrollHeight;
   }, [cliLog]);
 
-  // Poll TC theo jobId khi đang sinh — bảng cập nhật ngay khi có TC mới
+  // Poll TC theo jobId khi đang sinh / tạm dừng — bảng cập nhật ngay khi có TC mới
   useEffect(() => {
-    if (!activeJob?.jobId || (!running && liveCases.length === 0)) return;
+    if (!activeJob?.jobId || (!running && !paused && liveCases.length === 0)) return;
     let cancelled = false;
     const jobId = activeJob.jobId;
 
@@ -175,7 +186,7 @@ export default function FreezePanel({
     };
 
     void tick();
-    if (!running) return;
+    if (!running && !paused) return;
     const id = window.setInterval(() => {
       void tick();
     }, 2000);
@@ -183,11 +194,67 @@ export default function FreezePanel({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [activeJob?.jobId, running]);
+  }, [activeJob?.jobId, running, paused]);
+
+  async function watchJobUntilSettled(jobId: string, snapshotId: string) {
+    const job = await waitForJob(jobId, {
+      onProgress: (msg) => {
+        setProgress(msg);
+        const n = parseSavedCount(msg);
+        if (n != null && n > 0) {
+          setSavedCount((prev) => Math.max(prev, n));
+          if (!partialNotified.current) {
+            partialNotified.current = true;
+            onPartialGenerated?.({
+              snapshotId,
+              jobId,
+              preferredEngine: engine,
+              savedCount: n,
+            });
+          }
+        }
+        if (
+          /^Module\s+\d+\s*\/\s*\d+/i.test(msg.trim()) ||
+          /^\[progressive\]/i.test(msg.trim()) ||
+          /Tạm dừng|tạm dừng|Tiếp tục/i.test(msg)
+        ) {
+          setCliLog((prev) => {
+            const last = prev[prev.length - 1];
+            if (last === msg) return prev;
+            return [...prev, msg];
+          });
+        }
+      },
+      onLog: (lines) => setCliLog(lines.length ? lines : ["(chưa có log)"]),
+    });
+    if (job.progressLog?.length) setCliLog(job.progressLog);
+    try {
+      const rows = await testcases.listAll({ jobId });
+      setLiveCases(rows);
+      setSavedCount(rows.length);
+    } catch {
+      /* keep polled state */
+    }
+    if (job.status === "Paused") {
+      setPaused(true);
+      setRunning(false);
+      setProgress(job.progressMessage || "Đã tạm dừng — TC đã lưu được giữ.");
+      return job;
+    }
+    if (job.status === "Failed") {
+      setPaused(false);
+      throw new Error(job.error || "Tạo test case thất bại");
+    }
+    setPaused(false);
+    setProgress(job.progressMessage || "Hoàn tất");
+    onGenerated?.({ snapshotId, jobId, preferredEngine: engine });
+    return job;
+  }
 
   const runFreezeAndGenerate = async () => {
-    if (!workspaceId || running) return;
+    if (!workspaceId || running || paused) return;
     setRunning(true);
+    setPaused(false);
     setError(null);
     setProgress("Đang chốt snapshot…");
     setCliLog(["--- Chốt snapshot & tạo job ---"]);
@@ -204,6 +271,8 @@ export default function FreezePanel({
         mode: "append",
         preferredEngine: engine,
         targetUrl: engine === "e2e" ? targetUrl.trim() || undefined : undefined,
+        speed:
+          engine === "e2e" ? (e2eFullCoverage ? "full" : "fast") : undefined,
       });
       setLastWarnings(res.warnings ?? []);
       setSnapshots((prev) => [res.snapshot, ...prev]);
@@ -216,51 +285,55 @@ export default function FreezePanel({
         `Job ${jobId}`,
         res.job.progressMessage || "Đã tạo job — đang gọi AI CLI…",
       ]);
-      const job = await waitForJob(jobId, {
-        onProgress: (msg) => {
-          setProgress(msg);
-          const n = parseSavedCount(msg);
-          if (n != null && n > 0) {
-            setSavedCount((prev) => Math.max(prev, n));
-            if (!partialNotified.current) {
-              partialNotified.current = true;
-              onPartialGenerated?.({
-                snapshotId,
-                jobId,
-                preferredEngine: engine,
-                savedCount: n,
-              });
-            }
-          }
-          if (
-            /^Module\s+\d+\s*\/\s*\d+/i.test(msg.trim()) ||
-            /^\[progressive\]/i.test(msg.trim())
-          ) {
-            setCliLog((prev) => {
-              const last = prev[prev.length - 1];
-              if (last === msg) return prev;
-              return [...prev, msg];
-            });
-          }
-        },
-        onLog: (lines) => setCliLog(lines.length ? lines : ["(chưa có log)"]),
-      });
-      if (job.progressLog?.length) setCliLog(job.progressLog);
-      if (job.status === "Failed") {
-        throw new Error(job.error || "Tạo test case thất bại");
-      }
-      try {
-        const rows = await testcases.listAll({ jobId });
-        setLiveCases(rows);
-        setSavedCount(rows.length);
-      } catch {
-        /* keep polled state */
-      }
-      setProgress(job.progressMessage || "Hoàn tất");
-      onGenerated?.({ snapshotId, jobId, preferredEngine: engine });
+      await watchJobUntilSettled(jobId, snapshotId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setPaused(false);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const onPause = async () => {
+    if (!activeJob?.jobId || pausing || !running) return;
+    setPausing(true);
+    try {
+      await jobs.pause(activeJob.jobId);
+      setProgress("Đã yêu cầu tạm dừng — đợi module đang chạy xong…");
+      setCliLog((prev) => [...prev, ">>> Yêu cầu tạm dừng (giữ TC đã lưu)"]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      setPausing(false);
+    }
+  };
+
+  const onResume = async () => {
+    if (!activeJob?.jobId || resuming || !paused) return;
+    setResuming(true);
+    setError(null);
+    setRunning(true);
+    setPaused(false);
+    try {
+      const job = await jobs.resume(activeJob.jobId);
+      setProgress(job.progressMessage || "Tiếp tục sinh bổ sung…");
+      setCliLog((prev) => [
+        ...prev,
+        ">>> Tiếp tục — chỉ sinh module còn lại (không chạy lại từ đầu)",
+        job.progressMessage || "",
+      ]);
+      await watchJobUntilSettled(activeJob.jobId, activeJob.snapshotId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      // Keep paused UI if resume failed mid-flight
+      try {
+        const cur = await jobs.get(activeJob.jobId);
+        if (cur.status === "Paused") setPaused(true);
+      } catch {
+        setPaused(true);
+      }
+    } finally {
+      setResuming(false);
       setRunning(false);
     }
   };
@@ -324,7 +397,7 @@ export default function FreezePanel({
             onChange={(v) => {
               if (v === "unit" || v === "e2e") setEngine(v);
             }}
-            disabled={running}
+            disabled={running || paused}
           />
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {engine === "e2e"
@@ -334,13 +407,22 @@ export default function FreezePanel({
         </div>
 
         {engine === "e2e" ? (
-          <Input
-            value={targetUrl}
-            onChange={(e) => setTargetUrl(e.target.value)}
-            placeholder="Target URL (tuỳ chọn) — http://localhost:3000"
-            disabled={running}
-            aria-label="Target URL"
-          />
+          <>
+            <Input
+              value={targetUrl}
+              onChange={(e) => setTargetUrl(e.target.value)}
+              placeholder="Target URL (tuỳ chọn) — http://localhost:3000"
+              disabled={running || paused}
+              aria-label="Target URL"
+            />
+            <Checkbox
+              checked={e2eFullCoverage}
+              onChange={(e) => setE2eFullCoverage(e.target.checked)}
+              disabled={running || paused}
+            >
+              Cover đầy đủ mọi journey (chậm hơn) — mặc định tốc độ nhanh (~6 TC/module)
+            </Checkbox>
+          </>
         ) : null}
 
         <Input.TextArea
@@ -348,43 +430,79 @@ export default function FreezePanel({
           onChange={(e) => setNote(e.target.value)}
           placeholder="Ghi chú snapshot (tuỳ chọn)…"
           autoSize={{ minRows: 2, maxRows: 4 }}
-          disabled={running}
+          disabled={running || paused}
         />
         <Space wrap>
           {onOpenKnowledge ? (
-            <Button onClick={onOpenKnowledge} disabled={running}>
+            <Button onClick={onOpenKnowledge} disabled={running || paused}>
               Về Phân tích
             </Button>
           ) : null}
           <Button
             type="primary"
             icon={<ThunderboltOutlined />}
-            loading={running}
+            loading={running && !pausing}
+            disabled={paused}
             onClick={() => void runFreezeAndGenerate()}
           >
             {engine === "e2e"
               ? "Chốt snapshot và tạo TC E2E"
               : "Chốt snapshot và tạo test case"}
           </Button>
+          {running && !paused ? (
+            <Button
+              icon={<PauseCircleOutlined />}
+              loading={pausing}
+              onClick={() => void onPause()}
+            >
+              Tạm dừng
+            </Button>
+          ) : null}
+          {paused ? (
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={resuming}
+              onClick={() => void onResume()}
+            >
+              Tiếp tục (bổ sung)
+            </Button>
+          ) : null}
         </Space>
+        {paused ? (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginTop: 8 }}
+            title="Đã tạm dừng — TC đã gen được giữ nguyên"
+            description={
+              progress ||
+              "Module đang chạy đã lưu xong. Bấm Tiếp tục để sinh bổ sung các module còn lại — không chạy lại từ đầu."
+            }
+          />
+        ) : null}
       </div>
 
-      {running || cliLog.length > 0 ? (
+      {running || paused || cliLog.length > 0 ? (
         <div className="cli-log-panel" aria-live="polite">
           <div className="cli-log-panel__head">
             <Typography.Text strong>Nhật ký AI CLI</Typography.Text>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {running ? "live · prompt + xử lý hệ thống" : "lần chạy gần nhất"} ·{" "}
+              {running ? "live · prompt + xử lý hệ thống" : paused ? "tạm dừng · giữ TC đã lưu" : "lần chạy gần nhất"} ·{" "}
               {cliLog.length} dòng
             </Typography.Text>
           </div>
-          {running && savedCount > 0 ? (
+          {(running || paused) && savedCount > 0 ? (
             <Alert
               style={{ marginBottom: 8 }}
               type="success"
               showIcon
               title={`Đã có ${savedCount} test case`}
-              description="TC được lưu dần theo từng module — bảng bên dưới cập nhật realtime."
+              description={
+                paused
+                  ? "TC đã lưu khi tạm dừng — có thể duyệt ngay. Tiếp tục sẽ chỉ bổ sung module còn lại."
+                  : "TC được lưu dần theo từng module — bảng bên dưới cập nhật realtime."
+              }
               action={
                 activeJob && onGenerated ? (
                   <Button
@@ -412,6 +530,10 @@ export default function FreezePanel({
                   ? "Đang tổng hợp tài liệu, phân tích và tạo TC E2E…"
                   : "Đang tổng hợp tài liệu, phân tích và test case hiện có…")}
             </Typography.Text>
+          ) : paused && progress ? (
+            <Typography.Text type="secondary" className="cli-log-panel__status">
+              {progress}
+            </Typography.Text>
           ) : null}
           <pre className="cli-log-panel__body" ref={logBodyRef}>
             {cliLog.length ? cliLog.join("\n\n") : "Chưa có log…"}
@@ -420,13 +542,13 @@ export default function FreezePanel({
         </div>
       ) : null}
 
-      {liveCases.length > 0 || (running && activeJob) ? (
+      {liveCases.length > 0 || ((running || paused) && activeJob) ? (
         <div className="freeze-live-tc">
           <div className="freeze-live-tc__head">
             <Typography.Text strong>Test case đã sinh</Typography.Text>
-            <Tag color={running ? "processing" : "success"}>
+            <Tag color={running ? "processing" : paused ? "warning" : "success"}>
               {liveCases.length} TC
-              {running ? " · đang cập nhật" : ""}
+              {running ? " · đang cập nhật" : paused ? " · tạm dừng" : ""}
             </Tag>
           </div>
           <Table<TestCase>

@@ -308,6 +308,63 @@ def _rel_to_project(project_root: Path, path: Path) -> str:
         return path.as_posix().replace("\\", "/")
 
 
+def discover_login_path(project_root: str) -> str | None:
+    """
+    Best-effort login route from SUT E2E/FE sources (project-agnostic).
+    Prefers explicit goto('/login') / account/login patterns.
+    """
+    root = Path(project_root or "")
+    if not root.is_dir():
+        return None
+    patterns = (
+        r"""goto\(\s*['"`](/login|/account/login|/signin|/sign-in|/auth/login)['"`]""",
+        r"""['"`](/login|/account/login)['"`]\s*,""",
+        r"""path\s*:\s*['"`](login|account/login)['"`]""",
+    )
+    compiled = [re.compile(p, re.I) for p in patterns]
+    search_roots = [
+        root / "test",
+        root / "e2e",
+        root / "src",
+        root,
+    ]
+    hits: list[str] = []
+    for base in search_roots:
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".ts", ".tsx", ".js", ".jsx", ".vue", ".html"}:
+                continue
+            low = str(path).replace("\\", "/").lower()
+            if any(x in low for x in ("/node_modules/", "/dist/", "/.git/", "/coverage/")):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")[:8000]
+            except OSError:
+                continue
+            for cre in compiled:
+                m = cre.search(text)
+                if m:
+                    raw = m.group(1)
+                    if not raw.startswith("/"):
+                        raw = "/" + raw
+                    hits.append(raw)
+                    break
+            if len(hits) >= 8:
+                break
+        if len(hits) >= 8:
+            break
+    if not hits:
+        return None
+    # Prefer /login then /account/login
+    for preferred in ("/login", "/account/login", "/signin", "/sign-in", "/auth/login"):
+        if preferred in hits:
+            return preferred
+    return hits[0]
+
+
 def discover_project_auth(
     project_root: str,
     *,
@@ -466,6 +523,22 @@ def attach_storage_state_to_files(
     from app.llm.base import E2EFile
 
     root = e2e_module_root(module, package_prefix=package_prefix)
+    # Per-TC layout: put storageState next to the Spec folder (not only module root),
+    # otherwise playwright.config.ts under {TC}/ looks for ./fixtures/storageState.json
+    # and hits ENOENT while the JSON landed under {Module}/fixtures/.
+    for f in files or []:
+        p = (getattr(f, "path", "") or "").replace("\\", "/")
+        low = p.lower()
+        for marker in ("/specs/", "/pages/", "/fixtures/", "/types/"):
+            if marker in low:
+                root = p.split(marker)[0]
+                break
+        else:
+            if low.endswith("playwright.config.ts"):
+                root = p.rsplit("/", 1)[0]
+                break
+            continue
+        break
     dest = f"{root}/fixtures/storageState.json"
     out: list = []
     replaced = False
@@ -540,6 +613,12 @@ def merge_discovered_auth(
     body_env = extract_playwright_env(body)
     merged = dict(discovered)
     merged.update(body_env)
+
+    if not (merged.get("E2E_LOGIN_PATH") or "").strip():
+        login_path = discover_login_path(project_root)
+        if login_path:
+            merged["E2E_LOGIN_PATH"] = login_path
+            discovery.notes.append(f"Discovered E2E_LOGIN_PATH={login_path}")
 
     out_files = files
     profile = discovery.pick(preferred)

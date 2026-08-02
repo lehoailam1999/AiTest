@@ -326,8 +326,37 @@ class BaseCLIAdapter(BaseLLMAdapter):
         Cursor Agent must stay on oneshot ``--mode ask`` so it cannot write into
         the AITest product workspace; host applies files under projectRoot only.
         """
+        from app.services.e2e_auth_mode import (
+            is_login_or_auth_tc,
+            is_public_no_auth_signal,
+            resolve_auth_mode,
+        )
+
+        auth_hints = "\n".join(
+            [
+                req.precondition or "",
+                req.steps or "",
+                req.expected_result or "",
+                req.project_rules or "",
+            ]
+        )
+        app_public = is_public_no_auth_signal(
+            title=req.test_case_title,
+            dom_snapshot=req.dom_snapshot,
+            hints=auth_hints,
+        )
+        auth_mode = resolve_auth_mode(
+            use_storage=bool((req.storage_state_rel or "").strip()),
+            has_valid_storage_json=False,
+            is_login_tc=is_login_or_auth_tc(req.test_case_title),
+            app_public=app_public,
+        )
         sys_p = e2e_system_prompt(
-            heal=heal, has_storage_state=bool((req.storage_state_rel or "").strip())
+            heal=heal,
+            has_storage_state=(auth_mode == "storage"),
+            project_rules=req.project_rules,
+            user_rules=req.user_rules,
+            auth_mode=auth_mode,
         )
         usr_p = e2e_user_prompt(req)
         prompt = (
@@ -363,6 +392,8 @@ class BaseCLIAdapter(BaseLLMAdapter):
             testing_framework=req.testing_framework,
             mock_framework=req.mock_framework,
             assertion_library=req.assertion_library,
+            project_rules=req.project_rules,
+            user_rules=req.user_rules,
         )
         usr_p = unit_user_prompt(req)
         prompt = (

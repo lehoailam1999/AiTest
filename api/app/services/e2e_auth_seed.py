@@ -1,4 +1,4 @@
-﻿"""
+"""
 AI-driven E2E auth seed — analyze SUT source/DOM → seed script → local auth artifact.
 
 Artifacts live under ``{projectRoot}/.ai-test/auth/`` (not committed Spec secrets):
@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -293,6 +294,7 @@ async def _ensure_auth_seed_unlocked(
     source_file_name: str = "",
     force: bool = False,
 ) -> AuthSeedResult:
+    t0 = time.perf_counter()
     root = Path(project_root)
     role_s = _role_slug(role)
     auth_path = auth_artifact_path(root, role_s)
@@ -300,6 +302,12 @@ async def _ensure_auth_seed_unlocked(
 
     existing = None if force else load_auth_artifact(root, role_s)
     if existing:
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "auth-seed skip role=%s elapsed_ms=%s reason=artifact-exists",
+            role_s,
+            elapsed_ms,
+        )
         return AuthSeedResult(
             ok=True,
             skipped=True,
@@ -310,6 +318,12 @@ async def _ensure_auth_seed_unlocked(
         )
 
     if conn is None:
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.warning(
+            "auth-seed abort role=%s elapsed_ms=%s reason=no-conn",
+            role_s,
+            elapsed_ms,
+        )
         return AuthSeedResult(
             ok=False,
             skipped=False,
@@ -319,6 +333,12 @@ async def _ensure_auth_seed_unlocked(
         )
 
     if not (source_code or "").strip() and not (dom_snapshot or "").strip():
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.warning(
+            "auth-seed abort role=%s elapsed_ms=%s reason=missing-source-dom",
+            role_s,
+            elapsed_ms,
+        )
         return AuthSeedResult(
             ok=False,
             skipped=False,
@@ -328,6 +348,7 @@ async def _ensure_auth_seed_unlocked(
         )
 
     try:
+        t_ai = time.perf_counter()
         raw, _meta = await chat_for_connection(
             conn,
             _auth_seed_system_prompt(),
@@ -339,14 +360,19 @@ async def _ensure_auth_seed_unlocked(
                 source_file_name=source_file_name,
             ),
         )
+        ai_ms = int((time.perf_counter() - t_ai) * 1000)
+        logger.info("auth-seed ai-plan role=%s elapsed_ms=%s", role_s, ai_ms)
     except Exception as exc:  # noqa: BLE001
         logger.exception("auth seed AI failed")
+        detail = f"{type(exc).__name__}: {exc}".strip()
+        if detail.endswith(":"):
+            detail = type(exc).__name__
         return AuthSeedResult(
             ok=False,
             skipped=False,
             role=role_s,
             auth_rel=None,
-            message=f"AI seed auth thất bại: {exc}",
+            message=f"AI seed auth thất bại: {detail}",
         )
 
     plan = _parse_seed_json(raw)
@@ -378,11 +404,20 @@ async def _ensure_auth_seed_unlocked(
         sp.write_text(seed_script, encoding="utf-8")
         seed_rel = _rel(root, sp)
         tmp_out = auth_path.with_suffix(".json.tmp")
-        code, log = _run_node_seed(
+        t_exec = time.perf_counter()
+        code, log = await asyncio.to_thread(
+            _run_node_seed,
             sp,
             project_root=root,
             target_url=target_url,
             out_path=tmp_out,
+        )
+        exec_ms = int((time.perf_counter() - t_exec) * 1000)
+        logger.info(
+            "auth-seed exec role=%s exit_code=%s elapsed_ms=%s",
+            role_s,
+            code,
+            exec_ms,
         )
         if code == 0 and tmp_out.is_file():
             try:
@@ -397,6 +432,13 @@ async def _ensure_auth_seed_unlocked(
                     extra={"strategy": strategy, "seedLogTail": log[-500:]},
                 )
                 tmp_out.unlink(missing_ok=True)
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                logger.info(
+                    "auth-seed success role=%s elapsed_ms=%s strategy=%s",
+                    role_s,
+                    elapsed_ms,
+                    strategy or "unknown",
+                )
                 return AuthSeedResult(
                     ok=True,
                     skipped=False,
@@ -417,6 +459,13 @@ async def _ensure_auth_seed_unlocked(
         username=username,
         password=password,
         extra={"strategy": strategy or "credentials-only", "notes": plan.get("notes")},
+    )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "auth-seed fallback-success role=%s elapsed_ms=%s strategy=%s",
+        role_s,
+        elapsed_ms,
+        strategy or "credentials-only",
     )
     return AuthSeedResult(
         ok=True,

@@ -7,15 +7,41 @@ import type {
   WorkspacePreviewFile,
   WorkspaceFileOp,
 } from "./types";
-import { coerceAitestApplyPath, rewriteSutImports } from "../testOutputLayout";
+import {
+  coerceAitestApplyPath,
+  isFlatAitestTarget,
+  rewriteSutImports,
+  testFileNameFromSource,
+} from "../testOutputLayout";
 import { resolvePackagePrefix } from "../resolvePackagePrefix";
 import {
   ensureAitestJestTsconfigInWorkspace,
   looksLikeJestTsTest,
 } from "./ensureAitestJestTsconfig";
+import {
+  csharpShortIdFromPath,
+  ensureAitestDotnetInWorkspace,
+  manifestHasAitestCsharpTests,
+  sanitizeCsharpAitestCode,
+} from "./ensureAitestDotnet";
 
 function normalizeRel(p: string): string {
   return p.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function ensureTargetHasFileName(
+  rel: string,
+  sourceFileName: string | undefined,
+  kind: "unit" | "api"
+): string {
+  const norm = normalizeRel(rel).replace(/\/+$/, "");
+  const last = norm.split("/").pop() || "";
+  if (last.includes(".")) return norm;
+  const fallback = testFileNameFromSource({
+    sourceFileName: sourceFileName || undefined,
+    kind,
+  });
+  return `${norm}/${fallback}`.replace(/\/+/g, "/");
 }
 
 async function fileExists(projectRoot: string, rel: string): Promise<boolean> {
@@ -96,11 +122,18 @@ export async function addArtifactToWorkspace(input: {
   const packagePrefix =
     input.manifest.packagePrefix ??
     (await resolvePackagePrefix(input.projectRoot, srcName || input.targetRel));
-  const targetRel = coerceAitestApplyPath(normalizeRel(input.targetRel), {
+  const targetWithFile = ensureTargetHasFileName(
+    normalizeRel(input.targetRel),
+    srcName || input.manifest.sourceFileName,
+    kind
+  );
+  const targetRel = coerceAitestApplyPath(targetWithFile, {
     kind,
     module: input.module,
     sourceFileName: srcName || input.manifest.sourceFileName,
     packagePrefix,
+    // Generate may receive unsafe model paths — rebuild allowed when not yet flat AItest.
+    preserveLayout: isFlatAitestTarget(targetWithFile),
   });
   if (!targetRel) {
     throw new Error("Đường dẫn file không hợp lệ");
@@ -110,7 +143,12 @@ export async function addArtifactToWorkspace(input: {
   if (srcName) {
     body = rewriteSutImports(body, { testRel: targetRel, sourceRel: srcName });
   }
-  const content = ensureJestReferencePreamble(body, targetRel);
+  body = ensureJestReferencePreamble(body, targetRel);
+  if (/\.cs$/i.test(targetRel) && /(?:^|\/)AItest\//i.test(targetRel.replace(/\\/g, "/"))) {
+    const shortId = csharpShortIdFromPath(targetRel);
+    body = sanitizeCsharpAitestCode(body, shortId);
+  }
+  const content = body;
 
   let op: WorkspaceFileOp = input.forceOp ?? "new";
   let baseContent: string | null = null;
@@ -146,6 +184,13 @@ export async function addArtifactToWorkspace(input: {
       projectRoot: input.projectRoot,
       manifest,
       targetRel,
+    });
+  }
+
+  if (manifestHasAitestCsharpTests(manifest)) {
+    manifest = await ensureAitestDotnetInWorkspace({
+      projectRoot: input.projectRoot,
+      manifest,
     });
   }
 

@@ -51,7 +51,7 @@ _GLOBAL_SETUP_TS = """\
 /// <reference path="../types/playwright-shim.d.ts" />
 import fs from 'node:fs';
 import path from 'node:path';
-import { chromium, type FullConfig } from '@playwright/test';
+import { chromium, expect, type FullConfig } from '@playwright/test';
 
 function roleCreds(): { user: string; pass: string } {
   const roleHint = (process.env.E2E_ROLE || process.env.E2E_AUTH_ROLE || 'default').trim();
@@ -65,35 +65,181 @@ function roleCreds(): { user: string; pass: string } {
 
 async function doLogin(page: any): Promise<void> {
   const { user, pass } = roleCreds();
-  if (!user || !pass) return;
+  const LOGIN_NAME = /đăng\\s*nhập|sign\\s*[-\\s]?in|log\\s*[-\\s]?in|login/i;
+  const ACCOUNT_NAME = /tài\\s*khoản|account|profile|user\\s*menu|avatar|menu/i;
 
-  const loginHeading = page.getByRole('heading', {
-    name: /đăng\\s*nhập|sign\\s*in|log\\s*in|login/i,
-  }).first();
-  const email = page.getByRole('textbox', { name: /email|e-?mail|tài khoản|username/i }).first();
-  const password = page
-    .getByRole('textbox', { name: /password|mật khẩu|passwd/i })
-    .or(page.locator('input[type="password"]'))
-    .first();
-  const loginBtn = page
-    .locator('form')
-    .getByRole('button', { name: /đăng\\s*nhập|log\\s*in|sign\\s*in/i })
-    .first();
-  const loginTab = page.getByRole('tab', { name: /đăng\\s*nhập|log\\s*in|sign\\s*in/i }).first();
+  const loginHeading = () => page.getByRole('heading', { name: LOGIN_NAME }).first();
+  const email = () =>
+    page.getByRole('textbox', { name: /email|e-?mail|tài khoản|username|user\\s*name/i }).first();
+  const password = () =>
+    page
+      .getByRole('textbox', { name: /password|mật khẩu|passwd/i })
+      .or(page.locator('input[type="password"]'))
+      .first();
+  const loginBtn = () =>
+    page.locator('form').getByRole('button', { name: LOGIN_NAME }).first();
+  const loginTab = page.getByRole('tab', { name: LOGIN_NAME }).first();
 
-  const onLoginWall =
-    (await email.isVisible().catch(() => false)) ||
-    (await loginHeading.isVisible().catch(() => false));
-  if (!onLoginWall) return;
+  const isLoginWall = async (): Promise<boolean> => {
+    if (await password().isVisible().catch(() => false)) return true;
+    return (
+      (await email().isVisible().catch(() => false)) ||
+      (await loginHeading().isVisible().catch(() => false))
+    );
+  };
+
+  const clickFirstVisible = async (locs: any[]): Promise<boolean> => {
+    for (const loc of locs) {
+      if (await loc.isVisible().catch(() => false)) {
+        await loc.click({ timeout: 10000 }).catch(() => undefined);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const openLoginEntry = async (): Promise<boolean> => {
+    if (await isLoginWall()) return true;
+    const explicit = (process.env.E2E_LOGIN_PATH || '').trim();
+    if (explicit) {
+      const path = explicit.startsWith('http')
+        ? explicit
+        : explicit.startsWith('/')
+          ? explicit
+          : `/${explicit}`;
+      await page.goto(path, { waitUntil: 'domcontentloaded' });
+      if (await isLoginWall()) return true;
+    }
+    const entries = [
+      page.getByRole('link', { name: LOGIN_NAME }).first(),
+      page.getByRole('button', { name: LOGIN_NAME }).first(),
+      page.getByRole('menuitem', { name: LOGIN_NAME }).first(),
+      page.locator('a[href*="login" i], a[href*="signin" i], a[href*="sign-in" i], a[href*="auth" i]').first(),
+    ];
+    if (await clickFirstVisible(entries)) {
+      await password()
+        .or(email())
+        .or(loginHeading())
+        .first()
+        .waitFor({ state: 'visible', timeout: 15000 })
+        .catch(() => undefined);
+      if (await isLoginWall()) return true;
+    }
+    const menus = [
+      page.getByRole('button', { name: ACCOUNT_NAME }).first(),
+      page.getByRole('link', { name: ACCOUNT_NAME }).first(),
+      page.locator('[aria-label*="account" i], [aria-label*="user" i], [aria-label*="tài khoản" i]').first(),
+    ];
+    if (await clickFirstVisible(menus)) {
+      if (await clickFirstVisible(entries)) {
+        await password()
+          .or(email())
+          .or(loginHeading())
+          .first()
+          .waitFor({ state: 'visible', timeout: 15000 })
+          .catch(() => undefined);
+      }
+    }
+    return await isLoginWall();
+  };
+
+  if (!(await openLoginEntry())) return;
+
+  if (!user || !pass) {
+    throw new Error(
+      'Auth seed failed: app shows login but E2E_USERNAME/E2E_PASSWORD (or role creds) are not set. ' +
+        'Configure AITest → E2E → Môi trường before Verify with storageState.',
+    );
+  }
 
   if (await loginTab.isVisible().catch(() => false)) {
     await loginTab.click().catch(() => undefined);
   }
-  await email.fill(user);
-  await password.fill(pass);
-  await password.blur().catch(() => undefined);
-  await loginBtn.click().catch(() => undefined);
-  await page.waitForTimeout(1000);
+  await email().fill(user);
+  await password().fill(pass);
+  await password().blur().catch(() => undefined);
+  const tryLogin = async () => {
+    const authNetwork = page
+      .waitForResponse(
+        (r) => {
+          if (r.request().method() === 'GET') return false;
+          return /auth|login|signin|session|token|users?\\/sign/i.test(r.url());
+        },
+        { timeout: 30000 },
+      )
+      .catch(() => null);
+    await loginBtn().click().catch(() => undefined);
+    const resp = await authNetwork;
+    if (resp && !resp.ok()) {
+      const body = await resp.text().catch(() => '');
+      return { ok: false as const, status: resp.status(), url: resp.url(), body };
+    }
+    return { ok: true as const };
+  };
+
+  const tryRegisterAndRelogin = async (): Promise<boolean> => {
+    const signUpTab = page.getByRole('tab', { name: /đăng\\s*ký|sign\\s*up|register/i }).first();
+    const registerBtn = page
+      .locator('form')
+      .getByRole('button', { name: /đăng\\s*ký|sign\\s*up|register/i })
+      .first();
+    const canRegister =
+      (await signUpTab.isVisible().catch(() => false)) &&
+      (await registerBtn.isVisible().catch(() => false));
+    if (!canRegister) return false;
+    await signUpTab.click().catch(() => undefined);
+    await email().fill(user);
+    await password().fill(pass);
+    await password().blur().catch(() => undefined);
+    await registerBtn.click().catch(() => undefined);
+    if (await loginTab.isVisible().catch(() => false)) {
+      await loginTab.click().catch(() => undefined);
+    }
+    await email().fill(user);
+    await password().fill(pass);
+    await password().blur().catch(() => undefined);
+    const retried = await tryLogin();
+    return Boolean(retried.ok);
+  };
+
+  let loginRes = await tryLogin();
+  if (!loginRes.ok) {
+    const recovered = await tryRegisterAndRelogin();
+    if (recovered) {
+      loginRes = { ok: true as const };
+    }
+  }
+  if (!loginRes.ok) {
+    throw new Error(
+      `Login HTTP ${loginRes.status} for ${loginRes.url}. ` +
+        `${(loginRes.body || '').slice(0, 200)}`,
+    );
+  }
+  try {
+    await expect(email()).toBeHidden({ timeout: 15000 });
+  } catch {
+    const recovered = await tryRegisterAndRelogin();
+    if (recovered) {
+      await expect(email()).toBeHidden({ timeout: 15000 });
+      return;
+    }
+    throw new Error('Login did not leave the login wall in global setup.');
+  }
+}
+
+function isValidStorageStateFile(p: string): boolean {
+  try {
+    if (!fs.existsSync(p)) return false;
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const cookies = data && data.cookies;
+    const origins = data && data.origins;
+    return (
+      (Array.isArray(cookies) && cookies.length > 0) ||
+      (Array.isArray(origins) && origins.length > 0)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
@@ -102,9 +248,9 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   const statePath = path.join(fixturesDir, 'storageState.json');
   const cwdStatePath = path.join(process.cwd(), 'fixtures', 'storageState.json');
 
-  // Reuse previously generated state by default for faster startup.
+  // Reuse only *valid* previously generated state (empty {} must re-seed).
   if (
-    (fs.existsSync(statePath) || fs.existsSync(cwdStatePath)) &&
+    (isValidStorageStateFile(statePath) || isValidStorageStateFile(cwdStatePath)) &&
     !process.env.AITEST_FORCE_AUTH_SETUP
   ) {
     return;
@@ -578,6 +724,9 @@ _ALLOWED_E2E_ENV_KEYS = frozenset(
         "E2E_PASSWORD",
         "E2E_BASE_URL",
         "E2E_STORAGE_STATE",
+        "E2E_LOGIN_PATH",
+        "E2E_ROLE",
+        "E2E_AUTH_ROLE",
     }
 )
 
@@ -622,6 +771,24 @@ def _infer_subprocess_timeout_sec(cmd: Sequence[str]) -> float:
     return float(DEFAULT_SEED_TIMEOUT_SEC)
 
 
+def _command_wants_headed_gui(cmd: Sequence[str]) -> bool:
+    """
+    Detect Playwright --headed after Windows resolve_command wrapping.
+
+    npx becomes ``cmd.exe /d /s /c "npx.cmd … --headed"`` — ``"--headed" in argv``
+    is False because the flag sits inside the cmdline string. That wrongly applied
+    CREATE_NO_WINDOW and hid Chromium during Verify.
+    """
+    for tok in cmd:
+        s = str(tok)
+        if s == "--headed" or s.startswith("--headed=") or "--headed" in s.split():
+            return True
+        # cmd.exe /c single-string cmdline
+        if "--headed" in s and re.search(r"(^|[\s\"'])--headed([\s\"'=]|$)", s):
+            return True
+    return False
+
+
 def _sync_run_command(
     cmd: Sequence[str],
     cwd: str,
@@ -643,7 +810,7 @@ def _sync_run_command(
     }
     # Windows: CREATE_NO_WINDOW hides Chromium; CREATE_NEW_CONSOLE often resets
     # cwd to System32 (breaks --config discovery). Headed = no creationflags.
-    want_gui = "--headed" in resolved
+    want_gui = _command_wants_headed_gui(cmd) or _command_wants_headed_gui(resolved)
     if sys.platform == "win32" and not want_gui and _CREATE_NO_WINDOW:
         kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
@@ -688,7 +855,7 @@ async def _default_run_command(
     }
     # Windows: CREATE_NO_WINDOW hides Chromium; CREATE_NEW_CONSOLE often resets
     # cwd to System32 (breaks --config discovery). Headed = no creationflags.
-    want_gui = "--headed" in resolved
+    want_gui = _command_wants_headed_gui(cmd) or _command_wants_headed_gui(resolved)
     if sys.platform == "win32" and not want_gui and _CREATE_NO_WINDOW:
         kwargs["creationflags"] = _CREATE_NO_WINDOW
     try:
@@ -832,6 +999,209 @@ def _spec_run_root(path: str) -> str:
     if "/types/" in low:
         return p.split("/types/")[0]
     return p.rsplit("/", 1)[0] if "/" in p else p
+
+
+def _align_primary_spec_path(files: list[E2EFile], primary_spec_path: str) -> str:
+    """
+    After suffix heal (``.ts`` → ``.spec.ts``), keep primary_spec_path pointing at a
+    real file so Playwright argv is not a ghost path.
+    """
+    prim = (primary_spec_path or "").replace("\\", "/").strip()
+    paths = {
+        (getattr(f, "path", "") or "").replace("\\", "/")
+        for f in files
+        if (getattr(f, "path", "") or "").strip()
+    }
+    if prim and prim in paths:
+        return prim
+    if prim.endswith(".ts") and not prim.endswith((".spec.ts", ".test.ts")):
+        cand = prim[:-3] + ".spec.ts"
+        if cand in paths:
+            return cand
+    # Same directory: pick the only *.spec.ts / *.test.ts
+    if prim and "/" in prim:
+        parent = prim.rsplit("/", 1)[0]
+        specs = [
+            p
+            for p in paths
+            if p.startswith(parent + "/")
+            and (p.endswith(".spec.ts") or p.endswith(".test.ts"))
+        ]
+        if len(specs) == 1:
+            return specs[0]
+        stem = Path(prim).stem
+        for p in specs:
+            if Path(p).stem.startswith(stem[:16]) or stem.startswith(Path(p).stem[:16]):
+                return p
+    specs_all = [p for p in paths if p.endswith(".spec.ts") or p.endswith(".test.ts")]
+    if len(specs_all) == 1:
+        return specs_all[0]
+    return prim
+
+
+def _remap_e2e_files_short_paths(
+    files: list[E2EFile], primary_spec_path: str = ""
+) -> tuple[list[E2EFile], str]:
+    """
+    Remap AItest/E2ETest paths so no folder segment exceeds Windows-safe length.
+    Deterministic — same long title always maps to the same short folder.
+    Also rewrites import paths when a leaf filename changes (``.spec.ts`` / ``.page.ts``).
+    """
+    from app.services.test_output_layout import shorten_e2e_rel_path
+
+    mapping: dict[str, str] = {}
+    out: list[E2EFile] = []
+    for f in files:
+        old = (getattr(f, "path", "") or "").replace("\\", "/")
+        new = shorten_e2e_rel_path(old) if old else old
+        mapping[old] = new
+        out.append(
+            E2EFile(
+                path=new,
+                content=getattr(f, "content", "") or "",
+                kind=getattr(f, "kind", "spec") or "spec",
+            )
+        )
+
+    # leaf + import-specifier remaps (Playwright imports omit .ts)
+    leaf_map: dict[str, str] = {}
+    for old, new in mapping.items():
+        old_leaf = old.rsplit("/", 1)[-1]
+        new_leaf = new.rsplit("/", 1)[-1]
+        if old_leaf and new_leaf and old_leaf != new_leaf:
+            leaf_map[old_leaf] = new_leaf
+            for ext in (".ts", ".tsx", ".js", ".mjs"):
+                if old_leaf.endswith(ext) and new_leaf.endswith(ext):
+                    leaf_map[old_leaf[: -len(ext)]] = new_leaf[: -len(ext)]
+                    break
+
+    if leaf_map:
+        # Longest keys first so longer stems win over prefixes
+        keys = sorted(leaf_map.keys(), key=len, reverse=True)
+
+        def _rewrite(content: str) -> str:
+            text = content or ""
+            for old_leaf in keys:
+                new_leaf = leaf_map[old_leaf]
+                if old_leaf in text:
+                    text = text.replace(old_leaf, new_leaf)
+            return text
+
+        for f in out:
+            f.content = _rewrite(f.content)
+
+    prim = (primary_spec_path or "").replace("\\", "/")
+    if prim in mapping:
+        new_prim = mapping[prim]
+    elif prim:
+        new_prim = shorten_e2e_rel_path(prim)
+    else:
+        new_prim = prim
+    return out, new_prim
+
+def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> None:
+    """Fill E2E_USERNAME/PASSWORD from .ai-test/auth when Verify forgot to inject."""
+    if (env.get("E2E_USERNAME") or "").strip() and (env.get("E2E_PASSWORD") or "").strip():
+        pass
+    else:
+        try:
+            from app.services.e2e_auth_seed import load_auth_artifact
+
+            role = (env.get("E2E_ROLE") or env.get("E2E_AUTH_ROLE") or "default").strip()
+            art = load_auth_artifact(project_root, role) or load_auth_artifact(
+                project_root, "default"
+            )
+            if art:
+                if not (env.get("E2E_USERNAME") or "").strip():
+                    u = str(art.get("username") or art.get("email") or "").strip()
+                    if u:
+                        env["E2E_USERNAME"] = u
+                if not (env.get("E2E_PASSWORD") or "").strip():
+                    p = str(art.get("password") or "").strip()
+                    if p:
+                        env["E2E_PASSWORD"] = p
+        except Exception:  # noqa: BLE001
+            pass
+    if not (env.get("E2E_LOGIN_PATH") or "").strip():
+        try:
+            from app.services.e2e_auth_bootstrap import discover_login_path
+
+            path = discover_login_path(project_root)
+            if path:
+                env["E2E_LOGIN_PATH"] = path
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _assert_feature_auth_ready(
+    files: list[E2EFile],
+    env: dict[str, str],
+    *,
+    req: E2ERequest,
+) -> None:
+    """
+    Fail fast when feature Specs would hit the login wall with no session/creds.
+    Project-agnostic: based on generated files + env, not app names.
+    """
+    from app.services.e2e_auth_mode import is_login_or_auth_tc, is_public_no_auth_signal
+    from app.services.e2e_codegen_guard import (
+        is_valid_storage_state_json,
+        looks_like_storage_state_path,
+        spec_calls_ensure_authenticated,
+    )
+
+    path_blob = " ".join((f.path or "") for f in files)
+    if is_login_or_auth_tc(req.test_case_title or "", path_blob):
+        return
+    if is_public_no_auth_signal(
+        title=req.test_case_title or "",
+        path=path_blob,
+        dom_snapshot=req.dom_snapshot or "",
+        hints=req.precondition or "",
+    ):
+        return
+
+    has_valid_ss = any(
+        looks_like_storage_state_path(f.path)
+        and is_valid_storage_state_json(f.content or "")
+        for f in files
+    )
+    has_ensure = any(
+        spec_calls_ensure_authenticated(f.content or "")
+        for f in files
+        if (f.kind == "spec" or "/specs/" in (f.path or "").replace("\\", "/"))
+    )
+    cfg_blob = "\n".join(
+        f.content or ""
+        for f in files
+        if (f.path or "").replace("\\", "/").endswith("playwright.config.ts")
+    )
+    cfg_wants_storage = bool(re.search(r"storageState\s*:", cfg_blob))
+    has_global_setup = "globalSetup" in cfg_blob
+    creds = bool(
+        (env.get("E2E_USERNAME") or "").strip()
+        and (env.get("E2E_PASSWORD") or "").strip()
+    )
+
+    if has_valid_ss:
+        return
+    if has_ensure and creds:
+        return
+    if cfg_wants_storage and has_global_setup and creds:
+        return
+
+    if not has_ensure and not cfg_wants_storage and not has_valid_ss:
+        raise RuntimeError(
+            "E2E auth blocked: feature Specs have no ensureAuthenticated and no "
+            "storageState. Re-Generate/Verify so codegen guards inject "
+            "fixtures/auth.helper.ts, or enable storageState after a successful login seed."
+        )
+    if (has_ensure or cfg_wants_storage or has_global_setup) and not creds:
+        raise RuntimeError(
+            "E2E auth blocked: app needs login but E2E_USERNAME/E2E_PASSWORD are empty. "
+            "Run Seed auth (AI) → `.ai-test/auth/{role}.json`, or set env / UI credentials "
+            "before Verify."
+        )
 
 
 def _group_files_by_run_root(files: list[E2EFile]) -> list[tuple[str, list[E2EFile]]]:
@@ -999,6 +1369,109 @@ async def _run_one_e2e_root(
     )
 
 
+def probe_e2e_target_url(url: str, *, timeout_sec: float = 5.0) -> str | None:
+    """
+    Return a short note when Target URL looks unhealthy.
+
+    JHipster/Angular index.html often embeds «An error has occurred» in a
+    noscript/fallback shell WHILE still serving main.js/vendor.js — that is NOT
+    a dead SPA. Only FAIL when error markers appear without app bundles.
+    """
+    u = (url or "").strip()
+    if not u:
+        return None
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(u, method="GET", headers={"User-Agent": "AITest-E2E-preflight"})
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read(12000).decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        return f"WARN: Target URL không mở được ({type(exc).__name__}: {exc})"
+    low = raw.lower()
+    has_bundle = bool(
+        re.search(
+            r"""src=["'][^"']*(?:main|runtime|polyfills|vendor|chunk)[^"']*\.(?:js|mjs)""",
+            low,
+        )
+    )
+    has_error_shell = bool(
+        re.search(
+            r"an error has occurred|usual error causes|building the client side|"
+            r"webpack compiled with",
+            low,
+        )
+    )
+    if has_error_shell and not has_bundle:
+        return (
+            "FAIL: Target URL đang trả SPA error/build page (không có bundle JS). "
+            "Hãy start frontend của dự án đích rồi Verify lại."
+        )
+    if has_bundle:
+        return None
+    if "you must enable javascript" in low and "<script" not in low:
+        return (
+            "FAIL: Target URL không có script app (chỉ placeholder). "
+            "Hãy start frontend rồi Verify lại."
+        )
+    return None
+
+
+def e2e_verify_preflight_notes(
+    *,
+    target_url: str = "",
+    storage_state_rel: str = "",
+    env_extra: dict[str, str] | None = None,
+) -> str:
+    """Human-readable checklist before Playwright verify (any project)."""
+    from app.services.e2e_auth_mode import resolve_auth_mode, wants_storage_state
+
+    env = env_extra or {}
+    notes: list[str] = []
+    url = (target_url or env.get("E2E_BASE_URL") or "").strip()
+    if not url:
+        notes.append("WARN: thiếu Target URL / E2E_BASE_URL")
+    else:
+        notes.append(f"OK: baseURL={url}")
+        probe = probe_e2e_target_url(url)
+        if probe:
+            notes.append(probe)
+
+    user = (env.get("E2E_USERNAME") or "").strip()
+    password = (env.get("E2E_PASSWORD") or "").strip()
+    from app.services.e2e_auth_mode import is_public_no_auth_signal
+
+    app_public = is_public_no_auth_signal(
+        hints=" ".join(f"{k}={v}" for k, v in env.items() if "AUTH" in k.upper() or "PUBLIC" in k.upper()),
+    )
+    # Also treat missing creds + storage checkbox as soft public if env says so
+    if (env.get("E2E_AUTH_MODE") or "").strip().lower() in ("public", "none", "no-auth"):
+        app_public = True
+    mode = resolve_auth_mode(
+        use_storage=bool((storage_state_rel or "").strip()),
+        app_public=app_public,
+    )
+    if wants_storage_state(mode):
+        notes.append("authMode=storage (globalSetup seed → storageState)")
+        if not user or not password:
+            notes.append(
+                "WARN: storage mode nhưng thiếu E2E_USERNAME/E2E_PASSWORD — "
+                "seed sẽ fail nếu app hiện login wall"
+            )
+        else:
+            notes.append("OK: E2E credentials present")
+    elif mode == "ui_helper":
+        notes.append("authMode=ui_helper (ensureAuthenticated)")
+        if not user or not password:
+            notes.append("WARN: ui_helper nhưng thiếu E2E_* credentials")
+    elif mode == "public":
+        notes.append("authMode=public (no login — skip storageState/globalSetup)")
+    else:
+        notes.append(f"authMode={mode}")
+
+    return "[e2e preflight] " + " · ".join(notes)
+
+
 def ensure_playwright_config(
     files: list[E2EFile],
     *,
@@ -1009,34 +1482,72 @@ def ensure_playwright_config(
     headed: bool = False,
     requirement_title: str = "",
     test_case_title: str = "",
+    dom_snapshot: str = "",
+    auth_hints: str = "",
 ) -> list[E2EFile]:
-    """Ensure playwright.config.ts exists; luôn refresh khi headed / thiếu timeout."""
+    """Ensure playwright.config.ts exists; authMode drives storageState + globalSetup."""
+    from app.services.e2e_auth_mode import (
+        is_login_or_auth_tc,
+        is_public_no_auth_signal,
+        resolve_auth_mode,
+        wants_storage_state,
+    )
     from app.services.e2e_codegen_guard import (
         is_valid_storage_state_json,
         looks_like_storage_state_path,
     )
 
-    # If a valid storageState is already present, keep using it.
-    # Otherwise global setup will generate/reuse one at runtime.
     has_valid_state = any(
         looks_like_storage_state_path(f.path)
         and is_valid_storage_state_json(f.content or "")
         for f in files
     )
-    # Path is relative to playwright.config.ts (module folder), never repo-root AItest/...
-    storage_for_cfg = "./fixtures/storageState.json"
-    # Ignore host-requested storage_state_rel when file is not valid yet
-    _ = (storage_state_rel, has_valid_state)  # kept for API compat / future disk check
+    path_blob = " ".join((f.path or "") for f in files)
+    app_public = is_public_no_auth_signal(
+        title=test_case_title or module,
+        path=path_blob,
+        dom_snapshot=dom_snapshot,
+        hints=auth_hints,
+    )
+    auth_mode = resolve_auth_mode(
+        use_storage=bool((storage_state_rel or "").strip()),
+        has_valid_storage_json=has_valid_state,
+        is_login_tc=is_login_or_auth_tc(test_case_title),
+        app_public=app_public,
+    )
+    use_storage_cfg = wants_storage_state(auth_mode)
+    # Desktop «Dùng storageState» alone must NOT write storageState into config when
+    # the JSON is absent — Playwright loads it before tests and throws ENOENT.
+    # Fall back to ui_helper (guards inject ensureAuthenticated). Only enable
+    # storage mode when a valid storageState.json is already in the file bundle.
+    if use_storage_cfg and not has_valid_state:
+        use_storage_cfg = False
+    if app_public:
+        use_storage_cfg = False
+    # Path relative to playwright.config.ts (module/TC folder)
+    storage_for_cfg = "./fixtures/storageState.json" if use_storage_cfg else ""
 
     cfg_content = default_playwright_config(
         base_url=target_url,
         storage_state_rel=storage_for_cfg,
         headed=headed,
+        include_global_setup=use_storage_cfg,
     )
     root = e2e_module_root(
         module, package_prefix=package_prefix,
         requirement_title=requirement_title, test_case_title=test_case_title,
     )
+    # Prefer the folder that already holds specs/pages so Verify does not
+    # create playwright.config.ts under a title-based path while Specs stay elsewhere
+    # (Playwright → «No tests found»).
+    for f in files:
+        p = (getattr(f, "path", "") or "").replace("\\", "/")
+        low = p.lower()
+        if "/specs/" in low or "/pages/" in low or low.endswith(".spec.ts"):
+            inferred = _spec_run_root(p)
+            if inferred:
+                root = inferred
+                break
     cfg_path = f"{root}/playwright.config.ts"
 
     out: list[E2EFile] = []
@@ -1056,6 +1567,14 @@ def ensure_playwright_config(
             continue
         found = True
         body = f.content or ""
+        has_storage_line = "storageState" in body
+        storage_is_canonical = bool(
+            re.search(
+                r"""storageState\s*:\s*['"]\.\/fixtures\/storageState\.json['"]""",
+                body,
+                flags=re.IGNORECASE,
+            )
+        )
         needs_refresh = (
             headed
             or "timeout:" not in body
@@ -1063,8 +1582,11 @@ def ensure_playwright_config(
             or (headed and "headless: false" not in body)
             or (not headed and "headless: false" in body)
             or (headed and "slowMo" not in body)
-            or ("storageState" in body and not has_valid_state)
-            or (has_valid_state and "fixtures/storageState.json" not in body)
+            or (use_storage_cfg and not has_storage_line)
+            or (use_storage_cfg and not storage_is_canonical)
+            or (not use_storage_cfg and has_storage_line)
+            or (use_storage_cfg and "globalSetup" not in body)
+            or (not use_storage_cfg and "globalSetup" in body)
         )
         if needs_refresh:
             cfg_out_path = f.path or cfg_path
@@ -1076,8 +1598,25 @@ def ensure_playwright_config(
         out.append(E2EFile(path=cfg_path, content=cfg_content, kind="config"))
         cfg_out_path = cfg_path
 
-    # Ensure global setup exists so auth runs once and persists session for all specs.
-    # With multi-TC batch, ensure each config dir that already has a config also has setup.
+    # Batch / multi-TC: mỗi run root cần config riêng (headed + storage) — không chỉ root đầu.
+    existing_cfg_dirs = {
+        (f.path or "").replace("\\", "/").rsplit("/", 1)[0]
+        for f in out
+        if (f.path or "").replace("\\", "/").endswith("playwright.config.ts")
+    }
+    for root_rel, _root_files in _group_files_by_run_root(out):
+        if not root_rel or root_rel in existing_cfg_dirs:
+            continue
+        out.append(
+            E2EFile(
+                path=f"{root_rel}/playwright.config.ts",
+                content=cfg_content,
+                kind="config",
+            )
+        )
+        existing_cfg_dirs.add(root_rel)
+
+    # globalSetup only when storage mode (seed cookie once for feature specs)
     cfg_dirs = {
         (f.path or "").replace("\\", "/").rsplit("/", 1)[0]
         for f in out
@@ -1090,21 +1629,54 @@ def ensure_playwright_config(
         for f in out
         if (f.path or "").replace("\\", "/").lower().endswith("/fixtures/global.setup.ts")
     }
-    for cfg_dir in sorted(cfg_dirs):
-        setup_path = f"{cfg_dir}/fixtures/global.setup.ts"
-        if setup_path.lower() in existing_setups:
-            continue
-        out.append(E2EFile(path=setup_path, content=_GLOBAL_SETUP_TS, kind="fixture"))
-        existing_setups.add(setup_path.lower())
+    if use_storage_cfg:
+        for cfg_dir in sorted(cfg_dirs):
+            setup_path = f"{cfg_dir}/fixtures/global.setup.ts"
+            if setup_path.lower() in existing_setups:
+                # Always refresh canonical setup (cred fail messaging)
+                for f in out:
+                    if (f.path or "").replace("\\", "/").lower() == setup_path.lower():
+                        f.content = _GLOBAL_SETUP_TS
+                continue
+            out.append(E2EFile(path=setup_path, content=_GLOBAL_SETUP_TS, kind="fixture"))
+            existing_setups.add(setup_path.lower())
+    else:
+        out = [
+            f
+            for f in out
+            if not (f.path or "")
+            .replace("\\", "/")
+            .lower()
+            .endswith("/fixtures/global.setup.ts")
+        ]
     return out
 
 
 def _strip_storage_state_lines(text: str) -> str:
-    return re.sub(
+    """Remove storageState from config — dedicated lines and inline ``use: { ... }``."""
+    out = re.sub(
         r"^[ \t]*storageState\s*:\s*.+?,?\s*$\n?",
         "",
+        text or "",
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    # One-liner: use: { storageState: './fixtures/storageState.json', baseURL: ... }
+    out = re.sub(
+        r"""storageState\s*:\s*['\"][^'\"]*['\"]\s*,?""",
+        "",
+        out,
+        flags=re.IGNORECASE,
+    )
+    return out
+
+
+def _normalize_storage_state_line(text: str) -> str:
+    """Force canonical storageState path relative to playwright.config.ts."""
+    return re.sub(
+        r"""(storageState\s*:\s*)(['"])[^'"]*\2""",
+        r'\1"./fixtures/storageState.json"',
         text,
-        flags=re.MULTILINE,
+        flags=re.IGNORECASE,
     )
 
 
@@ -1114,42 +1686,68 @@ def _runtime_fix_missing_storage_state(
     config_arg: str | None,
 ) -> None:
     """
-    Runtime safety-net:
-    If config points to storageState but fixtures/storageState.json is missing/invalid,
-    strip storageState from config to avoid Playwright ENOENT fail-before-test.
+    Runtime safety-net against Playwright ENOENT on storageState.json.
+
+    If the fixture is missing/invalid, always strip ``storageState`` (and
+    ``globalSetup`` that only exists to seed it). Do not rely on globalSetup
+    soft-skip — that previously left config pointing at a non-existent file.
     """
     from app.services.e2e_codegen_guard import is_valid_storage_state_json
 
-    cfg_path = Path(work_cwd) / (config_arg or "playwright.config.ts")
+    cfg_path = Path(config_arg) if config_arg and Path(config_arg).is_absolute() else (
+        Path(work_cwd) / (config_arg or "playwright.config.ts")
+    )
     if not cfg_path.is_file():
-        return
+        # config_arg may be absolute while work_cwd is the TC folder
+        alt = Path(work_cwd) / "playwright.config.ts"
+        if not alt.is_file():
+            return
+        cfg_path = alt
     try:
         body = cfg_path.read_text(encoding="utf-8")
     except OSError:
         return
     if "storageState" not in body:
         return
-    # Global setup may create the state file right before tests start.
-    if "globalSetup" in body and "global.setup.ts" in body:
-        return
+    normalized = _normalize_storage_state_line(body)
+    if normalized != body:
+        try:
+            cfg_path.write_text(normalized, encoding="utf-8")
+            body = normalized
+            logger.info("Normalized storageState path in config: %s", cfg_path)
+        except OSError:
+            pass
 
     state_path = Path(work_cwd) / "fixtures" / "storageState.json"
+    # Also check next to the config file (canonical for per-TC layout).
+    cfg_dir_state = cfg_path.parent / "fixtures" / "storageState.json"
     has_valid = False
-    if state_path.is_file():
+    for candidate in (state_path, cfg_dir_state):
+        if not candidate.is_file():
+            continue
         try:
-            raw = state_path.read_text(encoding="utf-8")
-            has_valid = is_valid_storage_state_json(raw)
+            raw = candidate.read_text(encoding="utf-8")
+            if is_valid_storage_state_json(raw):
+                has_valid = True
+                break
         except OSError:
-            has_valid = False
+            continue
     if has_valid:
         return
 
     fixed = _strip_storage_state_lines(body)
+    fixed = re.sub(
+        r"^[ \t]*globalSetup\s*:\s*['\"][^'\"]*['\"]\s*,?\s*\n",
+        "",
+        fixed,
+        flags=re.MULTILINE,
+    )
     if fixed != body:
         try:
             cfg_path.write_text(fixed, encoding="utf-8")
             logger.warning(
-                "Removed storageState from config (missing/invalid fixture): %s",
+                "Removed storageState/globalSetup from config "
+                "(missing/invalid fixtures/storageState.json): %s",
                 cfg_path,
             )
         except OSError:
@@ -1171,8 +1769,16 @@ class E2EOrchestrator:
         self.module = module or ""
         self.package_prefix = package_prefix
 
-    def write_files(self, files: list[E2EFile]) -> None:
-        from app.services.test_output_layout import assert_e2e_aitest_target_rel
+    def write_files(self, files: list[E2EFile]) -> list[E2EFile]:
+        """
+        Write E2E artifacts under projectRoot. Returns files with paths shortened
+        when needed (Windows MAX_PATH). Callers should use the returned list /
+        remapped primarySpecPath for Playwright.
+        """
+        from app.services.test_output_layout import (
+            assert_e2e_aitest_target_rel,
+            shorten_e2e_rel_path,
+        )
 
         root = Path(self.project_root).resolve()
         # Refuse writing into the AITest product repo (tool source), only target apps.
@@ -1182,11 +1788,23 @@ class E2EOrchestrator:
                 "Hãy gắn Project root tới thư mục source code cần test "
                 f"(hiện tại: {root}). File E2E sẽ ghi vào {{root}}/AItest/E2ETest/…"
             )
+        written: list[E2EFile] = []
         for f in files:
             rel = assert_e2e_aitest_target_rel(f.path.replace("\\", "/"))
+            rel = shorten_e2e_rel_path(rel)
             abs_path = root / rel
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-            abs_path.write_text(f.content, encoding="utf-8")
+            # Prefer extended-length path on Windows when still near the limit
+            write_target = abs_path
+            if os.name == "nt":
+                s = str(abs_path)
+                if not s.startswith("\\\\?\\"):
+                    write_target = Path("\\\\?\\" + s)
+            write_target.parent.mkdir(parents=True, exist_ok=True)
+            write_target.write_text(f.content, encoding="utf-8")
+            written.append(
+                E2EFile(path=rel, content=f.content, kind=getattr(f, "kind", "spec") or "spec")
+            )
+        return written
 
     async def execute_sandbox_and_auto_heal(
         self,
@@ -1210,6 +1828,17 @@ class E2EOrchestrator:
         headed=True mở cửa sổ Chromium (--headed).
         """
         work_files = list(files)
+        from app.services.e2e_codegen_guard import apply_e2e_codegen_guards
+        auth_hints = "\n".join(
+            [
+                req.precondition or "",
+                req.steps or "",
+                req.expected_result or "",
+                req.project_rules or "",
+                req.test_case_title or "",
+            ]
+        )
+        # Scaffold config first, then guards normalize auth (storage missing → ui_helper).
         work_files = ensure_playwright_config(
             work_files,
             module=req.module or self.module,
@@ -1219,6 +1848,22 @@ class E2EOrchestrator:
             target_url=req.target_url,
             storage_state_rel=req.storage_state_rel,
             headed=headed,
+            test_case_title=req.test_case_title,
+            dom_snapshot=req.dom_snapshot,
+            auth_hints=auth_hints,
+        )
+        work_files = apply_e2e_codegen_guards(
+            work_files,
+            dom_snapshot=req.dom_snapshot,
+            use_storage=bool((req.storage_state_rel or "").strip()),
+            test_case_title=req.test_case_title,
+            auth_hints=auth_hints,
+            headed=headed,
+        )
+        primary_spec_path = _align_primary_spec_path(work_files, primary_spec_path)
+        # Shorten oversized title folders before cwd/spec resolution (Windows MAX_PATH).
+        work_files, primary_spec_path = _remap_e2e_files_short_paths(
+            work_files, primary_spec_path
         )
         cfg = next(
             (
@@ -1273,11 +1918,17 @@ class E2EOrchestrator:
         history: list[E2ESandboxAttempt] = []
         last_log = ""
 
-        if write_file:
-            self.write_files(work_files)
-        _runtime_fix_missing_storage_state(work_cwd, config_arg=config_arg)
-
         merged_env: dict[str, str] = dict(env_extra or {})
+        _ensure_auth_env_from_project(self.project_root, merged_env)
+        _assert_feature_auth_ready(work_files, merged_env, req=req)
+        target = (req.target_url or merged_env.get("E2E_BASE_URL") or "").strip()
+        spa_probe = probe_e2e_target_url(target) if target else None
+        if spa_probe and spa_probe.startswith("FAIL:"):
+            raise RuntimeError(spa_probe)
+
+        if write_file:
+            work_files = self.write_files(work_files)
+        _runtime_fix_missing_storage_state(work_cwd, config_arg=config_arg)
         if require_playwright and run_fn is None and run_command is None:
             check = check_playwright_ready(self.project_root)
             if not check.ok:
@@ -1416,7 +2067,7 @@ class E2EOrchestrator:
                             by_path[f.path] = f
                         work_files = list(by_path.values())
                         if write_file:
-                            self.write_files(result.files)
+                            work_files = self.write_files(work_files)
                         continue
                 else:
                     raise ValueError("E2E auto-heal cần conn hoặc fix_fn")
@@ -1439,18 +2090,37 @@ class E2EOrchestrator:
                     package_prefix=req.package_prefix
                     if req.package_prefix is not None
                     else self.package_prefix,
+                    requirement_title=req.requirement_title or "",
+                    test_case_title=req.test_case_title or "",
+                    journey_slug=re.sub(
+                        r"[^a-zA-Z0-9_-]+",
+                        "-",
+                        (req.test_case_title or "journey"),
+                    ).strip("-")
+                    or "journey",
                 )
                 from app.services.e2e_codegen_guard import apply_e2e_codegen_guards
 
                 resolved = apply_e2e_codegen_guards(
-                    resolved, dom_snapshot=req.dom_snapshot
+                    resolved,
+                    dom_snapshot=req.dom_snapshot,
+                    use_storage=bool((req.storage_state_rel or "").strip()),
+                    test_case_title=req.test_case_title,
+                    auth_hints="\n".join(
+                        [
+                            req.precondition or "",
+                            req.steps or "",
+                            req.expected_result or "",
+                        ]
+                    ),
                 )
-                by_path = {f.path: f for f in work_files}
+                # Merge by canonical path — last heal wins; drop superseded paths.
+                by_path = {f.path.replace("\\", "/"): f for f in work_files}
                 for f in resolved:
-                    by_path[f.path] = f
+                    by_path[f.path.replace("\\", "/")] = f
                 work_files = list(by_path.values())
                 if write_file:
-                    self.write_files(resolved)
+                    work_files = self.write_files(work_files)
 
             return E2ESandboxHealResult(
                 status="FAILED",
@@ -1493,9 +2163,15 @@ class E2EOrchestrator:
         Layout mới ({Requirement}/{TC}) có config riêng → chạy độc lập.
         TC fail không chặn TC sau. headed=True mở cửa sổ Chromium.
         """
+        preflight = e2e_verify_preflight_notes(
+            target_url=target_url,
+            storage_state_rel=storage_state_rel,
+            env_extra=env_extra,
+        )
         mod = (module if module is not None else self.module) or ""
         pkg = package_prefix if package_prefix is not None else self.package_prefix
         work_files = list(resolve_e2e_file_paths(files, module=mod, package_prefix=pkg))
+        from app.services.e2e_codegen_guard import apply_e2e_codegen_guards
         work_files = ensure_playwright_config(
             work_files,
             module=mod,
@@ -1503,26 +2179,43 @@ class E2EOrchestrator:
             target_url=target_url,
             storage_state_rel=storage_state_rel,
             headed=headed,
+            test_case_title=mod,
+            auth_hints=mod,
+        )
+        work_files = apply_e2e_codegen_guards(
+            work_files,
+            dom_snapshot="",
+            use_storage=bool((storage_state_rel or "").strip()),
+            test_case_title=mod,
+            auth_hints=mod,
+            headed=headed,
         )
         if not work_files:
-            return E2EModuleRunResult(status="FAILED", log="No E2E files to run.")
+            return E2EModuleRunResult(
+                status="FAILED", log=preflight + "\nNo E2E files to run."
+            )
+
+        work_files, _ = _remap_e2e_files_short_paths(work_files, "")
+        run_env = dict(env_extra or {})
+        _ensure_auth_env_from_project(self.project_root, run_env)
+        env_extra = run_env
 
         groups = _group_files_by_run_root(work_files)
         specs_rel = [
             f.path.replace("\\", "/")
             for f in work_files
             if "/specs/" in f.path.replace("\\", "/")
-            and f.path.replace("\\", "/").endswith((".ts", ".js", ".mjs"))
+            and f.path.replace("\\", "/").endswith((".spec.ts", ".test.ts", ".spec.js", ".test.js"))
         ]
         if not specs_rel:
             return E2EModuleRunResult(
                 status="FAILED",
                 files=work_files,
-                log="No specs/ files found for module run.",
+                log=preflight + "\nNo specs/ files found for module run.",
             )
 
         if write_file:
-            self.write_files(work_files)
+            work_files = self.write_files(work_files)
 
         merged_env: dict[str, str] = dict(env_extra or {})
         runner_prefix: str | None = None
@@ -1578,7 +2271,7 @@ class E2EOrchestrator:
                 )
 
         all_spec_results: list[E2ESpecRunResult] = []
-        logs: list[str] = []
+        logs: list[str] = [preflight]
         last_cmd: list[str] = []
         last_cwd: str | None = None
 

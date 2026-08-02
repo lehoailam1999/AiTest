@@ -7,6 +7,7 @@ def test_analysis_record_types_are_fixed_and_complete():
         "FEATURES",
         "ACTORS_PERMISSIONS",
         "BUSINESS_FLOWS",
+        "EXECUTION_CONTEXT",
         "BUSINESS_RULES",
         "VALIDATION_DATA",
         "API_UI",

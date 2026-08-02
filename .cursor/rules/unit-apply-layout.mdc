@@ -1,0 +1,27 @@
+---
+description: UUAS — Apply/Verify Unit Test trên mọi dự án (không hardcode tên app)
+globs: desktop/src/lib/unitWorkspace/**,desktop/src/lib/testOutputLayout.ts,desktop/src/features/unit-test/**,desktop/src/pages/GenerateUnitPage.tsx
+alwaysApply: false
+---
+
+# UUAS — Universal Unit Apply Specification
+
+Runtime: `applyManyWorkspacesToRepo` (single = `applyWorkspaceToRepo` → cùng pipeline).
+
+## Layout
+
+`[{packagePrefix}/]AItest/{UnitTest|APITest|E2ETest}/…`  
+Staging: `{pkg}/.ai-test/staging/{runId}/` · Scaffold: jest/tsconfig hoặc `AItest.UnitTests.csproj`.
+
+## Rules
+
+1. Gate Verify PASS (`status=pass` | `verify.overallPass`).
+2. Preserve path dưới `AItest/` (`preserveLayout`); `packagePrefix` từ Generate.
+3. Ghi mọi `manifest.files`; `workspaceRel` → `targetRel`; path jail `AItest/`.
+4. **Verify:** giữ overlay trên disk (`preserveStagedOverlays`) — không rollback UnitTest.
+5. **Apply:** write-all → cleanup từng `runId` → **xóa cả `{pkg}/.ai-test`**. Discard cũng dọn staging.
+6. **C#:** host chỉ `Remove` AItest (cấm `None Include`); ProjectReference → production SUT (không `*Test*.csproj`).
+
+## Khi sửa
+
+`applyManager.ts`, `cleanup.ts`, `staging.ts`, `ensureAitestDotnet.ts`, `testOutputLayout.ts`, tests `cleanup.safety` + `*.p5`, file này.

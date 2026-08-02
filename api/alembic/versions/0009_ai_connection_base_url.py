@@ -19,9 +19,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "ai_backend_connections",
-        sa.Column("base_url", sa.String(length=500), nullable=True),
+    # Idempotent: column may already exist if schema was created outside Alembic.
+    op.execute(
+        "ALTER TABLE ai_backend_connections "
+        "ADD COLUMN IF NOT EXISTS base_url VARCHAR(500)"
     )
 
 

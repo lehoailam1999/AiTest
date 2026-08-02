@@ -21,6 +21,26 @@ if sys.platform == "win32":
     _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 
+def _empty_cursor_workspace() -> str:
+    """
+    Isolated empty folder so headless agent does not tool-read AITest / project trees.
+    Prompt already carries freeze/source context — exploring disk burns minutes.
+    """
+    root = Path(os.environ.get("TEMP") or os.environ.get("TMP") or ".") / "aitest-cursor-empty"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        marker = root / ".aitest-empty-workspace"
+        if not marker.exists():
+            marker.write_text(
+                "AITest empty workspace for Cursor CLI oneshot — do not add project files.\n",
+                encoding="utf-8",
+            )
+    except OSError:
+        # Fallback: still return a path; agent may create or fail loudly
+        pass
+    return str(root.resolve())
+
+
 def _extract_stream_text(obj: dict[str, Any]) -> str:
     """Pull visible text from a Cursor agent stream-json event."""
     for key in ("text", "delta", "content", "message", "result"):
@@ -71,9 +91,10 @@ class CursorCLIAdapter(BaseCLIAdapter):
 
     One-shot headless with live progress:
       agent --print --mode ask --output-format stream-json --stream-partial-output --trust
+      --workspace <empty-dir>
 
-    Long prompts go via stdin (no temp-file tool-read). Optional --resume chatId
-    keeps a hidden ask-mode conversation across turns.
+    Empty --workspace prevents the agent from tool-scanning AITest/product trees
+    (common cause of 5–15 min TC jobs on tiny SRS). Prompt carries all context via stdin.
     """
 
     vendor = "cursor-cli"
@@ -114,6 +135,10 @@ class CursorCLIAdapter(BaseCLIAdapter):
             cmd.extend(["--resume", str(resume_chat_id)])
         if "--model" not in cmd:
             cmd.extend(["--model", self.model_name or "auto"])
+        # Always isolate workspace for oneshot TC/knowledge — context is in the prompt.
+        if oneshot and "--workspace" not in cmd:
+            empty = _empty_cursor_workspace()
+            cmd.extend(["--workspace", empty])
         return cmd
 
     async def health_check(self) -> bool:
@@ -225,13 +250,13 @@ class CursorCLIAdapter(BaseCLIAdapter):
         self, prompt: str, *, resume_chat_id: str | None = None
     ) -> str:
         """
-        Short prompts: argv. Long prompts: stdin (avoid temp-file + agent tool-read).
-        Optional --resume keeps ask-mode conversation without interactive write access.
+        Always feed prompt via stdin on Cursor CLI.
+
+        Windows PowerShell wrapping of `agent.ps1` mangles special chars when the
+        prompt is passed as argv (quotes, `$`, braces) — common for auth-seed JSON
+        instructions. Stdin avoids CreateProcess quoting limits too.
         """
         cmd = self.build_command(oneshot=True, resume_chat_id=resume_chat_id)
-        if len(prompt) <= 3500:
-            return await self._stream_oneshot([*cmd, prompt], stdin_text=None)
-
         self._progress(
             f"Cursor CLI: stdin mode ({len(prompt):,} chars, không file-ref)…"
         )
@@ -261,7 +286,20 @@ class CursorCLIAdapter(BaseCLIAdapter):
             except ValueError:
                 timeout = 240
         resolved = resolve_command(command)
-        self._progress(f"Cursor CLI: khởi động agent… (timeout {timeout}s)")
+        # Prefer empty workspace cwd when command carries --workspace
+        run_cwd = None
+        if "--workspace" in command:
+            try:
+                wi = command.index("--workspace")
+                if wi + 1 < len(command):
+                    run_cwd = command[wi + 1]
+            except ValueError:
+                run_cwd = None
+        self._progress(
+            f"Cursor CLI: khởi động agent… (timeout {timeout}s"
+            + (f", workspace={run_cwd}" if run_cwd else "")
+            + ")"
+        )
 
         def _run() -> str:
             proc = subprocess.Popen(
@@ -269,7 +307,7 @@ class CursorCLIAdapter(BaseCLIAdapter):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=None,
+                cwd=run_cwd or None,
                 env=os.environ.copy(),
                 creationflags=_CREATE_NO_WINDOW,
             )
@@ -358,6 +396,30 @@ class CursorCLIAdapter(BaseCLIAdapter):
                 stderr = proc.stderr.read().decode("utf-8", errors="replace")
             code = proc.wait(timeout=10)
             joined = "".join(text_parts).strip()
+
+            # Prefer explicit result / error payloads from stream-json
+            result_err = ""
+            for line in reversed(raw_lines):
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                typ = str(obj.get("type") or "").lower()
+                if typ == "result" or obj.get("subtype") in ("success", "error"):
+                    if obj.get("is_error") is True or str(obj.get("subtype") or "").lower() == "error":
+                        result_err = str(
+                            obj.get("result")
+                            or obj.get("error")
+                            or obj.get("message")
+                            or obj
+                        )[:1200]
+                    val = obj.get("result")
+                    if isinstance(val, str) and val.strip() and not joined:
+                        joined = val.strip()
+                    break
+
             if not joined:
                 for line in reversed(raw_lines):
                     try:
@@ -374,8 +436,10 @@ class CursorCLIAdapter(BaseCLIAdapter):
                         break
             if not joined and raw_lines:
                 joined = "\n".join(raw_lines)
+            if result_err and not joined.strip():
+                raise RuntimeError(f"Cursor CLI error: {result_err}")
             if code not in (0, None) and not joined.strip():
-                raise RuntimeError(f"Cursor CLI exit {code}: {(stderr or '')[:1200]}")
+                raise RuntimeError(f"Cursor CLI exit {code}: {(stderr or result_err or '')[:1200]}")
             if not joined.strip() and stderr.strip():
                 logger.warning("Cursor CLI stdout empty; stderr=%s", stderr[:400])
                 return stderr

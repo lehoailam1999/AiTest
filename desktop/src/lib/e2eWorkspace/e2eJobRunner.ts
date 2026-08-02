@@ -6,6 +6,11 @@ import { generateE2e, type E2EFileDto } from "../../api";
 import type { TestCase } from "../../api/types";
 import { createAsyncMutex, runPool } from "../runPool";
 import { buildE2EEnvConfig, playwrightEnvFromConfig } from "./env";
+import { resolveE2eFeSources } from "./resolveE2eFeSources";
+import {
+  e2eSpecPathsMatch,
+  findSpecReportForPrimary,
+} from "./e2eSpecPathMatch";
 import {
   syncE2eModuleBatchCampaign,
   syncE2eVerifyReport,
@@ -30,6 +35,9 @@ export type E2eBatchProgress = {
   current: number;
   total: number;
   label: string;
+  /** Row identity for parallel generate UI updates */
+  testCaseId?: string;
+  itemStatus?: "running" | "generated" | "fail";
 };
 
 export type E2eGenItem = {
@@ -38,6 +46,18 @@ export type E2eGenItem = {
   runId: string;
   primarySpecPath: string;
   files: E2EFileDto[];
+};
+
+/** Fired as soon as one TC finishes generate (success or fail) — enables live UI + pause→verify. */
+export type E2eGenerateItemDone = {
+  testCaseId: string;
+  title: string;
+  status: "generated" | "fail";
+  row: E2eBatchItemResult;
+  genItem?: E2eGenItem;
+  filesSoFar: E2EFileDto[];
+  done: number;
+  total: number;
 };
 
 export type E2eInspectResult = {
@@ -114,24 +134,14 @@ function mergeFiles(into: E2EFileDto[], add: E2EFileDto[]): E2EFileDto[] {
   return [...by.values()];
 }
 
-function matchSpecToTc(
-  specPath: string,
-  items: { testCaseId: string; primarySpecPath: string; title: string }[]
-): (typeof items)[0] | undefined {
-  const norm = specPath.replace(/\\/g, "/");
-  const base = norm.split("/").pop() || norm;
-  return (
-    items.find((i) => i.primarySpecPath.replace(/\\/g, "/") === norm) ||
-    items.find((i) => i.primarySpecPath.replace(/\\/g, "/").endsWith(base)) ||
-    items.find((i) => (i.primarySpecPath.split("/").pop() || "") === base)
-  );
-}
-
 /** Step: Inspect DOM / Target URL only. */
 export async function inspectE2eDom(opts: {
   targetUrl: string;
   projectRoot: string;
   usePlaywrightInspect?: boolean;
+  /** Optional FE template to enrich selector_candidates when URL is login-wall only. */
+  sourceCode?: string;
+  sourcePaths?: string[] | { path: string; content: string }[];
   onLog?: (line: string) => void;
 }): Promise<E2eInspectResult> {
   const log = (line: string) => opts.onLog?.(line);
@@ -140,6 +150,8 @@ export async function inspectE2eDom(opts: {
     targetUrl: opts.targetUrl,
     projectRoot: opts.projectRoot,
     usePlaywright: opts.usePlaywrightInspect,
+    sourceCode: opts.sourceCode,
+    sourcePaths: opts.sourcePaths,
   });
   const elementCount = inspected.elements?.length ?? 0;
   const routeCount = inspected.routes?.length ?? 0;
@@ -199,11 +211,34 @@ export async function generateE2eForTestCase(opts: {
   });
 
   log(`→ Generate: ${tc.title}\n`);
+  let sourceFileName: string | undefined;
+  let sourceCode: string | undefined;
+  let relatedSources: { path: string; content: string }[] | undefined;
+  try {
+    const fe = await resolveE2eFeSources({
+      projectRoot: opts.projectRoot,
+      testCase: tc,
+    });
+    if (fe) {
+      sourceFileName = fe.sourceFileName;
+      sourceCode = fe.sourceCode;
+      relatedSources = fe.relatedSources;
+      for (const n of fe.notes) log(`  fe-context: ${n}\n`);
+    } else {
+      log("  fe-context: (none — DOM/TC only)\n");
+    }
+  } catch (e) {
+    log(`  fe-context warn: ${String(e)}\n`);
+  }
+
   const gen = await generateE2e.run({
     projectId: opts.projectId,
     testCaseId: tc.id,
     targetUrl: env.targetUrl,
     domSnapshot: opts.domSnapshot || undefined,
+    sourceFileName,
+    sourceCode,
+    relatedSources,
     module: moduleName,
     requirementTitle: opts.requirementTitle || undefined,
     projectRoot: opts.projectRoot,
@@ -254,6 +289,8 @@ export async function generateE2eBatch(opts: {
   provider?: string | null;
   onLog?: (line: string) => void;
   onProgress?: (p: E2eBatchProgress) => void;
+  /** Called under merge lock after each TC — flush rows/files to UI immediately. */
+  onItemDone?: (payload: E2eGenerateItemDone) => void;
   waitIfPaused?: () => Promise<void>;
 }): Promise<{
   rows: E2eBatchItemResult[];
@@ -284,6 +321,8 @@ export async function generateE2eBatch(opts: {
   const mergeLock = createAsyncMutex();
   let done = 0;
 
+  // Parallel codegen: auth seed is serialized server-side (per-role locks).
+  // Each TC still gets its own chat/request; POM API snapshot is merge-locked below.
   log(
     `→ Generate batch parallel ×${Math.min(E2E_GEN_CONCURRENCY, total)} · ${total} TC (mỗi TC 1 request riêng)\n`
   );
@@ -299,6 +338,8 @@ export async function generateE2eBatch(opts: {
           current: done,
           total,
           label: `Generate: ${tc.title}`,
+          testCaseId: tc.id,
+          itemStatus: "running",
         });
       });
 
@@ -332,13 +373,14 @@ export async function generateE2eBatch(opts: {
         const ownedFiles = gen.files;
         await mergeLock.run(() => {
           allFiles = mergeFiles(allFiles, ownedFiles);
-          genItemsSlot[i] = {
+          const genItem: E2eGenItem = {
             testCaseId: tc.id,
             title: tc.title,
             runId: gen.runId,
             primarySpecPath: gen.primarySpecPath,
             files: ownedFiles,
           };
+          genItemsSlot[i] = genItem;
           rows[i] = {
             ...rows[i],
             status: "generated",
@@ -350,9 +392,22 @@ export async function generateE2eBatch(opts: {
             phase: "generate",
             current: done,
             total,
-            label: `Generate ${done}/${total}`,
+            label: `Đã gen «${tc.title}» (${done}/${total})`,
+            testCaseId: tc.id,
+            itemStatus: "generated",
+          });
+          opts.onItemDone?.({
+            testCaseId: tc.id,
+            title: tc.title,
+            status: "generated",
+            row: rows[i],
+            genItem,
+            filesSoFar: [...allFiles],
+            done,
+            total,
           });
         });
+        log(`  ✓ gen OK [${tc.title}] · ${ownedFiles.length} file · ${done}/${total}\n`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         await mergeLock.run(() => {
@@ -362,7 +417,18 @@ export async function generateE2eBatch(opts: {
             phase: "generate",
             current: done,
             total,
-            label: `Generate ${done}/${total}`,
+            label: `Gen lỗi «${tc.title}» (${done}/${total})`,
+            testCaseId: tc.id,
+            itemStatus: "fail",
+          });
+          opts.onItemDone?.({
+            testCaseId: tc.id,
+            title: tc.title,
+            status: "fail",
+            row: rows[i],
+            filesSoFar: [...allFiles],
+            done,
+            total,
           });
         });
         log(`  generate fail [${tc.testCaseId || tc.id}]: ${msg}\n`);
@@ -556,38 +622,33 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     for (const g of generatedOk) {
       const idx = rows.findIndex((r) => r.testCaseId === g.testCaseId);
       if (idx < 0) continue;
-      const direct = (mod.specs || []).find((s) => {
-        const sp = s.specPath.replace(/\\/g, "/");
-        const pp = g.primarySpecPath.replace(/\\/g, "/");
-        return (
-          sp === pp ||
-          sp.endsWith(pp.split("/").pop() || "") ||
-          pp.endsWith(sp.split("/").pop() || "")
-        );
-      });
-      const specRow = (mod.specs || []).find((s) =>
-        matchSpecToTc(s.specPath, [
-          {
-            testCaseId: g.testCaseId,
-            primarySpecPath: g.primarySpecPath,
-            title: g.title,
-          },
-        ])
+      const soleFallback = generatedOk.length === 1;
+      const resolved = findSpecReportForPrimary(
+        g.primarySpecPath,
+        (mod.specs || []).map((s) => ({
+          specPath: s.specPath,
+          success: s.success,
+          errorExcerpt: s.errorExcerpt,
+        })),
+        { soleTcFallback: soleFallback }
       );
-      const spec = direct || specRow;
+      log(
+        `  map: primary=${g.primarySpecPath} ↔ report=${resolved?.specPath || "(none)"}\n`
+      );
       let passed = false;
       let err: string | undefined;
-      if (spec) {
-        const sp = spec.specPath.replace(/\\/g, "/");
+      if (resolved) {
+        const sp = resolved.specPath.replace(/\\/g, "/");
         passed =
-          spec.success ||
+          !!resolved.success ||
           healedPass.has(sp) ||
           healedPass.has(sp.split("/").pop() || "");
         if (!passed) {
           for (const h of healList) {
             const hp = h.specPath.replace(/\\/g, "/");
             if (
-              (hp === sp || hp.endsWith(sp.split("/").pop() || "")) &&
+              (e2eSpecPathsMatch(hp, sp) ||
+                hp.endsWith(sp.split("/").pop() || "")) &&
               h.status === "PASSED"
             ) {
               passed = true;
@@ -597,15 +658,28 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         }
         err = passed
           ? undefined
-          : spec.errorExcerpt?.slice(0, 1200) ||
-            healList.find((h) => h.specPath.includes(sp.split("/").pop() || ""))
-              ?.errorLog?.slice(0, 1200) ||
+          : resolved.errorExcerpt?.slice(0, 1200) ||
+            healList.find((h) =>
+              e2eSpecPathsMatch(h.specPath, sp)
+            )?.errorLog?.slice(0, 1200) ||
             (mod.log || "").slice(-800) ||
             "FAIL";
       } else {
-        // Do not inherit whole-module log (often another TC's error) when unmapped.
+        // Unmapped: if exactly one failing report exists, surface its excerpt.
+        const fails = (mod.specs || []).filter((s) => !s.success);
+        const fallbackExcerpt =
+          fails.length === 1
+            ? fails[0].errorExcerpt?.slice(0, 1200)
+            : undefined;
         passed = false;
-        err = "FAIL — không map được spec trong báo cáo Verify batch";
+        err =
+          fallbackExcerpt ||
+          "FAIL — không map được spec trong báo cáo Verify batch";
+        if (fallbackExcerpt) {
+          log(
+            `  map warn: unmapped primary — using sole failing excerpt\n`
+          );
+        }
       }
 
       rows[idx] = {

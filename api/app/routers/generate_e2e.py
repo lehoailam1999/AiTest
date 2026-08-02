@@ -62,6 +62,8 @@ def _e2e_files_dto(files: list[E2EFile]) -> list[dict]:
 
 
 def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
+    from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+
     pkg = body.get("packagePrefix", body.get("package_prefix"))
     package_prefix = None if pkg is None else str(pkg)
     related: list[tuple[str, str]] = []
@@ -72,6 +74,11 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
     for item in body.get("files") or body.get("existingFiles") or []:
         if isinstance(item, dict) and item.get("path") and item.get("content") is not None:
             existing.append((str(item["path"]), str(item["content"])))
+    lang = str(body.get("language") or project.language or "TypeScript")
+    proj_rules, usr_rules = rules_pair_from_meta(
+        parse_project_meta(getattr(project, "meta", None)),
+        language=lang or project.language,
+    )
     return E2ERequest(
         test_case_title=tc.title,
         test_case_type=tc.type or "E2E",
@@ -88,7 +95,7 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         requirement_title=str(body.get("requirementTitle") or body.get("requirement_title") or "").strip(),
         package_prefix=package_prefix,
         framework=str(body.get("framework") or "playwright"),
-        language=str(body.get("language") or project.language or "TypeScript"),
+        language=lang,
         storage_state_rel=str(
             body.get("storageStateRel") or body.get("storage_state_rel") or ""
         ).strip(),
@@ -99,6 +106,11 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         repair_context=str(body.get("repairContext") or "").strip(),
         related_sources=related,
         existing_files=existing,
+        project_rules=proj_rules,
+        user_rules=usr_rules,
+        execution_context=str(
+            body.get("executionContext") or body.get("execution_context") or ""
+        ).strip(),
     )
 
 
@@ -194,19 +206,36 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
 
     # Optional inspect to enrich DOM snapshot
     target_url = str(body.get("targetUrl") or "").strip()
+    inspect_warning: str | None = None
     if not str(body.get("domSnapshot") or "").strip() and (
         target_url or str(body.get("sourceCode") or "").strip()
     ):
         try:
             from app.services.e2e_dom_inspector import inspect_target
 
+            use_pw = bool(
+                body.get("usePlaywrightInspect")
+                or body.get("usePlaywright")
+                or body.get("storageStateRel")
+            )
+            project_root = str(body.get("projectRoot") or "").strip()
             inspected = await inspect_target(
                 target_url=target_url,
                 source_code=str(body.get("sourceCode") or ""),
+                use_playwright=use_pw,
+                project_root=project_root,
             )
             if inspected.elements or inspected.routes:
                 body = {**body, "domSnapshot": inspected.to_prompt_json()}
+            else:
+                inspect_warning = (
+                    "DOM inspect returned no interactive elements — "
+                    "check Target URL / auth (storageState or E2E_*) / SPA ready. "
+                    f"source={inspected.source or 'empty'}"
+                )
+                log.warning("e2e inspect empty: %s", inspect_warning)
         except Exception as exc:  # noqa: BLE001
+            inspect_warning = f"DOM inspect failed: {exc}"
             log.warning("e2e inspect skipped: %s", exc)
 
     req = _build_e2e_req(tc, body, project=project)
@@ -229,8 +258,8 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
         requirement_title=req.requirement_title,
         test_case_title=req.test_case_title,
     )
-    # Do not synthesize empty storageState placeholders here.
-    # Empty "{}" fixtures are invalid for Playwright and can break local reruns.
+    # Guards already ran in e2e_result_from_raw — re-running appended duplicate POM stubs.
+    # Config/auth scaffolding above is enough at route layer.
 
     auth_seed_dto = None
     project_root = str(body.get("projectRoot") or "").strip()
@@ -271,6 +300,7 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
             "runnerUsed": meta.get("runnerUsed") or connection_runner_mode(conn),
             "cliSessionKey": meta.get("cliSessionKey"),
             "authSeed": auth_seed_dto,
+            "inspectWarning": inspect_warning,
             "playwrightConfigScaffold": default_playwright_config(
                 base_url=req.target_url, storage_state_rel=req.storage_state_rel
             ),
@@ -791,7 +821,7 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
 
     heal_results: list[dict] = []
     final_files = list(module_run.files)
-    heal_failures = bool(body.get("healFailures", True))
+    heal_failures = bool(body.get("healFailures", False))
     failed = [s for s in module_run.specs if not s.success]
 
     if heal_failures and failed:

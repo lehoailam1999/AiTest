@@ -23,6 +23,18 @@ const PACKAGE_MARKERS = [
   "Gemfile",
 ] as const;
 
+const TRANSIENT_BUILD_DIRS = new Set([
+  "dist",
+  "build",
+  "out",
+  "target",
+  "bin",
+  "obj",
+  ".next",
+  ".nuxt",
+  "coverage",
+]);
+
 async function pathExists(projectRoot: string, rel: string): Promise<boolean> {
   try {
     await readTextFile(projectRoot, rel);
@@ -78,6 +90,12 @@ export async function resolvePackagePrefix(
       // Monorepo root marker alone must not pull AItest out of backend/frontend.
       if (!dir) {
         return heuristic;
+      }
+      const last = dir.includes("/") ? dir.slice(dir.lastIndexOf("/") + 1) : dir;
+      if (TRANSIENT_BUILD_DIRS.has(last.toLowerCase())) {
+        // Never anchor AItest under build artifacts folders.
+        dir = parentDir(dir);
+        continue;
       }
       return dir;
     }

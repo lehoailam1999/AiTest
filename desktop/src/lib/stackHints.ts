@@ -225,16 +225,48 @@ export function suggestWorkspaceVerifyCommands(opts: {
   stackInspect?: StackInspect | null;
 }): WorkspaceVerifyCommands {
   const stack = opts.stackInspect;
+  const fwEarly = (opts.framework || "").toLowerCase();
+  const langEarly = (opts.language || "").toLowerCase();
   const underAitest = opts.targetRelPaths.some((p) =>
     /(?:^|\/)AItest\//i.test(p.replace(/\\/g, "/"))
   );
+  // Batch Verify often passes [] — still AItest layout (same as pytestTargets default).
+  const forAitestLayout = underAitest || opts.targetRelPaths.length === 0;
+  const hasCsharpSources = opts.targetRelPaths.some((p) => /\.cs$/i.test(p));
   const aitestJest = "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
+  const isCsharp =
+    hasCsharpSources ||
+    langEarly.includes("c#") ||
+    langEarly.includes("csharp") ||
+    fwEarly.includes("xunit") ||
+    fwEarly.includes("nunit") ||
+    fwEarly.includes("mstest");
+
+  // C# AItest layout — before Node monorepo heuristics (ClientApp/Jest must not win).
+  if (forAitestLayout && isCsharp) {
+    const pkg = (opts.packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const unitProj = pkg
+      ? `${pkg}/AItest/AItest.UnitTests.csproj`
+      : "AItest/AItest.UnitTests.csproj";
+    return {
+      compile: `dotnet build "${unitProj}" --nologo`,
+      test: `dotnet test "${unitProj}" --nologo`,
+      coverage: "",
+    };
+  }
+
+  const isNodeLike =
+    stack?.workspace_kind === "node" ||
+    langEarly.includes("typescript") ||
+    langEarly.includes("javascript") ||
+    fwEarly.includes("jest") ||
+    fwEarly.includes("vitest") ||
+    fwEarly.includes("mocha");
 
   if (stack?.is_monorepo_package || (stack?.workspace_kind && stack.workspace_kind !== "none")) {
     let test = shellJoinCommand(stack.run_command);
     let coverage = shellJoinCommand(stack.coverage_command);
-    const compile = shellJoinCommand(stack.compile_command);
-    const fwEarly = (opts.framework || "").toLowerCase();
+    let compile = shellJoinCommand(stack.compile_command);
     // Nested node / fake npm -w → local; AItest layout → never Nest npm test
     if (
       stack.workspace_kind === "node" ||
@@ -251,6 +283,10 @@ export function suggestWorkspaceVerifyCommands(opts: {
         coverage = "";
       }
     }
+    if (isNodeLike) {
+      // Verify on staged AItest should not emit build artifacts (dist/build/out).
+      compile = "";
+    }
     if (test) {
       return { compile, test, coverage };
     }
@@ -260,21 +296,40 @@ export function suggestWorkspaceVerifyCommands(opts: {
   const fw = (opts.framework || "").toLowerCase();
   const stacks = (opts.meta?.stacks ?? []).map((s) => s.toLowerCase()).join(" ");
   const paths = opts.targetRelPaths.map((p) => `"${p.replace(/"/g, "")}"`).join(" ");
+  /** pytest 8+/9: dùng -o cache_dir=… (--cache-dir đã bị bỏ). */
+  const pytestCache = "-o cache_dir=.ai-test/pytest_cache";
+  /** Batch Verify hay để targetRelPaths=[] — thu trong AItest/ thôi, tránh quét cả repo. */
+  const pytestTargets = paths || "AItest";
 
   // Prefer inspector commands even for single-package when available
   if (stack?.run_command?.length && !underAitest) {
     let test = shellJoinCommand(stack.run_command);
     const coverage = shellJoinCommand(stack.coverage_command);
-    const compile = shellJoinCommand(stack.compile_command);
+    let compile = shellJoinCommand(stack.compile_command);
     if (test && (stack.is_monorepo_package || stack.package_root)) {
       if ((test === "npm test" || test === "npx jest" || test === "jest") && (!fw || fw.includes("jest") || lang.includes("typescript") || lang.includes("javascript"))) {
         test = "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
+      }
+      if (isNodeLike) {
+        compile = "";
       }
       return { compile, test, coverage };
     }
   }
 
   if (lang.includes("c#") || lang.includes("csharp") || stacks.includes("asp.net")) {
+    if (underAitest) {
+      const pkg = (opts.packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      const unitProj = pkg
+        ? `${pkg}/AItest/AItest.UnitTests.csproj`
+        : "AItest/AItest.UnitTests.csproj";
+      return {
+        // Build only the generated test host — avoid whole-solution compile picking up AItest.
+        compile: `dotnet build "${unitProj}" --nologo`,
+        test: `dotnet test "${unitProj}" --nologo`,
+        coverage: "",
+      };
+    }
     return {
       compile: shellJoinCommand(stack?.compile_command) || "dotnet build",
       test: shellJoinCommand(stack?.run_command) || "dotnet test",
@@ -283,15 +338,25 @@ export function suggestWorkspaceVerifyCommands(opts: {
   }
 
   if (lang.includes("python") || fw.includes("pytest") || stacks.includes("fastapi")) {
-    const test = paths ? `pytest ${paths}` : "pytest";
+    const withCache = (cmd: string) => {
+      if (!/\bpytest\b/i.test(cmd)) return cmd;
+      if (/-o\s+cache_dir=/i.test(cmd) || /--cache-dir\b/i.test(cmd)) {
+        // Migrate legacy --cache-dir (unrecognized on pytest 9) → -o cache_dir=
+        return cmd.replace(/--cache-dir=\S+/gi, pytestCache);
+      }
+      return cmd.replace(/\bpytest\b/i, `pytest ${pytestCache}`);
+    };
+    const test = `pytest ${pytestCache} ${pytestTargets}`;
+    const fromStack = shellJoinCommand(stack?.run_command);
+    // Bare `pytest` from inspector would ignore AItest/ — always prefer scoped command.
+    const barePytest = !fromStack || /^(python\s+-m\s+)?pytest\s*$/i.test(fromStack.trim());
     return {
       compile: "",
-      test: shellJoinCommand(stack?.run_command) || test,
-      coverage:
+      test: withCache(barePytest ? test : `${fromStack} ${pytestTargets}`.trim()),
+      coverage: withCache(
         shellJoinCommand(stack?.coverage_command) ||
-        (paths
-          ? `pytest ${paths} --cov --cov-report=xml:coverage.xml --junitxml=report.xml`
-          : "pytest --cov --cov-report=xml:coverage.xml --junitxml=report.xml"),
+          `pytest ${pytestCache} ${pytestTargets} --cov --cov-report=xml:coverage.xml --junitxml=report.xml`
+      ),
     };
   }
 
@@ -342,14 +407,16 @@ export function suggestWorkspaceVerifyCommands(opts: {
   }
 
   const fallbackTest = lang.includes("python")
-    ? "pytest"
+    ? `pytest ${pytestCache} AItest`
     : lang.includes("go")
       ? "go test ./..."
       : "npm test";
 
   return {
     compile: "",
-    test: opts.targetRelPaths.length ? `pytest ${paths}` : fallbackTest,
+    test: opts.targetRelPaths.length
+      ? `pytest ${pytestCache} ${paths}`
+      : fallbackTest,
     coverage: "",
   };
 }

@@ -167,6 +167,10 @@ def testcase_dto(t: TestCase, source_content_hash: str | None = None) -> dict:
 
 
 def project_dto(p: Project, requirement_count: int, testcase_count: int) -> dict:
+    from app.llm.ai_rules import parse_project_meta
+
+    raw_meta = getattr(p, "meta", None)
+    meta_obj = parse_project_meta(raw_meta) if raw_meta else None
     return {
         "id": str(p.id),
         "name": p.name,
@@ -174,6 +178,7 @@ def project_dto(p: Project, requirement_count: int, testcase_count: int) -> dict
         "code": p.code,
         "language": p.language,
         "framework": p.framework,
+        "meta": meta_obj if meta_obj else None,
         "isActive": p.is_active,
         "requirementCount": requirement_count,
         "testCaseCount": testcase_count,

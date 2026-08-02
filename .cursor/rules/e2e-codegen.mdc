@@ -1,0 +1,62 @@
+---
+description: E2ECG — sinh code Playwright E2E đa dự án (Auth/Role Context + Implementation Mapping)
+globs: api/app/llm/e2e_codegen_rules.py,api/app/llm/base.py,api/app/routers/generate_e2e.py,api/app/services/e2e_*.py,desktop/src/lib/e2eWorkspace/**/*,desktop/src/features/e2e-test/**
+alwaysApply: false
+---
+
+# E2ECG — Generate E2E Test Code
+
+> Runtime: [`e2e_codegen_rules.py`](api/app/llm/e2e_codegen_rules.py) inject **một lần** trong `e2e_system_prompt`.  
+> Journey skeleton: [`e2e_journey_rules.py`](api/app/llm/e2e_journey_rules.py) — Phase A–F sau khi Context đã resolve.  
+> Khác Sinh TC E2E (`e2e-tc-from-analysis.mdc`).
+
+## Phân tách
+
+| Nguồn | Quyết định |
+|-------|------------|
+| Analysis `executionContexts` + `actors` + Approved TC | **Ai** (authRequired/role) + **nghiệp vụ** |
+| Source / DOM / Project Convention / auth_mode | **Cách** login + route + locator + sync |
+
+Layout giống Unit: `AItest/E2ETest/{Requirement}/{TC}/pages|specs/` — **một path / một file**; overwrite không salt-fork.
+
+**Staging FE:** một batch Generate = **một** `.ai-test/staging/e2e-{id}-{ts}/`.
+
+**Runnable:** Spec `import { ExactClass }` = `export class ExactClass`; gọi instance `new ExactClass(page)` — cấm static / import ảo.
+
+**Assert contract:** POM `expect*`/`assert*` = `Promise<void>` → Spec `await pom.expectX(...)` trực tiếp.  
+Cấm `expect(await pom.expectX()).toBeVisible()` (void → `toBeVisible(undefined)` → Chromium tắt sớm).
+
+## I. Auth & Role (Rules 1–6)
+
+1. Authentication Context · 2. Authorization/Role · 3. Login Strategy (HOW) ·  
+4. Session Reuse · 5. Multi-Role/Transition · 6. Permission Verify  
+
+Cấm: hardcode login mặc định · suy luận role từ source · hardcode tài khoản.
+
+## II. Implementation Mapping (Rules 7–18)
+
+7–13 mapping/locator · **14 Assert** (void POM / real Locator only) · 15 Convention ·  
+16 Self-check · **17 No duplicate** · **18 RUNNABLE emit**
+
+## Auth pass (thực thi — không hardcode trong Spec)
+
+| Bước | Việc |
+|------|------|
+| P0 | Analysis có `executionContexts` (WHO); TC precondition mang role/authRequired |
+| P1 | Credentials `E2E_*` / `E2E_<ROLE>_*` trên desktop; seed login thành công |
+| P2 | auth_mode=`storage` khi có JSON hợp lệ → feature Spec **không** UI login lại |
+| P3 | Thiếu storage → `ui_helper` + `ensureAuthenticated` (overlay); locator từ DOM/FE |
+| P4 | Multi-role chỉ khi Analysis/TC nói ≥2 actors |
+
+## Phân tầng prompt
+
+| Tầng | Nội dung |
+|------|----------|
+| E2ECG Spec | Rules 1–18 (**SoT**) |
+| auth_mode overlay | 1 dòng `resolve_auth_mode` |
+| Feature journey | Phase C Feature entry |
+| User prompt | TC + Execution Context + Auth resolved + DOM/FE |
+
+## Khi sửa
+
+Chỉ sửa contract trong `e2e_codegen_rules.py` (+ file này). Journey/auth essay **không** copy lại Rules 1–18.

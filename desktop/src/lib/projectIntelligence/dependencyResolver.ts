@@ -47,6 +47,11 @@ function resolveSymbolToFile(
       ? fromFileRel.slice(0, fromFileRel.lastIndexOf("/"))
       : "";
     const inDir = paths.find((p) => (dir ? p.startsWith(`${dir}/`) : !p.includes("/")));
+    // Prefer Interfaces/ folder for I* types when several stems collide
+    if (/^I[A-Z]/.test(symbol)) {
+      const iface = paths.find((p) => /\/Interfaces\//i.test(p) || /Interface/i.test(p));
+      if (iface) return iface;
+    }
     return inDir ?? paths[0];
   }
 

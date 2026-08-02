@@ -123,7 +123,13 @@ async def update_project(
         p.language = body.get("language")
     if "framework" in body:
         p.framework = body.get("framework")
-    # Ignore incoming "meta" payloads. Stack sync now updates only language/framework.
+    if "meta" in body:
+        from app.llm.ai_rules import dumps_project_meta, merge_project_meta, seed_ai_rules_on_meta
+
+        merged = merge_project_meta(p.meta, body.get("meta"))
+        # Keep projectAuto fresh from scan fields unless locked
+        merged = seed_ai_rules_on_meta(merged, language=p.language)
+        p.meta = dumps_project_meta(merged)
     db.commit()
     db.refresh(p)
     p = db.query(Project).filter(Project.id == pid, Project.deleted_at.is_(None)).first()

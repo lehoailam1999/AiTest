@@ -7,6 +7,11 @@
 import { projects, workspaceApi } from "../../api";
 import { assertApiReadyForSync } from "../../api/health";
 import type { Project } from "../../api/types";
+import {
+  assertProjectSynced,
+  buildProjectMetaFromScan,
+  normalizeProjectMeta,
+} from "../projectSync";
 import { isTauri, pickProjectFolder, scanProject, type ProjectScan } from "../../tauri/bridge";
 import { workspace } from "../../workspace";
 import { ensureWorkspaceOpen } from "./client";
@@ -45,11 +50,17 @@ export type SyncSourceMetaInput = {
  */
 export async function syncSourceMeta(input: SyncSourceMetaInput): Promise<Project> {
   await assertApiReadyForSync();
+  const current = await projects.get(input.projectId);
+  const existing = normalizeProjectMeta(current.meta);
+  const meta = buildProjectMetaFromScan(input.scan, existing, input.scan.language);
   await projects.update(input.projectId, {
     language: input.scan.language ?? null,
     framework: (input.scan.frameworks ?? [])[0] ?? null,
+    meta,
   });
-  return projects.get(input.projectId);
+  const verified = await projects.get(input.projectId);
+  assertProjectSynced(verified, input.projectId);
+  return verified;
 }
 
 /**

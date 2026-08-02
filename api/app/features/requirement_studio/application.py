@@ -75,6 +75,7 @@ ANALYSIS_RECORD_TYPES: tuple[str, ...] = (
     "FEATURES",
     "ACTORS_PERMISSIONS",
     "BUSINESS_FLOWS",
+    "EXECUTION_CONTEXT",
     "BUSINESS_RULES",
     "VALIDATION_DATA",
     "API_UI",
@@ -157,6 +158,12 @@ def _analysis_records_from_payload(payload: dict | None) -> list[dict]:
             "title": "Luồng nghiệp vụ",
             "itemCount": _analysis_count(data.get("useCases")),
             "content": data.get("useCases") or [],
+        },
+        {
+            "type": "EXECUTION_CONTEXT",
+            "title": "Execution Context",
+            "itemCount": _analysis_count(data.get("executionContexts")),
+            "content": data.get("executionContexts") or [],
         },
         {
             "type": "BUSINESS_RULES",
@@ -1547,6 +1554,8 @@ def enqueue_generate_from_snapshot(
     target_url: str | None = None,
     auth_hint: str | None = None,
     focus_modules: str | None = None,
+    speed: str | None = None,
+    max_per_module: int | None = None,
 ) -> Job:
     """R7 — create Job bound to snapshotId only (BR-V2-16)."""
     from app import constants as C
@@ -1560,6 +1569,9 @@ def enqueue_generate_from_snapshot(
     eng = (preferred_engine or "").strip().lower()
     if eng and eng not in ("unit", "e2e"):
         raise ValueError("preferredEngine must be unit or e2e when set")
+    speed_n = (speed or "").strip().lower() or None
+    if speed_n and speed_n not in ("fast", "full"):
+        raise ValueError("speed must be fast or full when set")
     # Target URL optional for TC generation (used in precondition if provided).
     # Required only when running E2E codegen / headless on E2E Test page.
 
@@ -1595,14 +1607,16 @@ def enqueue_generate_from_snapshot(
     db.commit()
     db.refresh(job)
     if eng:
-        stash_job_engine_hint(
-            job.id,
-            {
-                "preferredEngine": eng,
-                "targetUrl": (target_url or "").strip() or None,
-                "authHint": (auth_hint or "").strip() or None,
-                "focusModules": (focus_modules or "").strip() or None,
-            },
-        )
+        hint: dict = {
+            "preferredEngine": eng,
+            "targetUrl": (target_url or "").strip() or None,
+            "authHint": (auth_hint or "").strip() or None,
+            "focusModules": (focus_modules or "").strip() or None,
+        }
+        if speed_n:
+            hint["speed"] = speed_n
+        if max_per_module is not None:
+            hint["maxPerModule"] = int(max_per_module)
+        stash_job_engine_hint(job.id, hint)
     return job
 

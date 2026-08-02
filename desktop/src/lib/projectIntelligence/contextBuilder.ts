@@ -56,7 +56,22 @@ export async function buildContextPacket(input: {
   /** Path related ép buộc (vd. từ AI rank) — đọc thêm local */
   forcedRelatedPaths?: string[] | null;
 }): Promise<AITestContextPacket> {
-  const policy = input.policy ?? DEFAULT_CONTEXT_POLICY;
+  const langLower = (input.language || "").toLowerCase();
+  const isCsharp =
+    langLower.includes("c#") ||
+    langLower.includes("csharp") ||
+    langLower.includes(".net") ||
+    !!input.manualPrimaryPath?.toLowerCase().endsWith(".cs");
+  const policy =
+    input.policy ??
+    (isCsharp
+      ? {
+          ...DEFAULT_CONTEXT_POLICY,
+          maxDependencyFiles: 12,
+          maxBytesPerFile: 5_000,
+          maxDependencyDepth: 2,
+        }
+      : DEFAULT_CONTEXT_POLICY);
   const truncated: string[] = [];
   const omittedPaths: string[] = [];
   const adapter = getLanguageAdapter(input.language);

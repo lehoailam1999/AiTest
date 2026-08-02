@@ -431,6 +431,9 @@ class GenerateFromSnapshotBody(BaseModel):
     targetUrl: str | None = Field(default=None, max_length=500)
     authHint: str | None = Field(default=None, max_length=1000)
     focusModules: str | None = Field(default=None, max_length=500)
+    # fast | full — E2E mặc định fast trên BE nếu bỏ trống
+    speed: str | None = Field(default=None, max_length=20)
+    maxPerModule: int | None = Field(default=None, ge=2, le=30)
 
 
 class FreezeAndGenerateBody(BaseModel):
@@ -441,6 +444,8 @@ class FreezeAndGenerateBody(BaseModel):
     targetUrl: str | None = Field(default=None, max_length=500)
     authHint: str | None = Field(default=None, max_length=1000)
     focusModules: str | None = Field(default=None, max_length=500)
+    speed: str | None = Field(default=None, max_length=20)
+    maxPerModule: int | None = Field(default=None, ge=2, le=30)
 
 
 @router.post("/requirement-workspaces/{workspace_id}/freeze")
@@ -529,6 +534,8 @@ async def generate_tc_from_snapshot(
             target_url=body.targetUrl,
             auth_hint=body.authHint,
             focus_modules=body.focusModules,
+            speed=body.speed,
+            max_per_module=body.maxPerModule,
         )
     except ValueError as e:
         return errors(400, str(e))
@@ -585,6 +592,8 @@ async def freeze_and_generate(
             target_url=body.targetUrl,
             auth_hint=body.authHint,
             focus_modules=body.focusModules,
+            speed=body.speed,
+            max_per_module=body.maxPerModule,
         )
     except ValueError as e:
         return errors(400, str(e))

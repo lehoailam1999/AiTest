@@ -37,8 +37,28 @@ _API_RE = re.compile(
     r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_\-./{}:]+)",
     re.IGNORECASE,
 )
+# Label form only — do NOT treat «Người dùng ---->» ASCII diagrams as actors.
 _ACTOR_LINE_RE = re.compile(
-    r"(?i)^\s*(?:[-*•]\s*)?(?:actor|vai trò|role|persona|người dùng|user|admin|hệ thống)\s*[:\-–]\s*(.+)$"
+    r"(?i)^\s*(?:[-*•]\s*)?(?:actor|vai\s*trò|role|persona|tác\s*nhân)\s*[:：]\s*(.+)$"
+)
+# Coded requirement rows in markdown tables (formal SRS).
+_FR_TABLE_ROW = re.compile(
+    r"(?i)^\s*\|\s*FR[\s\-_]*(\d+)\s*\|\s*([^|]+?)\s*\|"
+)
+_UC_TABLE_ROW = re.compile(
+    r"(?i)^\s*\|\s*UC[\s\-_]*(\d+)\s*\|\s*([^|]+?)\s*\|"
+)
+_BR_TABLE_ROW = re.compile(
+    r"(?i)^\s*\|\s*BR[\s\-_]*(\d+)\s*\|\s*([^|]+?)\s*\|"
+)
+_AC_INLINE = re.compile(
+    r"(?i)\bAC[\s\-_]*(\d+)\s*:\s*(.+?)(?=(?:\s*<br\s*/?\s*>|\s*AC[\s\-_]*\d+\s*:|\s*\||$))"
+)
+_NFR_TABLE_ROW = re.compile(
+    r"(?i)^\s*\|\s*NFR[\s\-_]*(\d+)\s*\|\s*([^|]+)\|\s*([^|]+?)\s*\|"
+)
+_API_TABLE_ROW = re.compile(
+    r"(?i)^\s*\|\s*(GET|POST|PUT|PATCH|DELETE)\s*\|\s*`?(/[A-Za-z0-9_\-./{}:]+)`?\s*\|"
 )
 _USER_STORY_ACTOR_RE = re.compile(
     r"(?i)\blà\s+một\s+([^,.;\n]+)|\bas\s+an?\s+([^,.;\n]+)"
@@ -46,12 +66,25 @@ _USER_STORY_ACTOR_RE = re.compile(
 _RULE_HINT = re.compile(
     r"(?i)\b(phải|bắt buộc|không được|cấm|shall|must|should not|required)\b"
 )
-# Tight gaps — avoid treating every "?" as an open question
+# Tight gaps — avoid treating every "?" as an open question.
+# Do NOT use case-insensitive TODO (matches product name «Todo App»).
 _GAP_HINT = re.compile(
-    r"(?i)\b(TBD|TODO|cần làm rõ|chưa xác định|open question|to be defined|chưa rõ)\b"
+    r"(?:\bTBD\b|\bTODO\b|(?i:cần làm rõ|chưa xác định|open question|to be defined|chưa rõ))"
 )
 _USECASE_HEAD = re.compile(
     r"(?i)^(use\s*case|uc[\s\-_]?\d+|luồng|flow|scenario|kịch bản)\b"
+)
+# SRS numbered use cases: "01 Xem danh sách todo", "UC-01: Login"
+# Do NOT match outline numbers like "1. Giới thiệu" / "1.1. Mục đích".
+_NUMBERED_UC_TITLE = re.compile(
+    r"(?i)^(?:"
+    r"(?:use\s*case|uc)[\s\-_]*\d+\s*[:\-–.]?\s*|"
+    r"0\d{1,2}[\s.\-–:]+\s*"  # zero-padded 01/02… only
+    r")(.+)$"
+)
+# Functional requirement headings: "FR-01: Xem danh sách todo"
+_FR_HEAD = re.compile(
+    r"(?i)^FR[\s\-_]*(\d+)\s*[:\-–.]?\s*(.+)$"
 )
 _FEATURE_HEAD = re.compile(
     r"(?i)^(feature|chức năng|module|epic|capability)[\s\-_:.]+\s*(.+)$"
@@ -69,8 +102,95 @@ _EXCEPTION_HINT = re.compile(
     r"403|401|404|500|forbidden|unauthorized|fail|thất bại)\b"
 )
 _ACCEPTANCE_HINT = re.compile(
-    r"(?i)\b(acceptance|given\s|when\s|then\s|done when|tiêu chí chấp nhận|"
-    r"điều kiện hoàn thành|AC\s*\d+)\b"
+    r"(?i)\b("
+    r"given[\s\-]|when[\s\-]|then[\s\-]|done\s+when|"
+    r"tiêu chí chấp nhận\s*[:：]|AC\s*\d+|"
+    r"kỳ vọng\s*[:：]|expected\s*[:：]"
+    r")\b"
+)
+# Section headings in SRS — never become feature/AC items by themselves.
+_CRITERION_SECTION_LABEL = re.compile(
+    r"(?i)^(?:"
+    r"acceptance\s*criteria?|tiêu chí chấp nhận|"
+    r"business\s*rules?|quy tắc nghiệp vụ|"
+    r"validation(?:\s*&\s*dữ liệu)?|"
+    r"api(?:\s*/\s*giao diện|\s*summary|\s*định nghĩa)?|"
+    r"exceptions?|xử lý lỗi|error\s*handling|"
+    r"constraints?|ràng buộc(?:\s*nfr)?|nfr|"
+    r"gaps?|thiếu sót|open\s*questions?|"
+    r"use\s*cases?|luồng nghiệp vụ|kịch bản|"
+    r"features?|chức năng|modules?|"
+    r"actors?(?:\s*&\s*quyền)?|vai trò|tác\s*nhân|"
+    r"summary|tóm tắt(?:\s*&\s*phạm vi)?|phạm vi"
+    r")\.?\s*$"
+)
+# Common SRS template/document-outline headings — not functional items.
+# Includes EN IEEE-style + VI mục lục + structural labels (Endpoints, Todo Model…).
+_DOC_META_SECTION_LABEL = re.compile(
+    r"(?i)^(?:"
+    r"introduction|overall\s+description|functional\s+requirements|"
+    r"external\s+interface\s+requirements|non[\s\-]*functional\s+requirements?|"
+    r"use\s*cases?\s*(?:\(.*\))?|guidance\s+for\s+test\s+case\s+generation|"
+    r"sample\s+test\s+outline(?:\s*\(.*\))?|appendix(?:\s*[-—–:]\s*.*)?|"
+    r"project\s+structure|software\s+requirements?\s+specification|"
+    r"srs|đặc\s*tả\s*yêu\s*cầu(?:\s*phần\s*mềm)?|"
+    # Structural / model sections (not a user-facing capability)
+    r"endpoints?|api\s*endpoints?|routes?|"
+    r"(?:todo\s+)?model|data\s*model|domain\s*model|entities?|entity|"
+    r"schema|dto|database\s*schema|thực\s*thể(?:\s+todo)?|"
+    # Formal SRS TOC (VI + EN glosses stripped separately)
+    r"mục\s*tiêu|mục\s*đích(?:\s*tài\s*liệu)?|giới\s*thiệu|"
+    r"tổng\s*quan(?:\s*hệ\s*thống)?|"
+    r"mô\s*tả\s*tổng\s*quan(?:\s*hệ\s*thống)?|mô\s*tả\s*hệ\s*thống|"
+    r"mô\s*hình\s*nghiệp\s*vụ|bối\s*cảnh\s*sản\s*phẩm|"
+    r"các\s*bên\s*liên\s*quan|stakeholders?|đặc\s*điểm\s*người\s*dùng|"
+    r"phạm\s*vi(?:\s*(?:dự\s*án|sản\s*phẩm))?|ngoài\s*phạm\s*vi|out\s*of\s*scope|"
+    r"tác\s*nhân|đối\s*tượng\s*sử\s*dụng|actor|"
+    r"yêu\s*cầu\s*chức\s*năng|yêu\s*cầu\s*phi[\s\-]*chức\s*năng|"
+    r"yêu\s*cầu\s*phi\s*chức\s*năng|yêu\s*cầu\s*hệ\s*thống|"
+    r"yêu\s*cầu\s*giao\s*diện(?:\s*bên\s*ngoài)?|"
+    r"api\s*định\s*nghĩa|định\s*nghĩa\s*api|đặc\s*tả\s*api|đặc\s*tả\s*use\s*case|"
+    r"danh\s*sách\s*use\s*case|sơ\s*đồ\s*use\s*case|"
+    r"quy\s*tắc\s*nghiệp\s*vụ(?:\s*và\s*validation)?|"
+    r"hướng\s*dẫn(?:\s*(?:chạy\s*thử|cài\s*đặt|sử\s*dụng|môi\s*trường))?|"
+    r"test\s*case\s*gợi\s*ý|gợi\s*ý\s*test\s*case|test\s*cases?(?:\s*gợi\s*ý)?|"
+    r"kịch\s*bản\s*kiểm\s*thử(?:\s*nghiệm\s*thu)?|uat|test\s*scenarios?|"
+    r"ma\s*trận\s*truy\s*vết(?:\s*yêu\s*cầu)?|requirement\s*traceability|"
+    r"tiêu\s*chí\s*nghiệm\s*thu(?:\s*tổng\s*thể)?|phụ\s*lục|"
+    r"frontend|backend|database|kiến\s*trúc|cấu\s*trúc\s*dự\s*án|"
+    r"tài\s*liệu\s*tham\s*(?:chiếu|khảo)|định\s*nghĩa\s*và\s*từ\s*viết\s*tắt|"
+    r"lịch\s*sử\s*thay\s*đổi|giả\s*định(?:\s*và\s*phụ\s*thuộc)?|ràng\s*buộc(?:\s*hệ\s*thống)?|"
+    r"thực\s*thể(?:\s+\w+)?|giao\s*diện\s*(?:người\s*dùng|api|ui|bên\s*ngoài)|"
+    r"hướng\s*dẫn\s*môi\s*trường(?:\s*chạy\s*thử)?|"
+    r"tiêu\s*chí\s*nghiệm\s*thu(?:\s*tổng\s*thể)?|phụ\s*lục(?:\s*[-—–:].*)?|"
+    r"ghi\s*chú\s*phiên\s*bản|backlog(?:\s*gợi\s*ý)?|"
+    r"trạng\s*thái\s*công\s*việc(?:\s*trên\s*ui)?"
+    r")\.?\s*$"
+)
+# Capability-like verbs — empty-desc feature may keep only if name has one.
+_FEATURE_ACTION_HINT = re.compile(
+    r"(?i)\b("
+    r"xem|tạo|thêm|cập\s*nhật|sửa|xóa|xoá|validate|kiểm\s*tra|"
+    r"đăng\s*nhập|đăng\s*xuất|quản\s*lý|hiển\s*thị|tìm\s*kiếm|lọc|"
+    r"từ\s*chối|trả|cho\s*phép|reject|allow|display|show|"
+    r"view|create|update|delete|edit|search|login|logout"
+    r")\b"
+)
+# Item must contain at least one testable concrete token from SRS.
+_CONCRETE_DETAIL = re.compile(
+    r"(?i)(?:"
+    r"/[\w\-./{}:]+|"
+    r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+/|"
+    r"\bFR[-\s]?\d+\b|"
+    r"\b\d+\s*(?:ms|s|giây|phút|minute|min|day|ngày|giờ|h|mb|kb|%)\b|"
+    r"\b(?:Bearer|JWT|userId|email|password|refreshToken|accessToken)\b|"
+    r"\b(?:401|403|404|409|422|500)\b|"
+    r"`[^`]{2,}`|"
+    r"\b(?:CORS|TTL|localhost|OPTIONS)\b"
+    r")"
+)
+_MARKDOWN_OR_SRS_DUMP = re.compile(
+    r"(?i)(?:^|\s)#{1,6}\s|software\s+requirements?\s+specification|\bsrs\b.*\bsrs\b"
 )
 _GLOSSARY_RE = re.compile(
     r"(?i)^\s*(?:[-*•]\s*)?([A-Za-zÀ-ỹ0-9][\wÀ-ỹ0-9 \-/]{1,40})\s+(?:là|means|:)\s+(.+)$"
@@ -89,6 +209,7 @@ PRIMARY_LIST_KEYS = (
     "features",
     "actors",
     "useCases",
+    "executionContexts",
     "businessRules",
     "validationRules",
     "apiSummary",
@@ -111,8 +232,9 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "summary",
         "label": "Tóm tắt & phạm vi",
         "instruction": (
-            "Nêu mục tiêu hệ thống, phạm vi in-scope/out-of-scope, actor chính, và điều kiện tiền đề. "
-            "Không suy diễn ngoài tài liệu."
+            "2–5 câu Scope Statement (BABOK): mục tiêu sản phẩm + In-scope + Out-of-scope "
+            "+ actor chính — CHỈ câu/đoạn có trong SRS. "
+            "CẤM: vision/marketing, «Hệ thống cho phép…» template, suy diễn phạm vi ngoài SRS."
         ),
     },
     {
@@ -120,7 +242,14 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "features",
         "label": "Chức năng",
         "instruction": (
-            "Liệt kê module/chức năng độc lập từ SRS; mỗi item cần name rõ và description ngắn."
+            "CHỈ FR/capability atomic, kiểm thử được (IEEE 29148) từ thân SRS "
+            "(FR-xx / hành vi actor). name = động từ + đối tượng ngắn (vd «Tạo todo»). "
+            "description = 1–2 câu có ≥1 tín hiệu test (path|method|field|status|FR-id) — không lặp name. "
+            "CẤM: mục lục, heading (# ##), tiêu đề SRS, Mục tiêu/Phạm vi/Tác nhân (kể cả «Mục tiêu (2)»), "
+            "Endpoints, Todo Model, API định nghĩa, Frontend/Backend, Test case gợi ý, dump markdown, "
+            "epic/theme không hành vi. "
+            "Endpoint thuần → apiSummary; flow bước → useCases; must/shall chính sách → businessRules; "
+            "ràng buộc field → validationRules."
         ),
     },
     {
@@ -128,31 +257,57 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "actors",
         "label": "Actors & quyền",
         "instruction": (
-            "Xác định vai trò user/system và quyền thao tác tương ứng theo từng chức năng."
+            "Mỗi item = 1 role/actor đúng tên SRS (BABOK stakeholder/actor). "
+            "permissions = danh sách thao tác cụ thể SRS gán (động từ: tạo/xem/duyệt/…) — không prose dài. "
+            "CẤM bịa Admin/User/Guest; SRS im lặng về quyền → permissions rỗng; không suy diễn RBAC."
         ),
     },
-    {
-        "type": "BUSINESS_FLOWS",
-        "json_key": "useCases",
-        "label": "Luồng nghiệp vụ",
-        "instruction": (
-            "Mỗi flow là một user journey có điểm bắt đầu-kết thúc; ghi steps rõ theo thứ tự."
-        ),
-    },
-    {
-        "type": "BUSINESS_RULES",
-        "json_key": "businessRules",
-        "label": "Business rules",
-        "instruction": (
-            "Trích các quy tắc must/shall/không được; chỉ giữ rule có thể kiểm thử."
-        ),
-    },
+        {
+            "type": "BUSINESS_FLOWS",
+            "json_key": "useCases",
+            "label": "Luồng nghiệp vụ",
+            "instruction": (
+                "Mỗi item = 1 UC/flow: name = tên trong SRS; steps = «1. …\\n2. …» Main Success Scenario "
+                "(mỗi step = hành động actor hoặc phản hồi hệ thống cụ thể). "
+                "CẤM step tóm tắt («thực hiện nghiệp vụ / hoàn tất quy trình / xử lý thành công»). "
+                "Nhánh lỗi/exception trong SRS → exceptions; không gộp validation vào steps."
+            ),
+        },
+        {
+            "type": "EXECUTION_CONTEXT",
+            "json_key": "executionContexts",
+            "label": "Execution Context",
+            "instruction": (
+                "Mỗi item = 1 ngữ cảnh thực thi cho scenario/flow/AC có trong SRS (nuôi E2E codegen). "
+                "Bắt buộc khi SRS nêu actor/role/auth: "
+                "name = ref scenario/FEATURE/UC; actor = tên role SRS; "
+                "authRequired = true|false chỉ khi SRS nói rõ; "
+                "roles = danh sách role tham gia (multi-role nếu ≥2); "
+                "permissions = thao tác được/không được nếu SRS có; "
+                "sessionHint = authenticated|public|login_tc khi SRS có tín hiệu. "
+                "CẤM bịa Admin/User/Guest; SRS im lặng về auth/role → []; "
+                "không quyết định cơ chế login (storageState/API) — chỉ WHO/nghiệp vụ."
+            ),
+        },
+        {
+            "type": "BUSINESS_RULES",
+            "json_key": "businessRules",
+            "label": "Business rules",
+            "instruction": (
+                "Mỗi item = 1 policy atomic (BABOK BR): id = BR-n nếu SRS có (không thì BR-1..); "
+                "text ≈ nguyên văn must/shall/phải/chỉ được/cấm — có chủ thể + điều kiện/hành vi. "
+                "CẤM paraphrase «đảm bảo đúng đắn/toàn vẹn»; "
+                "ràng buộc field/format/range → validationRules; thông báo lỗi → exceptions."
+            ),
+        },
     {
         "type": "VALIDATION_DATA",
         "json_key": "validationRules",
         "label": "Validation & dữ liệu",
         "instruction": (
-            "Trích rule cho field/input: required, format, range, unique, boundary, message lỗi mong đợi."
+            "Mỗi item = 1 cặp field+rule (data dictionary): field = tên trường SRS; "
+            "rule = ràng buộc đo được (required|type|length|format|range|unique|pattern|message lỗi). "
+            "CẤM «dữ liệu phải hợp lệ / nhập đúng»; thiếu tên field trong SRS → không tạo item."
         ),
     },
     {
@@ -160,7 +315,10 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "apiSummary",
         "label": "API / giao diện",
         "instruction": (
-            "Liệt kê endpoint (method/path) hoặc entry UI trọng yếu liên quan flow nghiệp vụ."
+            "Mỗi item = 1 interface tường minh trong SRS: method+path (API) HOẶC tên màn/route/entry UI; "
+            "note ≤1 câu mục đích nếu SRS có. "
+            "CẤM đoán /api/... từ tên feature; cấm gộp nhiều endpoint vào 1 item; "
+            "không có method+path/UI entry tường minh → []."
         ),
     },
     {
@@ -168,7 +326,9 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "exceptions",
         "label": "Xử lý lỗi",
         "instruction": (
-            "Trích các case lỗi/exception/status code và phản hồi kỳ vọng của hệ thống."
+            "Mỗi item = 1 exception: điều kiện kích hoạt + phản hồi quan sát được "
+            "(status|message|hành vi UI/API) như SRS. "
+            "CẤM thêm 401/403/404/500 «cho đủ»; cấm «xử lý lỗi phù hợp / báo lỗi thân thiện»."
         ),
     },
     {
@@ -176,7 +336,10 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "acceptanceCriteria",
         "label": "Acceptance",
         "instruction": (
-            "Trích tiêu chí nghiệm thu (Given/When/Then hoặc điều kiện Done) theo ngôn ngữ SRS."
+            "CHỈ khi SRS có Given-When-Then / Done-when / AC-n / tiêu chí chấp nhận có điều kiện+kết quả. "
+            "Mỗi item = 1 outcome kiểm chứng được; text ≈ nguyên văn. "
+            "Không có AC → []. CẤM heading «Acceptance Criteria» trống; "
+            "cấm «user sử dụng thành công / hệ thống hoạt động đúng»."
         ),
     },
     {
@@ -184,7 +347,9 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "constraints",
         "label": "Ràng buộc NFR",
         "instruction": (
-            "Trích hiệu năng, bảo mật, audit, logging, compliance, timeout, SLA nếu có."
+            "Mỗi item = 1 NFR SMART trong SRS: có ngưỡng/điều kiện đo được "
+            "(SLA|latency|TTL|throughput|audit|retention|browser/OS…). "
+            "CẤM «bảo mật tốt / hiệu năng cao / dễ dùng»; SRS không nêu số liệu/điều kiện → []."
         ),
     },
     {
@@ -192,10 +357,48 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "gaps",
         "label": "Thiếu sót",
         "instruction": (
-            "Chỉ ghi thiếu sót thực sự cản trở sinh test chính xác (không bịa thêm)."
+            "Mỗi item = 1 thiếu sót chặn Sinh TC: TBD/TODO/«chưa rõ <X>» trong SRS, "
+            "hoặc «thiếu <tiêu chí/json_key> vì tài liệu không nêu». "
+            "CẤM brainstorm câu hỏi mở, wishlist, hoặc hỏi khám phá domain."
         ),
     },
 )
+
+# Rule CHUNG — áp dụng MỌI tiêu chí Phân tích (trước instruction riêng từng key).
+ANALYSIS_FIDELITY_RULES = """\
+QUY TẮC CHUNG PHÂN TÍCH TÀI LIỆU (BẮT BUỘC — áp dụng cho MỌI tiêu chí):
+Chuẩn tham chiếu: BABOK (scope/actors/BR/AC) + IEEE 29148 (FR/NFR kiểm thử được). Không lan man.
+A. NGUỒN SỰ THẬT: CHỈ Document excerpts từ file SRS đã upload.
+   Không domain mẫu, không kiến thức ngoài tài liệu, không bịa từ tên file.
+B. QUY TRÌNH EXTRACT (mỗi tiêu chí đều làm theo):
+   (1) Quét excerpts tìm câu/đoạn thuộc tiêu chí đó.
+   (2) Tách thành item độc lập — một ý = một item (atomic).
+   (3) Ghi nội dung GẦN NGUYÊN VĂN (giữ tên riêng, số, điều kiện, message, path).
+   (4) Self-check: item có truy vết được về 1 câu trong excerpts không? Không → xóa hoặc chuyển gaps.
+C. CẤM OUTPUT CHUNG CHUNG / MƠ HỒ (reject nếu viết kiểu này):
+   - «Hệ thống cho phép người dùng thực hiện các chức năng…»
+   - «Cần kiểm tra đầy đủ / đảm bảo tính đúng đắn / xử lý phù hợp»
+   - «Dữ liệu phải hợp lệ» / «Người dùng sử dụng thành công»
+   - Paraphrase làm mất tên field, số, điều kiện, status code trong SRS.
+D. MỖI ITEM PHẢI KIỂM CHỨNG ĐƯỢC (testable): chủ thể + điều kiện/hành động + kết quả (nếu SRS có).
+   Không verify được bằng TC → bỏ hoặc gaps. Thiếu chi tiết SRS → giữ đúng mức SRS; không pad.
+E. ĐÚNG KEY: không nhét Validation vào businessRules, không nhét Exception vào Acceptance, v.v.
+   Một đoạn SRS lẫn nhiều loại → tách nhiều item, map đúng json_key.
+F. THIẾU DỮ LIỆU: tiêu chí không có tín hiệu → [] (list rỗng). Chỉ gaps khi TBD/TODO/thiếu thật sự cản TC.
+G. NGÔN NGỮ = ngôn ngữ tài liệu. Không dịch làm lệch nghĩa. Không markdown ngoài JSON.
+H. Mục tiêu: Knowledge nuôi Sinh TC — chính xác > số lượng; cấm pad cho «đủ bộ».
+I. CẤM PLACEHOLDER / MỤC LỤC / MARKDOWN DUMP: Không tạo item từ:
+   - Tên section (Mục tiêu, Phạm vi, Tác nhân, Endpoints, Todo Model, API định nghĩa…)
+     kể cả «Mục tiêu (2)» / «1. Mục tiêu»
+   - Tiêu đề tài liệu / heading markdown (# ## Software Requirements Specification / SRS)
+   - Dump nguyên đoạn markdown SRS vào name hoặc description
+J. PHÂN TẦNG: features = FR/capability; apiSummary = method+path|UI entry;
+   useCases = Main Success Scenario; executionContexts = WHO (actor/auth/roles) cho scenario;
+   businessRules = policy; validationRules = field;
+   exceptions = lỗi; acceptanceCriteria = AC đo được; constraints = NFR SMART.
+K. CHI TIẾT CỤ THỂ: mỗi feature cần ≥1 tín hiệu kiểm thử (FR-id, path, method, field, status).
+   Heading mục lục / mô tả trống hoặc chung chung → bỏ.
+"""
 
 
 def empty_payload() -> dict[str, Any]:
@@ -204,6 +407,7 @@ def empty_payload() -> dict[str, Any]:
         "features": [],
         "actors": [],
         "useCases": [],
+        "executionContexts": [],
         "businessRules": [],
         "validationRules": [],
         "apiSummary": [],
@@ -230,6 +434,34 @@ def _dedupe_list(items: list[dict], key: str) -> list[dict]:
         if len(out) >= MAX_ITEMS:
             break
     return out
+
+
+def _dedupe_apis(items: list[dict]) -> list[dict]:
+    """Dedupe API rows by method+path (same path may host GET and POST)."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        method = str(it.get("method") or "").strip().upper()
+        path = str(it.get("path") or "").strip()
+        if not path:
+            continue
+        k = f"{method}|{path}".lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        row = dict(it)
+        row["method"] = method or str(it.get("method") or "")
+        row["path"] = path
+        out.append(row)
+        if len(out) >= MAX_ITEMS:
+            break
+    return out
+
+
+def _api_key(row: dict) -> str:
+    return f"{str(row.get('method') or '').strip().upper()}|{str(row.get('path') or '').strip()}".lower()
 
 
 def _as_list(value: Any) -> list:
@@ -267,6 +499,7 @@ def _payload_fragments(payload: dict[str, Any]) -> list[str]:
         "features",
         "actors",
         "useCases",
+        "executionContexts",
         "businessRules",
         "validationRules",
         "apiSummary",
@@ -294,6 +527,428 @@ def _append_unique(items: list[dict], key: str, value: dict, *, limit: int = MAX
         items.append(value)
 
 
+def _parse_numbered_use_case_title(text: str) -> str | None:
+    """Return UC title when line is numbered use case (01 Xem…, UC-01: …), else None."""
+    s = (text or "").strip()
+    if not s or len(s) < 5:
+        return None
+    m = _NUMBERED_UC_TITLE.match(s)
+    if not m:
+        return None
+    title = (m.group(1) or "").strip()
+    if not title or len(title) < 3:
+        return None
+    if not re.search(r"[A-Za-zÀ-ỹ]", title):
+        return None
+    return title[:200]
+
+
+def _strip_section_number_prefix(text: str) -> str:
+    """Remove TOC numbering: «1. », «1.1. », «II. », «A) » before matching section labels."""
+    s = (text or "").strip()
+    s = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", s)
+    s = re.sub(
+        r"^(?:[IVXLC]{1,6}|[A-Za-z])[\s.\-–:)+]+\s*",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    return s.strip(" .-–—:")
+
+
+def _normalize_feature_label(text: str) -> str:
+    """
+    Normalize a candidate feature/section name for junk detection:
+    strip markdown #, TOC numbers, trailing «(2)» / «(Functional Requirements)».
+    """
+    s = (text or "").strip()
+    if "#" in s:
+        first = re.split(r"\s*#{1,6}\s*", s, maxsplit=1)[0].strip()
+        if first:
+            s = first
+        s = re.sub(r"^#+\s*", "", s)
+    s = _strip_section_number_prefix(s)
+    s = re.sub(r"\s*\([^)]{0,80}\)\s*$", "", s)
+    return s.strip(" .-–—:")
+
+
+def _is_numbered_use_case_title(text: str) -> bool:
+    return _parse_numbered_use_case_title(text) is not None
+
+
+def _is_criterion_section_label(text: str) -> bool:
+    s = _normalize_feature_label(text or "")
+    return bool(s) and bool(
+        _CRITERION_SECTION_LABEL.match(s) or _DOC_META_SECTION_LABEL.match(s)
+    )
+
+
+def _is_markdown_or_srs_dump(text: str) -> bool:
+    """Reject names/descriptions that are document title or markdown heading dumps."""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if s.count("#") >= 1 and (
+        "requirement" in s.lower()
+        or "srs" in s.lower()
+        or "mục tiêu" in s.lower()
+        or s.count("#") >= 2
+        or len(s) > 80
+    ):
+        return True
+    if s.lstrip().startswith("|") and s.count("|") >= 3:
+        return True
+    return bool(_MARKDOWN_OR_SRS_DUMP.search(s))
+
+
+def _parse_fr_title(text: str) -> str | None:
+    """Return FR capability title from «FR-01: Xem danh sách todo», else None."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    m = _FR_HEAD.match(s)
+    if not m:
+        return None
+    title = (m.group(2) or "").strip()
+    if not title or len(title) < 3:
+        return None
+    if _is_criterion_section_label(title):
+        return None
+    return _shorten_fr_capability(title)[:200]
+
+
+def _shorten_fr_capability(text: str) -> str:
+    """Turn «Hệ thống phải cho phép người dùng xem…» into a short capability name."""
+    s = (text or "").strip()
+    s = re.sub(
+        r"(?i)^hệ\s*thống\s+phải\s+(?:cho\s+phép\s+(?:người\s+dùng\s+)?)?",
+        "",
+        s,
+    ).strip()
+    s = re.sub(r"(?i)^(?:the\s+system\s+shall\s+(?:allow\s+(?:the\s+user\s+to\s+)?)?)", "", s).strip()
+    return (s or text or "").strip()
+
+
+def _is_markdown_table_row(text: str) -> bool:
+    s = (text or "").strip()
+    return s.startswith("|") and s.count("|") >= 2
+
+
+def _is_junk_feature(name: str, desc: str = "") -> bool:
+    """True when item is TOC/heading/model/markdown — not an SRS capability."""
+    if not (name or "").strip():
+        return True
+    if _is_criterion_section_label(name):
+        return True
+    if _is_markdown_or_srs_dump(name):
+        return True
+    # Short blurb dumps only — long UC step tables are OK when name is clean.
+    if desc and len(desc.strip()) <= 160 and _is_markdown_or_srs_dump(desc):
+        return True
+    if len(name.strip()) > 100:
+        return True
+    if re.match(r"(?i)^UC[\s\-_]*\d+$", name.strip()):
+        return True
+    return False
+
+
+def _has_concrete_detail(text: str) -> bool:
+    return bool(_CONCRETE_DETAIL.search(text or ""))
+
+
+def _is_valid_acceptance_text(text: str) -> bool:
+    s = (text or "").strip()
+    if not s or len(s) < 12 or _is_criterion_section_label(s) or _is_markdown_or_srs_dump(s):
+        return False
+    if re.search(r"(?i)\bAC[-\s]?\d+\b", s):
+        return True
+    return bool(_ACCEPTANCE_HINT.search(s))
+
+
+def _promote_apis_from_text(apis: list[dict], text: str, *, note: str = "") -> None:
+    for m in _API_RE.finditer(text or ""):
+        row = {
+            "method": m.group(1).upper(),
+            "path": m.group(2),
+            "note": (note or text)[:200],
+        }
+        key = _api_key(row)
+        if any(_api_key(a) == key for a in apis):
+            continue
+        if len(apis) < MAX_ITEMS:
+            apis.append(row)
+
+
+def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop section placeholders, SRS dumps, invalid AC, and vague items."""
+    features_in = _as_list(payload.get("features"))
+    apis = list(_as_list(payload.get("apiSummary")))
+    kept_features: list[dict] = []
+
+    for row in features_in:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        desc = str(row.get("description") or "").strip()
+        if not name:
+            continue
+        fr_title = _parse_fr_title(name)
+        if fr_title:
+            name = fr_title
+        if _is_junk_feature(name, desc):
+            continue
+        combined = f"{name} {desc}".strip()
+        if _is_numbered_use_case_title(name) and not fr_title:
+            continue
+        if desc:
+            _promote_apis_from_text(apis, desc, note=desc[:200])
+        # Empty-desc: keep only capability verbs. With desc: keep if concrete OR action name.
+        if not desc:
+            if not _FEATURE_ACTION_HINT.search(name):
+                continue
+        elif not (
+            _has_concrete_detail(combined) or _FEATURE_ACTION_HINT.search(name)
+        ):
+            continue
+        kept_features.append({"name": name[:200], "description": desc[:400]})
+
+    payload["features"] = _dedupe_list(kept_features, "name")
+    payload["apiSummary"] = _dedupe_apis(apis)
+
+    use_cases_in = _as_list(payload.get("useCases"))
+    payload["useCases"] = _dedupe_list(
+        [
+            {
+                "name": (
+                    _parse_numbered_use_case_title(str(uc.get("name") or "").strip())
+                    or str(uc.get("name") or "").strip()
+                )[:200],
+                "steps": str(uc.get("steps") or "").strip()[:800],
+            }
+            for uc in use_cases_in
+            if isinstance(uc, dict)
+            and str(uc.get("name") or "").strip()
+            and not _is_junk_feature(str(uc.get("name") or ""), "")
+            and not _is_criterion_section_label(
+                _parse_numbered_use_case_title(str(uc.get("name") or "").strip())
+                or str(uc.get("name") or "")
+            )
+        ],
+        "name",
+    )
+
+    # Execution Context — WHO for E2E; only keep rows with a scenario/name ref from SRS.
+    exec_in = _as_list(payload.get("executionContexts"))
+    kept_exec: list[dict] = []
+    for row in exec_in:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        actor = str(row.get("actor") or "").strip()
+        if not name and not actor:
+            continue
+        if _is_criterion_section_label(name):
+            continue
+        roles_raw = row.get("roles")
+        if isinstance(roles_raw, list):
+            roles = [str(r).strip() for r in roles_raw if str(r).strip()][:8]
+        elif isinstance(roles_raw, str) and roles_raw.strip():
+            roles = [p.strip() for p in roles_raw.split(",") if p.strip()][:8]
+        else:
+            roles = []
+        auth_raw = row.get("authRequired")
+        auth_required: bool | None
+        if isinstance(auth_raw, bool):
+            auth_required = auth_raw
+        elif str(auth_raw).strip().lower() in ("true", "yes", "1"):
+            auth_required = True
+        elif str(auth_raw).strip().lower() in ("false", "no", "0"):
+            auth_required = False
+        else:
+            auth_required = None
+        item: dict[str, Any] = {
+            "name": (name or actor)[:200],
+            "actor": actor[:120],
+            "roles": roles,
+            "permissions": str(row.get("permissions") or "").strip()[:400],
+            "sessionHint": str(row.get("sessionHint") or "").strip()[:80],
+            "notes": str(row.get("notes") or "").strip()[:300],
+        }
+        if auth_required is not None:
+            item["authRequired"] = auth_required
+        kept_exec.append(item)
+    payload["executionContexts"] = _dedupe_list(kept_exec, "name")
+
+    acceptance_in = _as_list(payload.get("acceptanceCriteria"))
+    payload["acceptanceCriteria"] = _dedupe_list(
+        [
+            {"text": str(r.get("text") or "")[:500]}
+            for r in acceptance_in
+            if isinstance(r, dict) and _is_valid_acceptance_text(str(r.get("text") or ""))
+        ],
+        "text",
+    )
+
+    # Drop other lists whose sole content is a section heading / table dump.
+    for key, dedupe_key in (
+        ("businessRules", "text"),
+        ("exceptions", "text"),
+        ("constraints", "text"),
+        ("gaps", "text"),
+    ):
+        rows = _as_list(payload.get(key))
+        cleaned = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            val = str(r.get(dedupe_key) or r.get("text") or "").strip()
+            if not val:
+                continue
+            if _is_criterion_section_label(val) or _is_markdown_or_srs_dump(val):
+                continue
+            if _is_markdown_table_row(val):
+                continue
+            cleaned.append(r)
+        payload[key] = _dedupe_list(cleaned, dedupe_key) if cleaned else []
+
+    validations_in = _as_list(payload.get("validationRules"))
+    payload["validationRules"] = _dedupe_list(
+        [
+            r
+            for r in validations_in
+            if isinstance(r, dict)
+            and str(r.get("rule") or "").strip()
+            and not _is_criterion_section_label(str(r.get("rule") or ""))
+            and not _is_markdown_or_srs_dump(str(r.get("rule") or ""))
+            and not _is_markdown_table_row(str(r.get("rule") or ""))
+        ],
+        "rule",
+    )
+
+    actors_in = _as_list(payload.get("actors"))
+    payload["actors"] = _dedupe_list(
+        [
+            r
+            for r in actors_in
+            if isinstance(r, dict)
+            and str(r.get("name") or "").strip()
+            and not _is_criterion_section_label(str(r.get("name") or ""))
+            and not re.search(r"[-|]{3,}", str(r.get("name") or ""))
+            and not re.search(r"[<>]{2,}|-{2,}>", str(r.get("name") or ""))
+            and len(str(r.get("name") or "").strip()) <= 80
+        ],
+        "name",
+    )
+
+    return payload
+
+
+def _reclassify_misplaced_features(payload: dict[str, Any]) -> dict[str, Any]:
+    """Move numbered use-case titles out of features into useCases."""
+    features = _as_list(payload.get("features"))
+    use_cases = list(_as_list(payload.get("useCases")))
+    uc_names = {
+        str(uc.get("name") or "").strip().lower()
+        for uc in use_cases
+        if isinstance(uc, dict) and str(uc.get("name") or "").strip()
+    }
+    kept: list[dict] = []
+    for row in features:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        uc_title = _parse_numbered_use_case_title(name)
+        if uc_title:
+            desc = str(row.get("description") or "").strip()
+            steps = desc if desc else name
+            key = uc_title.lower()
+            if key not in uc_names and len(use_cases) < MAX_ITEMS:
+                use_cases.append({"name": uc_title, "steps": steps[:800]})
+                uc_names.add(key)
+            continue
+        kept.append(row)
+    payload["features"] = _dedupe_list(kept, "name")
+    payload["useCases"] = _dedupe_list(use_cases, "name")
+    return payload
+
+
+def _derive_use_case_name_from_fragment(frag: str) -> str:
+    """Derive a stable use-case title from SRS text — never a generic placeholder."""
+    s = (frag or "").strip()
+    if not s:
+        return ""
+    first = s.splitlines()[0].strip()
+    uc_title = _parse_numbered_use_case_title(first)
+    if uc_title:
+        return uc_title
+    # UC-01: Đăng nhập / Use case: Login / Luồng — Xác thực
+    m_uc = re.match(
+        r"(?i)^(?:use\s*case|uc[\s\-_]*\d+)\s*[:\-–]\s*(.+)$",
+        first,
+    )
+    if m_uc and m_uc.group(1).strip():
+        return m_uc.group(1).strip()[:200]
+    if _USECASE_HEAD.search(first):
+        for sep in (":", "—", "–", "-"):
+            if sep in first:
+                tail = first.split(sep, 1)[1].strip()
+                if tail and len(tail) >= 3:
+                    return tail[:200]
+        return first[:200]
+    m_feat = _FEATURE_HEAD.match(first)
+    if m_feat and m_feat.group(2).strip():
+        return m_feat.group(2).strip()[:200]
+    # Short non-step line as title (section heading above steps)
+    if first and len(first) <= 120 and not _FLOW_STEP_HINT.search(first):
+        return first[:200]
+    # Fallback: first step line trimmed (better than one shared label for all flows)
+    for line in s.splitlines():
+        ln = line.strip()
+        if ln and _FLOW_STEP_HINT.search(ln):
+            return ln[:200]
+    return first[:200] if first else ""
+
+
+def _fragment_already_in_use_cases(frag: str, use_cases: list) -> bool:
+    """Skip re-extracting flows from text already stored in useCases."""
+    needle = (frag or "").strip()
+    if len(needle) < 12:
+        return False
+    probe = needle[: min(80, len(needle))]
+    for uc in use_cases:
+        if not isinstance(uc, dict):
+            continue
+        steps = str(uc.get("steps") or "")
+        if probe in steps or needle in steps:
+            return True
+    return False
+
+
+def _append_unique_use_case(use_cases: list[dict], *, name: str, steps: str) -> None:
+    """Append use case; disambiguate name if same title but different steps."""
+    base_name = (name or "").strip()[:200]
+    steps_t = (steps or "").strip()[:800]
+    if not base_name or not steps_t:
+        return
+    for uc in use_cases:
+        if (
+            str(uc.get("name") or "").strip().lower() == base_name.lower()
+            and str(uc.get("steps") or "").strip() == steps_t
+        ):
+            return
+    final_name = base_name
+    n = 2
+    while any(
+        str(uc.get("name") or "").strip().lower() == final_name.lower() for uc in use_cases
+    ):
+        final_name = f"{base_name} ({n})"[:200]
+        n += 1
+    if len(use_cases) < MAX_ITEMS:
+        use_cases.append({"name": final_name, "steps": steps_t})
+
+
 def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Ensure mixed SRS lines are split into their own criteria buckets.
@@ -317,11 +972,13 @@ def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
     for frag in fragments:
         # 1) API/UI
         for m in _API_RE.finditer(frag):
-            _append_unique(
-                apis,
-                "path",
-                {"method": m.group(1).upper(), "path": m.group(2), "note": frag[:200]},
-            )
+            row = {
+                "method": m.group(1).upper(),
+                "path": m.group(2),
+                "note": frag[:200],
+            }
+            if not any(_api_key(a) == _api_key(row) for a in apis) and len(apis) < MAX_ITEMS:
+                apis.append(row)
         # 2) Actors / permissions
         m_actor = _ACTOR_LINE_RE.match(frag)
         if m_actor:
@@ -330,38 +987,59 @@ def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
                 "name",
                 {"name": m_actor.group(1).strip()[:120], "description": "", "permissions": ""},
             )
-        # 3) Business flow
-        if _FLOW_STEP_HINT.search(frag) or _USECASE_HEAD.search(frag):
-            flow_name = "Luồng tách từ SRS"
-            _append_unique(use_cases, "name", {"name": flow_name, "steps": frag[:800]})
+        # 3) Business flow — only split mixed lines not already in useCases
+        first_line = frag.splitlines()[0].strip() if frag else ""
+        is_flow = (
+            _FLOW_STEP_HINT.search(frag)
+            or _USECASE_HEAD.search(frag)
+            or _is_numbered_use_case_title(first_line)
+        )
+        if is_flow and not _fragment_already_in_use_cases(frag, use_cases):
+            flow_name = _derive_use_case_name_from_fragment(frag)
+            if flow_name:
+                _append_unique_use_case(use_cases, name=flow_name, steps=frag[:800])
         # 4) Validation
         if _VALIDATION_HINT.search(frag):
             _append_unique(validations, "rule", {"field": "", "rule": frag[:500]})
         # 5) Error handling
         if _EXCEPTION_HINT.search(frag):
             _append_unique(exceptions, "text", {"text": frag[:500]})
-        # 6) Acceptance
-        if _ACCEPTANCE_HINT.search(frag):
+        # 6) Acceptance — require real AC content, not section headings
+        if _ACCEPTANCE_HINT.search(frag) and _is_valid_acceptance_text(frag):
             _append_unique(acceptance, "text", {"text": frag[:500]})
         # 7) NFR constraints
         if re.search(r"(?i)\b(performance|bảo mật|security|sla|timeout|audit|logging)\b", frag):
             _append_unique(constraints, "text", {"text": frag[:500]})
         # 8) Business rules
-        if _RULE_HINT.search(frag) or _AUTH_HINT.search(frag):
+        if _RULE_HINT.search(frag) or (_AUTH_HINT.search(frag) and _RULE_HINT.search(frag)):
             _append_unique(
                 business_rules,
                 "text",
                 {"id": f"BR-{len(business_rules) + 1}", "text": frag[:500]},
             )
-        # 9) Features
-        m_feat = _FEATURE_HEAD.match(frag)
-        if m_feat:
-            _append_unique(
-                features,
-                "name",
-                {"name": (m_feat.group(2).strip() or frag[:80])[:200], "description": frag[:400]},
-            )
-        elif _FEATURE_HEAD_SIMPLE.search(frag):
+        # 9) Features — only real capability lines from SRS (not TOC / markdown dumps)
+        first_line = frag.splitlines()[0].strip() if frag else ""
+        if (
+            _is_numbered_use_case_title(first_line)
+            or _is_junk_feature(first_line, frag)
+            or _is_criterion_section_label(first_line)
+            or _is_markdown_or_srs_dump(frag)
+        ):
+            pass
+        elif m_feat := _FEATURE_HEAD.match(frag):
+            feat_name = (m_feat.group(2).strip() or frag[:80])[:200]
+            if not _is_junk_feature(feat_name, frag):
+                _append_unique(
+                    features,
+                    "name",
+                    {"name": feat_name, "description": frag[:400]},
+                )
+        elif (
+            _FEATURE_HEAD_SIMPLE.search(frag)
+            and not _USECASE_HEAD.search(frag)
+            and len(frag) < 120
+            and not _is_junk_feature(frag[:200], "")
+        ):
             _append_unique(features, "name", {"name": frag[:200], "description": ""})
         # 10) Gaps
         if _GAP_HINT.search(frag):
@@ -374,7 +1052,7 @@ def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
     for i, r in enumerate(payload["businessRules"], start=1):
         r["id"] = f"BR-{i}"
     payload["validationRules"] = _dedupe_list(validations, "rule")
-    payload["apiSummary"] = _dedupe_list(apis, "path")
+    payload["apiSummary"] = _dedupe_apis(apis)
     payload["exceptions"] = _dedupe_list(exceptions, "text")
     payload["acceptanceCriteria"] = _dedupe_list(acceptance, "text")
     payload["constraints"] = _dedupe_list(constraints, "text")
@@ -414,7 +1092,7 @@ def normalize_knowledge_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
             if not isinstance(uc, dict):
                 continue
             name = str(uc.get("name") or "").strip()
-            if name:
+            if name and not _is_numbered_use_case_title(name) and not _is_criterion_section_label(name):
                 feats.append({"name": name, "description": ""})
         base["features"] = _dedupe_list(feats, "name")
 
@@ -475,7 +1153,9 @@ def normalize_knowledge_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
             )
         base["validationRules"] = base["validationRules"][:MAX_ITEMS]
 
-    return _enforce_criteria_split(base)
+    return _sanitize_knowledge_payload(
+        _reclassify_misplaced_features(_enforce_criteria_split(base))
+    )
 
 
 def build_knowledge_heuristic(
@@ -542,20 +1222,157 @@ def build_knowledge_heuristic(
             use_cases.append({"name": h[:200], "steps": body[:800]})
 
         if h:
-            m_feat = _FEATURE_HEAD.match(h)
-            if m_feat:
+            fr_title = _parse_fr_title(h)
+            if fr_title:
                 features.append(
                     {
-                        "name": m_feat.group(2).strip()[:200] or h[:200],
-                        "description": body[:400],
+                        "name": fr_title,
+                        "description": (body[:400] if body else h[:400]),
                     }
                 )
-            elif _FEATURE_HEAD_SIMPLE.search(h) and not _USECASE_HEAD.search(h):
-                features.append({"name": h[:200], "description": body[:400]})
+            uc_title = _parse_numbered_use_case_title(h)
+            if uc_title:
+                use_cases.append(
+                    {
+                        "name": uc_title,
+                        "steps": body[:800] if body else h[:800],
+                    }
+                )
+            elif not fr_title and not _is_junk_feature(h, body):
+                m_feat = _FEATURE_HEAD.match(h)
+                if m_feat:
+                    feat_name = m_feat.group(2).strip()[:200] or h[:200]
+                    if not _is_junk_feature(feat_name, body):
+                        features.append(
+                            {
+                                "name": feat_name,
+                                "description": body[:400],
+                            }
+                        )
+                elif (
+                    _FEATURE_HEAD_SIMPLE.search(h)
+                    and not _USECASE_HEAD.search(h)
+                    and not _is_criterion_section_label(h)
+                ):
+                    features.append({"name": h[:200], "description": body[:400]})
+
+            # Actor table under «Actor» / «Tác nhân» headings
+            if re.search(r"(?i)\b(?:actor|tác\s*nhân|vai\s*trò)\b", h) and body:
+                for line in body.splitlines():
+                    row = line.strip()
+                    if not _is_markdown_table_row(row):
+                        continue
+                    cells = [c.strip() for c in row.strip("|").split("|")]
+                    if len(cells) < 2:
+                        continue
+                    aname = cells[0]
+                    if not aname or re.search(
+                        r"(?i)^(actor|vai\s*trò|mô\s*tả|tên|:[-]+)$", aname
+                    ):
+                        continue
+                    if re.search(r"[-|]{3,}|[<>]{2,}", aname):
+                        continue
+                    actors.append(
+                        {
+                            "name": aname[:120],
+                            "description": cells[1][:200] if len(cells) > 1 else "",
+                            "permissions": "",
+                        }
+                    )
 
         for line in text.splitlines():
             s = line.strip()
             if not s or len(s) < 8:
+                continue
+
+            # Structured FR / UC / BR / AC / NFR from markdown tables (formal SRS).
+            m_fr = _FR_TABLE_ROW.match(s)
+            if m_fr:
+                code = f"FR-{int(m_fr.group(1)):02d}"
+                raw_req = m_fr.group(2).strip()
+                feat_name = _shorten_fr_capability(raw_req)[:200]
+                # Traceability cells like «| FR-01 | UC-01 | … |» are not capabilities.
+                if re.match(r"(?i)^UC[\s\-_]*\d+$", feat_name):
+                    continue
+                if feat_name and not _is_junk_feature(feat_name, raw_req):
+                    features.append(
+                        {
+                            "name": feat_name,
+                            "description": f"{code}: {raw_req}"[:400],
+                        }
+                    )
+                continue
+
+            m_uc = _UC_TABLE_ROW.match(s)
+            if m_uc:
+                # Index-only table: skip — detailed «### UC-xx: …» chunks carry steps.
+                continue
+
+            m_br = _BR_TABLE_ROW.match(s)
+            if m_br:
+                rules.append(
+                    {
+                        "id": f"BR-{int(m_br.group(1))}",
+                        "text": m_br.group(2).strip()[:500],
+                    }
+                )
+                continue
+
+            m_nfr = _NFR_TABLE_ROW.match(s)
+            if m_nfr:
+                group = m_nfr.group(2).strip()
+                desc = m_nfr.group(3).strip()
+                text = f"{group}: {desc}" if group and desc else (desc or group)
+                if text:
+                    constraints.append({"text": text[:500]})
+                continue
+
+            m_api_tbl = _API_TABLE_ROW.match(s)
+            if m_api_tbl:
+                path = m_api_tbl.group(2)
+                # Skip UAT placeholder paths like /todos/{id_sai}
+                if not re.search(r"(?i)_sai|example|placeholder", path):
+                    apis.append(
+                        {
+                            "method": m_api_tbl.group(1).upper(),
+                            "path": path,
+                            "note": s[:200],
+                        }
+                    )
+                continue
+
+            for m_ac in _AC_INLINE.finditer(s):
+                ac_text = f"AC-{int(m_ac.group(1)):02d}: {m_ac.group(2).strip()}"
+                if _is_valid_acceptance_text(ac_text):
+                    acceptance.append({"text": ac_text[:500]})
+
+            # Skip freeform extraction on table separator / header noise rows.
+            if _is_markdown_table_row(s):
+                # Field validation table: | title | String | Có | Độ dài 3–100 |
+                if _VALIDATION_HINT.search(s) and not re.search(
+                    r"(?i)\|\s*(?:trường|field|kiểu|bắt buộc)\s*\|", s
+                ):
+                    cells = [c.strip() for c in s.strip("|").split("|")]
+                    if (
+                        len(cells) >= 4
+                        and cells[0]
+                        and not re.match(r"(?i)^(trường|field|:[-]+)$", cells[0])
+                        and not re.search(r"(?i)FR[\s\-_]*\d+|UC[\s\-_]*\d+|→|->", cells[0])
+                        and len(cells[0]) <= 40
+                    ):
+                        rule = " — ".join(c for c in cells if c)[:500]
+                        validations.append({"field": cells[0][:80], "rule": rule})
+                for m in _API_RE.finditer(s):
+                    path = m.group(2)
+                    if re.search(r"(?i)_sai|example|placeholder", path):
+                        continue
+                    apis.append(
+                        {
+                            "method": m.group(1).upper(),
+                            "path": path,
+                            "note": s[:200],
+                        }
+                    )
                 continue
 
             m_actor = _ACTOR_LINE_RE.match(s)
@@ -588,18 +1405,25 @@ def build_knowledge_heuristic(
                     constraints.append({"text": s[:500]})
                 else:
                     rules.append(item)
-                if _VALIDATION_HINT.search(s):
+                if _VALIDATION_HINT.search(s) and len(s) <= 220:
                     validations.append({"field": "", "rule": s[:500]})
-            elif _VALIDATION_HINT.search(s):
+            elif _VALIDATION_HINT.search(s) and len(s) <= 220 and not re.match(
+                r"(?i)^(?:AC|FR|NFR)[\s\-_]*\d+", s
+            ):
                 validations.append({"field": "", "rule": s[:500]})
 
-            if _AUTH_HINT.search(s):
+            if _AUTH_HINT.search(s) and _RULE_HINT.search(s):
                 rules.append({"id": f"BR-{len(rules) + 1}", "text": s[:500]})
 
-            if _EXCEPTION_HINT.search(s):
+            if (
+                _EXCEPTION_HINT.search(s)
+                and not re.match(r"(?i)^(?:AC|FR|NFR)[\s\-_]*\d+", s)
+                and not re.match(r"(?i)^(?:GET|POST|PUT|PATCH|DELETE)\s+/", s)
+                and "—" not in s[:40]
+            ):
                 exceptions.append({"text": s[:500]})
 
-            if _ACCEPTANCE_HINT.search(s):
+            if _ACCEPTANCE_HINT.search(s) and _is_valid_acceptance_text(s):
                 acceptance.append({"text": s[:500]})
 
             if _GAP_HINT.search(s):
@@ -637,7 +1461,7 @@ def build_knowledge_heuristic(
     payload["actors"] = _dedupe_list(actors, "name")
     payload["useCases"] = _dedupe_list(use_cases, "name")
     payload["validationRules"] = _dedupe_list(validations, "rule")
-    payload["apiSummary"] = _dedupe_list(apis, "path")
+    payload["apiSummary"] = _dedupe_apis(apis)
     payload["exceptions"] = _dedupe_list(exceptions, "text")
     payload["acceptanceCriteria"] = _dedupe_list(acceptance, "text")
     payload["constraints"] = _dedupe_list(constraints, "text")
@@ -850,6 +1674,8 @@ def merge_knowledge_payloads(
 
 
 def knowledge_system_prompt(*, pass1: bool = True) -> str:
+    from app.llm.analysis_rules import append_analysis_tc_checklist
+
     guide = (
         tuple(c for c in ANALYSIS_CRITERIA_GUIDE if c["json_key"] in PASS1_JSON_KEYS)
         if pass1
@@ -858,9 +1684,12 @@ def knowledge_system_prompt(*, pass1: bool = True) -> str:
     criteria_lines = "\n".join(
         f"- {c['type']} ({c['json_key']}): {c['instruction']}" for c in guide
     )
+    fidelity = ANALYSIS_FIDELITY_RULES.strip()
     if pass1:
-        return (
+        base = (
             "You are a requirements analyst preparing Knowledge for QA test-case generation. "
+            "Your output feeds Generate TC — inaccurate analysis causes wrong test cases.\n\n"
+            f"{fidelity}\n\n"
             "From uploaded SRS excerpts, return ONLY one JSON object (no markdown) with keys:\n"
             "- summary (string)\n"
             "- features ([{name,description}])\n"
@@ -868,36 +1697,40 @@ def knowledge_system_prompt(*, pass1: bool = True) -> str:
             "- useCases ([{name,steps}])\n"
             "- businessRules ([{id,text}])\n"
             "- validationRules ([{field,rule}])\n"
-            "- gaps ([{text}]): ONLY real missing info that blocks accurate TCs (max ~10)\n"
-            "Focus criteria:\n"
-            f"{criteria_lines}\n"
+            "- gaps ([{text}]): ONLY real missing info that blocks accurate TCs (max ~10)\n\n"
+            "Extraction criteria (fill content accurately per key):\n"
+            f"{criteria_lines}\n\n"
             "CRITICAL: split mixed SRS paragraphs into separate items per key. "
-            "Do NOT invent facts. Be concise. No evidence quotes required. "
-            "Use the document language (often Vietnamese)."
+            "Prefer near-verbatim excerpts. Empty list if absent — never invent."
         )
-    return (
+        return append_analysis_tc_checklist(base)
+    base = (
         "You are a requirements analyst preparing Knowledge for QA test-case generation. "
-        "From uploaded SRS excerpts, build a structured Knowledge Workspace for database persistence. "
+        "Your structured Knowledge is persisted and reused for Generate TC — "
+        "wrong/vague items cascade into wrong test cases.\n\n"
+        f"{fidelity}\n\n"
+        "From uploaded SRS excerpts, build a structured Knowledge Workspace. "
         "Return ONLY one JSON object (no markdown) with keys:\n"
-        "- summary (string): scope in/out + short overview\n"
-        "- features ([{name,description}]): distinct features/modules for TC module mapping\n"
-        "- actors ([{name,description,permissions}]): who can do what\n"
-        "- useCases ([{name,steps}]): flows with numbered steps when possible\n"
-        "- businessRules ([{id,text}]): testable rules\n"
-        "- validationRules ([{field,rule}]): field/format/range/required\n"
-        "- apiSummary ([{method,path,note}])\n"
-        "- exceptions ([{text}]): error/exception expected behaviors\n"
-        "- acceptanceCriteria ([{text}]): Done-when / Given-When-Then\n"
-        "- constraints ([{text}]): NFR (perf/security/audit…)\n"
-        "- gaps ([{text}]): ONLY real missing info that blocks accurate TCs "
-        "(do NOT invent dozens of open questions; max ~15)\n"
+        "- summary (string): chỉ phạm vi/overview có trong tài liệu\n"
+        "- features ([{name,description}]): module/chức năng đúng tên SRS\n"
+        "- actors ([{name,description,permissions}]): chỉ role/quyền đã nêu\n"
+        "- useCases ([{name,steps}]): flow + steps theo tài liệu\n"
+        "- businessRules ([{id,text}]): rule kiểm thử được, gần nguyên văn\n"
+        "- validationRules ([{field,rule}]): field/format/range/required như SRS\n"
+        "- apiSummary ([{method,path,note}]): chỉ endpoint/UI entry đã nêu\n"
+        "- exceptions ([{text}]): lỗi/status đã mô tả\n"
+        "- acceptanceCriteria ([{text}]): AC/Done-when gần nguyên văn\n"
+        "- constraints ([{text}]): NFR chỉ khi SRS có\n"
+        "- gaps ([{text}]): thiếu sót thật — không bịa danh sách câu hỏi (max ~15)\n\n"
         "Mandatory extraction criteria by persisted DB type:\n"
-        f"{criteria_lines}\n"
-        "CRITICAL: If one SRS paragraph mixes multiple criteria, split it into separate items "
-        "for each relevant key (do not keep mixed/combined items).\n"
-        "Use the document language (often Vietnamese). Be concise; do not invent facts. "
-        "Prefer Features + Use Cases + Validation + Exceptions + Acceptance over trivia."
+        f"{criteria_lines}\n\n"
+        "CRITICAL: Map content to the correct key only. Never invent section-placeholder items "
+        "(e.g. a feature named «Acceptance Criteria» with empty description). "
+        "acceptanceCriteria = [] unless Given-When-Then / Done-when / AC text exists in excerpts. "
+        "Each item needs concrete testable detail (path, method, field, TTL, status code). "
+        "Empty list if absent — never pad."
     )
+    return append_analysis_tc_checklist(base)
 
 
 def build_knowledge_user_prompt(
@@ -913,7 +1746,8 @@ def build_knowledge_user_prompt(
         else ANALYSIS_CRITERIA_GUIDE
     )
     criteria = "\n".join(
-        f"{idx + 1}. {c['label']} [{c['type']}] -> JSON key '{c['json_key']}'"
+        f"{idx + 1}. {c['label']} [{c['type']}] -> JSON key '{c['json_key']}'\n"
+        f"   → {c['instruction']}"
         for idx, c in enumerate(guide)
     )
     excerpt = chunks_to_prompt_text(
@@ -921,32 +1755,45 @@ def build_knowledge_user_prompt(
         max_chars=MAX_CHUNK_CHARS_FOR_BUILD_PASS1 if pass1 else MAX_CHUNK_CHARS_FOR_BUILD,
         rank=True,
     )
+    fidelity_short = (
+        "CHỈ extract từ Document excerpts (SRS upload). "
+        "Cấm mục lục/heading markdown/Endpoints/Todo Model/Mục tiêu (N). "
+        "features = hành vi kiểm thử được (có FR/path/method)."
+    )
+    from app.llm.analysis_rules import append_analysis_tc_checklist
+
     if pass1:
-        return (
-            "SRS nguồn — phân tích nhanh (pass 1) theo checklist TC-critical.\n"
+        base = (
+            "SRS nguồn — phân tích nhanh (pass 1). Chỉ bám excerpts bên dưới.\n"
             f"Files: {files}\n\n"
-            "Checklist:\n"
+            f"{fidelity_short}\n\n"
+            "Checklist (mỗi mục = instruction riêng — output phải cụ thể):\n"
             f"{criteria}\n\n"
             "Quy tắc:\n"
-            "- Trả về DUY NHẤT 1 JSON object hợp lệ (các key ở trên; list thiếu → []).\n"
-            "- Không markdown, không giải thích.\n"
-            "- Tách item đúng key; không bịa.\n\n"
-            "Document excerpts:\n\n"
+            "- Trả về DUY NHẤT 1 JSON object hợp lệ (list thiếu → []).\n"
+            "- Không markdown, không giải thích, không copy tiêu đề SRS vào features.\n"
+            "- Endpoint → apiSummary; flow UI → useCases; không gom mục lục vào features.\n\n"
+            "Document excerpts (NGUỒN SỰ THẬT — SRS):\n\n"
             f"{excerpt}\n\n"
             "Return the Knowledge JSON now."
         )
-    return (
+        return append_analysis_tc_checklist(base)
+    base = (
         "SRS nguồn tải lên cần phân tích đầy đủ theo checklist bắt buộc dưới đây.\n"
         f"Files: {files}\n\n"
-        "Checklist tiêu chí:\n"
+        f"{fidelity_short}\n\n"
+        "Checklist tiêu chí (mỗi json_key một loại nội dung — phải cụ thể, bám SRS):\n"
         f"{criteria}\n\n"
         "Quy tắc output:\n"
-        "- Trả về DUY NHẤT 1 JSON object hợp lệ theo schema đã yêu cầu.\n"
+        "- Trả về DUY NHẤT 1 JSON object hợp lệ theo schema system prompt.\n"
         "- Không markdown, không giải thích thêm ngoài JSON.\n"
-        "- Mỗi tiêu chí phải tách item riêng; không gộp Validation/Rule/Exception/Acceptance vào cùng 1 item.\n"
-        "- Nếu 1 đoạn SRS chứa nhiều ý, phải tách thành nhiều item và map đúng key tương ứng.\n"
-        "- Nếu không đủ dữ liệu cho tiêu chí nào, ghi lý do vào gaps.\n\n"
-        "Document excerpts:\n\n"
+        "- Mỗi tiêu chí chỉ chứa nội dung thuộc tiêu chí đó; không gom Validation/Rule/Exception/AC vào features.\n"
+        "- features.description phải có path/field/số/status cụ thể; endpoint chi tiết → apiSummary.\n"
+        "- acceptanceCriteria chỉ khi SRS có Given-When-Then/Done-when/AC — không có thì [].\n"
+        "- Cấm tạo feature/AC chỉ là heading «Acceptance Criteria» không kèm nội dung.\n"
+        "- Nếu không đủ dữ liệu cho tiêu chí nào → [] — không bịa.\n\n"
+        "Document excerpts (NGUỒN SỰ THẬT — chỉ dùng nội dung này):\n\n"
         f"{excerpt}\n\n"
         "Return the Knowledge JSON now."
     )
+    return append_analysis_tc_checklist(base)

@@ -82,7 +82,7 @@ export function ReadyStrip({
             Ready
           </Typography.Text>
           <Tag color={aiReady ? "success" : "error"}>
-            AI {aiReady ? aiProvider || "Ready" : "chưa"}
+            AI {aiReady ? (aiProvider ? `Ready · ${aiProvider}` : "Ready") : "chưa"}
           </Tag>
           <Tag color={localPath ? "success" : "warning"}>
             Project root · {rootLabel}
@@ -114,7 +114,7 @@ export function ReadyStrip({
               </Button>
             </Link>
           }
-          description="Lưu API Key và Xác minh trước khi sinh mã."
+          description="Vào Cấu hình AI, chọn CLI (vd. Cursor CLI) rồi Lưu → Test CLI cho đến khi Ready."
         />
       ) : null}
 

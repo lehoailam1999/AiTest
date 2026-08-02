@@ -9,6 +9,7 @@
     "api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./api/run.ps1",
     "start": "npm run api",
     "desktop": "npm run dev --prefix desktop",
+    "desktop:build": "npm run build --prefix desktop",
     "desktop:ui": "npm run dev:ui --prefix desktop",
     "desktop:install": "npm install --prefix desktop",
     "protocol:install": "npm install --prefix packages/ide-protocol",

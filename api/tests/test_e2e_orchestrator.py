@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -98,13 +99,71 @@ def test_resolve_e2e_file_paths_with_requirement_tc():
         requirement_title="Đăng nhập",
         test_case_title="TC01 - Login thành công",
     )
-    assert resolved[0].path == "AItest/E2ETest/Đăng nhập/TC01 - Login thành công/pages/login.page.ts"
-    assert resolved[1].path == "AItest/E2ETest/Đăng nhập/TC01 - Login thành công/specs/login.spec.ts"
+    assert resolved[0].path == "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công/pages/login.page.ts"
+    assert resolved[1].path == "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công/specs/login.spec.ts"
     assert e2e_module_root(
         "Auth",
         requirement_title="Đăng nhập",
         test_case_title="TC01 - Login thành công",
-    ) == "AItest/E2ETest/Đăng nhập/TC01 - Login thành công"
+    ) == "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công"
+
+
+def test_resolve_e2e_file_paths_overwrites_same_canonical_path():
+    """LLM double-emit same leaf → one file (last wins), no salt twin."""
+    files = [
+        E2EFile(path="specs/login.spec.ts", content="FIRST", kind="spec"),
+        E2EFile(path="pages/login.page.ts", content="page", kind="page"),
+        E2EFile(path="specs/login.spec.ts", content="SECOND", kind="spec"),
+    ]
+    resolved = resolve_e2e_file_paths(
+        files,
+        module="Auth",
+        requirement_title="Auth",
+        test_case_title="Login",
+    )
+    specs = [f for f in resolved if f.kind == "spec"]
+    assert len(specs) == 1
+    assert specs[0].content == "SECOND"
+    assert ".spec." in specs[0].path
+    assert not re.search(r"\.[0-9a-f]{8}\.spec", specs[0].path)
+
+
+def test_resolve_e2e_file_paths_collapses_nested_aitest_segments():
+    files = [
+        E2EFile(
+            path="backend/AItest/E2ETest/To-do/tmp/AItest/E2ETest/Cap-nhat/fixtures/storageState.json",
+            content='{"cookies":[],"origins":[]}',
+            kind="fixture",
+        )
+    ]
+    resolved = resolve_e2e_file_paths(
+        files,
+        module="To-do",
+        package_prefix="backend",
+        requirement_title="To-do",
+    )
+    assert (
+        resolved[0].path
+        == "backend/AItest/E2ETest/To-do/fixtures/storageState.json"
+    )
+
+
+def test_resolve_e2e_file_paths_rewrites_spec_storage_state_override():
+    files = [
+        E2EFile(
+            path="specs/a.spec.ts",
+            kind="spec",
+            content=(
+                "import { test } from '@playwright/test';\n"
+                "test.use({ storageState: 'AItest/E2ETest/X/fixtures/storageState.json' });\n"
+                "test('x', async () => {});\n"
+            ),
+        )
+    ]
+    resolved = resolve_e2e_file_paths(files, module="Auth")
+    spec = next(f for f in resolved if f.path.endswith("/specs/a.spec.ts"))
+    assert 'storageState: "./fixtures/storageState.json"' in spec.content
+    assert "AItest/E2ETest/X/fixtures/storageState.json" not in spec.content
 
 
 def test_e2e_module_root_fallback_module():
@@ -113,20 +172,80 @@ def test_e2e_module_root_fallback_module():
     assert e2e_module_root("", requirement_title="Req1") == "AItest/E2ETest/Req1"
 
 
+def test_e2e_module_root_sanitizes_slashes_in_label():
+    assert (
+        e2e_module_root("[E2E-Auth/Permission]-Refresh")
+        == "AItest/E2ETest/E2E-Auth-Permission-Refresh"
+    )
+
+
+def test_e2e_module_root_truncates_long_tc_title():
+    long_title = (
+        "E2E-Validation-Khai-báo-thiết-bị-kỹ-thuật-số-Nhập-IMEI-Số-Serial-"
+        "chứa-ký-tự-không-phải-chữ-và-số-Hệ-thống-không-chấp-nhận-dữ-liệu-không-hợp-lệ"
+    )
+    root = e2e_module_root(
+        "Mod",
+        requirement_title="Tạo vật chứng",
+        test_case_title=long_title,
+    )
+    tc_seg = root.split("/")[-1]
+    assert len(tc_seg) <= 48
+    assert root.startswith("AItest/E2ETest/")
+
+
 def test_ensure_playwright_config():
     files = [E2EFile(path="AItest/E2ETest/Auth/specs/a.spec.ts", content="x", kind="spec")]
-    out = ensure_playwright_config(files, module="Auth", target_url="http://localhost:5173")
+    # storageStateRel alone (no JSON) → ui_helper (avoid Playwright ENOENT)
+    out = ensure_playwright_config(
+        files,
+        module="Auth",
+        target_url="http://localhost:5173",
+        storage_state_rel="./fixtures/storageState.json",
+    )
     assert any(f.kind == "config" for f in out)
-    assert any(
+    cfg = next(f for f in out if f.kind == "config")
+    assert "storageState" not in cfg.content
+    assert not any(
         f.path.replace("\\", "/").endswith("fixtures/global.setup.ts") for f in out
     )
     assert "baseURL" in default_playwright_config(base_url="http://x")
     assert "globalSetup: './fixtures/global.setup.ts'" in default_playwright_config(
-        base_url="http://x"
+        base_url="http://x", storage_state_rel="./fixtures/storageState.json"
+    )
+    bare = default_playwright_config(base_url="http://x")
+    assert "globalSetup" not in bare
+    assert "storageState" not in bare
+
+    state = (
+        '{"cookies":[{"name":"a","value":"b","domain":"localhost","path":"/"}],'
+        '"origins":[]}'
+    )
+    out_ss = ensure_playwright_config(
+        [
+            E2EFile(path="AItest/E2ETest/Auth/specs/a.spec.ts", content="x", kind="spec"),
+            E2EFile(
+                path="AItest/E2ETest/Auth/fixtures/storageState.json",
+                content=state,
+                kind="fixture",
+            ),
+        ],
+        module="Auth",
+        target_url="http://localhost:5173",
+        storage_state_rel="./fixtures/storageState.json",
+    )
+    cfg_ss = next(f for f in out_ss if f.kind == "config")
+    assert "storageState" in cfg_ss.content
+    assert any(
+        f.path.replace("\\", "/").endswith("fixtures/global.setup.ts") for f in out_ss
     )
 
 
 def test_ensure_playwright_config_places_global_setup_next_to_config():
+    state = (
+        '{"cookies":[{"name":"a","value":"b","domain":"localhost","path":"/"}],'
+        '"origins":[]}'
+    )
     files = [
         E2EFile(
             path="AItest/E2ETest/Req A/TC B/specs/a.spec.ts",
@@ -138,6 +257,11 @@ def test_ensure_playwright_config_places_global_setup_next_to_config():
             content="export default defineConfig({ testDir: './specs' });",
             kind="config",
         ),
+        E2EFile(
+            path="AItest/E2ETest/Req A/TC B/fixtures/storageState.json",
+            content=state,
+            kind="fixture",
+        ),
     ]
     out = ensure_playwright_config(
         files,
@@ -145,11 +269,78 @@ def test_ensure_playwright_config_places_global_setup_next_to_config():
         requirement_title="Req A",
         test_case_title="TC B",
         target_url="http://localhost:5174",
+        storage_state_rel="./fixtures/storageState.json",
     )
     setup = next(
         f for f in out if f.path.replace("\\", "/").endswith("fixtures/global.setup.ts")
     )
     assert setup.path.replace("\\", "/").startswith("AItest/E2ETest/Req A/TC B/")
+
+
+def test_ensure_playwright_config_ui_helper_omits_storage():
+    files = [E2EFile(path="AItest/E2ETest/M/specs/a.spec.ts", content="x", kind="spec")]
+    out = ensure_playwright_config(
+        files, module="M", target_url="http://localhost:1", storage_state_rel=""
+    )
+    cfg = next(f for f in out if f.kind == "config")
+    assert "storageState" not in cfg.content
+    assert "globalSetup" not in cfg.content
+    assert not any(
+        f.path.replace("\\", "/").endswith("global.setup.ts") for f in out
+    )
+
+
+def test_ensure_playwright_config_stays_with_existing_specs():
+    """Config must land next to Specs — not a divergent title-based folder."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Demo/specs/feature.spec.ts",
+            content="test('x', async ({ page }) => {})",
+            kind="spec",
+        ),
+    ]
+    out = ensure_playwright_config(
+        files,
+        module="Demo",
+        test_case_title="Update feature form",
+        target_url="http://localhost:1",
+        storage_state_rel="",
+    )
+    cfg = next(f for f in out if f.kind == "config")
+    assert cfg.path.replace("\\", "/") == "AItest/E2ETest/Demo/playwright.config.ts"
+
+
+def test_ensure_playwright_config_headed_covers_each_batch_root():
+    """Batch Verify: mỗi TC folder phải có config headless:false khi headed."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Req/TC-A/specs/a.spec.ts",
+            content="test('a', async ({ page }) => {})",
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Req/TC-B/specs/b.spec.ts",
+            content="test('b', async ({ page }) => {})",
+            kind="spec",
+        ),
+    ]
+    out = ensure_playwright_config(
+        files,
+        module="Req",
+        target_url="http://localhost:9000",
+        storage_state_rel="",
+        headed=True,
+    )
+    cfgs = [
+        f
+        for f in out
+        if (f.path or "").replace("\\", "/").endswith("playwright.config.ts")
+    ]
+    paths = {f.path.replace("\\", "/") for f in cfgs}
+    assert "AItest/E2ETest/Req/TC-A/playwright.config.ts" in paths
+    assert "AItest/E2ETest/Req/TC-B/playwright.config.ts" in paths
+    assert all("headless: false" in (f.content or "") for f in cfgs)
+    assert all("slowMo" in (f.content or "") for f in cfgs)
 
 
 def test_build_e2e_heal_prompt_context():
@@ -241,17 +432,36 @@ def test_sandbox_auto_heal_fails_after_max(tmp_path):
 
 
 def test_parse_html_interactive():
-    html = '<button data-testid="submit" aria-label="Save">Save</button><input name="email" />'
+    html = (
+        '<button data-testid="submit" aria-label="Save">Save</button>'
+        '<input name="email" />'
+        '<input data-cy="username" id="field_username" />'
+        '<select data-cy="status" id="field_status" formControlName="status"></select>'
+    )
     els = parse_html_interactive(html)
     assert any(e.test_id == "submit" for e in els)
     assert any(e.tag == "input" for e in els)
+    cy = next(e for e in els if e.test_id == "username")
+    assert any("getByTestId" in c for c in cy.selector_candidates)
+    assert any("data-cy" in c for c in cy.selector_candidates)
+    sel = next(e for e in els if e.test_id == "status")
+    assert any("formControlName" in c or "formcontrolname" in c.lower() for c in sel.selector_candidates)
+    assert any("#field_status" in c for c in sel.selector_candidates)
 
 
 def test_parse_source_interactive():
-    src = 'path: "/login"\n<button data-testid="go">Go</button>'
+    src = (
+        'path: "/login"\n'
+        '<button data-testid="go">Go</button>\n'
+        '<input data-cy="seizureLocation" formControlName="seizureLocation" id="field_seizureLocation" />\n'
+    )
     els, routes = parse_source_interactive(src)
     assert "/login" in routes
     assert any(e.test_id == "go" for e in els)
+    assert any(e.test_id == "seizureLocation" for e in els)
+    assert any(
+        any("field_seizureLocation" in c for c in e.selector_candidates) for e in els
+    )
 
 
 def test_exc_detail_not_implemented_empty_message():
@@ -431,6 +641,24 @@ def test_default_playwright_run_command_headed():
     assert "--headed" in headed
     assert apply_headed_flag(bare, headed=True).count("--headed") == 1
     assert "--headed" not in apply_headed_flag(headed, headed=False)
+
+
+def test_command_wants_headed_gui_survives_cmd_exe_wrap():
+    """npx → cmd.exe /c \"… --headed\" must still count as headed (no CREATE_NO_WINDOW)."""
+    from app.llm.cli.process_runner import resolve_command
+    from app.services.e2e_orchestrator import (
+        _command_wants_headed_gui,
+        default_playwright_run_command,
+    )
+
+    headed = default_playwright_run_command("specs/a.spec.ts", headed=True)
+    assert _command_wants_headed_gui(headed)
+    wrapped = resolve_command(headed)
+    # On Windows wrap collapses argv into one cmdline string — old ``"--headed" in list`` failed.
+    assert _command_wants_headed_gui(wrapped)
+    assert not _command_wants_headed_gui(
+        default_playwright_run_command("specs/a.spec.ts", headed=False)
+    )
 
 
 def test_parse_playwright_json_report_per_spec():
@@ -644,6 +872,25 @@ def test_runtime_fix_missing_storage_state_strips_config(tmp_path):
     _runtime_fix_missing_storage_state(str(mod), config_arg=None)
     out = cfg.read_text(encoding="utf-8")
     assert "storageState" not in out
+
+
+def test_runtime_fix_strips_even_when_global_setup_present(tmp_path):
+    """globalSetup soft-skip used to leave ENOENT — always strip if JSON missing."""
+    mod = tmp_path / "AItest" / "E2ETest" / "Auth"
+    (mod / "fixtures").mkdir(parents=True)
+    cfg = mod / "playwright.config.ts"
+    # One-liner use block (AI / older scaffold) — must strip inline storageState too
+    cfg.write_text(
+        "export default defineConfig({\n"
+        "  globalSetup: './fixtures/global.setup.ts',\n"
+        "  use: { storageState: './fixtures/storageState.json', baseURL: 'http://x' },\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    _runtime_fix_missing_storage_state(str(mod), config_arg=None)
+    out = cfg.read_text(encoding="utf-8")
+    assert "storageState" not in out
+    assert "globalSetup" not in out
 
 
 def test_inject_node_path_for_prefixed_playwright_sets_runner_node_modules():

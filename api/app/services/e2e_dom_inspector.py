@@ -61,7 +61,7 @@ _ROLE_EL_RE = re.compile(
     re.IGNORECASE,
 )
 _TESTID_EL_RE = re.compile(
-    r"<(?P<tag>\w+)(?P<attrs>[^>]*(?:data-testid|data-test-id)\s*=\s*['\"][^'\"]+['\"][^>]*)>",
+    r"<(?P<tag>\w+)(?P<attrs>[^>]*(?:data-testid|data-test-id|data-cy)\s*=\s*['\"][^'\"]+['\"][^>]*)>",
     re.IGNORECASE,
 )
 _ATTR_RE = re.compile(
@@ -69,7 +69,7 @@ _ATTR_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TESTID_JSX = re.compile(
-    r"""data-testid\s*=\s*(?:\{\s*)?['"]([^'"]+)['"]""",
+    r"""(?:data-testid|data-test-id|data-cy)\s*=\s*(?:\{\s*)?['"]([^'"]+)['"]""",
     re.IGNORECASE,
 )
 _ROUTE_RE = re.compile(
@@ -78,6 +78,15 @@ _ROUTE_RE = re.compile(
 )
 _ARIA_ROLE_JSX = re.compile(
     r"""(?:role|aria-label)\s*=\s*(?:\{\s*)?['"]([^'"]+)['"]""",
+    re.IGNORECASE,
+)
+# Angular / reactive forms — common stable hooks in templates
+_FORM_CONTROL_JSX = re.compile(
+    r"""formControlName\s*=\s*(?:\{\s*)?['"]([^'"]+)['"]""",
+    re.IGNORECASE,
+)
+_ID_ATTR_JSX = re.compile(
+    r"""\bid\s*=\s*(?:\{\s*)?['"]([^'"]+)['"]""",
     re.IGNORECASE,
 )
 
@@ -90,26 +99,60 @@ def _attr_map(attrs: str) -> dict[str, str]:
 
 
 def _candidates_from_attrs(tag: str, attrs: dict[str, str]) -> list[str]:
+    """
+    Prefer stable HTML hooks used by real apps (JHipster data-cy, testid, name, id).
+    Playwright config defaults testIdAttribute to data-cy — emit getByTestId for both.
+    """
     cands: list[str] = []
-    tid = attrs.get("data-testid") or attrs.get("data-test-id")
+    tid = (
+        attrs.get("data-cy")
+        or attrs.get("data-testid")
+        or attrs.get("data-test-id")
+    )
     if tid:
-        cands.append(f'[data-testid="{tid}"]')
+        # Runtime often maps getByTestId → data-cy via testIdAttribute
         cands.append(f'getByTestId("{tid}")')
+        if attrs.get("data-cy"):
+            cands.append(f'[data-cy="{tid}"]')
+        else:
+            cands.append(f'[data-testid="{tid}"]')
+    fcn = attrs.get("formcontrolname")
+    if fcn:
+        cands.append(f'[formControlName="{fcn}"]')
+        cands.append(f'locator(`[formcontrolname="{fcn}"]`)')
+    name_attr = attrs.get("name")
+    if name_attr and name_attr not in (tid or "",):
+        cands.append(f'[name="{name_attr}"]')
     role = attrs.get("role")
-    name = attrs.get("aria-label") or attrs.get("name") or attrs.get("placeholder")
-    if role and name:
-        cands.append(f'getByRole("{role}", {{ name: "{name}" }})')
-    elif tag == "button" and name:
-        cands.append(f'getByRole("button", {{ name: "{name}" }})')
-    elif tag == "a" and name:
-        cands.append(f'getByRole("link", {{ name: "{name}" }})')
+    accessible = (
+        attrs.get("aria-label")
+        or attrs.get("placeholder")
+        or attrs.get("title")
+    )
+    if role and accessible:
+        cands.append(f'getByRole("{role}", {{ name: "{accessible}" }})')
+    elif tag == "button" and accessible:
+        cands.append(f'getByRole("button", {{ name: "{accessible}" }})')
+    elif tag == "a" and accessible:
+        cands.append(f'getByRole("link", {{ name: "{accessible}" }})')
+    elif tag == "select" and accessible:
+        cands.append(f'getByRole("combobox", {{ name: "{accessible}" }})')
     if attrs.get("aria-label"):
         cands.append(f'getByLabel("{attrs["aria-label"]}")')
     if attrs.get("placeholder"):
         cands.append(f'getByPlaceholder("{attrs["placeholder"]}")')
     if attrs.get("id"):
         cands.append(f'#{attrs["id"]}')
-    return cands[:6]
+        cands.append(f'locator("#{attrs["id"]}")')
+    # de-dupe preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cands:
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out[:8]
 
 
 def parse_html_interactive(html: str) -> list[InteractiveElement]:
@@ -125,7 +168,11 @@ def parse_html_interactive(html: str) -> list[InteractiveElement]:
                 tag=tag,
                 role=attrs.get("role"),
                 name=attrs.get("name") or attrs.get("aria-label"),
-                test_id=attrs.get("data-testid") or attrs.get("data-test-id"),
+                test_id=(
+                    attrs.get("data-cy")
+                    or attrs.get("data-testid")
+                    or attrs.get("data-test-id")
+                ),
                 aria_label=attrs.get("aria-label"),
                 placeholder=attrs.get("placeholder"),
                 type=attrs.get("type"),
@@ -151,9 +198,33 @@ def parse_source_interactive(source: str) -> tuple[list[InteractiveElement], lis
             InteractiveElement(
                 tag="unknown",
                 test_id=tid,
-                selector_candidates=[f'[data-testid="{tid}"]', f'getByTestId("{tid}")'],
+                selector_candidates=[
+                    f'getByTestId("{tid}")',
+                    f'[data-cy="{tid}"]',
+                    f'[data-testid="{tid}"]',
+                ],
             )
         )
+    for fcn in _FORM_CONTROL_JSX.findall(source or ""):
+        elements.append(
+            InteractiveElement(
+                tag="input",
+                name=fcn,
+                selector_candidates=[
+                    f'[formControlName="{fcn}"]',
+                    f'[name="{fcn}"]',
+                ],
+            )
+        )
+    for eid in _ID_ATTR_JSX.findall(source or ""):
+        if eid.startswith("field_") or eid.startswith("jh-") or "field" in eid.lower():
+            elements.append(
+                InteractiveElement(
+                    tag="unknown",
+                    name=eid,
+                    selector_candidates=[f"#{eid}", f'locator("#{eid}")'],
+                )
+            )
     # Also reuse HTML regex for template strings
     elements.extend(parse_html_interactive(source or ""))
     routes = list(dict.fromkeys(_ROUTE_RE.findall(source or "")))

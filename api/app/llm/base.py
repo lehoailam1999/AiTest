@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass, field
 
 
@@ -51,6 +52,9 @@ class UnitRequest:
     context_gaps: list[str] = field(default_factory=list)
     requirement_title: str = ""
     requirement_description: str = ""
+    # 3-tier AI rules (Project / User) — System lives in unit_system_prompt
+    project_rules: str = ""
+    user_rules: str = ""
 
 
 @dataclass
@@ -109,22 +113,32 @@ class GenerateContext:
     topic_scope: str | None = None
     scope_topic_notes: str | None = None
     requirement_description: str | None = None
+    """System-tier BE rules (tc_generation_rules + engine overlay). Not user-editable."""
     custom_rules: str | None = None
+    """Project-tier rules from project.meta.aiRules (auto + extra)."""
+    project_rules: str | None = None
+    """User-tier freeform rules from project.meta.aiRules.user."""
+    user_rules: str | None = None
     feature_titles: list[str] = field(default_factory=list)
     # Studio engine lock: unit | e2e | None (mixed)
     preferred_engine: str | None = None
+    # fast | full — E2E default fast via tc_speed.resolve_tc_speed_mode
+    speed_mode: str | None = None
+    # Soft cap when speed_mode=fast (None = unlimited anti-lazy)
+    max_tc_per_module: int | None = None
 
 
 # Ví dụ schema-only — placeholder, KHÔNG phải domain mẫu để copy vào dự án thật.
 _VIETNAMESE_TC_EXAMPLE_UNIT = (
     '{"testCases":['
-    '{"title":"[Tên chức năng trong tài liệu] - [Hàm/method] - [Kết quả kỳ vọng]",'
+    '{"title":"[Tên chức năng trong Phân tích] - [Hàm/method] - [Kết quả kỳ vọng]",'
     '"type":"Unit","priority":"Cao","severity":"Nặng",'
-    '"module":"[Tên module/Feature trong tài liệu]",'
-    '"precondition":"Mock dependency theo tài liệu/source (nếu có)",'
+    '"module":"[Tên FEATURES trong Phân tích]",'
+    '"precondition":"Mock dependency theo Phân tích/source (nếu có)",'
     '"steps":"1. Chuẩn bị input + mock\\n2. Gọi đơn vị cần test\\n3. Assert kết quả",'
-    '"expectedResult":"Return/exception/state đúng mô tả tài liệu",'
-    '"testData":"input=... (lấy từ tài liệu)","automationReady":true}'
+    '"expectedResult":"Return/exception/state đúng mục Phân tích",'
+    '"testData":"trace: FEATURES/[tên]; input=... (từ VALIDATION/BR)",'
+    '"automationReady":true}'
     "]}"
 )
 
@@ -252,22 +266,15 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
     eng = (ctx.preferred_engine or "").strip().lower()
     if eng == "unit":
         type_block = (
-            "PHIÊN ENGINE = UNIT (BẮT BUỘC):\n"
-            "- Mọi test case phải có type=Unit.\n"
-            "- Kiểm tra hàm/class/service/validator/API handler — KHÔNG mở trình duyệt, không click/fill UI.\n"
-            "- KHÔNG sinh type=E2E trong phiên này.\n"
-            "- Tên module/hàm/API lấy từ tài liệu hoặc source context — không dùng tên mẫu trong ví dụ.\n"
+            "PHIÊN ENGINE = UNIT: mọi TC type=Unit; không UI/E2E. "
+            "SoT + map 11 tiêu chí + trace → khối «UNIT ← PHÂN TÍCH» trong QUY TẮC HỆ THỐNG.\n"
         )
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
         type_schema = "Unit"
     elif eng == "e2e":
         type_block = (
-            "PHIÊN ENGINE = E2E (BẮT BUỘC):\n"
-            "- Mọi test case phải có type=E2E.\n"
-            "- Mô tả user journey trên UI theo tài liệu (mở màn hình, fill, click, assert UI/state).\n"
-            "- Steps: [Hành động] -> [Element] -> [Dữ liệu]. Assert URL/toast/persistence chỉ khi tài liệu có tín hiệu.\n"
-            "- KHÔNG sinh type=Unit/API thuần hàm trong phiên này.\n"
-            "- Không copy tên màn hình/route/domain từ ví dụ — lấy từ tài liệu job.\n"
+            "PHIÊN ENGINE = E2E: mọi TC type=E2E. "
+            "SoT + gate + trace → khối «E2E ← PHÂN TÍCH» trong QUY TẮC HỆ THỐNG.\n"
         )
         example = _VIETNAMESE_TC_EXAMPLE_E2E
         type_schema = "E2E"
@@ -282,6 +289,31 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         example = _VIETNAMESE_TC_EXAMPLE
         type_schema = "Unit|E2E|API|Chức năng|Phủ định|Biên"
 
+    if eng == "unit":
+        doc_usage = (
+            "Tài liệu: Freeze/DB Knowledge = SoT; SRS+source bổ sung chi tiết tín hiệu đã có. "
+            "Chi tiết coverage → QUY TẮC HỆ THỐNG (UNIT ← PHÂN TÍCH).\n\n"
+        )
+    elif eng == "e2e":
+        doc_usage = (
+            "Freeze/DB Knowledge = SoT Output-driven — "
+            "chi tiết trong QUY TẮC HỆ THỐNG (E2E ← PHÂN TÍCH).\n\n"
+        )
+    else:
+        doc_usage = (
+            "Cách dùng tài liệu:\n"
+            "- Knowledge / Phân tích (Freeze hoặc DB) = checklist coverage chính (11 tiêu chí).\n"
+            "- User Story / SRS bổ sung chi tiết cho tín hiệu đã có trong Phân tích — không invent bucket mới.\n"
+            "- Mỗi feature trong Phân tích = một module; trường module khớp tên feature.\n"
+            "- Nếu có «KẾT QUẢ PHÂN TÍCH ĐÃ LƯU DB» hoặc «Knowledge workspace»: cover đủ itemCount>0; [] → bỏ qua.\n"
+            "- Nếu có «NGỮ CẢNH SOURCE CODE»: bổ sung nhánh logic cho tín hiệu Phân tích (map class/hàm), không thêm requirement mới.\n"
+            "- Không bịa yêu cầu không có trong Phân tích/input.\n\n"
+            "CHECKLIST ANTI-MISS (chỉ mục có tín hiệu trong tài liệu):\n"
+            "- Happy path, validation/negative, business rules, permission/auth (nếu có), exception, boundary/data integrity.\n"
+            "- Không bỏ sót module/chức năng đã xuất hiện trong tài liệu/analysis/source context.\n"
+            "- Mỗi TC: thao tác + dữ liệu + expected result kiểm được, bám tài liệu.\n\n"
+        )
+
     base = (
         "Bạn là kỹ sư QA senior. Nhiệm vụ: sinh test case cụ thể từ tài liệu yêu cầu của job hiện tại.\n\n"
         "QUY TẮC NGUỒN (BẮT BUỘC):\n"
@@ -295,18 +327,7 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         "- KHÔNG dùng tiếng Anh cho tiêu đề, bước, kết quả.\n"
         "- Dù requirement đầu vào là tiếng Anh, vẫn phải viết test case bằng tiếng Việt.\n\n"
         f"{type_block}\n"
-        "Cách dùng tài liệu:\n"
-        "- User Story / SRS / Feature / heading / màn hình / API trong input = phạm vi chức năng cần cover.\n"
-        "- Mỗi chức năng tách rõ trong tài liệu = một module; trường module khớp tên trong tài liệu.\n"
-        "- Requirement: phạm vi chính cần kiểm thử.\n"
-        "- Nếu có mã nguồn tham khảo: căn TC theo module/API/validation trong code.\n"
-        "- Nếu có khối «KẾT QUẢ PHÂN TÍCH ĐÃ LƯU DB»: cover đủ tiêu chí (khi có — thường đã gộp trong freeze).\n"
-        "- Nếu có khối «NGỮ CẢNH SOURCE CODE»: bổ sung nhánh logic/validation/exception.\n"
-        "- Không bịa yêu cầu không có trong input.\n\n"
-        "CHECKLIST ANTI-MISS (chỉ mục có tín hiệu trong tài liệu):\n"
-        "- Happy path, validation/negative, business rules, permission/auth (nếu có), exception, boundary/data integrity.\n"
-        "- Không bỏ sót module/chức năng đã xuất hiện trong tài liệu/analysis/source context.\n"
-        "- Mỗi TC: thao tác + dữ liệu + expected result kiểm được, bám tài liệu.\n\n"
+        f"{doc_usage}"
         "Trả về CHỈ JSON hợp lệ (không markdown), đúng schema:\n"
         f'{{"testCases":[{{"title":"...","type":"{type_schema}",'
         '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
@@ -318,47 +339,95 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         base += (
             "\nCHẾ ĐỘ BỔ SUNG: Đã có test case bên dưới.\n"
             "Chỉ sinh test case MỚI cho phần còn thiếu — không trùng hoặc paraphrase nhẹ.\n"
-            "Nếu đã đủ coverage, chỉ sinh 1–3 case bổ sung cho gap.\n"
+            "Cover HẾT gap còn lại (mọi FR/AC/rule chưa có TC) — không trần «chỉ 1–3 case».\n"
+            "Nếu đã đủ coverage thật sự thì trả mảng rỗng [] (không bịa).\n"
             "Test case mới vẫn phải 100% tiếng Việt.\n"
         )
     elif ctx.topic_scope:
-        base += (
-            "\nSinh test case cho ĐÚNG một chức năng trong phạm vi chủ đề. "
-            "Cover từng FR/AC/business rule/validation trong phạm vi (≥1 TC mỗi tín hiệu). "
-            "Ưu tiên 5–10 case (happy + negative + biên); chỉ tăng thêm khi FR/AC còn thiếu. "
-            "Toàn bộ nội dung tiếng Việt."
-        )
-    else:
-        n = len(ctx.feature_titles)
-        if n > 1:
+        if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
             base += (
-                f"\nTài liệu có {n} chức năng (Feature). "
-                "Mỗi chức năng: cover FR/AC trong phạm vi (ưu tiên 5–10 case; "
-                "happy + negative + biên + exception khi có tín hiệu). "
-                "Trường module PHẢI khớp đúng tên từng Feature. "
-                "Không được chỉ sinh TC cho 1–2 module rồi bỏ qua phần còn lại. "
-                "Toàn bộ nội dung tiếng Việt."
+                f"\nSinh test case cho ĐÚNG một chức năng trong phạm vi chủ đề. "
+                f"SPEED: ưu tiên journey/nhánh chính — tối đa ~{ctx.max_tc_per_module} TC. "
+                f"Toàn bộ nội dung tiếng Việt."
             )
         else:
             base += (
-                "\nSinh test case phủ FR/AC/business rule/validation trong tài liệu "
-                "(ưu tiên 6–12 case; tăng khi SRS lớn còn gap). "
-                "Bám sát tài liệu + phân tích — không bỏ sót luồng nghiệp vụ chính. "
+                "\nSinh test case cho ĐÚNG một chức năng trong phạm vi chủ đề. "
+                "Cover từng FR/AC/business rule/validation/permission/error/boundary trong phạm vi "
+                "(≥1 TC mỗi tín hiệu độc lập). "
+                "KHÔNG trần số lượng — sinh đủ kịch bản; không dừng sớm sau vài case. "
                 "Toàn bộ nội dung tiếng Việt."
             )
-    if ctx.custom_rules:
-        # Engine overlay ưu tiên; truncate gọn hơn khi đã lock engine (tiết kiệm token)
-        cap = 3500 if eng in ("unit", "e2e") else 4000
-        base += f"\n\nQUY TẮC BỔ SUNG (ưu tiên cao — cấu hình BE):\n{truncate(ctx.custom_rules, cap)}\n"
+    else:
+        n = len(ctx.feature_titles)
+        if n > 1:
+            if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+                base += (
+                    f"\nTài liệu có {n} chức năng (Feature). "
+                    f"SPEED: mỗi module ≤~{ctx.max_tc_per_module} TC ưu tiên chính. "
+                    f"Trường module khớp tên Feature. Toàn bộ nội dung tiếng Việt."
+                )
+            else:
+                base += (
+                    f"\nTài liệu có {n} chức năng (Feature). "
+                    "Mỗi chức năng: cover HẾT FR/AC/rule/validation có tín hiệu "
+                    "(≥1 TC mỗi kịch bản độc lập; happy + negative + biên + exception khi có). "
+                    "KHÔNG trần số lượng theo module. "
+                    "Trường module PHẢI khớp đúng tên từng Feature. "
+                    "Không được chỉ sinh TC cho 1–2 module rồi bỏ qua phần còn lại. "
+                    "Toàn bộ nội dung tiếng Việt."
+                )
+        else:
+            if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+                base += (
+                    f"\nSPEED: ưu tiên FR/AC chính — tối đa ~{ctx.max_tc_per_module} TC. "
+                    f"Bám tài liệu; không bịa. Toàn bộ nội dung tiếng Việt."
+                )
+            else:
+                base += (
+                    "\nSinh test case phủ HẾT FR/AC/business rule/validation/API/use-case trong tài liệu "
+                    "(≥1 TC mỗi tín hiệu độc lập). "
+                    "KHÔNG trần số lượng — không dừng sớm vì «đã có vài case». "
+                    "Bám sát tài liệu + phân tích — không bỏ sót luồng nghiệp vụ đã nêu. "
+                    "Toàn bộ nội dung tiếng Việt."
+                )
+    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+        from app.llm.tc_speed import speed_prompt_addon
+
+        base += speed_prompt_addon(
+            speed=ctx.speed_mode,
+            max_per_module=ctx.max_tc_per_module,
+            preferred_engine=ctx.preferred_engine,
+        )
+    if ctx.custom_rules or ctx.project_rules or ctx.user_rules:
+        from app.llm.ai_rules import format_layered_rules_block
+
+        # System extra: Unit SoT block is prepended in engine rules — keep full under cap.
+        # Unit/E2E both prepend analysis SoT — keep cap room for contract + overlay.
+        eng_cap = 2200 if ctx.speed_mode == "fast" else (4200 if eng in ("unit", "e2e") else 4000)
+        sys_extra = truncate(ctx.custom_rules or "", eng_cap) if ctx.custom_rules else ""
+        block = format_layered_rules_block(
+            system_extra=sys_extra,
+            project_rules=ctx.project_rules or "",
+            user_rules=ctx.user_rules or "",
+            system_label="QUY TẮC HỆ THỐNG (System — BE, không sửa từ UI)",
+        )
+        if block:
+            base += f"\n\n{block}\n"
     return base
 
 
 def cursor_tc_hidden_chat_enabled() -> bool:
-    """Env AITEST_TC_CURSOR_HIDDEN_CHAT default on — per-module create-chat + 2-turn."""
+    """
+    Env AITEST_TC_CURSOR_HIDDEN_CHAT — per-module create-chat + 2-turn (seed→gen).
+
+    Default OFF: oneshot 1 call/module is ~2–3× faster wall-clock than hidden 2-turn.
+    Set AITEST_TC_CURSOR_HIDDEN_CHAT=1 when token budget matters more than speed.
+    """
     import os
 
-    raw = (os.environ.get("AITEST_TC_CURSOR_HIDDEN_CHAT") or "1").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    raw = (os.environ.get("AITEST_TC_CURSOR_HIDDEN_CHAT") or "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
@@ -374,34 +443,64 @@ def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
     elif eng == "e2e":
         type_schema = "E2E"
-        type_line = "ENGINE=E2E: mọi TC type=E2E (user journey UI theo tài liệu)."
+        type_line = "ENGINE=E2E: mọi TC type=E2E (journey UI từ Output Phân tích)."
         example = _VIETNAMESE_TC_EXAMPLE_E2E
     else:
         type_schema = "Unit|E2E|API|Chức năng|Phủ định|Biên"
         type_line = "Phân loại type theo tài liệu (Unit/E2E/API) — không gộp Unit+E2E trong 1 TC."
         example = _VIETNAMESE_TC_EXAMPLE
 
-    seed = (
-        "Bạn là QA senior. Đây là TURN SEED (conversation ngầm) — ghi nhớ quy tắc; "
-        "CHƯA sinh test case. Turn sau sẽ gửi đúng 1 module + tài liệu liên quan.\n\n"
-        f"{type_line}\n"
-        "Ngôn ngữ: title/steps/expectedResult/precondition/testData/module = TIẾNG VIỆT.\n"
-        "Chỉ dựa vào tài liệu turn sau cung cấp — không bịa domain.\n"
-        "Mỗi lần gen (turn sau): CHỈ 1 module trong scope; 3–6 TC "
-        "(happy + negative + biên nếu có tín hiệu); không tham chiếu module khác.\n\n"
-        "Output turn sau: CHỈ JSON "
-        f'{{"testCases":[{{"title","type":"{type_schema}",'
-        '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
-        '"module","precondition","steps","expectedResult","testData","automationReady":false}]}}\n'
-        f"Ví dụ schema (placeholder):\n{example}\n"
-        "Trả lời turn này đúng 1 dòng: READY"
-    )
-    if ctx.custom_rules:
-        seed += (
-            "\n\nQUY TẮC BỔ SUNG (engine):\n"
-            + truncate(ctx.custom_rules, 2500)
-            + "\n"
+    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+        from app.llm.tc_speed import speed_prompt_addon
+
+        seed = (
+            "Bạn là QA senior. Đây là TURN SEED (conversation ngầm) — ghi nhớ quy tắc; "
+            "CHƯA sinh test case. Turn sau sẽ gửi đúng 1 module + tài liệu liên quan.\n\n"
+            f"{type_line}\n"
+            "Ngôn ngữ: title/steps/expectedResult/precondition/testData/module = TIẾNG VIỆT.\n"
+            "Chỉ dựa vào tài liệu turn sau cung cấp — không bịa domain.\n"
+            f"SPEED: mỗi module ≤~{ctx.max_tc_per_module} TC ưu tiên chính "
+            "(happy + validation + permission/boundary nếu có).\n\n"
+            "Output turn sau: CHỈ JSON "
+            f'{{"testCases":[{{"title","type":"{type_schema}",'
+            '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
+            '"module","precondition","steps","expectedResult","testData","automationReady":false}]}}\n'
+            f"Ví dụ schema (placeholder):\n{example}\n"
+            "Trả lời turn này đúng 1 dòng: READY"
         )
+        seed += speed_prompt_addon(
+            speed=ctx.speed_mode,
+            max_per_module=ctx.max_tc_per_module,
+            preferred_engine=ctx.preferred_engine,
+        )
+    else:
+        seed = (
+            "Bạn là QA senior. Đây là TURN SEED (conversation ngầm) — ghi nhớ quy tắc; "
+            "CHƯA sinh test case. Turn sau sẽ gửi đúng 1 module + tài liệu liên quan.\n\n"
+            f"{type_line}\n"
+            "Ngôn ngữ: title/steps/expectedResult/precondition/testData/module = TIẾNG VIỆT.\n"
+            "Chỉ dựa vào tài liệu turn sau cung cấp — không bịa domain.\n"
+            "Mỗi lần gen (turn sau): CHỈ 1 module trong scope; sinh ĐỦ TC cho mọi tín hiệu "
+            "FR/AC/rule/validation/error/boundary của module đó (≥1 TC/tín hiệu độc lập). "
+            "KHÔNG trần số lượng — không dừng sớm; không tham chiếu module khác.\n\n"
+            "Output turn sau: CHỈ JSON "
+            f'{{"testCases":[{{"title","type":"{type_schema}",'
+            '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
+            '"module","precondition","steps","expectedResult","testData","automationReady":false}]}}\n'
+            f"Ví dụ schema (placeholder):\n{example}\n"
+            "Trả lời turn này đúng 1 dòng: READY"
+        )
+    if ctx.custom_rules or ctx.project_rules or ctx.user_rules:
+        from app.llm.ai_rules import format_layered_rules_block
+
+        block = format_layered_rules_block(
+            system_extra=truncate(ctx.custom_rules or "", 2500) if ctx.custom_rules else "",
+            project_rules=ctx.project_rules or "",
+            user_rules=ctx.user_rules or "",
+            system_label="QUY TẮC HỆ THỐNG (System — engine)",
+        )
+        if block:
+            seed += f"\n\n{block}\n"
     return seed
 
 
@@ -410,7 +509,7 @@ def tc_module_gen_user_prompt(
 ) -> str:
     """
     Turn 1 for Cursor hidden chat — module slice + source only (rules already seeded).
-    Anti-lazy: force ONLY this module, 3–6 new cases.
+    Anti-lazy: force ONLY this module; cover ALL document signals (no artificial count cap).
     """
     ctx = ctx or GenerateContext()
     module = ""
@@ -433,10 +532,26 @@ def tc_module_gen_user_prompt(
         "",
         "ANTI-LAZY (bắt buộc):",
         f"- CHỈ sinh TC cho «{module}» — bỏ qua / không tham chiếu module khác.",
-        "- Sinh 3–6 test case MỚI (happy + negative + biên khi có tín hiệu FR/AC).",
-        "- Không nói «đã cover», không trả mảng rỗng, không tóm tắt thay vì JSON.",
-        "- Toàn bộ nội dung tiếng Việt. Trả CHỈ JSON {\"testCases\":[...]}.",
     ]
+    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+        parts.extend(
+            [
+                f"- SPEED: tối đa ~{ctx.max_tc_per_module} TC — ưu tiên happy + validation "
+                "quan trọng + permission/boundary nếu có tín hiệu.",
+                "- Không bịa journey phụ; đủ ý nghĩa thì dừng.",
+                "- Toàn bộ nội dung tiếng Việt. Trả CHỈ JSON {\"testCases\":[...]}.",
+            ]
+        )
+    else:
+        parts.extend(
+            [
+                "- Cover HẾT tín hiệu trong slice: mỗi FR/AC/business rule/validation/permission/"
+                "error/boundary độc lập → ≥1 TC MỚI (happy + negative khi có rule).",
+                "- KHÔNG trần số lượng giả tạo. Sinh đủ rồi mới dừng; không bịa ngoài tài liệu.",
+                "- Không nói «đã cover», không trả mảng rỗng khi còn tín hiệu, không tóm tắt thay vì JSON.",
+                "- Toàn bộ nội dung tiếng Việt. Trả CHỈ JSON {\"testCases\":[...]}.",
+            ]
+        )
     if ctx.topic_scope:
         parts.append("## Phạm vi chủ đề\n" + truncate(ctx.topic_scope, 2000))
     body = (content or "").strip()
@@ -457,9 +572,15 @@ def tc_module_gen_user_prompt(
                 else ""
             )
         )
-    parts.append(
-        f"Sinh ngay JSON testCases cho module «{module}» (3–6 case)."
-    )
+    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+        parts.append(
+            f"Sinh ngay JSON testCases cho module «{module}» — ≤~{ctx.max_tc_per_module} TC ưu tiên chính."
+        )
+    else:
+        parts.append(
+            f"Sinh ngay JSON testCases cho module «{module}» — đủ mọi kịch bản độc lập trong slice "
+            "(không trần số lượng)."
+        )
     return "\n\n".join(parts)
 
 
@@ -531,7 +652,8 @@ def user_prompt(title: str, content: str, ctx: GenerateContext | None = None) ->
         parts.append(
             "## Nhắc lại\n"
             "Trả JSON tiếng Việt. Phải cover đủ mọi FR/AC/business rule/validation/API/use case "
-            "trong snapshot (và source context nếu có) — không dừng sớm ở ~10 case."
+            "trong snapshot (và source context nếu có) — ≥1 TC mỗi tín hiệu độc lập; "
+            "KHÔNG trần số lượng, không dừng sớm."
         )
         return "\n\n".join(parts)
 
@@ -557,7 +679,8 @@ def user_prompt(title: str, content: str, ctx: GenerateContext | None = None) ->
         parts.append(
             "## Nhắc lại\n"
             "Trả JSON tiếng Việt. Chỉ sinh TC cho module trong phạm vi chủ đề; "
-            "cover đủ FR/AC/rule thuộc module đó — không dừng sớm ở ~10 case."
+            "cover đủ FR/AC/rule thuộc module đó (≥1 TC/tín hiệu) — "
+            "KHÔNG trần số lượng, không dừng sớm."
         )
         return "\n\n".join(parts)
 
@@ -1177,40 +1300,147 @@ def unit_result_from_raw(raw: str, req: UnitRequest) -> UnitResult:
     return UnitResult(code=code, suggested_path=suggested, file_name=file_name)
 
 
-def unit_system_prompt(framework: str, language: str = "", *, testing_framework: str = "", mock_framework: str = "", assertion_library: str = "") -> str:
+def is_likely_app_entrypoint(source_file_name: str = "", source_code: str = "") -> bool:
+    """
+    True when the SUT looks like a process bootstrap/entrypoint (unsafe to import in unit tests).
+    Document/stack-agnostic basename + common framework bootstrap signals.
+    """
+    src = (source_file_name or "").replace("\\", "/").lstrip("./")
+    base = src.rsplit("/", 1)[-1] if src else ""
+    if base:
+        low = base.lower()
+        if low in {
+            "main.ts",
+            "main.js",
+            "main.tsx",
+            "main.jsx",
+            "main.mjs",
+            "main.cjs",
+            "main.py",
+            "bootstrap.ts",
+            "bootstrap.js",
+            "bootstrap.py",
+            "wsgi.py",
+            "asgi.py",
+            "__main__.py",
+            "program.cs",
+        }:
+            return True
+        if low.startswith("main.") and low.endswith((".ts", ".js", ".tsx", ".jsx", ".py")):
+            return True
+    code = source_code or ""
+    if not code.strip():
+        return False
+    # Framework-agnostic side-effect bootstrap signals
+    if re.search(r"\bNestFactory\.create\b", code) and re.search(
+        r"\b(bootstrap|createApp)\s*\(", code
+    ):
+        return True
+    if re.search(r"\buvicorn\.run\b|\bgunicorn\b", code) and re.search(
+        r"\bif\s+__name__\s*==\s*['\"]__main__['\"]", code
+    ):
+        return True
+    if re.search(r"\bWebApplication\.Create(Builder)?\b", code) and re.search(
+        r"\b(Run|Build)\s*\(", code
+    ):
+        return True
+    if re.search(r"\bSpringApplication\.run\b", code):
+        return True
+    return False
+
+
+def _unit_csharp_import_rule(language: str = "") -> str:
+    """Prevent invented namespaces (CS0234) and Moq expression pitfalls — project-agnostic."""
+    lang = (language or "").lower()
+    if not any(x in lang for x in ("c#", "csharp", "f#", ".net", "dotnet")):
+        return ""
+    return (
+        "- CRITICAL for C#/.NET: ONLY add `using` lines that appear in the provided SUT "
+        "or Related source files (plus System.*, the chosen test/mock/assert libs, "
+        "and Microsoft.* when those APIs appear in snippets). "
+        "Never invent sibling namespaces (e.g. do not invent `*.Entities` or "
+        "`*.Infrastructure.*.Entities` just because Repositories was imported).\n"
+        "- NEVER invent child namespaces under third-party packages "
+        "(e.g. do NOT write `SomeVendor.Core.Repository` unless that exact using is in snippets).\n"
+        "- Mock ONLY constructor dependencies of the class under test; copy types and "
+        "method signatures EXACTLY from SUT + Related interface files.\n"
+        "- Moq CRITICAL (CS0854): expression trees cannot use optional/default arguments. "
+        "In every Setup/Verify lambda pass ALL parameters explicitly "
+        "(use `It.IsAny<T>()` for unused args). Read the interface method in Related source.\n"
+        "- Moq return types must match the interface exactly: if Related shows `Task<int>`, "
+        "use `ReturnsAsync(0)` (or similar); if `Task`, use `Returns(Task.CompletedTask)` — "
+        "never guess.\n"
+        "- NEVER Setup/Verify extension methods. Setup only methods declared on the "
+        "mocked interface/type from Related source.\n"
+        "- Use types exactly as declared in Related source (repository fluent types, "
+        "page/result wrappers, DTOs). Do not cast to `object`/`IPage<object>` when the "
+        "test later needs concrete properties.\n"
+        "- Prefer the same Moq patterns as any provided test-sample from this repo.\n"
+    )
+
+
+def _unit_bootstrap_safety_rule(language: str = "") -> str:
+    """Thin Nest tip — general entrypoint ban lives in UUTGS §9."""
+    lang = (language or "").lower()
+    include_node = (not lang) or any(
+        x in lang
+        for x in (
+            "typescript",
+            "javascript",
+            "tsx",
+            "jsx",
+            "ts",
+            "js",
+            "theo mã",
+            "node",
+        )
+    )
+    if not include_node:
+        return ""
+    return (
+        "Ecosystem note (Nest/Express/Fastify): never `import`/`require` main after a partial "
+        "`NestFactory` mock; unit-test pipes/controllers/services/DTOs and mirror pipe options "
+        "in Arrange instead of executing bootstrap().\n"
+    )
+
+
+def unit_system_prompt(
+    framework: str,
+    language: str = "",
+    *,
+    testing_framework: str = "",
+    mock_framework: str = "",
+    assertion_library: str = "",
+    project_rules: str = "",
+    user_rules: str = "",
+) -> str:
+    from app.llm.uutgs_rules import uutgs_system_block
+
     lang = language or "theo mã nguồn được cung cấp"
     fw = normalize_framework(testing_framework or framework, language)
-    mock_line = (
-        f"- Prefer mocking with: {mock_framework}\n" if mock_framework.strip() else ""
-    )
-    assert_line = (
-        f"- Prefer assertions with: {assertion_library}\n"
-        if assertion_library.strip()
-        else ""
-    )
-    return (
-        "You are a senior software engineer writing automated unit tests.\n"
-        f"Target language: {lang}\n"
-        f"Test framework: {fw}\n"
-        "Rules:\n"
-        f"- Output ONLY source code in {lang} (no markdown fences, no explanation).\n"
-        "- Match the language and idioms of the provided source snippet.\n"
-        "- Use Arrange-Act-Assert (or equivalent).\n"
-        "- Cover the Approved test case intent using the provided source snippet.\n"
-        "- Prefer focused unit tests; mock external dependencies when listed in Unit strategy.\n"
-        f"{mock_line}"
-        f"{assert_line}"
-        "- Include necessary imports and a public/exportable test module or class.\n"
-        "- The host will place this file under [{pkg}/]AItest/UnitTest/{Module}/… "
-        "(or AItest/APITest/…) — never beside production source. "
-        "Write a complete file body suitable for that location.\n"
-        "- CRITICAL for TS/JS: ALL project-internal imports (SUT, DTOs, entities, interfaces, helpers) "
-        "MUST use package root specifiers like `src/…` or `@/…` instead of local relative paths (`./…`) "
-        "because this test file is placed under `AItest/UnitTest/…`. Use the EXACT SUT path given in prompt.\n"
+    stack_bits = [f"Language: {lang}", f"Test framework: {fw}"]
+    if mock_framework.strip():
+        stack_bits.append(f"Mock library: {mock_framework.strip()}")
+    if assertion_library.strip():
+        stack_bits.append(f"Assertion library: {assertion_library.strip()}")
+
+    base = (
+        f"{uutgs_system_block()}\n\n"
+        "## Emit constraints (this job)\n"
+        + "\n".join(f"- {b}" for b in stack_bits)
+        + "\n"
+        "- Output ONLY the complete test source file (no markdown fences, no explanation).\n"
+        "- Host path: [{pkg}/]AItest/UnitTest/{Module}/… (or AItest/APITest/…) — never beside production source.\n"
+        "- TS/JS internal imports MUST use package roots (`src/…` or `@/…`) — never deep `../../../src` "
+        "when the user prompt gives an exact SUT specifier.\n"
         f"{_node_test_types_rule(fw, lang)}"
-        "- Do not invent APIs that are not in the source snippet; if incomplete, "
-        "test the visible surface and add TODO comments.\n"
-        "- If a test-sample is provided, match its naming/style without copying unrelated cases."
+        f"{_unit_bootstrap_safety_rule(lang)}"
+        f"{_unit_csharp_import_rule(lang)}"
+    )
+    from app.llm.ai_rules import append_layered_rules
+
+    return append_layered_rules(
+        base, project_rules=project_rules, user_rules=user_rules
     )
 
 
@@ -1222,19 +1452,17 @@ def _node_test_types_rule(framework: str, language: str) -> str:
         return ""
     if "vitest" in fw:
         return (
-            "- Vitest + TS/JS: import { describe, it, expect, beforeEach, vi } from 'vitest' "
+            "- Vitest: import { describe, it, expect, beforeEach, vi } from 'vitest' "
             "(do not rely on ambient globals).\n"
         )
     if "mocha" in fw:
         return (
-            "- Mocha + TS/JS: start the file with /// <reference types=\"mocha\" /> "
-            "or import from 'mocha'.\n"
+            "- Mocha: /// <reference types=\"mocha\" /> or import from 'mocha'.\n"
         )
     if "jest" in fw or "javascript" in lang or "typescript" in lang:
         return (
-            "- Jest + TS/JS: start the file with /// <reference types=\"jest\" /> "
-            "OR import { describe, it, expect, beforeEach, jest } from '@jest/globals'. "
-            "Do not use bare describe/it/beforeEach without one of these.\n"
+            "- Jest: /// <reference types=\"jest\" /> OR "
+            "import { describe, it, expect, beforeEach, jest } from '@jest/globals'.\n"
         )
     return ""
 
@@ -1250,7 +1478,6 @@ def ensure_node_test_globals_preamble(code: str, language: str = "", framework: 
     lang = (language or "").lower()
     fw = (framework or "").lower()
     if not any(x in lang for x in ("typescript", "javascript", "tsx", "jsx", "ts", "js")):
-        # Infer from code when language missing
         if not re.search(r"\b(describe|beforeEach|it|expect)\s*\(", raw):
             return code
         if not re.search(r"\b(import|export|const|let|function)\b", raw):
@@ -1266,7 +1493,6 @@ def ensure_node_test_globals_preamble(code: str, language: str = "", framework: 
     if "vitest" in fw:
         if re.search(r"""from\s+['"]vitest['"]""", raw):
             return code
-        # Prefer LLM import; if missing and globals used, leave as-is (Vitest often ships types via vite)
         return code
 
     if "mocha" in fw:
@@ -1278,7 +1504,6 @@ def ensure_node_test_globals_preamble(code: str, language: str = "", framework: 
             return '/// <reference types="mocha" />\n' + raw.lstrip("\n")
         return code
 
-    # Jest (default for TS/JS unit)
     if "reference types=\"jest\"" in raw or "reference types='jest'" in raw:
         return code
     if re.search(r"""from\s+['"]@jest/globals['"]""", raw):
@@ -1290,8 +1515,8 @@ def ensure_node_test_globals_preamble(code: str, language: str = "", framework: 
     return code
 
 
-
 def unit_user_prompt(req: UnitRequest) -> str:
+    """Data packet only — behavior rules live in UUTGS (system prompt)."""
     language = infer_language(req)
     class_hint = req.class_name or guess_class_name(req.source_file_name, req.source_code)
     method_hint = req.method_name or "(infer from source + test case)"
@@ -1321,7 +1546,9 @@ def unit_user_prompt(req: UnitRequest) -> str:
         sut_import = sut_module_specifier(suggested, req.source_file_name)
 
     base = (
-        f"Generate a unit test file in {language} for this Approved test case.\n\n"
+        f"Generate a unit test file in {language} for the Approved test case below.\n"
+        "Follow UUTGS in the system prompt. Source under test = behavior SoT; "
+        "Approved TC = scenario intent.\n\n"
         "## Testing stack\n"
         f"Framework: {test_fw}\n"
         f"Mock: {or_dash(req.mock_framework)}\n"
@@ -1331,13 +1558,18 @@ def unit_user_prompt(req: UnitRequest) -> str:
     )
     if sut_import:
         base += (
-            f"Import path for SUT (USE THIS EXACT path — package baseUrl src/… preferred): "
-            f"{sut_import}\n"
+            f"SUT import (exact): {sut_import}\n"
             f"Example: import {{ {class_hint} }} from '{sut_import}';\n"
-            "- Do NOT use deep relative paths like '../../../src/…' when a src/… path is given.\n"
+        )
+    if is_likely_app_entrypoint(req.source_file_name, req.source_code):
+        base += (
+            "\n## Entrypoint / bootstrap SUT\n"
+            "This file looks like an app entrypoint. Per UUTGS §9: do NOT import/execute it; "
+            "test the extractable unit (pipe/service/handler/validator/DTO) using Related source "
+            "when provided; mirror config from the snippet in Arrange.\n"
         )
     base += (
-        "\n## Test Case\n"
+        "\n## Test Case (scenario intent)\n"
         f"Title: {req.test_case_title}\n"
         f"Type: {or_dash(req.test_case_type)}\n"
         f"Priority: {or_dash(req.priority)}\n"
@@ -1348,12 +1580,12 @@ def unit_user_prompt(req: UnitRequest) -> str:
     )
     if req.requirement_title.strip() or req.requirement_description.strip():
         base += (
-            "## Requirement Context\n"
+            "## Requirement Context (secondary — source wins on conflict)\n"
             f"Title: {or_dash(req.requirement_title)}\n"
             f"Description: {or_dash(req.requirement_description)}\n\n"
         )
     base += (
-        "## Source under test\n"
+        "## Source under test (SoT)\n"
         f"Language: {language}\n"
         f"File: {or_dash(req.source_file_name)}\n"
         f"Class/module hint: {class_hint}\n"
@@ -1361,7 +1593,9 @@ def unit_user_prompt(req: UnitRequest) -> str:
     )
     if req.source_under_test_summary.strip():
         base += f"\n### Extracted surface\n{req.source_under_test_summary.strip()}\n"
-    base += f"\n{truncate(req.source_code, 10000)}\n"
+    is_csharp = any(x in language.lower() for x in ("c#", "csharp", ".net", "dotnet"))
+    sut_cap = 18000 if is_csharp else 10000
+    base += f"\n{truncate(req.source_code, sut_cap)}\n"
 
     if req.unit_strategy_summary.strip():
         base = (
@@ -1379,11 +1613,13 @@ def unit_user_prompt(req: UnitRequest) -> str:
         )
     if req.related_sources:
         parts = ["\n## Related source (dependencies)\n"]
-        for path, content in req.related_sources[:6]:
-            parts.append(f"### {path}\n{truncate(content, 2500)}\n")
+        rel_n = 10 if is_csharp else 6
+        rel_cap = 4500 if is_csharp else 2500
+        for path, content in req.related_sources[:rel_n]:
+            parts.append(f"### {path}\n{truncate(content, rel_cap)}\n")
         base = base.rstrip() + "\n" + "\n".join(parts)
     if req.test_samples:
-        parts = ["\n## Style sample (existing tests — match style only)\n"]
+        parts = ["\n## Style sample (match conventions only)\n"]
         for path, content in req.test_samples[:2]:
             parts.append(f"### {path}\n{truncate(content, 3500)}\n")
         base = base.rstrip() + "\n" + "\n".join(parts)
@@ -1507,6 +1743,11 @@ class E2ERequest:
     related_sources: list[tuple[str, str]] = field(default_factory=list)
     # Existing POM/spec files when healing (path, content)
     existing_files: list[tuple[str, str]] = field(default_factory=list)
+    # 3-tier AI rules (Project / User) — System lives in e2e_system_prompt + guards
+    project_rules: str = ""
+    user_rules: str = ""
+    # Optional Analysis/TC execution context snippet (actor/role/authRequired/…)
+    execution_context: str = ""
 
 
 @dataclass
@@ -1516,53 +1757,73 @@ class E2EResult:
     primary_spec_path: str
 
 
-def e2e_system_prompt(*, heal: bool = False, has_storage_state: bool = False) -> str:
-    locator_rules = (
-        "- LOCATOR: getByTestId → getByRole+name → getByLabel/Placeholder → getByText (unique) → CSS last. "
-        "Prefer DOM `selector_candidates` / FE attributes; never invent fields.\n"
-        "- Scope duplicates with form/main/testId; no bare button name if DOM shows duplicates.\n"
-    )
-    step_rules = (
-        "- Map numbered Steps → test.step('1. …'); Expected → final expect. "
-        "Validation: prefer expect(submit).toBeDisabled() over force-click. "
-        "Error text: regex keywords only (no hardcoded full message).\n"
-        "- Spec imports ONLY ../pages/ of this TC folder; every Spec method must exist on POM.\n"
+def e2e_system_prompt(
+    *,
+    heal: bool = False,
+    has_storage_state: bool = False,
+    project_rules: str = "",
+    user_rules: str = "",
+    auth_mode: str = "",
+) -> str:
+    from app.llm.e2e_codegen_rules import e2ecg_system_block
+    from app.llm.e2e_journey_rules import E2E_FEATURE_JOURNEY_RULES
+
+    codegen_spec = e2ecg_system_block()
+    journey_rules = E2E_FEATURE_JOURNEY_RULES
+
+    mode = (auth_mode or "").strip().lower()
+    if mode == "public":
+        auth_short = (
+            "- AUTH overlay: PUBLIC — no storageState/globalSetup/auth.helper/ensureAuthenticated.\n"
+        )
+    elif mode == "none":
+        auth_short = (
+            "- AUTH overlay: Login/Logout TC — UI-driven; no storageState/ensureAuthenticated inject.\n"
+        )
+    elif has_storage_state or mode == "storage":
+        auth_short = (
+            "- AUTH overlay: storageState — feature Specs must NOT repeat login UI / ensureAuthenticated.\n"
+        )
+    else:
+        auth_short = (
+            "- AUTH overlay: ui_helper — `test.step('0. …')` + ensureAuthenticated "
+            "(E2E_* / E2E_<ROLE>_*); E2ECG Rules 2+6 for discovery/session.\n"
+        )
+    # Path/sync/reuse → E2ECG 13+15. Keep emit/shim only.
+    host_rules = (
+        '- Shim: `/// <reference path="../types/playwright-shim.d.ts" />` on generated TS.\n'
     )
     if heal:
-        return (
+        base = (
             "You are a senior Playwright E2E engineer fixing broken selectors.\n"
-            "Rules:\n"
-            f"{locator_rules}"
+            f"{codegen_spec}\n\n"
+            f"{auth_short}"
+            f"{journey_rules}\n"
+            f"{host_rules}"
             "- Update Page Object first; Spec only if needed. Keep method contract.\n"
             "- Return ALL updated files:\n"
             "  ### FILE: relative/path.ts\n"
             "  ```ts\n  ...full file...\n  ```\n"
             "- Output only FILE sections.\n"
         )
-    auth_short = (
-        "- AUTH: storageState set → no UI login in feature Specs. "
-        "Else post-login journey → fixtures/auth.helper.ts ensureAuthenticated "
-        "(E2E_* env) before POM.goto. Login/Logout TCs stay UI-driven.\n"
-        if not has_storage_state
-        else "- AUTH: storageState present — feature Specs must NOT repeat login UI.\n"
+    else:
+        base = (
+            "You are a senior Playwright TypeScript E2E engineer (Page Object Model).\n"
+            f"{codegen_spec}\n\n"
+            f"{auth_short}"
+            f"{journey_rules}\n"
+            "- Emit separate *.page.ts + *.spec.ts (optional minimal playwright.config.ts).\n"
+            f"{host_rules}"
+            "- Output only:\n"
+            "  ### FILE: pages/….page.ts\n```ts\n...\n```\n"
+            "  ### FILE: specs/….spec.ts\n```ts\n...\n```\n"
+        )
+    from app.llm.ai_rules import append_layered_rules
+
+    return append_layered_rules(
+        base, project_rules=project_rules, user_rules=user_rules
     )
-    return (
-        "You are a senior Playwright TypeScript E2E engineer (Page Object Model).\n"
-        "Rules:\n"
-        "- Emit separate *.page.ts + *.spec.ts (optional minimal playwright.config.ts).\n"
-        f"{locator_rules}"
-        f"{step_rules}"
-        f"{auth_short}"
-        "- Host path: [{pkg}/]AItest/E2ETest/{Module}/pages|specs/. Relative imports only.\n"
-        "- Shim: `/// <reference path=\"../types/playwright-shim.d.ts\" />` on generated TS.\n"
-        "- goto: waitUntil domcontentloaded (never networkidle). goto() navigates only — "
-        "no feature asserts inside goto().\n"
-        "- Reuse existing page methods from ## Current E2E files; extend if missing.\n"
-        "- Spec order: auth (if needed) → goto → arrange → act → assert.\n"
-        "- Output only:\n"
-        "  ### FILE: pages/….page.ts\n```ts\n...\n```\n"
-        "  ### FILE: specs/….spec.ts\n```ts\n...\n```\n"
-    )
+
 
 
 def _compact_dom_for_e2e_prompt(dom_snapshot: str, *, limit: int = 6000) -> str:
@@ -1607,7 +1868,7 @@ def _compact_dom_for_e2e_prompt(dom_snapshot: str, *, limit: int = 6000) -> str:
         "routes": (data.get("routes") or [])[:12],
         "elements": slim_els,
         "locatorHint": (
-            "Use selector_candidates / test_id / role+name from this list. "
+            "Use selector_candidates / test_id / data-cy / #id / role+name from this list. "
             "Do not invent controls absent here unless FE source below proves them."
         ),
     }
@@ -1685,19 +1946,56 @@ def e2e_user_prompt(req: E2ERequest) -> str:
     parts.append(
         _e2e_steps_checklist(req.steps, req.expected_result, req.test_data)
     )
+    from app.llm.e2e_codegen_rules import derive_execution_context_block
+    from app.llm.e2e_journey_rules import e2e_journey_user_checklist
+
+    parts.append(
+        derive_execution_context_block(
+            title=req.test_case_title,
+            precondition=req.precondition,
+            test_data=req.test_data,
+            steps=req.steps,
+            execution_context=getattr(req, "execution_context", "") or "",
+        )
+    )
+    parts.append(
+        e2e_journey_user_checklist(
+            test_case_title=req.test_case_title,
+            test_case_type=req.test_case_type,
+            precondition=req.precondition,
+            steps=req.steps,
+            expected_result=req.expected_result,
+        )
+    )
     if req.target_url.strip():
         parts.append(f"## Target URL\n{req.target_url.strip()}\n")
-    if req.storage_state_rel.strip():
+    from app.services.e2e_auth_mode import is_public_no_auth_signal
+
+    public = is_public_no_auth_signal(
+        title=req.test_case_title,
+        dom_snapshot=req.dom_snapshot,
+        hints="\n".join(
+            [
+                req.precondition or "",
+                req.steps or "",
+                req.expected_result or "",
+                req.project_rules or "",
+            ]
+        ),
+    )
+    if public:
         parts.append(
-            f"## Auth storageState\nUse storageState path: `{req.storage_state_rel.strip()}`\n"
-            "Feature specs must NOT repeat UI login — session is already loaded via storageState.\n"
+            "## Auth resolved\nPUBLIC — no login artifacts (E2ECG 2; AUTH overlay).\n"
+        )
+    elif req.storage_state_rel.strip():
+        parts.append(
+            f"## Auth resolved\nstorageState: `{req.storage_state_rel.strip()}` "
+            "(no UI login on feature Spec — E2ECG 6).\n"
         )
     else:
         parts.append(
-            "## Auth strategy (no storageState yet)\n"
-            "Post-login journeys: emit fixtures/auth.helper.ts ensureAuthenticated(page) "
-            "using E2E_* env (role-aware). Call before POM.goto. "
-            "Login/Logout TCs: drive login UI in Spec — no ensureAuthenticated skip.\n"
+            "## Auth resolved\nui_helper — step-0 ensureAuthenticated + E2E_* env "
+            "(details: AUTH overlay + E2ECG 2+6).\n"
         )
     if req.seed_command.strip() or req.teardown_command.strip():
         parts.append(
@@ -1710,8 +2008,8 @@ def e2e_user_prompt(req: E2ERequest) -> str:
             "## DOM / interactive elements snapshot (GROUND TRUTH for locators)\n"
             + _compact_dom_for_e2e_prompt(req.dom_snapshot, limit=6000)
             + "\n"
-            "If snapshot is mostly Login, still generate the feature journey from FE source + TC "
-            "with auth first via ensureAuthenticated/storageState.\n"
+            "Prefer DOM `selector_candidates`. Login-wall snapshot on a feature TC → "
+            "use FE attrs for post-login UI; do NOT invent testids.\n"
         )
     else:
         parts.append(
@@ -1722,7 +2020,11 @@ def e2e_user_prompt(req: E2ERequest) -> str:
     if req.source_code.strip():
         parts.append(
             f"## FE source hint (`{req.source_file_name or 'source'}`)\n"
-            "Extract data-testid, aria-label, name, placeholder, button text, routes.\n"
+            "Extract ONLY real hooks from this template/component: data-cy, data-testid, "
+            "id, name, formControlName, aria-label, placeholder, button/link visible text, "
+            "routerLink/href routes. Map each Spec action to those attrs — "
+            "do not rename fields to free-form Vietnamese labels unless that exact text "
+            "appears in the template.\n"
             + truncate(req.source_code, src_cap)
             + "\n"
         )
@@ -1751,9 +2053,9 @@ def e2e_user_prompt(req: E2ERequest) -> str:
     if req.repair_context.strip():
         parts.append(f"## Repair context\n{truncate(req.repair_context.strip(), 5000)}\n")
     parts.append(
-        "Generate Playwright Page Object + Spec (and config if needed) for this journey.\n"
-        "Prefer Spec-only or minimal page extend when Current E2E files already define the POM.\n"
-        "Every locator must be grounded in DOM selector_candidates, FE attributes, or TC steps.\n"
+        "Generate Playwright Page Object + Spec (and config if needed).\n"
+        "Prefer Spec-only / minimal page extend when Current E2E files already define the POM.\n"
+        "Locators grounded in DOM / FE / TC only — contract = E2ECG Rules 9–16.\n"
     )
     return "\n".join(parts)
 
@@ -1836,7 +2138,31 @@ def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
     )
     from app.services.e2e_codegen_guard import apply_e2e_codegen_guards
 
-    resolved = apply_e2e_codegen_guards(resolved, dom_snapshot=req.dom_snapshot)
+    resolved = apply_e2e_codegen_guards(
+        resolved,
+        dom_snapshot=req.dom_snapshot,
+        use_storage=bool((req.storage_state_rel or "").strip()),
+        test_case_title=req.test_case_title,
+        auth_hints="\n".join(
+            [
+                req.precondition or "",
+                req.steps or "",
+                req.expected_result or "",
+                req.project_rules or "",
+            ]
+        ),
+    )
+    tc_suffix = hashlib.md5((req.test_case_title or "").encode("utf-8")).hexdigest()[:8]
+    if tc_suffix:
+        patched: list[E2EFile] = []
+        for f in resolved:
+            p = (f.path or "").replace("\\", "/")
+            if f.kind == "spec":
+                m = re.search(r"(\.(?:spec|test)\.[^.]+)$", p, flags=re.IGNORECASE)
+                if m and f".{tc_suffix}." not in p.lower():
+                    p = f"{p[:m.start(1)]}.{tc_suffix}{m.group(1)}"
+            patched.append(E2EFile(path=p, content=f.content, kind=f.kind))
+        resolved = patched
     paths = [f.path for f in resolved]
     primary = next((f.path for f in resolved if f.kind == "spec"), paths[0])
     return E2EResult(files=resolved, suggested_paths=paths, primary_spec_path=primary)
@@ -1853,6 +2179,7 @@ def default_playwright_config(
     storage_state_rel: str = "",
     headed: bool = False,
     slow_mo_ms: int | None = None,
+    include_global_setup: bool | None = None,
 ) -> str:
     base = (base_url or "http://localhost:3000").rstrip("/")
     def _normalize_storage_rel(rel: str) -> str:
@@ -1870,6 +2197,11 @@ def default_playwright_config(
 
     storage_rel = _normalize_storage_rel(storage_state_rel)
     storage_line = f'    storageState: "{storage_rel}",\n' if storage_rel else ""
+    # Default: globalSetup only when storageState is configured (storage auth mode).
+    use_setup = include_global_setup if include_global_setup is not None else bool(storage_rel)
+    global_setup_line = (
+        "  globalSetup: './fixtures/global.setup.ts',\n" if use_setup else ""
+    )
     # Explicit headless — CLI --headed đôi khi bị nuốt trên Windows/npx; config chắc hơn
     headless_line = "    headless: false,\n" if headed else "    headless: true,\n"
     # Headed: slowMo đủ lớn để mắt người theo kịp từng click/fill (80ms ≈ bật/tắt).
@@ -1886,7 +2218,7 @@ def default_playwright_config(
     return (
         "import { defineConfig, devices } from '@playwright/test';\n\n"
         "export default defineConfig({\n"
-        "  globalSetup: './fixtures/global.setup.ts',\n"
+        f"{global_setup_line}"
         "  testDir: './specs',\n"
         "  fullyParallel: false,\n"
         "  workers: 1,\n"
@@ -1903,6 +2235,8 @@ def default_playwright_config(
         "  ],\n"
         "  use: {\n"
         f"    baseURL: process.env.E2E_BASE_URL || '{base}',\n"
+        "    // Prefer data-cy (JHipster) then apps can override via E2E_TEST_ID_ATTRIBUTE\n"
+        "    testIdAttribute: process.env.E2E_TEST_ID_ATTRIBUTE || 'data-cy',\n"
         f"{headless_line}"
         f"{slow_line}"
         "    actionTimeout: 15_000,\n"

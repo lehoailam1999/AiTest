@@ -22,6 +22,7 @@ export type ProjectMeta = {
   testProjectCount?: number;
   sdkVersion?: string | null;
   scanName?: string;
+  scanLanguage?: string;
   modules?: {
     name: string;
     language?: string | null;
@@ -33,6 +34,20 @@ export type ProjectMeta = {
    * VD: { "chia sẻ vật chứng": ["EvidenceShare", "ShareEvidence"] }
    */
   codeAliases?: Record<string, string[]>;
+  /**
+   * 3-tier AI Rules — Project + User (System cố định trên BE).
+   * Precedence khi xung đột: System > Project > User.
+   */
+  aiRules?: {
+    /** Auto từ stack scan — regenerate khi sync trừ khi lockProjectAuto */
+    projectAuto?: string;
+    /** Ghi chú dự án bền (người dùng / team) */
+    projectExtra?: string;
+    /** Quy tắc cá nhân trên UI */
+    user?: string;
+    /** Không ghi đè projectAuto khi sync */
+    lockProjectAuto?: boolean;
+  };
   /** EX4.3 — E2E console env persisted per project */
   e2e?: {
     targetUrl?: string;
@@ -174,6 +189,16 @@ export type KnowledgePayload = {
   features?: { name: string; description?: string }[];
   actors?: { name: string; description?: string; permissions?: string }[];
   useCases?: { name: string; steps?: string }[];
+  /** WHO for E2E: actor/auth/roles per scenario — not login mechanism */
+  executionContexts?: {
+    name: string;
+    actor?: string;
+    authRequired?: boolean;
+    roles?: string[];
+    permissions?: string;
+    sessionHint?: string;
+    notes?: string;
+  }[];
   businessRules?: { id?: string; text: string; priority?: string }[];
   validationRules?: { field?: string; rule: string }[];
   apiSummary?: { method?: string; path: string; note?: string }[];

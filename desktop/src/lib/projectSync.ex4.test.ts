@@ -27,11 +27,28 @@ describe("buildProjectMetaFromScan EX4.3", () => {
         useStorageState: false,
       },
       codeAliases: { login: ["SignIn"] },
+      aiRules: { user: "keep-me", projectExtra: "extra" },
     };
     const next = buildProjectMetaFromScan(scanStub, prev);
     assert.equal(next.e2e?.targetUrl, "http://localhost:5173");
     assert.equal(next.e2e?.usePlaywrightInspect, true);
     assert.deepEqual(next.codeAliases, { login: ["SignIn"] });
+    assert.equal(next.aiRules?.user, "keep-me");
+    assert.equal(next.aiRules?.projectExtra, "extra");
+    assert.ok(next.aiRules?.projectAuto);
     assert.ok(next.syncedAt);
+  });
+
+  it("respects lockProjectAuto", () => {
+    const prev: ProjectMeta = {
+      aiRules: {
+        projectAuto: "LOCKED_AUTO",
+        lockProjectAuto: true,
+        user: "u",
+      },
+    };
+    const next = buildProjectMetaFromScan(scanStub, prev);
+    assert.equal(next.aiRules?.projectAuto, "LOCKED_AUTO");
+    assert.equal(next.aiRules?.user, "u");
   });
 });

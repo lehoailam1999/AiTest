@@ -37,7 +37,7 @@ describe("resolveTestFramework", () => {
     assert.equal(r.status, "missing");
   });
 
-  it("suggests xunit for csharp without test packages", () => {
+  it("suggests xunit scaffold — never dotnet add on production csproj", () => {
     const r = resolveTestFramework({
       scan: {
         projectPath: "D:/x",
@@ -55,7 +55,32 @@ describe("resolveTestFramework", () => {
     });
     assert.equal(r.status, "missing");
     assert.equal(r.framework, "xunit");
-    assert.ok(r.installCommand?.includes("dotnet"));
+    assert.ok(r.installCommand?.includes("dotnet new xunit"));
+    assert.ok(r.installCommand?.includes("AItest.UnitTests"));
+    assert.ok(!r.installCommand?.includes("App.csproj"));
+  });
+
+  it("dotnet add only targets scanned test projects", () => {
+    const r = resolveTestFramework({
+      preferredLanguage: "C#",
+      sourceFile: "Services/Foo.cs",
+      scan: {
+        projectPath: "D:/x",
+        name: "x",
+        solutionFiles: [],
+        csprojFiles: ["D:/x/App.csproj"],
+        testProjects: ["D:/x/App.Tests.csproj"],
+        frameworks: ["net8.0"],
+        testFrameworks: [],
+        stacks: ["ASP.NET Core"],
+        modules: [],
+        language: "C#",
+        tree: [],
+      },
+    });
+    assert.equal(r.status, "missing");
+    assert.ok(r.installCommand?.includes('dotnet add "D:/x/App.Tests.csproj"'));
+    assert.ok(!r.installCommand?.includes("App.csproj\" package"));
   });
 
   it("prefers scan xUnit over empty package.json (mixed / tooling root)", () => {

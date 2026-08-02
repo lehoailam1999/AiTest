@@ -631,7 +631,15 @@ fn collect_files(
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.eq_ignore_ascii_case("node_modules") || name.eq_ignore_ascii_case("bin") || name.eq_ignore_ascii_case("obj") {
+        // Skip hidden + tool caches (pytest/mypy/venv) so they never enter unit-gen context.
+        if name.starts_with('.')
+            || name.eq_ignore_ascii_case("node_modules")
+            || name.eq_ignore_ascii_case("bin")
+            || name.eq_ignore_ascii_case("obj")
+            || name.eq_ignore_ascii_case("__pycache__")
+            || name.eq_ignore_ascii_case("venv")
+            || name.eq_ignore_ascii_case(".venv")
+        {
             continue;
         }
         if path.is_file() {
@@ -686,7 +694,15 @@ fn build_tree(root: &Path, current: &Path, depth: usize, counter: &mut usize) ->
         }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.eq_ignore_ascii_case("node_modules") || name.eq_ignore_ascii_case("bin") || name.eq_ignore_ascii_case("obj") {
+        // Skip hidden + tool caches (pytest/mypy/venv) so they never enter unit-gen context.
+        if name.starts_with('.')
+            || name.eq_ignore_ascii_case("node_modules")
+            || name.eq_ignore_ascii_case("bin")
+            || name.eq_ignore_ascii_case("obj")
+            || name.eq_ignore_ascii_case("__pycache__")
+            || name.eq_ignore_ascii_case("venv")
+            || name.eq_ignore_ascii_case(".venv")
+        {
             continue;
         }
         let is_dir = path.is_dir();
@@ -923,9 +939,64 @@ fn is_under_root(root: &Path, path: &Path) -> bool {
     path_s == root_s || path_s.starts_with(&(root_s + std::path::MAIN_SEPARATOR_STR))
 }
 
+/// Windows `canonicalize()` yields `\\?\C:\…` / `\\?\UNC\…`. MSBuild percent-encodes `?`
+/// (`\\%3f\…`) and then fails MSB4019 on `$(MSBuildProjectExtensionsPath)*.props`.
+/// Strip before any path handed to `dotnet` / `cmd` / shells.
 fn strip_verbatim(p: &Path) -> String {
     let s = p.to_string_lossy();
-    s.trim_start_matches(r"\\?\").to_string()
+    strip_verbatim_str(&s)
+}
+
+fn strip_verbatim_str(s: &str) -> String {
+    let t = s.trim();
+    // \\?\UNC\server\share → \\server\share
+    if let Some(rest) = t.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = t.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    // Forward-slash variants (rare)
+    if let Some(rest) = t.strip_prefix("//?/UNC/") {
+        return format!(r"\\{}", rest.replace('/', "\\"));
+    }
+    if let Some(rest) = t.strip_prefix("//?/") {
+        return rest.replace('/', "\\");
+    }
+    t.to_string()
+}
+
+fn path_for_external_tool(p: &Path) -> PathBuf {
+    PathBuf::from(strip_verbatim(p))
+}
+
+#[cfg(test)]
+mod verbatim_path_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn strips_extended_length_prefix() {
+        assert_eq!(
+            strip_verbatim_str(r"\\?\D:\Xlab\Forensic\forensic"),
+            r"D:\Xlab\Forensic\forensic"
+        );
+        assert_eq!(
+            strip_verbatim_str(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        assert_eq!(
+            path_for_external_tool(Path::new(r"\\?\D:\proj\AItest\AItest.UnitTests.csproj"))
+                .to_string_lossy(),
+            r"D:\proj\AItest\AItest.UnitTests.csproj"
+        );
+    }
+
+    #[test]
+    fn leaves_normal_paths() {
+        assert_eq!(strip_verbatim_str(r"D:\proj"), r"D:\proj");
+        assert_eq!(strip_verbatim_str("/home/u/proj"), "/home/u/proj");
+    }
 }
 
 #[derive(Serialize)]
@@ -970,12 +1041,14 @@ pub fn run_dotnet_test(
         if !p.is_file() {
             return Err(format!("Filter không tồn tại: {rel}"));
         }
-        Some(p.to_string_lossy().into_owned())
+        // Absolute path for display/args must NOT keep \\?\ (MSBuild MSB4019).
+        Some(strip_verbatim(&p))
     } else {
         None
     };
 
-    let results_dir = root.join("TestResults");
+    let cwd = path_for_external_tool(&root);
+    let results_dir = cwd.join("TestResults");
     let _ = fs::create_dir_all(&results_dir);
     let trx_name = format!(
         "aitest-{}.trx",
@@ -989,7 +1062,7 @@ pub fn run_dotnet_test(
     args.push("--logger".into());
     args.push(format!("trx;LogFileName={trx_name}"));
     args.push("--results-directory".into());
-    args.push(results_dir.to_string_lossy().into_owned());
+    args.push(strip_verbatim(&results_dir));
     args.push("--nologo".into());
 
     let command_display = if target_arg.is_some() {
@@ -1004,7 +1077,7 @@ pub fn run_dotnet_test(
     let mut cmd = Command::new("dotnet");
     cmd.arg("test")
         .args(&args)
-        .current_dir(&root);
+        .current_dir(&cwd);
 
     let output = cmd
         .output()
@@ -1088,16 +1161,26 @@ pub fn run_test_command(project_root: String, command: String) -> Result<TestRun
         return Err("Command test không được để trống".into());
     }
 
-    let cwd = resolve_test_cwd(&root, cmd_line)?;
+    let cwd_raw = resolve_test_cwd(&root, cmd_line)?;
+    // MSBuild/dotnet choke on \\?\ cwd (MSB4019). Node/pytest are fine either way.
+    let cwd = path_for_external_tool(&cwd_raw);
+    let root_ext = path_for_external_tool(&root);
     let started = Instant::now();
     let started_at = iso_now();
 
+    // Windows: Rust's default arg quoting breaks nested quotes around paths with spaces
+    // (e.g. pytest "AItest/UnitTest/To do/x.py" → pytest sees "AItest/UnitTest/To).
+    // raw_arg passes the /C payload exactly as typed.
     #[cfg(windows)]
-    let output = Command::new("cmd")
-        .args(["/C", cmd_line])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("Không chạy được lệnh test: {e}"))?;
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new("cmd")
+            .raw_arg("/C")
+            .raw_arg(cmd_line)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("Không chạy được lệnh test: {e}"))?
+    };
 
     #[cfg(not(windows))]
     let output = Command::new("sh")
@@ -1111,7 +1194,7 @@ pub fn run_test_command(project_root: String, command: String) -> Result<TestRun
     let exit_code = output.status.code().unwrap_or(-1);
 
     let mut log = String::new();
-    if cwd != root {
+    if cwd != root_ext {
         log.push_str(&format!(
             "[AITest] cwd = {}\n",
             cwd.to_string_lossy()

@@ -299,6 +299,13 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
             req_title = req_obj.title or ""
             req_desc = req_obj.description or ""
 
+    from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+
+    proj_rules, usr_rules = rules_pair_from_meta(
+        parse_project_meta(getattr(project, "meta", None)),
+        language=language or project.language,
+    )
+
     req = UnitRequest(
         test_case_title=tc.title,
         test_case_type=tc.type,
@@ -330,6 +337,8 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         context_gaps=gaps,
         requirement_title=req_title,
         requirement_description=req_desc,
+        project_rules=proj_rules,
+        user_rules=usr_rules,
     )
     try:
         result, meta = await generate_unit_for_connection(conn, req)
@@ -453,6 +462,13 @@ async def unit_sandbox_repair_route(request: Request, db: Annotated[Session, Dep
                 module=module,
                 package_prefix=package_prefix,
             )
+        from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+
+        lang = str(body.get("language") or orch.stack.language or project.language or "")
+        proj_rules, usr_rules = rules_pair_from_meta(
+            parse_project_meta(getattr(project, "meta", None)),
+            language=lang or project.language,
+        )
         req = UnitRequest(
             test_case_title=tc.title,
             test_case_type=tc.type,
@@ -466,10 +482,12 @@ async def unit_sandbox_repair_route(request: Request, db: Annotated[Session, Dep
             class_name=str(body.get("className") or ""),
             method_name=str(body.get("methodName") or ""),
             framework=str(body.get("framework") or orch.stack.framework),
-            language=str(body.get("language") or orch.stack.language or project.language or ""),
+            language=lang,
             module=module,
             package_prefix=package_prefix,
             testing_framework=str(body.get("framework") or orch.stack.framework),
+            project_rules=proj_rules,
+            user_rules=usr_rules,
         )
         sandbox = await orch.execute_sandbox_and_auto_repair(
             initial_code=code,
