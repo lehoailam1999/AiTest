@@ -78,10 +78,18 @@ describe("e2eWorkspace env", () => {
       useStorageState: true,
       seedCommand: "npm run seed",
     });
-    assert.ok(env.storageStateRel?.includes("fixtures/storageState.json"));
+    assert.equal(env.storageStateRel, "./fixtures/storageState.json");
     assert.equal(env.seedCommand, "npm run seed");
     const pe = playwrightEnvFromConfig(env);
     assert.equal(pe.E2E_BASE_URL, "http://localhost:5173");
-    assert.ok(pe.E2E_STORAGE_STATE?.includes("storageState.json"));
+    assert.equal(pe.E2E_STORAGE_STATE, "./fixtures/storageState.json");
+  });
+
+  it("ignores nested AItest module storage paths", () => {
+    const env = buildE2EEnvConfig({
+      useStorageState: true,
+      storageStateRel: "AItest/E2ETest/Vật-chứng/fixtures/storageState.json",
+    });
+    assert.equal(env.storageStateRel, "./fixtures/storageState.json");
   });
 });

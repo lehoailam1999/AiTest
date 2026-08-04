@@ -19,7 +19,6 @@ import {
   Checkbox,
   Collapse,
   Input,
-  Modal,
   Progress,
   Radio,
   Segmented,
@@ -57,13 +56,23 @@ import {
   type E2eGenItem,
 } from "../../lib/e2eWorkspace/e2eJobRunner";
 import {
+  aggregateE2eMetrics,
+  classifyE2eFailure,
+  type E2eRunMetrics,
+} from "../../lib/e2eWorkspace/e2eFailureMetrics";
+import { resolveE2eFeSources } from "../../lib/e2eWorkspace/resolveE2eFeSources";
+import { deriveFeaturePathFromTc } from "../../lib/e2eWorkspace/deriveFeaturePathFromTc";
+import { pickDiscoveredStorageStateRel } from "../../lib/e2eWorkspace/pickDiscoveredStorageState";
+import {
   applyE2eStaging,
   buildE2eStagedFiles,
   captureE2eBackups,
+  deleteE2eStagedFile,
   newE2eRunId,
   refreshE2eOverlayFromFiles,
   rollbackE2eTargets,
   stagingDirHint,
+  updateE2eStagedFileContent,
   writeE2eOverlayReplacingPrevious,
   type E2eStagingSession,
 } from "../../lib/e2eWorkspace/stagingApply";
@@ -88,10 +97,16 @@ import {
   BATCH_NOTE_PAUSED,
   BATCH_NOTE_RUNNING,
   BATCH_NOTE_WAITING,
+  batchTcSnapshot,
+  isBatchQueueNote,
   markBatchRowsPaused,
   markBatchRowsResumed,
   type BatchPipelineRow,
 } from "../unit-test/BatchRunConsole";
+import {
+  generateErrorLogRel,
+  saveErrorLogFile,
+} from "../../lib/unitWorkspace/errorLogStore";
 import {
   appendPhaseLog,
   finishPhase,
@@ -122,8 +137,10 @@ function tcBelongsToReq(tc: TestCase, req: ReqOption): boolean {
   return false;
 }
 
-/** Folder under AItest/E2ETest — prefer shared TC.module, else requirement title. */
+/** Folder label for batch — SoT is requirement title; API builds {Req}/{TC} per case. */
 function resolveBatchModuleFolder(cases: TestCase[], reqTitle: string): string {
+  const slug = (reqTitle || "").trim();
+  if (slug) return slug.slice(0, 80);
   const mods = cases
     .map((t) => (t.module || "").trim())
     .filter(Boolean);
@@ -131,11 +148,9 @@ function resolveBatchModuleFolder(cases: TestCase[], reqTitle: string): string {
     const counts = new Map<string, number>();
     for (const m of mods) counts.set(m, (counts.get(m) || 0) + 1);
     const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-    if (top && top[1] >= Math.ceil(mods.length / 2)) return top[0];
-    if (new Set(mods).size === 1) return mods[0];
+    if (top) return top[0].slice(0, 80);
   }
-  const slug = (reqTitle || "E2E").trim() || "E2E";
-  return slug.slice(0, 80);
+  return "E2E";
 }
 
 function initE2eQueueRows(cases: TestCase[]): E2eBatchPipelineRow[] {
@@ -145,18 +160,23 @@ function initE2eQueueRows(cases: TestCase[]): E2eBatchPipelineRow[] {
     title: t.title,
     status: "fail",
     error: BATCH_NOTE_WAITING,
+    ...batchTcSnapshot(t),
   }));
 }
 
 function mapGenToPipeline(
   cases: TestCase[],
   rows: { testCaseId: string; title: string; status: string; error?: string; runId?: string; files?: number }[],
-  genItems: E2eGenItem[]
+  genItems: E2eGenItem[],
+  prevRows?: E2eBatchPipelineRow[]
 ): E2eBatchPipelineRow[] {
   const byId = new Map(rows.map((r) => [r.testCaseId, r]));
+  const prevById = new Map((prevRows || []).map((r) => [r.testCaseId, r]));
   const okIds = new Set(genItems.map((g) => g.testCaseId));
   return cases.map((t) => {
     const r = byId.get(t.id);
+    const prev = prevById.get(t.id);
+    const snap = batchTcSnapshot(t);
     if (okIds.has(t.id) || r?.status === "generated" || r?.status === "ok") {
       return {
         key: t.id,
@@ -166,6 +186,7 @@ function mapGenToPipeline(
         runId: r?.runId ?? genItems.find((g) => g.testCaseId === t.id)?.runId,
         files: r?.files ?? genItems.find((g) => g.testCaseId === t.id)?.files.length,
         verifyStatus: "pending" as const,
+        ...snap,
       };
     }
     if (r?.status === "running") {
@@ -176,6 +197,7 @@ function mapGenToPipeline(
         status: "fail" as const,
         error: BATCH_NOTE_RUNNING,
         runId: r.runId,
+        ...snap,
       };
     }
     if (r?.status === "pending") {
@@ -185,32 +207,63 @@ function mapGenToPipeline(
         title: t.title,
         status: "fail" as const,
         error: BATCH_NOTE_WAITING,
+        ...snap,
       };
     }
+    const errMsg = r?.error || prev?.error || "Generate fail";
+    const detail =
+      prev?.errorDetail && !isBatchQueueNote(prev.error)
+        ? prev.errorDetail
+        : isBatchQueueNote(errMsg)
+          ? undefined
+          : errMsg;
     return {
       key: t.id,
       testCaseId: t.id,
       title: t.title,
       status: "fail" as const,
-      error: r?.error || "Generate fail",
-      runId: r?.runId,
+      error: errMsg,
+      errorDetail: detail,
+      errorLogRel: prev?.errorLogRel,
+      runId: r?.runId ?? prev?.runId,
+      ...snap,
     };
   });
 }
 
 function mergeVerifyStatus(
   prev: E2eBatchPipelineRow[],
-  verifyRows: { testCaseId: string; status: string; error?: string }[]
+  verifyRows: {
+    testCaseId: string;
+    status: string;
+    error?: string;
+    failCategory?: string;
+  }[],
+  logRels?: Map<string, string>
 ): E2eBatchPipelineRow[] {
   const byId = new Map(verifyRows.map((r) => [r.testCaseId, r]));
   return prev.map((p) => {
     const v = byId.get(p.testCaseId);
     if (!v || p.status !== "ok") return p;
     const pass = v.status === "ok";
+    if (pass) {
+      return {
+        ...p,
+        verifyStatus: "pass" as const,
+        error: undefined,
+        errorDetail: undefined,
+        errorLogRel: undefined,
+        failCategory: undefined,
+      };
+    }
+    const errBody = v.error || p.error || "Verify FAIL";
     return {
       ...p,
-      verifyStatus: pass ? ("pass" as const) : ("fail" as const),
-      error: pass ? undefined : v.error || p.error,
+      verifyStatus: "fail" as const,
+      error: errBody,
+      errorDetail: errBody,
+      errorLogRel: logRels?.get(p.testCaseId) || p.errorLogRel,
+      failCategory: v.failCategory || p.failCategory,
     };
   });
 }
@@ -227,8 +280,8 @@ export default function E2ETestPage() {
   const [testCaseId, setTestCaseId] = useState(searchParams.get("testCaseId") || "");
   const [targetUrl, setTargetUrl] = useState("http://localhost:3000");
   const [usePlaywrightInspect, setUsePlaywrightInspect] = useState(true);
-  /** Default on — feature specs skip login UI via fixtures/storageState.json */
-  const [useStorageState, setUseStorageState] = useState(true);
+  /** Prefer UI login until a real storageState.json exists (avoids Playwright ENOENT). */
+  const [useStorageState, setUseStorageState] = useState(false);
   /** Optional override only — primary: AI seed → .ai-test/auth */
   const [e2eUsername, setE2eUsername] = useState("");
   const [e2ePassword, setE2ePassword] = useState("");
@@ -241,6 +294,7 @@ export default function E2ETestPage() {
       role: string;
       hasUsername: boolean;
       hasPassword: boolean;
+      storageStateRel?: string | null;
       storageStateValid: boolean;
       source: string;
       skippedSeed: boolean;
@@ -270,14 +324,12 @@ export default function E2ETestPage() {
   const [batchSelected, setBatchSelected] = useState<string[]>([]);
   const [batchResults, setBatchResults] = useState<E2eBatchPipelineRow[]>([]);
   const [batchGenItems, setBatchGenItems] = useState<E2eGenItem[]>([]);
+  /** Phase 4 — last Verify/Heal metrics */
+  const [verifyMetrics, setVerifyMetrics] = useState<E2eRunMetrics | null>(null);
   const [stagingPreviewPath, setStagingPreviewPath] = useState<string | null>(null);
   const [singleRunId, setSingleRunId] = useState<string | null>(null);
   const [singlePrimarySpec, setSinglePrimarySpec] = useState<string>("");
   const [inputMode, setInputMode] = useState<"requirement" | "single">("requirement");
-  const [batchErrorDetail, setBatchErrorDetail] = useState<{
-    title: string;
-    error: string;
-  } | null>(null);
   const [batchStatus, setBatchStatus] = useState<BatchRunStatus>("idle");
   const [batchProgress, setBatchProgress] = useState<{
     current: number;
@@ -288,13 +340,16 @@ export default function E2ETestPage() {
   /** One staging runId per Generate batch — never mint a new folder per TC. */
   const e2eStagingRunIdRef = useRef<string | null>(null);
   const e2eStagingSessionRef = useRef<E2eStagingSession | null>(null);
-  /** Reuse Inspect DOM for ~5 phút cùng Target URL (skip cold Chromium). */
+  /** Reuse Inspect DOM for ~5 phút cùng Target URL + feature seed (skip cold Chromium). */
   const inspectCacheRef = useRef<{
     targetUrl: string;
+    featurePath?: string;
+    feSeed?: string;
     promptJson: string;
     elementCount: number;
     routeCount: number;
     source: string;
+    routes: string[];
     at: number;
   } | null>(null);
 
@@ -624,9 +679,61 @@ export default function E2ETestPage() {
 
   async function ensureInspectSnapshot(force = false): Promise<string> {
     if (!localPath) throw new Error("Chưa gắn project root");
+    const tcForSeed =
+      selected ||
+      batchCandidates[0] ||
+      approved[0] ||
+      null;
+
+    let feSeed = "";
+    let sourceCode: string | undefined;
+    let sourcePaths: { path: string; content: string }[] | undefined;
+    let featurePath: string | undefined;
+    if (tcForSeed) {
+      try {
+        const fe = await resolveE2eFeSources({
+          projectRoot: localPath,
+          testCase: tcForSeed,
+        });
+        if (fe) {
+          feSeed = fe.sourceFileName;
+          sourceCode = fe.sourceCode;
+          sourcePaths = [
+            { path: fe.sourceFileName, content: fe.sourceCode },
+            ...fe.relatedSources,
+          ];
+          for (const n of fe.notes) {
+            pushPhaseLog("inspect", `  fe: ${n}\n`);
+          }
+          featurePath = deriveFeaturePathFromTc({
+            title: tcForSeed.title,
+            precondition: tcForSeed.precondition,
+            testData: tcForSeed.testData,
+            steps: tcForSeed.steps,
+            feSource: [fe.sourceCode, ...fe.relatedSources.map((r) => r.content)].join(
+              "\n"
+            ),
+            feFilePaths: [
+              fe.sourceFileName,
+              ...fe.relatedSources.map((r) => r.path),
+            ],
+          });
+          if (featurePath) {
+            pushPhaseLog("inspect", `  featurePath=${featurePath}\n`);
+          }
+        }
+      } catch (e) {
+        pushPhaseLog("inspect", `  fe warn: ${String(e)}\n`);
+      }
+    }
+
     const cached = inspectCacheRef.current;
     const sameUrl = cached && cached.targetUrl === targetUrl.trim();
-    const fresh = sameUrl && Date.now() - cached.at < 5 * 60 * 1000;
+    const sameSeed =
+      cached &&
+      (cached.feSeed || "") === feSeed &&
+      (cached.featurePath || "") === (featurePath || "");
+    const fresh = sameUrl && sameSeed && Date.now() - cached.at < 5 * 60 * 1000;
     if (!force && fresh && cached.promptJson) {
       pushPhaseLog(
         "inspect",
@@ -641,14 +748,44 @@ export default function E2ETestPage() {
       targetUrl,
       projectRoot: localPath,
       usePlaywrightInspect,
+      sourceCode,
+      sourcePaths,
+      featurePath,
+      // Post-auth: prefer discovered AItest storage; API also searches if missing
+      username: e2eUsername.trim() || undefined,
+      password: e2ePassword.trim() || undefined,
+      storageStateRel:
+        pickDiscoveredStorageStateRel(authDiscovery) ||
+        (useStorageState ? "./fixtures/storageState.json" : undefined),
+      module:
+        inputMode === "requirement"
+          ? selectedBatchReq?.title
+          : selected?.module || undefined,
       onLog: (line) => pushPhaseLog("inspect", line),
     });
+    // Refine feature path with live routes from Inspect when TC/FE alone was ambiguous
+    if (!featurePath && inspected.routes?.length && tcForSeed) {
+      featurePath = deriveFeaturePathFromTc({
+        title: tcForSeed.title,
+        precondition: tcForSeed.precondition,
+        testData: tcForSeed.testData,
+        steps: tcForSeed.steps,
+        routes: inspected.routes,
+        feSource: sourceCode,
+      });
+      if (featurePath) {
+        pushPhaseLog("inspect", `  featurePath(from routes)=${featurePath}\n`);
+      }
+    }
     inspectCacheRef.current = {
       targetUrl: targetUrl.trim(),
+      featurePath,
+      feSeed,
       promptJson: inspected.domSnapshot,
       elementCount: inspected.elementCount,
       routeCount: inspected.routeCount,
       source: inspected.source,
+      routes: inspected.routes || [],
       at: Date.now(),
     };
     setRun((r) =>
@@ -785,18 +922,18 @@ export default function E2ETestPage() {
     setAppliedPaths([]);
     setBatchGenItems([]);
     setBatchResults(initE2eQueueRows(cases));
+    setVerifyMetrics(null);
     setBatchProgress({ current: 0, total: cases.length, label: cases[0]?.title || "Generate…" });
     setActivePhase("generate");
     setResultTab("log");
     setRun((r) => setPhaseRunning(r, "generate"));
 
     try {
-      let domSnapshot = "";
-      try {
-        domSnapshot = await ensureInspectSnapshot(false);
-      } catch (e) {
-        pushPhaseLog("inspect", `  inspect warn (vẫn Generate): ${String(e)}\n`);
-      }
+      // Inspect runs per TC inside generateE2eBatch (inspectPerTc) — no warm-up Chromium.
+      pushPhaseLog(
+        "inspect",
+        "  skip warm-up Inspect (per-TC Inspect during Generate)\n"
+      );
 
       const t0 = performance.now();
       const { rows, files: batchFiles, genItems } = await generateE2eBatch({
@@ -806,11 +943,14 @@ export default function E2ETestPage() {
         targetUrl,
         module: batchModule,
         requirementTitle: selectedBatchReq?.title,
-        domSnapshot,
         provider: conn?.provider,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
+        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        inspectPerTc: true,
+        usePlaywrightInspect,
+        skipAuthSeed: Boolean(pickDiscoveredStorageStateRel(authDiscovery)),
         waitIfPaused: async () => {
           await control.waitIfPaused();
           setBatchResults((prev) =>
@@ -846,27 +986,59 @@ export default function E2ETestPage() {
                 ? `Đã gen «${item.title}» (${item.done}/${item.total})`
                 : `Gen lỗi «${item.title}» (${item.done}/${item.total})`,
           });
-          setBatchResults((prev) =>
-            prev.map((r) => {
-              if (r.testCaseId !== item.testCaseId) return r;
-              if (item.status === "generated") {
-                return {
-                  ...r,
-                  status: "ok",
-                  error: undefined,
-                  runId: item.row.runId,
-                  files: item.row.files,
-                  verifyStatus: "pending",
-                };
-              }
-              return {
-                ...r,
-                status: "fail",
-                error: item.row.error || "Generate fail",
-                runId: item.row.runId,
-              };
-            })
-          );
+          const tc = cases.find((c) => c.id === item.testCaseId);
+          const snap = tc ? batchTcSnapshot(tc) : {};
+          if (item.status === "generated") {
+            setBatchResults((prev) =>
+              prev.map((r) =>
+                r.testCaseId !== item.testCaseId
+                  ? r
+                  : {
+                      ...r,
+                      ...snap,
+                      status: "ok",
+                      error: undefined,
+                      errorDetail: undefined,
+                      errorLogRel: undefined,
+                      runId: item.row.runId,
+                      files: item.row.files,
+                      verifyStatus: "pending",
+                    }
+              )
+            );
+          } else {
+            const errMsg = item.row.error || "Generate fail";
+            const logBody = `${new Date().toISOString()} · E2E Generate FAIL · ${item.testCaseId}\n${item.title}\n\n${errMsg}`;
+            setBatchResults((prev) =>
+              prev.map((r) =>
+                r.testCaseId !== item.testCaseId
+                  ? r
+                  : {
+                      ...r,
+                      ...snap,
+                      status: "fail",
+                      error: errMsg,
+                      errorDetail: logBody,
+                      runId: item.row.runId,
+                    }
+              )
+            );
+            if (localPath && isTauri()) {
+              void saveErrorLogFile(
+                localPath,
+                generateErrorLogRel(item.testCaseId),
+                logBody
+              )
+                .then((errorLogRel) => {
+                  setBatchResults((prev) =>
+                    prev.map((r) =>
+                      r.testCaseId === item.testCaseId ? { ...r, errorLogRel } : r
+                    )
+                  );
+                })
+                .catch(() => undefined);
+            }
+          }
           if (item.genItem) {
             setBatchGenItems((prev) => {
               const rest = prev.filter((g) => g.testCaseId !== item.genItem!.testCaseId);
@@ -884,12 +1056,12 @@ export default function E2ETestPage() {
         },
         onLog: (line) => pushPhaseLog("generate", line),
       });
-      const pipeline = mapGenToPipeline(cases, rows, genItems);
-      setBatchResults(
-        control.getStatus() === "paused"
-          ? (markBatchRowsPaused(pipeline as BatchPipelineRow[]) as E2eBatchPipelineRow[])
-          : pipeline
-      );
+      setBatchResults((prev) => {
+        const mapped = mapGenToPipeline(cases, rows, genItems, prev);
+        return control.getStatus() === "paused"
+          ? (markBatchRowsPaused(mapped as BatchPipelineRow[]) as E2eBatchPipelineRow[])
+          : mapped;
+      });
       setBatchGenItems(genItems);
       setFiles(batchFiles);
       await stageFilesFromGen(
@@ -923,7 +1095,7 @@ export default function E2ETestPage() {
       if (control.getStatus() === "paused") {
         setBatchProgress((p) =>
           p
-            ? { ...p, label: `Tạm dừng · đã gen — có thể Kiểm thử phần đã gen` }
+            ? { ...p, label: `Tạm dừng · đã gen — có thể Kiểm thử tất cả phần đã gen` }
             : p
         );
       } else {
@@ -934,7 +1106,7 @@ export default function E2ETestPage() {
     }
   }
 
-  /** Step 3 — Verify Playwright hàng loạt (module batch, no AI heal). Allowed while Generate paused. */
+  /** Step 3 — Verify Playwright hàng loạt: toàn bộ batchGenItems (Gen OK), không lọc batchSelected/filter bảng. */
   async function runStepVerifyBatch() {
     if (!project?.id || !localPath) {
       message.warning("Cần project + root");
@@ -944,9 +1116,12 @@ export default function E2ETestPage() {
       message.warning("Chưa Generate — bấm Chạy E2E Job trước (hoặc chờ TC gen xong)");
       return;
     }
+    // Module folder from requirement title; verify set = all generated items this batch.
     const batchModule = selectedBatchReq
       ? resolveBatchModuleFolder(
-          batchCandidates.filter((t) => batchSelected.includes(t.id)),
+          batchCandidates.filter((t) =>
+            batchGenItems.some((g) => g.testCaseId === t.id)
+          ),
           selectedBatchReq.title
         )
       : "E2E";
@@ -961,10 +1136,10 @@ export default function E2ETestPage() {
       current: 0,
       total: batchGenItems.length,
       label: preserveGeneratePause
-        ? `Kiểm thử ${batchGenItems.length} TC đã gen (Generate đang tạm dừng)`
+        ? `Kiểm thử tất cả phần đã gen (${batchGenItems.length} TC)`
         : showBrowser
-          ? `Kiểm thử hàng loạt — Chromium (${batchGenItems.length} TC)…`
-          : `Kiểm thử hàng loạt (${batchGenItems.length} TC)…`,
+          ? `Kiểm thử tất cả — Chromium (${batchGenItems.length} TC)…`
+          : `Kiểm thử tất cả (${batchGenItems.length} TC)…`,
     });
 
     try {
@@ -992,7 +1167,7 @@ export default function E2ETestPage() {
       }
 
       const t0 = performance.now();
-      const { rows, okCount, files: outFiles } = await verifyE2eModuleBatch({
+      const { rows, okCount, files: outFiles, metrics } = await verifyE2eModuleBatch({
         projectId: project.id,
         projectRoot: localPath,
         module: batchModule,
@@ -1007,6 +1182,8 @@ export default function E2ETestPage() {
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
+        // Suite path only when genItems share one — else each Spec uses baked path
+        featurePath: inspectCacheRef.current?.featurePath,
         priorRows: batchResults.map((r) => ({
           testCaseId: r.testCaseId,
           title: r.title,
@@ -1025,7 +1202,25 @@ export default function E2ETestPage() {
         },
         onLog: (line) => pushPhaseLog("headless", line),
       });
-      setBatchResults((prev) => mergeVerifyStatus(prev, rows));
+      setVerifyMetrics(metrics);
+      const logRels = new Map<string, string>();
+      if (localPath && isTauri()) {
+        for (const vr of rows) {
+          if (vr.status === "ok" || !vr.error) continue;
+          const logBody = `${new Date().toISOString()} · E2E Verify FAIL · ${vr.testCaseId}\n${vr.title || ""}\n\n${vr.error}`;
+          try {
+            const rel = await saveErrorLogFile(
+              localPath,
+              generateErrorLogRel(vr.testCaseId),
+              logBody
+            );
+            logRels.set(vr.testCaseId, rel);
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+      setBatchResults((prev) => mergeVerifyStatus(prev, rows, logRels));
       setFiles(outFiles);
 
       if (isTauri() && session && outFiles.length > 0) {
@@ -1052,13 +1247,15 @@ export default function E2ETestPage() {
       }));
       setRun((r) => finishPhase(r, "heal", { status: "skip", durationMs: 0 }));
       if (allPassed) {
-        message.success(`Kiểm thử: ${okCount}/${batchGenItems.length} PASS`);
+        message.success(
+          `Kiểm thử: ${okCount}/${batchGenItems.length} PASS (${metrics.passRatePct}%)`
+        );
       } else {
         setResultTab("log");
         message.error(
           firstVerifyError
-            ? `Kiểm thử FAIL — xem tab Log. ${firstVerifyError.slice(0, 180)}`
-            : `Kiểm thử: ${okCount}/${batchGenItems.length} PASS — xem Log chi tiết`
+            ? `Kiểm thử ${metrics.passRatePct}% PASS — ${metrics.summaryLine}. ${firstVerifyError.slice(0, 120)}`
+            : metrics.summaryLine
         );
       }
     } catch (e) {
@@ -1101,7 +1298,9 @@ export default function E2ETestPage() {
     }
     const batchModule = selectedBatchReq
       ? resolveBatchModuleFolder(
-          batchCandidates.filter((t) => batchSelected.includes(t.id)),
+          batchCandidates.filter((t) =>
+            batchGenItems.some((g) => g.testCaseId === t.id)
+          ),
           selectedBatchReq.title
         )
       : "E2E";
@@ -1115,7 +1314,7 @@ export default function E2ETestPage() {
 
     try {
       const t0 = performance.now();
-      const { rows, okCount, files: outFiles } = await verifyE2eModuleBatch({
+      const { rows, okCount, files: outFiles, metrics } = await verifyE2eModuleBatch({
         projectId: project.id,
         projectRoot: localPath,
         module: batchModule,
@@ -1130,6 +1329,7 @@ export default function E2ETestPage() {
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
+        featurePath: inspectCacheRef.current?.featurePath,
         priorRows: batchResults.map((r) => ({
           testCaseId: r.testCaseId,
           title: r.title,
@@ -1148,7 +1348,25 @@ export default function E2ETestPage() {
         },
         onLog: (line) => pushPhaseLog("heal", line),
       });
-      setBatchResults((prev) => mergeVerifyStatus(prev, rows));
+      setVerifyMetrics(metrics);
+      const healLogRels = new Map<string, string>();
+      if (localPath && isTauri()) {
+        for (const vr of rows) {
+          if (vr.status === "ok" || !vr.error) continue;
+          const logBody = `${new Date().toISOString()} · E2E Heal/Verify FAIL · ${vr.testCaseId}\n${vr.title || ""}\n\n${vr.error}`;
+          try {
+            const rel = await saveErrorLogFile(
+              localPath,
+              generateErrorLogRel(vr.testCaseId),
+              logBody
+            );
+            healLogRels.set(vr.testCaseId, rel);
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+      setBatchResults((prev) => mergeVerifyStatus(prev, rows, healLogRels));
       setFiles(outFiles);
       if (isTauri() && staging && outFiles.length > 0) {
         try {
@@ -1167,7 +1385,9 @@ export default function E2ETestPage() {
         jobPassed: allPassed,
         healCount: allPassed ? 1 : 0,
       }));
-      message.success(`Heal: ${okCount}/${batchGenItems.length} PASS`);
+      message.success(
+        `Heal: ${okCount}/${batchGenItems.length} PASS (${metrics.passRatePct}%) — ${metrics.summaryLine}`
+      );
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
       setRun((r) =>
@@ -1199,16 +1419,16 @@ export default function E2ETestPage() {
     }
     setBusy(true);
     setAppliedPaths([]);
+    setVerifyMetrics(null);
     setActivePhase("generate");
     setResultTab("log");
     setRun((r) => setPhaseRunning(r, "generate"));
     try {
-      let domSnapshot = "";
-      try {
-        domSnapshot = await ensureInspectSnapshot(false);
-      } catch (e) {
-        pushPhaseLog("inspect", `  inspect warn: ${String(e)}\n`);
-      }
+      // Single Generate uses inspectPerTc — skip duplicate warm-up Chromium.
+      pushPhaseLog(
+        "inspect",
+        "  skip warm-up Inspect (per-TC Inspect during Generate)\n"
+      );
       const t0 = performance.now();
       const gen = await generateE2eForTestCase({
         projectId: project.id,
@@ -1216,11 +1436,14 @@ export default function E2ETestPage() {
         testCase: selected,
         targetUrl,
         module: selected.module || undefined,
-        domSnapshot,
         provider: conn?.provider,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
+        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        inspectPerTc: true,
+        usePlaywrightInspect,
+        skipAuthSeed: Boolean(pickDiscoveredStorageStateRel(authDiscovery)),
         onLog: (line) => pushPhaseLog("generate", line),
       });
       setSingleRunId(gen.runId);
@@ -1232,6 +1455,9 @@ export default function E2ETestPage() {
           runId: gen.runId,
           primarySpecPath: gen.primarySpecPath,
           files: gen.files,
+          authRole: gen.authRole,
+          featurePath: gen.featurePath,
+          domSnapshot: gen.domSnapshot,
         },
       ]);
       await stageFilesFromGen(
@@ -1315,6 +1541,7 @@ export default function E2ETestPage() {
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
+        featurePath: inspectCacheRef.current?.featurePath,
         onLog: (line) => pushPhaseLog(phase, line),
       });
       setFiles(verified.files);
@@ -1331,6 +1558,45 @@ export default function E2ETestPage() {
           pushPhaseLog(phase, `  staging warn: ${String(e)}\n`);
         }
       }
+      const failCategory = verified.passed
+        ? undefined
+        : classifyE2eFailure(verified.error);
+      const metrics = aggregateE2eMetrics([
+        {
+          testCaseId: selected.id,
+          title: selected.title,
+          status: verified.passed ? "ok" : "fail",
+          error: verified.error,
+          failCategory,
+        },
+      ]);
+      setVerifyMetrics(metrics);
+      setBatchResults((prev) => {
+        if (!prev.length) {
+          return [
+            {
+              key: selected.id,
+              testCaseId: selected.id,
+              title: selected.title,
+              status: "ok" as const,
+              files: verified.files.length,
+              verifyStatus: verified.passed ? ("pass" as const) : ("fail" as const),
+              error: verified.error,
+              errorDetail: verified.passed ? undefined : verified.error,
+              failCategory,
+              ...batchTcSnapshot(selected),
+            },
+          ];
+        }
+        return mergeVerifyStatus(prev, [
+          {
+            testCaseId: selected.id,
+            status: verified.passed ? "ok" : "fail",
+            error: verified.error,
+            failCategory,
+          },
+        ]);
+      });
       setRun((r) => ({
         ...finishPhase(r, phase, {
           status: verified.passed ? "finish" : "error",
@@ -1343,7 +1609,11 @@ export default function E2ETestPage() {
       if (!healFailures) {
         setRun((r) => finishPhase(r, "heal", { status: "skip", durationMs: 0 }));
       }
-      message.success(verified.passed ? "PASS" : "FAIL — có thể bấm Heal");
+      message.success(
+        verified.passed
+          ? `PASS (${metrics.passRatePct}%)`
+          : `FAIL [${failCategory}] — ${metrics.summaryLine}`
+      );
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
       setRun((r) =>
@@ -1409,7 +1679,7 @@ export default function E2ETestPage() {
       (prev) => markBatchRowsPaused(prev as BatchPipelineRow[]) as E2eBatchPipelineRow[]
     );
     message.info(
-      "Đã tạm dừng TC chưa chạy — TC đang gen sẽ xong. Có thể Kiểm thử phần đã gen."
+      "Đã tạm dừng TC chưa chạy — TC đang gen sẽ xong. Có thể Kiểm thử tất cả phần đã gen."
     );
   }
 
@@ -1441,6 +1711,57 @@ export default function E2ETestPage() {
     setAppliedPaths([]);
     setRun(initialE2eJobRunState());
     message.info("Đã hủy staging E2E");
+  }
+
+  function patchE2eFileInMemory(path: string, content: string | null) {
+    const norm = (p: string) => p.replace(/\\/g, "/");
+    const want = norm(path);
+    const match = (p: string) => {
+      const a = norm(p);
+      return a === want || a.endsWith("/" + want.split("/").pop()) || want.endsWith("/" + a.split("/").pop());
+    };
+    setFiles((prev) =>
+      content === null
+        ? prev.filter((f) => !match(f.path))
+        : prev.map((f) => (match(f.path) ? { ...f, content } : f))
+    );
+    setBatchGenItems((prev) =>
+      prev.map((g) => ({
+        ...g,
+        files:
+          content === null
+            ? g.files.filter((f) => !match(f.path))
+            : g.files.map((f) => (match(f.path) ? { ...f, content } : f)),
+      }))
+    );
+  }
+
+  async function onSaveStagingFile(path: string, content: string) {
+    patchE2eFileInMemory(path, content);
+    if (!localPath || !isTauri()) return;
+    const session = e2eStagingSessionRef.current || staging;
+    if (!session) return;
+    const { session: next, syncedTarget } = await updateE2eStagedFileContent(
+      localPath,
+      session,
+      path,
+      content
+    );
+    e2eStagingSessionRef.current = next;
+    setStaging(next);
+    if (syncedTarget) {
+      /* already messaged in preview */
+    }
+  }
+
+  async function onDeleteStagingFile(path: string) {
+    patchE2eFileInMemory(path, null);
+    if (!localPath || !isTauri()) return;
+    const session = e2eStagingSessionRef.current || staging;
+    if (!session) return;
+    const { session: next } = await deleteE2eStagedFile(localPath, session, path);
+    e2eStagingSessionRef.current = next;
+    setStaging(next);
   }
 
   const pipelineStep =
@@ -1611,24 +1932,40 @@ export default function E2ETestPage() {
                       onChange={(e) => setUseStorageState(e.target.checked)}
                       disabled={busy}
                     >
-                      Dùng storageState — bỏ qua login UI khi test chức năng (fixtures/storageState.json)
+                      Dùng storageState — chỉ bật khi đã có fixtures/storageState.json (tránh ENOENT)
                     </Checkbox>
                     <Alert
-                      type={authDiscovery?.ready ? "success" : "info"}
+                      type={
+                        authDiscovery?.ready || (e2eUsername.trim() && e2ePassword.trim())
+                          ? "success"
+                          : "info"
+                      }
                       showIcon
                       style={{ marginBottom: 0 }}
                       title={
                         authDiscovery?.ready
-                          ? "Auth sẵn sàng (AI seed / storageState)"
-                          : "Auth: AI sẽ seed từ source khi Generate / Seed auth"
+                          ? `Auto auth sẵn sàng (${authDiscovery.roles?.filter((r) => r.hasUsername).length || 0} role)`
+                          : e2eUsername.trim() && e2ePassword.trim()
+                            ? "Dùng override thủ công"
+                            : "Auto auth từ project (JHipster/i18n/.env) — không bắt buộc nhập tay"
                       }
                       description={
-                        <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+                        <Space orientation="vertical" size={8} style={{ width: "100%" }}>
                           <Typography.Text style={{ fontSize: 12 }}>
-                            Credential lưu tại <code>.ai-test/auth/&#123;role&#125;.json</code> (local,
-                            gitignore). TC gắn <code>authRole</code>/<code>authRef</code> — không nhập
-                            login trên AITest. Đã có artifact → bỏ qua seed.
+                            Hệ thống tự lấy user từ project (i18n login, JHipster admin/user,
+                            <code> .ai-test/auth/&#123;role&#125;.json</code>, <code>.env</code>).
+                            TC gắn <code>authRole</code> / <code>roles: a,b</code> → Verify chọn đúng
+                            role; multi-role inject <code>E2E_ADMIN_*</code>, <code>E2E_USER_*</code>…
                           </Typography.Text>
+                          {authDiscovery?.roles?.length ? (
+                            <Typography.Text style={{ fontSize: 12 }}>
+                              Roles:{" "}
+                              {authDiscovery.roles
+                                .filter((r) => r.hasUsername)
+                                .map((r) => r.role)
+                                .join(", ") || "(chưa có)"}
+                            </Typography.Text>
+                          ) : null}
                           {authDiscovery?.notes?.length ? (
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                               {authDiscovery.notes[authDiscovery.notes.length - 1]}
@@ -1637,7 +1974,7 @@ export default function E2ETestPage() {
                           <Space wrap size={8}>
                             <Button
                               size="small"
-                              disabled={busy || !localPath || !project?.id || !aiReady}
+                              disabled={busy || !localPath || !project?.id}
                               onClick={() => {
                                 void (async () => {
                                   setBusy(true);
@@ -1649,7 +1986,7 @@ export default function E2ETestPage() {
                                 })();
                               }}
                             >
-                              Seed auth (AI)
+                              Đồng bộ auth (auto / AI)
                             </Button>
                             <Button
                               type="link"
@@ -1657,7 +1994,7 @@ export default function E2ETestPage() {
                               style={{ padding: 0, height: "auto" }}
                               onClick={() => setShowAuthOverride((v) => !v)}
                             >
-                              {showAuthOverride ? "Ẩn ghi đè" : "Ghi đè thủ công"}
+                              {showAuthOverride ? "Ẩn override" : "Override thủ công (tuỳ chọn)"}
                             </Button>
                           </Space>
                           {showAuthOverride ? (
@@ -1665,7 +2002,7 @@ export default function E2ETestPage() {
                               <Input
                                 value={e2eUsername}
                                 onChange={(e) => setE2eUsername(e.target.value)}
-                                placeholder="Override email"
+                                placeholder="Override email/username"
                                 disabled={busy}
                                 autoComplete="off"
                                 style={{ width: "50%" }}
@@ -1775,7 +2112,7 @@ export default function E2ETestPage() {
                   />
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {batchStatus === "paused"
-                      ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · có thể Kiểm thử phần đã gen · chờ Tiếp tục`
+                      ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · có thể Kiểm thử tất cả phần đã gen · chờ Tiếp tục`
                       : `Đang xử lý: ${batchProgress.label}`}
                   </Typography.Text>
                 </>
@@ -1817,7 +2154,7 @@ export default function E2ETestPage() {
                       disabled={batchGenItems.length === 0}
                       onClick={() => void runStepVerifyBatch()}
                     >
-                      Kiểm thử phần đã gen ({batchGenItems.length})
+                      Kiểm thử tất cả phần đã gen ({batchGenItems.length})
                     </Button>
                   </Space>
                 ) : null}
@@ -1830,6 +2167,7 @@ export default function E2ETestPage() {
                   rows={batchResults}
                   busy={busy}
                   batchRunStatus={batchStatus}
+                  projectRoot={localPath}
                   generateFailCount={batchFailCount}
                   onRetryGenerateFails={() => void runStepGenerateBatch()}
                 />
@@ -1904,6 +2242,8 @@ export default function E2ETestPage() {
                 runId={staging?.runId || batchGenItems[0]?.runId}
                 selectedPath={stagingPreviewPath}
                 onSelectPath={setStagingPreviewPath}
+                onSaveFile={onSaveStagingFile}
+                onDeleteFile={onDeleteStagingFile}
               />
             ) : files.length > 0 ? (
               <E2eBatchStagingPreview
@@ -1938,6 +2278,8 @@ export default function E2ETestPage() {
                 runId={staging?.runId}
                 selectedPath={stagingPreviewPath}
                 onSelectPath={setStagingPreviewPath}
+                onSaveFile={onSaveStagingFile}
+                onDeleteFile={onDeleteStagingFile}
               />
             ) : null}
             {inputMode === "requirement" && batchResults.length > 0 ? (
@@ -1955,6 +2297,7 @@ export default function E2ETestPage() {
                 verifyLoading={busy && activePhase === "headless"}
                 healLoading={busy && activePhase === "heal"}
                 applyLoading={applyBusy}
+                metrics={verifyMetrics}
                 onVerify={() => void runStepVerifyBatch()}
                 onHeal={() => void runStepHealBatch()}
                 onApply={() => void onApplyStaging()}
@@ -1978,6 +2321,11 @@ export default function E2ETestPage() {
                               : run.jobPassed === false
                                 ? "fail"
                                 : "pending",
+                          failCategory:
+                            run.jobPassed === false
+                              ? verifyMetrics?.rows.find((r) => r.status !== "ok")
+                                  ?.failCategory
+                              : undefined,
                         },
                       ]
                 }
@@ -1990,6 +2338,7 @@ export default function E2ETestPage() {
                 applied={appliedPaths.length > 0}
                 canHeal={run.jobPassed === false}
                 canApply={run.jobPassed === true && !!staging && appliedPaths.length === 0}
+                metrics={verifyMetrics}
                 verifyLoading={busy && activePhase === "headless"}
                 healLoading={busy && activePhase === "heal"}
                 applyLoading={applyBusy}
@@ -2049,30 +2398,6 @@ export default function E2ETestPage() {
           editable={Boolean(staging) && appliedPaths.length === 0}
         />
       </Space>
-
-      <Modal
-        open={!!batchErrorDetail}
-        title={batchErrorDetail ? `Lỗi E2E: ${batchErrorDetail.title}` : "Chi tiết lỗi E2E"}
-        onCancel={() => setBatchErrorDetail(null)}
-        footer={[
-          <Button key="close" type="primary" onClick={() => setBatchErrorDetail(null)}>
-            Đóng
-          </Button>,
-        ]}
-        width={720}
-      >
-        <Typography.Paragraph
-          style={{
-            whiteSpace: "pre-wrap",
-            fontFamily: "ui-monospace, monospace",
-            fontSize: 12,
-            maxHeight: 420,
-            overflow: "auto",
-          }}
-        >
-          {batchErrorDetail?.error || ""}
-        </Typography.Paragraph>
-      </Modal>
     </div>
   );
 }

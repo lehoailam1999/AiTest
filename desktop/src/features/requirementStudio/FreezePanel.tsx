@@ -113,8 +113,8 @@ export default function FreezePanel({
   const [note, setNote] = useState("");
   const [engine, setEngine] = useState<PreferredEngine>("unit");
   const [targetUrl, setTargetUrl] = useState("");
-  /** E2E: mặc định nhanh (trần mềm). Bật full = cover đủ mọi tín hiệu (chậm hơn). */
-  const [e2eFullCoverage, setE2eFullCoverage] = useState(false);
+  /** E2E: mặc định full cover theo tín hiệu Output (không trần số TC). Bỏ tick = prompt gọn. */
+  const [e2eFullCoverage, setE2eFullCoverage] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [savedCount, setSavedCount] = useState(0);
@@ -368,6 +368,16 @@ export default function FreezePanel({
             </li>
             <li>
               <strong>Phân tích</strong> (quy tắc, actor, use case, API, ràng buộc…)
+              {knowledge?.enrichTiming?.total_ms != null ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {" "}
+                  · lần enrich gần nhất {Number(knowledge.enrichTiming.total_ms)}ms
+                  {knowledge.enrichCacheHit ? " (cache)" : ""}
+                  {knowledge.enrichTiming.prompt_chars != null
+                    ? ` · ${Number(knowledge.enrichTiming.prompt_chars).toLocaleString()} chars`
+                    : ""}
+                </Typography.Text>
+              ) : null}
             </li>
             <li>
               <strong>Test case hiện có</strong> (nếu có) — tránh trùng, bổ sung phần còn thiếu
@@ -420,7 +430,7 @@ export default function FreezePanel({
               onChange={(e) => setE2eFullCoverage(e.target.checked)}
               disabled={running || paused}
             >
-              Cover đầy đủ mọi journey (chậm hơn) — mặc định tốc độ nhanh (~6 TC/module)
+              Cover đủ tín hiệu Output (mặc định) — bỏ tick = prompt gọn; vẫn cấm cắt lớp / pad TC
             </Checkbox>
           </>
         ) : null}

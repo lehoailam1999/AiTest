@@ -10,15 +10,18 @@ from app.llm.e2e_journey_rules import (
 
 def test_journey_rules_cover_phases_and_non_happy():
     text = E2E_FEATURE_JOURNEY_RULES
-    assert "FEATURE ENTRY" in text or "Feature entry" in text
-    assert "Spec skeleton" in text or "test.step('1." in text
+    # Phase C only — Spec skeleton / Rule 7 live in E2ECG, not here.
+    assert "FEATURE ENTRY" in text or "Feature entry" in text or "Phase C" in text
+    assert "Spec skeleton" not in text
+    assert "Spec order" not in text
     assert "Anti-patterns" in text or "invent" in text.lower()
-    assert "Validation" in text or "BOUNDARY" in text or "Boundary" in text or "E2ECG" in text
     assert "landmark" in text.lower()
     assert "E2E_FEATURE_PATH" in text or "menu" in text.lower()
+    assert "gotoFeature" in text
     # Auth/locator essays belong in E2ECG — journey must not restate them.
     assert "selectOption({ label: RegExp })" not in text
     assert "LOCATOR RESOLUTION" not in text
+    assert len(text) < 1200
 
 
 def test_journey_checklist_flags_validation_tc():
@@ -33,3 +36,4 @@ def test_journey_checklist_flags_validation_tc():
     assert "VALIDATION" in out or "BOUNDARY" in out
     assert "dialog" in out.lower() or "Create" in out or "Arrange" in out
     assert "Execution Context resolved" not in out  # auth/context not duplicated here
+    assert "E2ECG" in out or "Phase C" in out

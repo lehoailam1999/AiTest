@@ -253,7 +253,9 @@ export default function CoverageBoardPage() {
                   </Typography.Text>
                 </Typography.Title>
                 <Typography.Text type="secondary" className="studio-lead">
-                  Toàn bộ test case của project. Lọc Unit / E2E / module — Draft / Approved / Rejected.
+                  Toàn bộ test case của project. Lọc Unit / E2E / module — dùng{" "}
+                  <strong>Duyệt tất cả</strong> để duyệt hết TC chờ duyệt theo bộ lọc (không cần chọn
+                  từng dòng).
                 </Typography.Text>
               </div>
             </div>

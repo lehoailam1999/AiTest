@@ -67,6 +67,21 @@ def _knowledge_sections(p: dict) -> list[str]:
     )
     lines.extend(
         _line_items(
+            "Execution context (WHO — auth/role per scenario)",
+            _as_list(p.get("executionContexts")),
+            fields=(
+                "name",
+                "actor",
+                "authRequired",
+                "roles",
+                "sessionHint",
+                "description",
+                "text",
+            ),
+        )
+    )
+    lines.extend(
+        _line_items(
             "Business rules",
             _as_list(p.get("businessRules")),
             fields=("id", "text", "priority"),
@@ -76,7 +91,7 @@ def _knowledge_sections(p: dict) -> list[str]:
         _line_items(
             "Validation & data",
             _as_list(p.get("validationRules")),
-            fields=("field", "rule"),
+            fields=("module", "field", "rule"),
         )
     )
     lines.extend(
@@ -195,6 +210,9 @@ def slice_knowledge_payload_for_module(
         "useCases": _filter_rows_for_module(_as_list(kw.get("useCases")), tokens, keep_min=1)[
             :12
         ],
+        "executionContexts": _filter_rows_for_module(
+            _as_list(kw.get("executionContexts")), tokens, keep_min=0
+        )[:10],
         "businessRules": _filter_rows_for_module(
             _as_list(kw.get("businessRules")), tokens, keep_min=1
         )[:15],
@@ -336,7 +354,7 @@ def _chat_section(messages: list) -> list[str]:
     return out
 
 
-def _existing_tcs_section(cases: list) -> list[str]:
+def _existing_tcs_section(cases: list, *, titles_only: bool = False) -> list[str]:
     if not cases:
         return [
             "",
@@ -353,6 +371,10 @@ def _existing_tcs_section(cases: list) -> list[str]:
             out.append(f"{i}. {row}")
             continue
         title = str(row.get("title") or "").strip() or f"TC-{i}"
+        if titles_only:
+            typ = str(row.get("type") or "").strip()
+            out.append(f"{i}. {title}" + (f" · {typ}" if typ else ""))
+            continue
         typ = str(row.get("type") or "").strip()
         module = str(row.get("module") or "").strip()
         priority = str(row.get("priority") or "").strip()
@@ -370,6 +392,52 @@ def _existing_tcs_section(cases: list) -> list[str]:
     return out
 
 
+def knowledge_rich_enough_to_omit_docs(knowledge: dict | None) -> bool:
+    """When Knowledge already has module + testable signals, skip re-sending SRS body."""
+    kw = knowledge if isinstance(knowledge, dict) else {}
+    def _len(key: str) -> int:
+        v = kw.get(key)
+        return len(v) if isinstance(v, list) else 0
+
+    modules = _len("features") + _len("useCases")
+    signals = (
+        _len("acceptanceCriteria")
+        + _len("validationRules")
+        + _len("businessRules")
+        + _len("apiSummary")
+    )
+    return modules >= 1 and signals >= 2
+
+
+def slim_freeze_payload_for_tc_gen(payload: dict | None) -> dict:
+    """
+    Single-call TC gen: drop uploaded SRS body when Knowledge is rich
+    (same idea as fan-out module slice). Keep title inventory only for existing TCs.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("schema") != "freeze-bundle-v1":
+        return payload
+    out = dict(payload)
+    kw = out.get("knowledge") if isinstance(out.get("knowledge"), dict) else {}
+    if knowledge_rich_enough_to_omit_docs(kw):
+        out["uploadedFiles"] = []
+    # Always drop chat for TC gen speed (clarifications already in Knowledge)
+    out["chatTranscript"] = []
+    existing = _as_list(out.get("existingTestCases"))
+    if existing:
+        out["existingTestCases"] = [
+            {
+                "title": str(r.get("title") or "").strip(),
+                "type": str(r.get("type") or "").strip(),
+            }
+            if isinstance(r, dict)
+            else r
+            for r in existing[:80]
+        ]
+    return out
+
+
 def snapshot_payload_to_prompt(
     *,
     title: str,
@@ -377,6 +445,8 @@ def snapshot_payload_to_prompt(
     payload: dict | None,
     coverage: dict | None = None,  # kept for backward compat; unused in UI
     knowledge_version: int,
+    omit_docs_when_rich: bool = False,
+    existing_titles_only: bool = False,
 ) -> str:
     """
     Build LLM input from Freeze bundle (hidden synthesis).
@@ -384,6 +454,8 @@ def snapshot_payload_to_prompt(
     """
     del coverage
     p = payload or {}
+    if omit_docs_when_rich and p.get("schema") == "freeze-bundle-v1":
+        p = slim_freeze_payload_for_tc_gen(p)
     lines: list[str] = [
         f"# {title or 'Requirement Snapshot'}",
         f"Knowledge version: {knowledge_version}",
@@ -404,10 +476,24 @@ def snapshot_payload_to_prompt(
         existing = _as_list(p.get("existingTestCases"))
         if kw_text:
             lines.extend(["", "## Knowledge summary", kw_text])
-        lines.extend(_files_section(_as_list(p.get("uploadedFiles"))))
+        files = _as_list(p.get("uploadedFiles"))
+        if files:
+            lines.extend(_files_section(files))
+        elif knowledge_rich_enough_to_omit_docs(kw):
+            lines.extend(
+                [
+                    "",
+                    "## Uploaded documents",
+                    "(omitted — Knowledge already has features/rules; use Knowledge SoT)",
+                ]
+            )
+        else:
+            lines.extend(_files_section([]))
         lines.extend(["", "## Knowledge workspace (Phân tích)"])
         lines.extend(_knowledge_sections(kw))
-        lines.extend(_existing_tcs_section(existing))
+        lines.extend(
+            _existing_tcs_section(existing, titles_only=existing_titles_only)
+        )
         lines.extend(_chat_section(chat))
     else:
         # Legacy snapshots (knowledge-only)
@@ -415,7 +501,12 @@ def snapshot_payload_to_prompt(
             lines.extend(["", "## Summary", coerce_summary_text(summary)])
         lines.extend(["", "## Knowledge workspace"])
         lines.extend(_knowledge_sections(p))
-        lines.extend(_existing_tcs_section(_as_list(p.get("existingTestCases"))))
+        lines.extend(
+            _existing_tcs_section(
+                _as_list(p.get("existingTestCases")),
+                titles_only=existing_titles_only,
+            )
+        )
 
     text = "\n".join(lines).strip()
     if len(text) < 80:

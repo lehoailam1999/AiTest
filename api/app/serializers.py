@@ -89,7 +89,7 @@ def connection_dto(c: AiBackendConnection) -> dict:
         "hasApiKey": has_key,
         "lastVerifiedAt": _iso(c.last_verified_at),
         "lastError": c.last_error,
-        "runnerMode": getattr(c, "runner_mode", None) or "API_DIRECT",
+        "runnerMode": "AI_CLI",
         "cliType": getattr(c, "cli_type", None) or "gemini-cli",
         "cliPath": getattr(c, "cli_path", None),
         "cliArgsJson": getattr(c, "cli_args_json", None),

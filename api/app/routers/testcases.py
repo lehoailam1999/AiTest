@@ -17,6 +17,7 @@ from app.serializers import testcase_dto
 from app.services.requirement_content import source_content_hash
 from app.services.vietnamese_labels import (
     normalize_engine_type,
+    priority_order_expr,
     priority_vi,
     severity_vi,
     type_vi,
@@ -53,7 +54,10 @@ def list_testcases(request: Request, db: Annotated[Session, Depends(get_db)]):
         q = q.filter(TestCase.review_status == v)
     total = q.count()
     items = (
-        q.order_by(TestCase.created_at.desc())
+        q.order_by(
+            priority_order_expr(TestCase.priority).asc(),
+            TestCase.created_at.desc(),
+        )
         .offset((page_number - 1) * size)
         .limit(size)
         .all()

@@ -252,6 +252,12 @@ export function ReviewQueuePanel({
     [selected, cases]
   );
 
+  /** Pending rows in the current table filter (engine / module / status) — for Duyệt tất cả. */
+  const filteredPendingIds = useMemo(
+    () => filtered.filter((c) => isTcPendingReview(c.reviewStatus)).map((c) => c.id),
+    [filtered]
+  );
+
   async function bulkApprove(ids: string[]) {
     if (ids.length === 0) return;
     setBusy(true);
@@ -273,6 +279,25 @@ export function ReviewQueuePanel({
     } finally {
       setBusy(false);
     }
+  }
+
+  function approveAllFiltered() {
+    const ids = filteredPendingIds;
+    if (ids.length === 0) {
+      message.info("Không có test case chờ duyệt trong bộ lọc hiện tại.");
+      return;
+    }
+    const engineLabel =
+      engineSel === "unit" ? "Unit" : engineSel === "e2e" ? "E2E" : "Unit + E2E";
+    modal.confirm({
+      title: `Duyệt tất cả ${ids.length} TC chờ duyệt?`,
+      content: `Áp dụng cho bộ lọc hiện tại (${engineLabel}${
+        moduleSel !== "__all__" ? ` · ${moduleSel}` : ""
+      }). Không cần chọn từng dòng.`,
+      okText: `Duyệt tất cả (${ids.length})`,
+      cancelText: "Huỷ",
+      onOk: () => bulkApprove(ids),
+    });
   }
 
   function openEdit(row: TestCase) {
@@ -538,6 +563,20 @@ export function ReviewQueuePanel({
         >
           Duyệt đã chọn ({selectedPendingIds.length})
         </Button>
+        <Button
+          disabled={filteredPendingIds.length === 0 || busy}
+          loading={busy}
+          icon={<CheckOutlined />}
+          onClick={() => approveAllFiltered()}
+        >
+          Duyệt tất cả
+          {engineSel === "unit"
+            ? " Unit"
+            : engineSel === "e2e"
+              ? " E2E"
+              : ""}{" "}
+          ({filteredPendingIds.length})
+        </Button>
         <Link to="/requirement">
           <Button type="link">Về Requirement Studio →</Button>
         </Link>
@@ -675,7 +714,6 @@ export function ReviewQueuePanel({
                 </Tooltip>
               }
               style={{ marginBottom: 12, width: "100%" }}
-              extra="Unit / E2E / API chọn trước khi Duyệt — CTA Job sẽ theo loại này."
             >
               <Select options={TYPE_OPTIONS} />
             </Form.Item>

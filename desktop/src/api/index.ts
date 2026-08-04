@@ -389,6 +389,12 @@ export const generateE2e = {
     language?: string;
     relatedSources?: { path: string; content: string }[];
     existingFiles?: { path: string; content: string; kind?: string }[];
+    /** WHO from Analysis/TC — actor/authRequired/authRole (not login mechanism) */
+    executionContext?: string;
+    /** Feature entry path — baked into Spec at Generate (Phase wire) */
+    featurePath?: string;
+    /** Skip ensure_auth_seed_roles after LLM when Desktop already has artifact */
+    skipAuthSeed?: boolean;
   }) =>
     authFetch<E2EGenerateResult>("/generate-e2e", {
       method: "POST",
@@ -401,6 +407,16 @@ export const generateE2e = {
     sourcePaths?: string[] | { path: string; content: string }[];
     /** EX4.2 — Chromium render for SPA */
     usePlaywright?: boolean;
+    /** Phase 1 — post-auth DOM */
+    featurePath?: string;
+    storageStatePath?: string;
+    storageStateRel?: string;
+    username?: string;
+    password?: string;
+    /** Help API find AItest/.../fixtures/storageState.json */
+    module?: string;
+    role?: string;
+    packagePrefix?: string | null;
   }) =>
     authFetch<E2EInspectResult>("/e2e-inspect", {
       method: "POST",
@@ -526,7 +542,7 @@ export const generateE2e = {
     maxRetries?: number;
     writeFile?: boolean;
     healFailures?: boolean;
-    healItems?: { testCaseId: string; primarySpecPath: string }[];
+    healItems?: { testCaseId: string; primarySpecPath: string; domSnapshot?: string }[];
     testCaseId?: string;
     runCommand?: string[];
     headed?: boolean;

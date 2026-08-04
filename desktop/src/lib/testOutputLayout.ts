@@ -100,6 +100,9 @@ const MAX_MODULE_DEPTH = 2;
 /**
  * Layout Unit/API under AItest:
  *   AItest/UnitTest/{Requirement}/{TestCaseTitle}/{file}
+ * E2E:
+ *   AItest/E2ETest/_shared/{pages|fixtures|types}/…
+ *   AItest/E2ETest/{Requirement}/{TC}/{specs|playwright.config.ts}
  * Shared config stays at AItest/jest.config.cjs + AItest/tsconfig.json (not inside modules).
  *
  * Segments collapse whitespace → `-` so Windows `cmd` / pytest không cắt path (vd. "To do").
@@ -117,10 +120,12 @@ export function buildRequirementTcModule(
   };
   const req = oneSeg(requirementTitle);
   const tc = oneSeg(testCaseTitle);
+  const mod = sanitizeModuleLabel(fallbackModule);
   if (req && tc) return `${req}/${tc}`;
+  if (mod && tc) return `${mod}/${tc}`;
   if (req) return req;
   if (tc) return tc;
-  return sanitizeModuleLabel(fallbackModule);
+  return mod;
 }
 
 export function normalizeKind(kind?: string | null): GeneratedTestKind {
@@ -804,6 +809,25 @@ export function rewriteSutImports(
   );
 }
 
+/** [{pkg}/]AItest/E2ETest */
+export function e2eSuiteRoot(opts?: {
+  packagePrefix?: string | null;
+  sourceFileName?: string | null;
+}): string {
+  let kindRoot = aitestKindRoot("e2e");
+  const pkg = packagePrefixFromSource(opts?.sourceFileName, opts?.packagePrefix);
+  if (pkg) kindRoot = `${pkg}/${kindRoot}`;
+  return kindRoot.replace(/\/+/g, "/");
+}
+
+/** [{pkg}/]AItest/E2ETest/_shared — auth, storage, shim, shared POMs */
+export function e2eSharedRoot(opts?: {
+  packagePrefix?: string | null;
+  sourceFileName?: string | null;
+}): string {
+  return `${e2eSuiteRoot(opts)}/_shared`.replace(/\/+/g, "/");
+}
+
 /** [{pkg}/]AItest/E2ETest/{Requirement}/{TC} */
 export function e2eModuleRoot(
   module?: string | null,
@@ -814,9 +838,7 @@ export function e2eModuleRoot(
     testCaseTitle?: string | null;
   }
 ): string {
-  let kindRoot = aitestKindRoot("e2e");
-  const pkg = packagePrefixFromSource(opts?.sourceFileName, opts?.packagePrefix);
-  if (pkg) kindRoot = `${pkg}/${kindRoot}`;
+  const kindRoot = e2eSuiteRoot(opts);
   const mod = buildRequirementTcModule(
     opts?.requirementTitle,
     opts?.testCaseTitle,
@@ -826,7 +848,7 @@ export function e2eModuleRoot(
   return kindRoot;
 }
 
-/** Default fixtures/storageState.json under E2E module */
+/** Default storage under suite _shared/fixtures */
 export function e2eStorageStateRel(
   module?: string | null,
   opts?: {
@@ -836,7 +858,9 @@ export function e2eStorageStateRel(
     testCaseTitle?: string | null;
   }
 ): string {
-  const root = e2eModuleRoot(module, opts);
+  const shared = e2eSharedRoot({
+    packagePrefix: opts?.packagePrefix,
+  });
   const name = opts?.fileName || "storageState.json";
-  return `${root}/fixtures/${name}`.replace(/\/+/g, "/");
+  return `${shared}/fixtures/${name}`.replace(/\/+/g, "/");
 }

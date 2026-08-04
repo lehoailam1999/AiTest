@@ -3,8 +3,10 @@
  */
 import { useMemo, useState } from "react";
 import {
+  App,
   Button,
   Card,
+  Modal,
   Space,
   Table,
   Tag,
@@ -13,15 +15,24 @@ import {
 import {
   CheckCircleOutlined,
   DeleteOutlined,
+  EyeOutlined,
   PlayCircleOutlined,
   SaveOutlined,
   ToolOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import type { BatchRunStatus } from "../../lib/batchRunControl";
+import {
+  E2E_FAIL_CATEGORY_LABELS,
+  type E2eFailCategory,
+} from "../../lib/e2eWorkspace/e2eFailureMetrics";
+import { labelOf, priorityLabel, typeLabel } from "../../i18n/labels";
+import { isTauri, readTextFile } from "../../tauri/bridge";
 import {
   BATCH_NOTE_PAUSED,
   BATCH_NOTE_RUNNING,
   BATCH_NOTE_WAITING,
+  isBatchQueueNote,
 } from "../unit-test/BatchRunConsole";
 
 export type E2eBatchPipelineRow = {
@@ -31,10 +42,25 @@ export type E2eBatchPipelineRow = {
   /** Generate ok/fail — queue rows use fail + queue note in `error`. */
   status: "ok" | "fail";
   error?: string;
+  /** Full generate/verify error body for «Chi tiết lỗi». */
+  errorDetail?: string;
+  /** Relative path under project root where error log was saved. */
+  errorLogRel?: string;
   runId?: string;
   files?: number;
   verifyStatus?: "pending" | "pass" | "fail" | "skipped";
   applyStatus?: "pending" | "done" | "skipped";
+  /** Phase 4 — classified Verify failure */
+  failCategory?: string;
+  /** TC snapshot — Chi tiết Test case */
+  module?: string;
+  precondition?: string;
+  steps?: string;
+  expectedResult?: string;
+  testData?: string;
+  priority?: string;
+  severity?: string;
+  type?: string;
 };
 
 type Props = {
@@ -42,6 +68,8 @@ type Props = {
   rows: E2eBatchPipelineRow[];
   busy: boolean;
   batchRunStatus: BatchRunStatus;
+  /** Project root — used to load saved error logs for «Chi tiết lỗi». */
+  projectRoot?: string | null;
   variant?: "table" | "verifyApply";
   generateFailCount?: number;
   onRetryGenerateFails?: () => void;
@@ -62,6 +90,7 @@ export function E2eBatchConsole({
   rows,
   busy,
   batchRunStatus,
+  projectRoot,
   variant = "table",
   generateFailCount = 0,
   onRetryGenerateFails,
@@ -76,7 +105,13 @@ export function E2eBatchConsole({
   canApply,
   hasStaging,
 }: Props) {
+  const { message } = App.useApp();
   const [filter, setFilter] = useState<"all" | "unverified" | "fail">("all");
+  const [tcDetail, setTcDetail] = useState<E2eBatchPipelineRow | null>(null);
+  const [errorDetail, setErrorDetail] = useState<{
+    row: E2eBatchPipelineRow;
+    body: string;
+  } | null>(null);
 
   const genOk = rows.filter((r) => r.status === "ok").length;
   const verifyDone = rows.filter((r) => r.verifyStatus === "pass").length;
@@ -101,7 +136,144 @@ export function E2eBatchConsole({
     return rows;
   }, [rows, filter]);
 
+  function resolveErrorBody(r: E2eBatchPipelineRow): string {
+    if (r.errorDetail?.trim()) return r.errorDetail.trim();
+    if (r.error && !isBatchQueueNote(r.error)) return r.error;
+    return "";
+  }
+
+  async function openErrorDetail(r: E2eBatchPipelineRow) {
+    let body = resolveErrorBody(r);
+    if (r.errorLogRel && projectRoot && isTauri()) {
+      try {
+        const fromDisk = await readTextFile(projectRoot, r.errorLogRel);
+        if (fromDisk?.trim()) body = fromDisk.trim();
+      } catch {
+        // keep in-memory body
+      }
+    }
+    if (!body) {
+      message.info("Chưa có chi tiết lỗi cho dòng này.");
+      return;
+    }
+    setErrorDetail({ row: r, body });
+  }
+
   if (rows.length === 0) return null;
+
+  const detailModals = (
+    <>
+      <Modal
+        open={!!tcDetail}
+        title={tcDetail ? `Chi tiết ${tcDetail.testCaseId}` : "Chi tiết TC"}
+        onCancel={() => setTcDetail(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setTcDetail(null)}>
+            Đóng
+          </Button>,
+        ]}
+        width={640}
+      >
+        {tcDetail ? (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Tiêu đề</Typography.Text>
+              <div style={{ marginTop: 4 }}>{tcDetail.title || "—"}</div>
+            </div>
+            <Space
+              wrap
+              style={{ width: "100%", marginBottom: 4 }}
+              styles={{ item: { flex: 1, minWidth: 160 } }}
+            >
+              <div style={{ marginBottom: 12, width: "100%" }}>
+                <Typography.Text type="secondary">Module</Typography.Text>
+                <div style={{ marginTop: 4 }}>{tcDetail.module?.trim() || "—"}</div>
+              </div>
+              <div style={{ marginBottom: 12, width: "100%" }}>
+                <Typography.Text type="secondary">Loại (engine)</Typography.Text>
+                <div style={{ marginTop: 4 }}>
+                  {labelOf(typeLabel, tcDetail.type || "") || tcDetail.type || "—"}
+                </div>
+              </div>
+              <div style={{ marginBottom: 12, width: "100%" }}>
+                <Typography.Text type="secondary">Ưu tiên</Typography.Text>
+                <div style={{ marginTop: 4 }}>
+                  {labelOf(priorityLabel, tcDetail.priority || "") ||
+                    tcDetail.priority ||
+                    "—"}
+                </div>
+              </div>
+            </Space>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Tiền điều kiện</Typography.Text>
+              <pre className="detail-block">
+                {tcDetail.precondition?.trim() || "—"}
+              </pre>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Các bước</Typography.Text>
+              <pre className="detail-block">{tcDetail.steps?.trim() || "—"}</pre>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Kết quả mong đợi</Typography.Text>
+              <pre className="detail-block">
+                {tcDetail.expectedResult?.trim() || "—"}
+              </pre>
+            </div>
+            <div style={{ marginBottom: 0 }}>
+              <Typography.Text type="secondary">Test data</Typography.Text>
+              <pre className="detail-block">{tcDetail.testData?.trim() || "—"}</pre>
+            </div>
+            {!tcDetail.steps?.trim() && !tcDetail.expectedResult?.trim() ? (
+              <Typography.Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+                Chưa có snapshot nội dung TC trên dòng này — chạy lại Generate batch để gắn chi
+                tiết.
+              </Typography.Text>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
+      <Modal
+        open={!!errorDetail}
+        title={
+          errorDetail
+            ? `Chi tiết lỗi · ${errorDetail.row.testCaseId} · ${errorDetail.row.title}`
+            : "Chi tiết lỗi"
+        }
+        onCancel={() => setErrorDetail(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setErrorDetail(null)}>
+            Đóng
+          </Button>,
+        ]}
+        width={780}
+      >
+        {errorDetail?.row.errorLogRel ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
+            Đã lưu:{" "}
+            <Typography.Text code style={{ fontSize: 11 }}>
+              {errorDetail.row.errorLogRel}
+            </Typography.Text>
+          </Typography.Paragraph>
+        ) : null}
+        {errorDetail?.row.failCategory ? (
+          <Typography.Paragraph style={{ marginBottom: 8 }}>
+            Loại lỗi:{" "}
+            <Tag>
+              {E2E_FAIL_CATEGORY_LABELS[errorDetail.row.failCategory as E2eFailCategory] ||
+                errorDetail.row.failCategory}
+            </Tag>
+          </Typography.Paragraph>
+        ) : null}
+        <pre
+          className="detail-block"
+          style={{ maxHeight: 460, overflow: "auto", margin: 0 }}
+        >
+          {errorDetail?.body || ""}
+        </pre>
+      </Modal>
+    </>
+  );
 
   const statusSummary = (
     <Space wrap style={{ marginBottom: variant === "table" ? 8 : 12 }}>
@@ -151,7 +323,9 @@ export function E2eBatchConsole({
         loading={verifyLoading}
         disabled={genOk === 0 || actionsLockedByGenerate || !onVerify}
       >
-        {batchRunStatus === "paused" ? "Kiểm thử phần đã gen" : "Kiểm thử"}
+        {batchRunStatus === "paused"
+          ? `Kiểm thử tất cả phần đã gen (${genOk})`
+          : `Kiểm thử tất cả (${genOk})`}
       </Button>
       {canHeal ? (
         <Button
@@ -194,19 +368,21 @@ export function E2eBatchConsole({
 
   if (variant === "verifyApply") {
     return (
-      <Card id="aitest-e2e-batch-verify-apply" title={title || "3. Verify & Apply"} style={{ marginTop: 8 }}>
+      <Card id="aitest-e2e-batch-verify-apply" title={title || "3. Execute & Apply"} style={{ marginTop: 8 }}>
         {statusSummary}
         {actionBar}
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
           {batchRunStatus === "paused" ? (
             <>
-              Generate đang <strong>tạm dừng</strong> — có thể{" "}
-              <strong>Kiểm thử / Apply</strong> các TC đã gen xong, rồi bấm Tiếp tục để gen tiếp.
+              Generate đang <strong>tạm dừng</strong> — bấm{" "}
+              <strong>Kiểm thử tất cả phần đã gen</strong> / Apply mọi Spec đã Generate (không phụ thuộc
+              bộ lọc bảng), rồi bấm Tiếp tục để gen tiếp.
             </>
           ) : (
             <>
-              Kiểm thử chạy Playwright cho specs đã Generate. Heal chỉ khi FAIL. Apply chỉ sau PASS
-              — ghi vào <code>AItest/E2ETest/</code>.
+              <strong>Kiểm thử tất cả</strong> chạy Playwright cho{" "}
+              <strong>mọi Spec đã Generate</strong> trong batch — không phụ thuộc bộ lọc bảng. Heal
+              chỉ khi FAIL. Apply chỉ sau PASS — ghi vào <code>AItest/E2ETest/</code>.
             </>
           )}
         </Typography.Paragraph>
@@ -222,7 +398,7 @@ export function E2eBatchConsole({
         pagination={false}
         rowKey="key"
         dataSource={visible}
-        scroll={{ x: 720 }}
+        scroll={{ x: 900 }}
         columns={[
           { title: "TC", dataIndex: "title", ellipsis: true },
           {
@@ -256,6 +432,19 @@ export function E2eBatchConsole({
               if (r.status === "ok") return <Tag>Chờ</Tag>;
               return <Tag>—</Tag>;
             },
+          },
+          {
+            title: "Loại lỗi",
+            width: 110,
+            render: (_, r) =>
+              r.verifyStatus === "fail" && r.failCategory ? (
+                <Tag>
+                  {E2E_FAIL_CATEGORY_LABELS[r.failCategory as E2eFailCategory] ||
+                    r.failCategory}
+                </Tag>
+              ) : (
+                <Typography.Text type="secondary">—</Typography.Text>
+              ),
           },
           {
             title: "Apply",
@@ -292,8 +481,39 @@ export function E2eBatchConsole({
               return v || "—";
             },
           },
+          {
+            title: "Chi tiết",
+            width: 180,
+            fixed: "right",
+            render: (_, r) => {
+              const hasErr = Boolean(resolveErrorBody(r) || r.errorLogRel);
+              return (
+                <Space size={0} wrap>
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<EyeOutlined />}
+                    onClick={() => setTcDetail(r)}
+                  >
+                    Test case
+                  </Button>
+                  <Button
+                    type="link"
+                    size="small"
+                    danger={hasErr}
+                    disabled={!hasErr}
+                    icon={<WarningOutlined />}
+                    onClick={() => void openErrorDetail(r)}
+                  >
+                    Lỗi
+                  </Button>
+                </Space>
+              );
+            },
+          },
         ]}
       />
+      {detailModals}
     </Card>
   );
 }

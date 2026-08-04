@@ -1,49 +1,31 @@
 """
-E2E feature-journey rules — Phase A–F + Feature entry ONLY.
+E2E feature-journey rules — Phase C Feature entry ONLY.
 
-Auth/role/locator/assert/session → ``e2e_codegen_rules.py`` (E2ECG). Do not restate.
+Auth/role/locator/assert/Act-Arrange → ``e2e_codegen_rules.py`` (E2ECG 1–19). Do not restate.
+Spec order Auth→Feature→Arrange→Act → E2ECG Rule 7 (Phase 2 guard enforces).
 
-Cursor: ``.cursor/rules/e2e-feature-journey.mdc`` — keep in sync with this skeleton.
+Cursor: ``.cursor/rules/e2e-feature-journey.mdc`` — keep in sync (Phase C only).
 """
 
 from __future__ import annotations
 
-# Unique value = Feature entry. Everything else points at E2ECG / auth_mode overlay.
+# Unique value = Feature entry. Everything else → E2ECG + E2E_GROUNDING.
 E2E_FEATURE_JOURNEY_RULES = """\
-## Feature journey skeleton (after Execution Context + auth_mode resolved)
+## Feature entry (Phase C — after auth, before fill)
 
-### Spec skeleton (order)
-```
-0. Auth…     → per auth_mode overlay + E2ECG 1–6 (skip if PUBLIC / storage already loaded)
-1. Feature…  → gotoFeature/goto + landmark on FEATURE screen
-2. Arrange…  → dialog/tab/filter from Precondition
-3..N Act…    → one test.step per numbered TC Step
-final Assert → Expected on feature UI (E2ECG 14)
-```
+Also follow E2E_GROUNDING (path+landmark+fail-closed). Prefer deep-link **per TC**:
+1. Spec/POM Feature-entry prose / `E2E_FEATURE_PATH` — highest
+2. TC `path:` / `featurePath:` + path tokens (required on post-login TC)
+3. FE route file → URL segment (e.g. `app/foo/routes.ts` or `pages/foo/` → `/foo` — **from this project only**)
+4. Inspect routes scored vs TC tokens
+Guard force-bakes into Spec↔POM. Do NOT invent app routes (`/admin/...`, `/app/...`) without a signal.
+Menu only if path still unknown — label from this project's Inspect DOM.
+Landmark visible; open Create/Edit before fills if fields live in dialog.
+`gotoFeature` alone does not auto-click Create.
 
-### Phase A START
-- `page.goto('/')` or baseURL only. No deep-link before auth (except PUBLIC / Login TC).
-
-### Phase B AUTH
-- Follow AUTH overlay only — details in E2ECG Rules 1–6.
-
-### Phase C FEATURE ENTRY (AFTER auth, BEFORE fill) — do not skip
-Resolve path STRICTLY; comment `// Feature entry: …`:
-1) TC Precondition / Steps / `path:` / `route:`
-2) FE source: routerLink, href, Routes, path:
-3) `process.env.E2E_FEATURE_PATH` (or module E2E_*_PATH)
-4) Sidebar/menu by **exact** FE visible name / data-cy — never paraphrase
-Else menu-click FE labels — do NOT invent `/admin/...`.
-Landmark = heading/module OR `[data-cy=…]` list/form OR dialog title from Precondition.
-List vs form: open Create/Edit (FE button) BEFORE fills if fields only exist in dialog.
-
-### Phase D–F
-- Arrange / Act / Assert per E2ECG 7–14 (incl. Validation/Boundary/RBAC non-happy).
-
-### Anti-patterns (Feature entry)
-- Fill feature fields while still on home/login
-- Invented feature path not in TC/FE/env
-- Assert list-page fields that only exist inside Create/Edit dialog
+### Anti-patterns
+- Fill on login/home · invented routes · assert dialog fields on list page ·
+  inventing `button.first()` when DOM/FE empty (fail-closed → Phase-3)
 """
 
 
@@ -108,13 +90,12 @@ def e2e_journey_user_checklist(
         )
     ):
         hints.append(
-            "Needs dialog/form → Phase D open Create/Edit BEFORE filling fields."
+            "Needs dialog/form → open Create/Edit BEFORE filling fields (E2ECG 19)."
         )
     extra = ("\n".join(f"- {h}" for h in hints) + "\n") if hints else ""
     return (
         "## Feature entry checklist\n"
-        "1. After auth: write `// Feature entry: <path|menu>` from "
-        "Precondition / FE source / E2E_FEATURE_PATH — then goto + landmark visible.\n"
-        "2. Prefer FE menu labels over inventing a path when route is unknown.\n"
+        "Follow E2ECG 7–19 + Phase C. After auth: deep-link Feature path "
+        "(see ## Feature path if present) + landmark before Act.\n"
         f"{extra}"
     )

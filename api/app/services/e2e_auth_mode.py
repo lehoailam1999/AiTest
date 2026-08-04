@@ -43,10 +43,16 @@ _POST_LOGIN_FEATURE_RE = re.compile(
     r"(?:leaves?|left|exit|thoát|rời)\s*(?:the\s*)?(?:login|/login)|"
     r"session\s*(?:ready|established)|"
     r"authenticated\s+session|"
+    r"phiên\s*đã\s*xác\s*thực|"
+    r"đã\s*xác\s*thực|"
+    r"execution\s*context|"
     r"sau\s*(?:khi\s*)?đăng[\s_-]*nhập|"
     r"đã\s*đăng[\s_-]*nhập|"
     r"post[\s_-]*auth"
 )
+
+# AITest category tags — e.g. [E2E-Auth/Permission] — not Login journeys.
+_E2E_CATEGORY_TAG_RE = re.compile(r"\[E2E[^\]]*\]", re.IGNORECASE)
 
 # Path segments that ARE login journeys — not modules like AuthSmoke / auth-smoke.spec.
 _LOGIN_PATH_RE = re.compile(
@@ -71,6 +77,14 @@ _LOGIN_WALL_DOM_RE = re.compile(
     r"getByLabel\([^\)]*password|"
     r"textbox[^\n]{0,40}(?:email|password|username)"
 )
+
+
+def is_login_wall_dom(dom_snapshot: str = "") -> bool:
+    """True when snapshot looks like a login/sign-in screen (password/email fields)."""
+    dom = (dom_snapshot or "").strip()
+    if not dom:
+        return False
+    return bool(_LOGIN_WALL_DOM_RE.search(dom))
 
 
 def is_public_no_auth_signal(
@@ -101,6 +115,8 @@ def is_login_or_auth_tc(title: str = "", path: str = "") -> bool:
     blob = f"{title or ''} {path or ''}".strip()
     if not blob:
         return False
+    # Strip [E2E-Auth/Permission] style tags — category ≠ Login TC.
+    blob = _E2E_CATEGORY_TAG_RE.sub(" ", blob)
     # Public-access / anonymous TCs must NOT be treated as Login journeys.
     if _PUBLIC_NO_AUTH_RE.search(blob):
         return False
@@ -127,15 +143,19 @@ def resolve_auth_mode(
 
     - Login TC → none (never stack storage + helper).
     - Public app / no-auth signal → public (overrides Desktop «Dùng storageState»).
-    - Valid storage JSON or use_storage flag → storage.
+    - Valid storage JSON on disk/bundle → storage (login once, reuse session).
+    - Desktop «Dùng storageState» alone does NOT enable storage without a real file
+      (avoids Playwright ENOENT). Prefer ui_helper until seed/login writes JSON.
     - Else → ui_helper.
     """
     if is_login_tc:
         return "none"
     if app_public:
         return "public"
-    if has_valid_storage_json or use_storage:
+    # Intentionally ignore use_storage unless JSON exists — checkbox = preference only.
+    if has_valid_storage_json:
         return "storage"
+    _ = use_storage  # preference reserved for future UX hints
     return "ui_helper"
 
 

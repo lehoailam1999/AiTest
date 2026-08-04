@@ -240,12 +240,30 @@ async def _default_fetch_html(url: str) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-async def _playwright_fetch_html(url: str, *, timeout_ms: int = 20000) -> str:
+async def _playwright_fetch_html(
+    url: str,
+    *,
+    timeout_ms: int = 20000,
+    storage_state_path: str = "",
+    feature_path: str = "",
+    username: str = "",
+    password: str = "",
+) -> str:
     """
     EX4.2 — Chromium render via Playwright sync API in a worker thread.
-    Falls back to raising if playwright / browser missing.
+    Optional storageState / UI login + featurePath for post-auth DOM (Phase 1).
     """
     import asyncio
+
+    def _join(base: str, path: str) -> str:
+        path = (path or "").strip()
+        if not path:
+            return base
+        if path.startswith("http"):
+            return path
+        b = base.rstrip("/")
+        p = path if path.startswith("/") else f"/{path}"
+        return f"{b}{p}"
 
     def _sync_fetch() -> str:
         from playwright.sync_api import sync_playwright
@@ -253,20 +271,58 @@ async def _playwright_fetch_html(url: str, *, timeout_ms: int = 20000) -> str:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
-                page = browser.new_page()
+                ctx_kwargs: dict = {}
+                if storage_state_path and Path(storage_state_path).is_file():
+                    ctx_kwargs["storage_state"] = storage_state_path
+                context = browser.new_context(**ctx_kwargs)
+                page = context.new_page()
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                # SPA: wait a beat for client render (avoid networkidle — can hang)
-                page.wait_for_timeout(1200)
-                return page.content()
+                page.wait_for_timeout(800)
+                if not ctx_kwargs.get("storage_state") and username and password:
+                    pwd = page.locator('input[type="password"]').first
+                    if pwd.is_visible():
+                        email = page.locator(
+                            'input[type="email"], input[name*="user" i], '
+                            'input[name*="email" i], input[type="text"]'
+                        ).first
+                        email.fill(username)
+                        pwd.fill(password)
+                        btn = page.get_by_role(
+                            "button",
+                            name=re.compile(r"log\s*in|sign\s*in|đăng\s*nhập", re.I),
+                        ).first
+                        btn.click()
+                        page.wait_for_timeout(1500)
+                if feature_path.strip():
+                    page.goto(
+                        _join(url, feature_path),
+                        wait_until="domcontentloaded",
+                        timeout=timeout_ms,
+                    )
+                    page.wait_for_timeout(1200)
+                else:
+                    page.wait_for_timeout(400)
+                html = page.content()
+                context.close()
+                return html
             finally:
                 browser.close()
 
     return await asyncio.to_thread(_sync_fetch)
 
 
-async def _node_playwright_fetch_html_with_runner(url: str, runner: Path) -> str:
+async def _node_playwright_fetch_html_with_runner(
+    url: str,
+    runner: Path,
+    *,
+    storage_state_path: str = "",
+    feature_path: str = "",
+    username: str = "",
+    password: str = "",
+) -> str:
     """
     Render SPA via Node Playwright runner dir (shared or project package root).
+    Phase 1: optional --storage / --feature + E2E_* env for post-auth DOM.
     """
     import asyncio
     import os
@@ -290,16 +346,26 @@ async def _node_playwright_fetch_html_with_runner(url: str, runner: Path) -> str
         raise RuntimeError("Không tìm thấy node trên PATH của API")
 
     def _sync() -> str:
+        cmd = [node, str(dst), url]
+        if storage_state_path and Path(storage_state_path).is_file():
+            cmd.extend(["--storage", storage_state_path])
+        if feature_path.strip():
+            cmd.extend(["--feature", feature_path.strip()])
+        env = os.environ.copy()
+        if username:
+            env["E2E_USERNAME"] = username
+        if password:
+            env["E2E_PASSWORD"] = password
         kwargs: dict = {
             "cwd": str(runner),
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
-            "env": os.environ.copy(),
+            "env": env,
         }
         if sys.platform == "win32" and _CREATE_NO_WINDOW:
             kwargs["creationflags"] = _CREATE_NO_WINDOW
         completed = subprocess.run(  # noqa: S603
-            [node, str(dst), url],
+            cmd,
             **kwargs,
         )
         out = (completed.stdout or b"").decode("utf-8", errors="replace")
@@ -313,7 +379,14 @@ async def _node_playwright_fetch_html_with_runner(url: str, runner: Path) -> str
     return await asyncio.to_thread(_sync)
 
 
-async def _node_shared_playwright_fetch_html(url: str) -> str:
+async def _node_shared_playwright_fetch_html(
+    url: str,
+    *,
+    storage_state_path: str = "",
+    feature_path: str = "",
+    username: str = "",
+    password: str = "",
+) -> str:
     """
     Render SPA via AITest shared Node runner (~/.aitest/playwright-runner).
     Uses same Chromium as Headless — không cần pip install playwright.
@@ -328,7 +401,14 @@ async def _node_shared_playwright_fetch_html(url: str) -> str:
         raise RuntimeError(
             "AITest Playwright runner chưa cài — bấm «Cài Playwright trên AITest»"
         )
-    return await _node_playwright_fetch_html_with_runner(url, runner)
+    return await _node_playwright_fetch_html_with_runner(
+        url,
+        runner,
+        storage_state_path=storage_state_path,
+        feature_path=feature_path,
+        username=username,
+        password=password,
+    )
 
 
 async def resolve_fetch_fn(
@@ -388,10 +468,15 @@ async def inspect_target(
     fetch_fn: BrowserFetchFn | None = None,
     use_playwright: bool = False,
     project_root: str = "",
+    storage_state_path: str = "",
+    feature_path: str = "",
+    username: str = "",
+    password: str = "",
 ) -> InspectResult:
     """
     Inspect live URL and/or FE source for interactive elements.
     use_playwright=True → Chromium render (Python or AITest Node runner); falls back to HTTP GET.
+    Phase 1: storage_state_path / username+password + feature_path → post-auth DOM.
     """
     elements: list[InteractiveElement] = []
     routes: list[str] = []
@@ -400,10 +485,44 @@ async def inspect_target(
     render_mode = "none"
 
     url = (target_url or "").strip()
+    post_auth = bool(
+        (storage_state_path or "").strip()
+        or (feature_path or "").strip()
+        or ((username or "").strip() and (password or "").strip())
+    )
+
     if url:
         if fetch_fn is not None:
             fetcher = fetch_fn
             render_mode = "custom"
+        elif post_auth and use_playwright:
+            # Prefer Python Playwright when post-auth options are set (full kwargs).
+            try:
+                import playwright  # noqa: F401
+
+                async def _auth_fetch(u: str) -> str:
+                    return await _playwright_fetch_html(
+                        u,
+                        storage_state_path=storage_state_path,
+                        feature_path=feature_path,
+                        username=username,
+                        password=password,
+                    )
+
+                fetcher = _auth_fetch
+                render_mode = "playwright+auth"
+            except Exception:
+                async def _node_auth_fetch(u: str) -> str:
+                    return await _node_shared_playwright_fetch_html(
+                        u,
+                        storage_state_path=storage_state_path,
+                        feature_path=feature_path,
+                        username=username,
+                        password=password,
+                    )
+
+                fetcher = _node_auth_fetch
+                render_mode = "playwright-node+auth"
         else:
             try:
                 fetcher, render_mode = await resolve_fetch_fn(
@@ -422,8 +541,8 @@ async def inspect_target(
             source = f"url:{render_mode}"
         except Exception as exc:  # noqa: BLE001
             # Chromium fail → one retry with static GET
-            if use_playwright and fetch_fn is None and render_mode.startswith(
-                "playwright"
+            if use_playwright and fetch_fn is None and (
+                render_mode.startswith("playwright") or "auth" in render_mode
             ):
                 try:
                     html = await _default_fetch_html(url)

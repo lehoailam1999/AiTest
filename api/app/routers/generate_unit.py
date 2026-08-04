@@ -121,9 +121,8 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
     if conn is None or not C.is_ai_ready(conn.status):
         return errors(
             400,
-            "AI chưa Ready — vào Cấu hình AI thiết lập (API Key hoặc AI CLI) và Verify",
+            "AI chưa Ready — vào Cấu hình AI thiết lập AI CLI và Verify",
         )
-    runner_mode = connection_runner_mode(conn)
 
     packet = body.get("contextPacket") if isinstance(body.get("contextPacket"), dict) else None
     workspace_id = str(body.get("workspaceId") or "").strip() or None
@@ -347,9 +346,7 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
     except Exception as exc:  # noqa: BLE001
         return errors(400, f"generate unit failed: {exc}")
 
-    provider_label = meta.get("provider") or (
-        "ai-cli" if runner_mode == RUNNER_AI_CLI else "api"
-    )
+    provider_label = meta.get("provider") or "ai-cli"
     return ok(
         {
             "code": result.code,
@@ -358,7 +355,7 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
             "testCaseId": str(tc.id),
             "projectId": str(project_id),
             "provider": provider_label,
-            "runnerUsed": meta.get("runnerUsed") or runner_mode,
+            "runnerUsed": meta.get("runnerUsed") or RUNNER_AI_CLI,
             "cliSessionKey": meta.get("cliSessionKey"),
             "stackInspect": stack_inspect.to_dict() if stack_inspect else None,
             "contextSource": body.get("contextSource")

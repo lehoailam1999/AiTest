@@ -13,7 +13,8 @@ from app.services.e2e_auth_mode import (
 
 
 def test_resolve_auth_mode_storage_first():
-    assert resolve_auth_mode(use_storage=True) == "storage"
+    # Checkbox alone must NOT enable storage (ENOENT without JSON).
+    assert resolve_auth_mode(use_storage=True) == "ui_helper"
     assert resolve_auth_mode(has_valid_storage_json=True) == "storage"
     assert resolve_auth_mode() == "ui_helper"
     assert resolve_auth_mode(use_storage=True, is_login_tc=True) == "none"
@@ -47,6 +48,14 @@ def test_login_tc_detection():
     assert not is_login_or_auth_tc(
         "Establish authenticated session for features",
         "AItest/E2ETest/AuthSmoke/specs/auth-smoke.spec.ts",
+    )
+    # Category tag [E2E-Auth/Permission] + phiên đã xác thực = feature, not Login
+    assert not is_login_or_auth_tc(
+        "[E2E-Auth/Permission] Thêm tài liệu liên quan - Phiên đã xác thực theo Execution Context"
+    )
+    assert not is_login_or_auth_tc(
+        "Thêm tài liệu",
+        "AItest/E2ETest/Req/E2E-Auth-Permission-Them/specs/x.spec.ts",
     )
     assert is_login_or_auth_tc("Đăng nhập thành công", "specs/login.spec.ts")
     assert is_login_or_auth_tc("Login fails", "auth/login.spec.ts")

@@ -18,6 +18,8 @@ def test_e2e_analysis_rules_cover_output_driven_contract():
     assert "trace:" in text
     assert "Scenario Expansion" in text or "Scenario" in text
     assert "Workflow" in text or "BUSINESS_FLOWS" in text
+    assert "EP" in text or "BVA" in text or "biên" in text
+    assert "1 tín hiệu" in text or "1 TC" in text
     for label in (
         "FEATURES",
         "BUSINESS_FLOWS",
@@ -31,6 +33,31 @@ def test_e2e_analysis_rules_cover_output_driven_contract():
         assert label in text
     assert "CẤM" in text
     assert "SRS" in text
+
+
+def test_e2e_analysis_rules_feature_path_contract():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "FEATURE PATH" in text
+    assert "path:" in text
+    assert "featurePath:" in text
+
+
+def test_e2e_fast_rules_keep_mandatory_classes():
+    fast = E2E_TC_FROM_ANALYSIS_RULES_FAST
+    assert "Cover đủ" in fast or "cover" in fast.lower()
+    assert "AUTH" in fast
+    assert "VALIDATION" in fast or "BR" in fast
+    assert "ERROR" in fast or "permission" in fast
+    assert "không trần" in fast.lower() or "không trần N" in fast
+    assert "pad" in fast.lower() or "invent" in fast.lower() or "trùng" in fast.lower()
+
+
+def test_e2e_rules_anti_bloat_and_no_fixed_ceiling():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "không trần" in text.lower()
+    assert "Anti-bloat" in text or "thừa" in text
+    assert "trùng" in text.lower()
+    assert "Coverage gate" in text
 
 
 def test_append_prepares_analysis_first():
@@ -61,6 +88,11 @@ def test_engine_e2e_injects_analysis_fidelity_without_map_dup():
     assert fast.startswith("## E2E ← PHÂN TÍCH")
     assert "≤5" in fast or "5" in fast
 
+    uncapped = engine_generation_rules("e2e", speed="fast", max_per_module=None)
+    assert "SPEED" in uncapped
+    assert "Trần tùy chọn" not in uncapped
+    assert "Trần mềm" not in uncapped
+
 
 def test_e2e_custom_rules_fit_eng_cap():
     shared = get_tc_generation_rules(preferred_engine="e2e")
@@ -81,6 +113,7 @@ def test_engine_e2e_overlay_does_not_restate_sot_steps_expected():
     assert full.count("Step Expansion") == 1
     assert full.count("Expected Binding") == 1
     assert full.count("[Hành động]->[Element]") == 1
+    assert "EP" in full or "BVA" in full or "biên" in full
     # Overlay must not restate the action→element essay a second time.
     assert "element từ FLOWS" not in full
     assert "Expected chỉ assert outcome" not in full

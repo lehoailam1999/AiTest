@@ -121,7 +121,7 @@ def synthesize_project_auto_rules(meta: dict[str, Any]) -> str:
 
     lines.append(
         "- Layout artifact: Unit → AItest/UnitTest/{Requirement}/{TC}/ ; "
-        "E2E → AItest/E2ETest/{Requirement}/{TC}/pages|specs/."
+        "E2E → AItest/E2ETest/{Requirement}/{TC}/specs + _shared/{pages|fixtures}."
     )
     lines.append(
         "- Unit: không import/chạy entrypoint bootstrap (main.ts/js, Program.cs, wsgi/asgi, …); "

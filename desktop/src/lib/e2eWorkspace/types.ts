@@ -29,6 +29,10 @@ export type E2EEnvConfig = {
   username?: string;
   /** Injected as E2E_PASSWORD */
   password?: string;
+  /** Injected as E2E_ROLE — from TC authRole / Analysis WHO */
+  role?: string;
+  /** Injected as E2E_FEATURE_PATH — Feature entry after auth (Phase 1) */
+  featurePath?: string;
 };
 
 export type E2EWorkspaceManifest = {
@@ -60,5 +64,7 @@ export function defaultE2EEnv(partial?: Partial<E2EEnvConfig>): E2EEnvConfig {
     teardownCommand: partial?.teardownCommand?.trim() || undefined,
     username: partial?.username?.trim() || undefined,
     password: partial?.password?.trim() || undefined,
+    role: partial?.role?.trim() || undefined,
+    featurePath: partial?.featurePath?.trim() || undefined,
   };
 }

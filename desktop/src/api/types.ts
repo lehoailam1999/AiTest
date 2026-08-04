@@ -61,6 +61,8 @@ export type ProjectMeta = {
     username?: string;
     /** Optional override — primary auth: AI seed → .ai-test/auth */
     password?: string;
+    /** @deprecated Manual UI removed — path derives from TC/FE/Inspect per generate */
+    featurePath?: string;
   };
 };
 
@@ -75,7 +77,7 @@ export type Connection = {
   hasApiKey: boolean;
   lastVerifiedAt?: string | null;
   lastError?: string | null;
-  /** API_DIRECT | AI_CLI */
+  /** AI_CLI only */
   runnerMode?: string | null;
   cliType?: string | null;
   cliPath?: string | null;
@@ -188,7 +190,7 @@ export type KnowledgePayload = {
   summary?: string;
   features?: { name: string; description?: string }[];
   actors?: { name: string; description?: string; permissions?: string }[];
-  useCases?: { name: string; steps?: string }[];
+  useCases?: { name: string; steps?: string; /** flowchart TD — Analysis UI; steps vẫn nuôi Sinh TC */ mermaid?: string }[];
   /** WHO for E2E: actor/auth/roles per scenario — not login mechanism */
   executionContexts?: {
     name: string;
@@ -200,7 +202,7 @@ export type KnowledgePayload = {
     notes?: string;
   }[];
   businessRules?: { id?: string; text: string; priority?: string }[];
-  validationRules?: { field?: string; rule: string }[];
+  validationRules?: { field?: string; rule: string; module?: string }[];
   apiSummary?: { method?: string; path: string; note?: string }[];
   exceptions?: { text: string }[];
   acceptanceCriteria?: { text: string }[];
@@ -250,6 +252,9 @@ export type KnowledgeWorkspaceView = {
   /** True while background Cursor/LLM enrich is running after heuristic ready */
   enrichPending?: boolean;
   enrichError?: string | null;
+  /** Phase timing from last enrich (prepare/llm/persist ms, prompt_chars, …) */
+  enrichTiming?: Record<string, number | string> | null;
+  enrichCacheHit?: boolean;
 };
 
 export type FreezeWarning = {
@@ -366,7 +371,7 @@ export type UnitResult = {
   testCaseId: string;
   projectId: string;
   provider: string;
-  /** API_DIRECT | AI_CLI — Step 1 unit CLI workflow */
+  /** AI_CLI — Step 1 unit CLI workflow */
   runnerUsed?: string;
   cliSessionKey?: string | null;
   /** Step 2 — ProjectInspector snapshot */

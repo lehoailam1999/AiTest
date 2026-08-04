@@ -1,4 +1,4 @@
-"""AI Service router — API_DIRECT vs AI_CLI for test-case generation."""
+"""AI Service — AI_CLI only (Cursor / Claude / Gemini / Ollama / custom)."""
 
 from __future__ import annotations
 
@@ -15,14 +15,10 @@ from app.llm.cli.adapters.custom_script_cli import CustomScriptCLIAdapter
 from app.llm.cli.adapters.gemini_cli import GeminiCLIAdapter
 from app.llm.cli.adapters.ollama_cli import OllamaCLIAdapter
 from app.llm.cli.session_pool import CLISessionPool
-from app.llm.direct_api_adapter import DirectAPIAdapter
-from app.llm.providers import Provider
 from app.models.domain import AiBackendConnection
-from app.services.connection_service import connection_api_key, llm_from_connection
 
 logger = logging.getLogger(__name__)
 
-RUNNER_API_DIRECT = "API_DIRECT"
 RUNNER_AI_CLI = "AI_CLI"
 
 
@@ -40,16 +36,13 @@ def _parse_cli_args(raw: str | None) -> list[str]:
 
 
 def connection_runner_mode(conn: AiBackendConnection) -> str:
-    mode = (getattr(conn, "runner_mode", None) or RUNNER_API_DIRECT).strip().upper()
-    if mode in ("AI_CLI", "CLI", "BACKGROUND_CLI"):
-        return RUNNER_AI_CLI
-    return RUNNER_API_DIRECT
+    """Always AI_CLI — legacy API_DIRECT rows are coerced."""
+    del conn  # kept for call-site compatibility
+    return RUNNER_AI_CLI
 
 
 def connection_is_cursor_cli(conn: AiBackendConnection) -> bool:
     """True when project AI is Cursor Agent CLI (oneshot --mode ask only)."""
-    if connection_runner_mode(conn) != RUNNER_AI_CLI:
-        return False
     cli_type = (getattr(conn, "cli_type", None) or "").strip().lower()
     return cli_type in ("cursor", "cursor-cli", "cursor-agent", "agent")
 
@@ -90,15 +83,11 @@ def get_adapter_for_connection(
     conn: AiBackendConnection,
     *,
     api_key: str | None = None,
-    provider: Provider | None = None,
+    provider: Any | None = None,
 ) -> BaseLLMAdapter:
-    if connection_runner_mode(conn) == RUNNER_AI_CLI:
-        return build_cli_adapter(conn)
-    key = api_key
-    if key is None:
-        key = connection_api_key(conn)
-    prov = provider or llm_from_connection(conn)
-    return DirectAPIAdapter(prov, key)
+    """Always CLI adapter. api_key/provider kept for call-site compatibility (ignored)."""
+    del api_key, provider
+    return build_cli_adapter(conn)
 
 
 async def generate_test_cases_for_connection(
@@ -108,7 +97,7 @@ async def generate_test_cases_for_connection(
     ctx: GenerateContext,
     *,
     api_key: str | None = None,
-    provider: Provider | None = None,
+    provider: Any | None = None,
     on_progress: Any | None = None,
     prefer_oneshot: bool | None = None,
     session_topic_key: str | None = None,
@@ -116,9 +105,8 @@ async def generate_test_cases_for_connection(
     create_chat: bool = False,
 ) -> tuple[list[TestCaseDraft], dict[str, Any]]:
     """Returns (drafts, meta) with runnerUsed / cliSessionKey / cursorChatId."""
-    mode = connection_runner_mode(conn)
     meta: dict[str, Any] = {
-        "runnerUsed": mode,
+        "runnerUsed": RUNNER_AI_CLI,
         "cliSessionKey": None,
         "cursorChatId": None,
     }
@@ -150,27 +138,21 @@ async def chat_for_connection(
     user: str,
     *,
     api_key: str | None = None,
-    provider: Provider | None = None,
+    provider: Any | None = None,
     resume_chat_id: str | None = None,
     create_chat: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """
-    Chat / Knowledge enrich via API_DIRECT or AI_CLI.
+    Chat / Knowledge enrich via AI CLI.
     Returns (raw_text, meta) with runnerUsed.
     Optional create_chat / resume_chat_id — Cursor hidden conversation (--mode ask).
     """
-    mode = connection_runner_mode(conn)
     meta: dict[str, Any] = {
-        "runnerUsed": mode,
+        "runnerUsed": RUNNER_AI_CLI,
         "cliSessionKey": None,
         "cursorChatId": None,
     }
-    key = api_key
-    if mode == RUNNER_AI_CLI:
-        key = None  # CLI không cần API key
-    elif key is None:
-        key = connection_api_key(conn)
-    adapter = get_adapter_for_connection(conn, api_key=key, provider=provider)
+    adapter = get_adapter_for_connection(conn, api_key=api_key, provider=provider)
     raw = await adapter.chat(
         system,
         user,
@@ -190,30 +172,19 @@ async def generate_unit_for_connection(
     req: UnitRequest,
     *,
     api_key: str | None = None,
-    provider: Provider | None = None,
+    provider: Any | None = None,
 ) -> tuple[UnitResult, dict[str, Any]]:
-    """
-    Step 1 Unit Test CLI workflow — sinh unit qua API_DIRECT hoặc AI_CLI.
-    Returns (UnitResult, meta) with runnerUsed / provider / cliSessionKey.
-    """
-    mode = connection_runner_mode(conn)
+    """Step 1 Unit Test — sinh unit qua AI CLI."""
     meta: dict[str, Any] = {
-        "runnerUsed": mode,
+        "runnerUsed": RUNNER_AI_CLI,
         "cliSessionKey": None,
         "provider": None,
     }
-    key = api_key
-    if mode == RUNNER_AI_CLI:
-        key = None
-    elif key is None:
-        key = connection_api_key(conn)
-    adapter = get_adapter_for_connection(conn, api_key=key, provider=provider)
+    adapter = get_adapter_for_connection(conn, api_key=api_key, provider=provider)
     result = await adapter.generate_unit(req)
     if isinstance(adapter, BaseCLIAdapter):
         meta["cliSessionKey"] = adapter.last_session_key
         meta["provider"] = adapter.vendor
-    elif isinstance(adapter, DirectAPIAdapter):
-        meta["provider"] = adapter.provider.name
     else:
         meta["provider"] = "llm"
     return result, meta
@@ -224,39 +195,27 @@ async def generate_e2e_for_connection(
     req: "E2ERequest",
     *,
     api_key: str | None = None,
-    provider: Provider | None = None,
+    provider: Any | None = None,
     heal: bool = False,
 ) -> tuple["E2EResult", dict[str, Any]]:
-    """
-    E2E Playwright generate / heal via API_DIRECT or AI_CLI (chat + parse multi-file).
-    """
-    from app.llm.base import (
-        e2e_result_from_raw,
-        e2e_system_prompt,
-        e2e_user_prompt,
-    )
-    from app.services.e2e_auth_mode import is_login_or_auth_tc, resolve_auth_mode
-
-    mode = connection_runner_mode(conn)
+    """E2E Playwright generate / heal via AI CLI."""
     meta: dict[str, Any] = {
-        "runnerUsed": mode,
+        "runnerUsed": RUNNER_AI_CLI,
         "cliSessionKey": None,
         "provider": None,
         "heal": heal,
     }
-    key = api_key
-    if mode == RUNNER_AI_CLI:
-        key = None
-    elif key is None:
-        key = connection_api_key(conn)
-    adapter = get_adapter_for_connection(conn, api_key=key, provider=provider)
+    adapter = get_adapter_for_connection(conn, api_key=api_key, provider=provider)
 
-    # CLI: dedicated warm session (avoid oneshot cold-start per TC).
     if isinstance(adapter, BaseCLIAdapter) and hasattr(adapter, "generate_e2e"):
         result = await adapter.generate_e2e(req, heal=heal)
         meta["cliSessionKey"] = adapter.last_session_key
         meta["provider"] = adapter.vendor
         return result, meta
+
+    # Fallback chat path (non-CLI adapters should not occur — kept for safety)
+    from app.llm.base import e2e_result_from_raw, e2e_system_prompt, e2e_user_prompt
+    from app.services.e2e_auth_mode import is_login_or_auth_tc, resolve_auth_mode
 
     auth_mode = resolve_auth_mode(
         use_storage=bool((req.storage_state_rel or "").strip()),
@@ -274,8 +233,6 @@ async def generate_e2e_for_connection(
     if isinstance(adapter, BaseCLIAdapter):
         meta["cliSessionKey"] = adapter.last_session_key
         meta["provider"] = adapter.vendor
-    elif isinstance(adapter, DirectAPIAdapter):
-        meta["provider"] = adapter.provider.name
     else:
         meta["provider"] = "llm"
     result = e2e_result_from_raw(raw, req)

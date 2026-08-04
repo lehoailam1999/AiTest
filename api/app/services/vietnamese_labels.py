@@ -33,6 +33,30 @@ PRIORITY_VI = {
     "nghiêm trọng": "Nghiêm trọng",
 }
 
+# High → low for list/display (0 = highest).
+PRIORITY_RANK = {
+    "nghiêm trọng": 0,
+    "critical": 0,
+    "p0": 0,
+    "cao": 1,
+    "high": 1,
+    "p1": 1,
+    "trung bình": 2,
+    "medium": 2,
+    "p2": 2,
+    "thấp": 3,
+    "low": 3,
+    "p3": 3,
+}
+
+# Canonical + legacy spellings stored in DB (after priority_vi + older EN).
+_PRIORITY_SQL_GROUPS: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (0, ("Nghiêm trọng", "Critical", "critical", "CRITICAL", "P0", "p0")),
+    (1, ("Cao", "High", "high", "HIGH", "P1", "p1")),
+    (2, ("Trung bình", "Medium", "medium", "MEDIUM", "P2", "p2")),
+    (3, ("Thấp", "Low", "low", "LOW", "P3", "p3")),
+)
+
 SEVERITY_VI = {
     "minor": "Nhẹ",
     "major": "Nặng",
@@ -88,6 +112,24 @@ def normalize_engine_type(value: str | None) -> str:
 def priority_vi(value: str | None) -> str:
     key = _norm_key(value)
     return PRIORITY_VI.get(key) or (value.strip() if value and value.strip() else "Trung bình")
+
+
+def priority_rank(value: str | None) -> int:
+    """0 = highest (Nghiêm trọng/Critical) … 3 = Thấp/Low; unknown → 4."""
+    return PRIORITY_RANK.get(_norm_key(value), 4)
+
+
+def priority_order_expr(column):
+    """
+    SQLAlchemy ORDER BY helper: độ ưu tiên cao → thấp, rồi tie-break khác.
+    Dùng: ``query.order_by(priority_order_expr(TestCase.priority), …)``
+    """
+    from sqlalchemy import case
+
+    whens = []
+    for rank, labels in _PRIORITY_SQL_GROUPS:
+        whens.append((column.in_(list(labels)), rank))
+    return case(*whens, else_=4)
 
 
 def severity_vi(value: str | None) -> str:

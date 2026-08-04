@@ -108,6 +108,8 @@ def knowledge_dto(
             "builtAt": None,
             "enrichPending": False,
             "enrichError": None,
+            "enrichTiming": None,
+            "enrichCacheHit": False,
         }
     payload = None
     if k.payload_json:
@@ -146,6 +148,8 @@ def knowledge_dto(
         "updatedAt": k.updated_at,
         "enrichPending": enrich_pending,
         "enrichError": enrich_error,
+        "enrichTiming": enrich.get("timing"),
+        "enrichCacheHit": bool(enrich.get("cacheHit")),
     }
 
 

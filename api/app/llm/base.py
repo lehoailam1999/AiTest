@@ -122,9 +122,9 @@ class GenerateContext:
     feature_titles: list[str] = field(default_factory=list)
     # Studio engine lock: unit | e2e | None (mixed)
     preferred_engine: str | None = None
-    # fast | full — E2E default fast via tc_speed.resolve_tc_speed_mode
+    # fast | full — E2E default full via tc_speed.resolve_tc_speed_mode
     speed_mode: str | None = None
-    # Soft cap when speed_mode=fast (None = unlimited anti-lazy)
+    # Soft cap: Unit when fast; E2E only if opt-in maxPerModule/env (None = signal-driven)
     max_tc_per_module: int | None = None
 
 
@@ -335,6 +335,13 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         '"expectedResult":"...","testData":"...","automationReady":false}]}\n\n'
         f"Ví dụ schema (placeholder — thay bằng nội dung từ tài liệu):\n{example}\n"
     )
+    eng_for_cap = (ctx.preferred_engine or "").strip().lower()
+    # E2E: no default numeric ceiling — only Unit/mixed use soft-cap language when max set.
+    use_numeric_cap = (
+        eng_for_cap != "e2e"
+        and ctx.speed_mode == "fast"
+        and bool(ctx.max_tc_per_module)
+    )
     if ctx.mode == "append" and ctx.existing_cases and not ctx.topic_scope:
         base += (
             "\nCHẾ ĐỘ BỔ SUNG: Đã có test case bên dưới.\n"
@@ -344,7 +351,7 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
             "Test case mới vẫn phải 100% tiếng Việt.\n"
         )
     elif ctx.topic_scope:
-        if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+        if use_numeric_cap:
             base += (
                 f"\nSinh test case cho ĐÚNG một chức năng trong phạm vi chủ đề. "
                 f"SPEED: ưu tiên journey/nhánh chính — tối đa ~{ctx.max_tc_per_module} TC. "
@@ -356,12 +363,12 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
                 "Cover từng FR/AC/business rule/validation/permission/error/boundary trong phạm vi "
                 "(≥1 TC mỗi tín hiệu độc lập). "
                 "KHÔNG trần số lượng — sinh đủ kịch bản; không dừng sớm sau vài case. "
-                "Toàn bộ nội dung tiếng Việt."
+                "Cấm TC thừa/trùng. Toàn bộ nội dung tiếng Việt."
             )
     else:
         n = len(ctx.feature_titles)
         if n > 1:
-            if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+            if use_numeric_cap:
                 base += (
                     f"\nTài liệu có {n} chức năng (Feature). "
                     f"SPEED: mỗi module ≤~{ctx.max_tc_per_module} TC ưu tiên chính. "
@@ -372,13 +379,13 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
                     f"\nTài liệu có {n} chức năng (Feature). "
                     "Mỗi chức năng: cover HẾT FR/AC/rule/validation có tín hiệu "
                     "(≥1 TC mỗi kịch bản độc lập; happy + negative + biên + exception khi có). "
-                    "KHÔNG trần số lượng theo module. "
+                    "KHÔNG trần số lượng theo module. Cấm TC thừa/trùng. "
                     "Trường module PHẢI khớp đúng tên từng Feature. "
                     "Không được chỉ sinh TC cho 1–2 module rồi bỏ qua phần còn lại. "
                     "Toàn bộ nội dung tiếng Việt."
                 )
         else:
-            if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+            if use_numeric_cap:
                 base += (
                     f"\nSPEED: ưu tiên FR/AC chính — tối đa ~{ctx.max_tc_per_module} TC. "
                     f"Bám tài liệu; không bịa. Toàn bộ nội dung tiếng Việt."
@@ -388,14 +395,14 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
                     "\nSinh test case phủ HẾT FR/AC/business rule/validation/API/use-case trong tài liệu "
                     "(≥1 TC mỗi tín hiệu độc lập). "
                     "KHÔNG trần số lượng — không dừng sớm vì «đã có vài case». "
-                    "Bám sát tài liệu + phân tích — không bỏ sót luồng nghiệp vụ đã nêu. "
+                    "Cấm TC thừa/trùng. Bám sát tài liệu + phân tích — không bỏ sót luồng đã nêu. "
                     "Toàn bộ nội dung tiếng Việt."
                 )
-    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+    if eng_for_cap == "e2e" or use_numeric_cap:
         from app.llm.tc_speed import speed_prompt_addon
 
         base += speed_prompt_addon(
-            speed=ctx.speed_mode,
+            speed=ctx.speed_mode or "full",
             max_per_module=ctx.max_tc_per_module,
             preferred_engine=ctx.preferred_engine,
         )
@@ -450,7 +457,12 @@ def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
         type_line = "Phân loại type theo tài liệu (Unit/E2E/API) — không gộp Unit+E2E trong 1 TC."
         example = _VIETNAMESE_TC_EXAMPLE
 
-    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+    use_numeric_cap = (
+        eng != "e2e"
+        and ctx.speed_mode == "fast"
+        and bool(ctx.max_tc_per_module)
+    )
+    if use_numeric_cap:
         from app.llm.tc_speed import speed_prompt_addon
 
         seed = (
@@ -470,6 +482,29 @@ def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
         )
         seed += speed_prompt_addon(
             speed=ctx.speed_mode,
+            max_per_module=ctx.max_tc_per_module,
+            preferred_engine=ctx.preferred_engine,
+        )
+    elif eng == "e2e":
+        from app.llm.tc_speed import speed_prompt_addon
+
+        seed = (
+            "Bạn là QA senior. Đây là TURN SEED (conversation ngầm) — ghi nhớ quy tắc; "
+            "CHƯA sinh test case. Turn sau sẽ gửi đúng 1 module + tài liệu liên quan.\n\n"
+            f"{type_line}\n"
+            "Ngôn ngữ: title/steps/expectedResult/precondition/testData/module = TIẾNG VIỆT.\n"
+            "Chỉ dựa vào tài liệu turn sau cung cấp — không bịa domain.\n"
+            "Mỗi lần gen (turn sau): CHỈ 1 module; cover đủ tín hiệu Output "
+            "(≥1 TC/tín hiệu độc lập). KHÔNG trần số TC cố định; cấm TC thừa/trùng.\n\n"
+            "Output turn sau: CHỈ JSON "
+            f'{{"testCases":[{{"title","type":"{type_schema}",'
+            '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
+            '"module","precondition","steps","expectedResult","testData","automationReady":false}]}}\n'
+            f"Ví dụ schema (placeholder):\n{example}\n"
+            "Trả lời turn này đúng 1 dòng: READY"
+        )
+        seed += speed_prompt_addon(
+            speed=ctx.speed_mode or "full",
             max_per_module=ctx.max_tc_per_module,
             preferred_engine=ctx.preferred_engine,
         )
@@ -533,7 +568,13 @@ def tc_module_gen_user_prompt(
         "ANTI-LAZY (bắt buộc):",
         f"- CHỈ sinh TC cho «{module}» — bỏ qua / không tham chiếu module khác.",
     ]
-    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+    eng_mod = (ctx.preferred_engine or "").strip().lower()
+    use_numeric_cap = (
+        eng_mod != "e2e"
+        and ctx.speed_mode == "fast"
+        and bool(ctx.max_tc_per_module)
+    )
+    if use_numeric_cap:
         parts.extend(
             [
                 f"- SPEED: tối đa ~{ctx.max_tc_per_module} TC — ưu tiên happy + validation "
@@ -548,6 +589,7 @@ def tc_module_gen_user_prompt(
                 "- Cover HẾT tín hiệu trong slice: mỗi FR/AC/business rule/validation/permission/"
                 "error/boundary độc lập → ≥1 TC MỚI (happy + negative khi có rule).",
                 "- KHÔNG trần số lượng giả tạo. Sinh đủ rồi mới dừng; không bịa ngoài tài liệu.",
+                "- Cấm TC thừa: trùng trace, cùng flow+expected chỉ đổi wording.",
                 "- Không nói «đã cover», không trả mảng rỗng khi còn tín hiệu, không tóm tắt thay vì JSON.",
                 "- Toàn bộ nội dung tiếng Việt. Trả CHỈ JSON {\"testCases\":[...]}.",
             ]
@@ -572,14 +614,14 @@ def tc_module_gen_user_prompt(
                 else ""
             )
         )
-    if ctx.speed_mode == "fast" and ctx.max_tc_per_module:
+    if use_numeric_cap:
         parts.append(
             f"Sinh ngay JSON testCases cho module «{module}» — ≤~{ctx.max_tc_per_module} TC ưu tiên chính."
         )
     else:
         parts.append(
             f"Sinh ngay JSON testCases cho module «{module}» — đủ mọi kịch bản độc lập trong slice "
-            "(không trần số lượng)."
+            "(không trần số lượng; cấm TC thừa)."
         )
     return "\n\n".join(parts)
 
@@ -1748,6 +1790,8 @@ class E2ERequest:
     user_rules: str = ""
     # Optional Analysis/TC execution context snippet (actor/role/authRequired/…)
     execution_context: str = ""
+    # Feature entry path (Desktop-derived or user) — baked into Spec Feature entry step
+    feature_path: str = ""
 
 
 @dataclass
@@ -1890,8 +1934,7 @@ def _e2e_steps_checklist(steps: str, expected: str, test_data: str) -> str:
     body = "\n".join(numbered) if numbered else "(none — derive minimal happy path from Expected only)"
     return (
         "## Step → code mapping (follow exactly)\n"
-        "For each numbered step below, emit `await test.step('<step text>', async () => { ... })` "
-        "with locators from DOM selector_candidates / FE source — not invented labels.\n"
+        "Each numbered step → `test.step` (E2ECG 7–19: locators from DOM/FE only).\n"
         f"### Steps\n{body}\n"
         f"### Expected (final asserts)\n{(expected or '(none)').strip()}\n"
         f"### Test data (fill values)\n{(test_data or '(none)').strip()}\n"
@@ -1948,6 +1991,41 @@ def e2e_user_prompt(req: E2ERequest) -> str:
     )
     from app.llm.e2e_codegen_rules import derive_execution_context_block
     from app.llm.e2e_journey_rules import e2e_journey_user_checklist
+
+    fp = (req.feature_path or "").strip().replace("\\", "/")
+    if fp and not fp.startswith("/") and not re.match(r"^[a-zA-Z]:", fp):
+        fp = f"/{fp}"
+    if fp:
+        parts.append(
+            f"## Feature path (resolved — use in Feature entry / gotoFeature)\n`{fp}`\n"
+        )
+    else:
+        from app.services.e2e_auth_mode import is_public_no_auth_signal
+
+        _public_early = is_public_no_auth_signal(
+            title=req.test_case_title,
+            dom_snapshot=req.dom_snapshot,
+            hints="\n".join(
+                [
+                    req.precondition or "",
+                    req.steps or "",
+                    req.expected_result or "",
+                    req.test_data or "",
+                ]
+            ),
+        )
+        _login_tc = bool(
+            re.search(
+                r"(?i)\b(login|đăng\s*nhập|sign\s*in|logout|đăng\s*xuất)\b",
+                f"{req.test_case_title}\n{req.test_case_type}",
+            )
+        )
+        if not _public_early and not _login_tc:
+            parts.append(
+                "## Feature path\n"
+                "(MISSING — E2E_GROUNDING) Add `path: /…` or `featurePath: /…` on TC "
+                "testData or ensure Inspect/FE yields a route. Do NOT invent `/admin/...`.\n"
+            )
 
     parts.append(
         derive_execution_context_block(
@@ -2016,7 +2094,41 @@ def e2e_user_prompt(req: E2ERequest) -> str:
             "## DOM snapshot\n(none — derive locators from FE source / TC labels only; "
             "prefer getByRole+name from Steps; do not invent testids).\n"
         )
-    src_cap = 4000 if req.dom_snapshot.strip() else 8000
+    # Login-wall DOM means FE is the real ground truth for post-login controls —
+    # do NOT cut FE to 4k (old behavior contradicted the instruction above).
+    from app.services.e2e_auth_mode import is_login_wall_dom
+
+    login_wall = is_login_wall_dom(req.dom_snapshot)
+    dom_has_candidates = False
+    if (req.dom_snapshot or "").strip():
+        try:
+            _dom = json.loads(req.dom_snapshot)
+            els = _dom.get("elements") if isinstance(_dom, dict) else None
+            if isinstance(els, list):
+                n_cands = 0
+                for el in els:
+                    if not isinstance(el, dict):
+                        continue
+                    cands = el.get("selector_candidates")
+                    if isinstance(cands, list) and cands:
+                        n_cands += 1
+                dom_has_candidates = n_cands >= 5
+        except Exception:
+            dom_has_candidates = False
+
+    if login_wall and not dom_has_candidates:
+        src_cap = 12000
+        related_cap = 3500
+    elif dom_has_candidates:
+        # Inspect grounded — keep FE smaller to cut prefill latency.
+        src_cap = 4000
+        related_cap = 2000
+    elif req.dom_snapshot.strip():
+        src_cap = 6000
+        related_cap = 2500
+    else:
+        src_cap = 8000
+        related_cap = 2000
     if req.source_code.strip():
         parts.append(
             f"## FE source hint (`{req.source_file_name or 'source'}`)\n"
@@ -2029,7 +2141,7 @@ def e2e_user_prompt(req: E2ERequest) -> str:
             + "\n"
         )
     for path, content in req.related_sources[:3]:
-        parts.append(f"## Related `{path}`\n{truncate(content, 2000)}\n")
+        parts.append(f"## Related `{path}`\n{truncate(content, related_cap)}\n")
     if req.existing_files:
         heal = bool(req.repair_context.strip())
         parts.append(
@@ -2138,6 +2250,26 @@ def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
     )
     from app.services.e2e_codegen_guard import apply_e2e_codegen_guards
 
+    # Prefer Desktop/API featurePath; fall back to path:/ markers in TC text.
+    feature_path_hint = (req.feature_path or "").strip().replace("\\", "/")
+    if feature_path_hint and not feature_path_hint.startswith("/") and not feature_path_hint.startswith(
+        "http"
+    ):
+        feature_path_hint = f"/{feature_path_hint}"
+    if not feature_path_hint:
+        for blob in (req.precondition, req.test_data, req.steps):
+            m = re.search(
+                r"(?im)^\s*(?:path|route|url|featurePath|feature_path)\s*[:=]\s*([^\n;,|]+)",
+                blob or "",
+            )
+            if m:
+                raw = m.group(1).strip().strip("\"'")
+                if raw:
+                    feature_path_hint = (
+                        raw if raw.startswith("/") or raw.startswith("http") else f"/{raw}"
+                    )
+                    break
+
     resolved = apply_e2e_codegen_guards(
         resolved,
         dom_snapshot=req.dom_snapshot,
@@ -2151,16 +2283,26 @@ def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
                 req.project_rules or "",
             ]
         ),
+        feature_path=feature_path_hint,
+        enforce_journey=True,
     )
     tc_suffix = hashlib.md5((req.test_case_title or "").encode("utf-8")).hexdigest()[:8]
     if tc_suffix:
+        # Only salt when two specs would collide in the same specs/ folder.
+        # Folder already encodes {Req}/{TC} — do not double-hash every Spec name.
         patched: list[E2EFile] = []
+        used_names: dict[str, int] = {}
         for f in resolved:
             p = (f.path or "").replace("\\", "/")
             if f.kind == "spec":
-                m = re.search(r"(\.(?:spec|test)\.[^.]+)$", p, flags=re.IGNORECASE)
-                if m and f".{tc_suffix}." not in p.lower():
-                    p = f"{p[:m.start(1)]}.{tc_suffix}{m.group(1)}"
+                parent = p.rsplit("/", 1)[0] if "/" in p else ""
+                leaf = p.rsplit("/", 1)[-1].lower()
+                key = f"{parent}/{leaf}"
+                if key in used_names:
+                    m = re.search(r"(\.(?:spec|test)\.[^.]+)$", p, flags=re.IGNORECASE)
+                    if m and f".{tc_suffix}." not in p.lower():
+                        p = f"{p[:m.start(1)]}.{tc_suffix}{m.group(1)}"
+                used_names[key] = used_names.get(key, 0) + 1
             patched.append(E2EFile(path=p, content=f.content, kind=f.kind))
         resolved = patched
     paths = [f.path for f in resolved]
@@ -2187,11 +2329,11 @@ def default_playwright_config(
         if not s:
             return ""
         # Playwright resolves storageState relative to playwright.config.ts directory.
-        # Absolute-from-repo forms like AItest/E2ETest/... cause duplicated path at runtime.
+        # Prefer caller-supplied relative paths (incl. ../../_shared/fixtures/...).
+        if s.startswith("./") or s.startswith("../"):
+            return s
         low = s.lower()
-        if low.endswith("storagestate.json"):
-            return "./fixtures/storageState.json"
-        if low.startswith("./fixtures/") or low.startswith("fixtures/"):
+        if low.endswith("storagestate.json") or low.startswith("fixtures/"):
             return "./fixtures/storageState.json"
         return ""
 
@@ -2199,9 +2341,16 @@ def default_playwright_config(
     storage_line = f'    storageState: "{storage_rel}",\n' if storage_rel else ""
     # Default: globalSetup only when storageState is configured (storage auth mode).
     use_setup = include_global_setup if include_global_setup is not None else bool(storage_rel)
-    global_setup_line = (
-        "  globalSetup: './fixtures/global.setup.ts',\n" if use_setup else ""
-    )
+    if use_setup:
+        # Prefer sibling of storageState when under _shared; else classic ./fixtures/
+        if "/_shared/" in storage_rel.replace("\\", "/"):
+            setup_dir = storage_rel.rsplit("/", 1)[0]
+            global_setup_line = f"  globalSetup: '{setup_dir}/global.setup.ts',\n"
+        else:
+            global_setup_line = "  globalSetup: './fixtures/global.setup.ts',\n"
+    else:
+        global_setup_line = ""
+
     # Explicit headless — CLI --headed đôi khi bị nuốt trên Windows/npx; config chắc hơn
     headless_line = "    headless: false,\n" if headed else "    headless: true,\n"
     # Headed: slowMo đủ lớn để mắt người theo kịp từng click/fill (80ms ≈ bật/tắt).

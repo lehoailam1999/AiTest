@@ -422,11 +422,11 @@ export function VerifyApplyConsole({
   return (
     <Card
       id={VERIFY_APPLY_CONSOLE_ID}
-      title="3. Verify & Apply"
+      title="3. Execute & Apply"
       style={{ marginTop: 8 }}
       extra={
         suggestVerify && !applied && manifest.status !== "pass" ? (
-          <Tag color="processing">Tiếp theo: Chạy Verify</Tag>
+          <Tag color="processing">Tiếp theo: Verify</Tag>
         ) : null
       }
     >
@@ -535,7 +535,7 @@ export function VerifyApplyConsole({
           loading={busy && !autoRepairing}
           disabled={!isTauri() || applied || !testCmd.trim() || autoRepairing}
         >
-          Chạy Verify
+          Verify
         </Button>
         <Button
           icon={<ToolOutlined />}
@@ -673,7 +673,7 @@ export function VerifyApplyConsole({
               ))}
               <br />
               Chạy full suite trên{" "}
-              <Link to={`/run?cmd=${encodeURIComponent(testCmd.trim())}`}>Chạy test</Link>
+              <Link to={`/run?lane=unit&cmd=${encodeURIComponent(testCmd.trim())}`}>Chạy test</Link>
               {" · "}staging job đã được dọn (nếu cleanup thành công).
             </>
           }
@@ -786,7 +786,7 @@ export function VerifyApplyConsole({
           showIcon
           style={{ marginTop: 4 }}
           title="Chưa chạy Verify"
-          description="Bấm Chạy Verify để compile/test trên staging. PASS xong mới Apply vào AItest/."
+          description="Bấm Verify để compile/test trên staging. PASS xong mới Apply vào AItest/."
         />
       )}
 

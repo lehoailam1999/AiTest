@@ -12,6 +12,8 @@ import {
 } from "@ant-design/icons";
 import type { BatchRunStatus } from "../../lib/batchRunControl";
 import type { E2eBatchPipelineRow } from "./E2eBatchConsole";
+import type { E2eRunMetrics } from "../../lib/e2eWorkspace/e2eFailureMetrics";
+import { E2E_FAIL_CATEGORY_LABELS } from "../../lib/e2eWorkspace/e2eFailureMetrics";
 
 export const E2E_VERIFY_APPLY_ID = "aitest-e2e-batch-verify-apply";
 
@@ -29,6 +31,8 @@ type Props = {
   verifyLoading?: boolean;
   healLoading?: boolean;
   applyLoading?: boolean;
+  /** Phase 4 — last Verify metrics */
+  metrics?: E2eRunMetrics | null;
   onVerify?: () => void;
   onHeal?: () => void;
   onApply?: () => void;
@@ -49,6 +53,7 @@ export function E2eVerifyApplyConsole({
   verifyLoading,
   healLoading,
   applyLoading,
+  metrics,
   onVerify,
   onHeal,
   onApply,
@@ -115,11 +120,11 @@ export function E2eVerifyApplyConsole({
   return (
     <Card
       id={E2E_VERIFY_APPLY_ID}
-      title="3. Verify & Apply"
+      title="3. Execute & Apply"
       style={{ marginTop: 8 }}
       extra={
         suggestVerify ? (
-          <Tag color="processing">Tiếp theo: Chạy Verify</Tag>
+          <Tag color="processing">Tiếp theo: Kiểm thử tất cả</Tag>
         ) : applied ? (
           <Tag color="success">Đã Apply</Tag>
         ) : jobPassed === true ? (
@@ -165,6 +170,34 @@ export function E2eVerifyApplyConsole({
         description="Staging tạm rồi rollback cho đến Apply. Apply ghi AItest/E2ETest/ trên disk — không đụng src production. Sau Apply có thể dọn staging."
       />
 
+      {metrics && metrics.total > 0 ? (
+        <Alert
+          type={metrics.failed === 0 ? "success" : "warning"}
+          showIcon
+          style={{ marginBottom: 12 }}
+          title={metrics.summaryLine}
+          description={
+            metrics.failed === 0 ? (
+              "Suite PASS — không có fail category."
+            ) : (
+              <Space wrap size={[6, 6]} style={{ marginTop: 4 }}>
+                {(
+                  Object.entries(metrics.failByCategory) as [keyof typeof E2E_FAIL_CATEGORY_LABELS, number][]
+                )
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([cat, n]) => (
+                    <Tag key={cat}>
+                      {E2E_FAIL_CATEGORY_LABELS[cat]}: {n} (
+                      {metrics.failSharePct[cat]}% fails · {metrics.suiteSharePct[cat]}%
+                      suite)
+                    </Tag>
+                  ))}
+              </Space>
+            )
+          }
+        />
+      ) : null}
+
       {jobPassed == null ? (
         <Alert
           type="info"
@@ -172,13 +205,13 @@ export function E2eVerifyApplyConsole({
           style={{ marginBottom: 12 }}
           title={
             batchRunStatus === "paused"
-              ? "Generate đang tạm dừng — có thể Verify phần đã gen"
-              : "Chưa chạy Verify"
+              ? "Generate đang tạm dừng — có thể Kiểm thử tất cả phần đã gen"
+              : "Chưa chạy Kiểm thử tất cả"
           }
           description={
             batchRunStatus === "paused"
-              ? `Bấm Kiểm thử phần đã gen (${genOkCount} TC). PASS xong mới Apply.`
-              : "Bấm Chạy Verify để chạy Playwright trên staging. PASS xong mới Apply vào AItest/E2ETest/."
+              ? `Bấm Kiểm thử tất cả phần đã gen (${genOkCount} TC). PASS xong mới Apply.`
+              : `Bấm Kiểm thử tất cả (${genOkCount}) để chạy Playwright cho mọi Spec đã Generate trong batch. PASS xong mới Apply vào AItest/E2ETest/.`
           }
         />
       ) : null}
@@ -206,7 +239,9 @@ export function E2eVerifyApplyConsole({
           loading={verifyLoading}
           disabled={genOkCount === 0 || actionsLockedByGenerate || !onVerify}
         >
-          {batchRunStatus === "paused" ? "Kiểm thử phần đã gen" : "Chạy Verify"}
+          {batchRunStatus === "paused"
+            ? `Kiểm thử tất cả phần đã gen (${genOkCount})`
+            : `Kiểm thử tất cả (${genOkCount})`}
         </Button>
         <Button
           icon={<ToolOutlined />}

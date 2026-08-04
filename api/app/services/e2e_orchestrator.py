@@ -310,6 +310,49 @@ class E2ESpecRunResult:
     error_excerpt: str = ""
 
 
+def _playwright_result_error_message(result: dict) -> str:
+    """Prefer short human error.message over nested JSON / code frames."""
+    err = result.get("error")
+    if isinstance(err, dict):
+        msg = str(err.get("message") or err.get("stack") or "").strip()
+        if msg:
+            return msg
+    elif err:
+        return str(err).strip()
+    for item in result.get("errors") or []:
+        if isinstance(item, dict):
+            msg = str(item.get("message") or item.get("stack") or "").strip()
+            if msg:
+                return msg
+        elif item:
+            return str(item).strip()
+    return ""
+
+
+def _clean_error_excerpt(raw: str, *, limit: int = 600) -> str:
+    """Drop ANSI / report JSON tails so Desktop Phase 4 can classify failures."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\x1b\[[0-9;]*m|\u001b\[[0-9;]*m", "", text)
+    # Prefer Phase 3 / expect lines if buried in a dump
+    for pat in (
+        r"Phase 3: ungrounded POM stub[^\n]+",
+        r"Error:\s*[^\n]+",
+        r"expect\([^\n]+",
+    ):
+        m = re.search(pat, text)
+        if m:
+            return m.group(0)[:limit]
+    # Strip accidental JSON report fragments
+    if '"attachments"' in text or '"errorLocation"' in text:
+        m = re.search(r"(Phase 3:[^\"]+|Error:[^\"]{10,200})", text)
+        if m:
+            return m.group(1)[:limit]
+        return "Playwright FAIL (see Log — excerpt was JSON report noise)"[:limit]
+    return text[:limit]
+
+
 @dataclass
 class E2EModuleRunResult:
     status: str  # PASSED | FAILED
@@ -517,18 +560,14 @@ def parse_playwright_json_report(log: str) -> list[E2ESpecRunResult]:
                     st = str(r.get("status") or "").lower()
                     if st and st not in ("passed", "skipped", "expected"):
                         ok = False
-                        err = str(
-                            r.get("error", {}).get("message")
-                            if isinstance(r.get("error"), dict)
-                            else r.get("error") or st
-                        )[:500]
+                        err = _playwright_result_error_message(r) or st
             if file_rel:
                 out.append(
                     E2ESpecRunResult(
                         spec_path=file_rel,
                         success=ok,
                         title=title,
-                        error_excerpt=err,
+                        error_excerpt=_clean_error_excerpt(err),
                     )
                 )
         for child in suite.get("suites") or []:
@@ -985,13 +1024,19 @@ def apply_headed_flag(cmd: Sequence[str], *, headed: bool) -> list[str]:
 
 
 def _spec_run_root(path: str) -> str:
-    """Directory that owns a TC run (parent of specs/ or of playwright.config.ts)."""
+    """Directory that owns a TC run (parent of specs/ or of playwright.config.ts).
+
+    Never treat E2ETest/_shared as a TC work_cwd.
+    """
     p = path.replace("\\", "/").strip("/")
     low = p.lower()
+    if "/_shared/" in f"/{low}/" or low.rstrip("/").endswith("/_shared"):
+        return ""
     if low.endswith("playwright.config.ts"):
         return p.rsplit("/", 1)[0]
     if "/specs/" in low:
         return p.split("/specs/")[0]
+    # Pages/fixtures under _shared are filtered above; legacy TC-local pages still map
     if "/pages/" in low:
         return p.split("/pages/")[0]
     if "/fixtures/" in low:
@@ -1101,6 +1146,13 @@ def _remap_e2e_files_short_paths(
 
 def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> None:
     """Fill E2E_USERNAME/PASSWORD from .ai-test/auth when Verify forgot to inject."""
+    from app.services.e2e_auth_seed import is_invented_auth_username
+
+    # Drop stale invented usernames so they never reach Playwright login.
+    if is_invented_auth_username(env.get("E2E_USERNAME")):
+        env.pop("E2E_USERNAME", None)
+        env.pop("E2E_PASSWORD", None)
+
     if (env.get("E2E_USERNAME") or "").strip() and (env.get("E2E_PASSWORD") or "").strip():
         pass
     else:
@@ -1114,11 +1166,11 @@ def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> Non
             if art:
                 if not (env.get("E2E_USERNAME") or "").strip():
                     u = str(art.get("username") or art.get("email") or "").strip()
-                    if u:
+                    if u and not is_invented_auth_username(u):
                         env["E2E_USERNAME"] = u
                 if not (env.get("E2E_PASSWORD") or "").strip():
                     p = str(art.get("password") or "").strip()
-                    if p:
+                    if p and (env.get("E2E_USERNAME") or "").strip():
                         env["E2E_PASSWORD"] = p
         except Exception:  # noqa: BLE001
             pass
@@ -1131,6 +1183,18 @@ def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> Non
                 env["E2E_LOGIN_PATH"] = path
         except Exception:  # noqa: BLE001
             pass
+
+    # Never point Playwright at a nested/missing storageState via env.
+    ss = (env.get("E2E_STORAGE_STATE") or "").strip().replace("\\", "/")
+    if ss:
+        nested = "/AItest/" in f"/{ss}" and not ss.startswith("./fixtures/")
+        candidates = [
+            Path(project_root) / ss,
+            Path(ss) if Path(ss).is_absolute() else None,
+        ]
+        exists = any(c is not None and c.is_file() for c in candidates)
+        if nested or not exists:
+            env.pop("E2E_STORAGE_STATE", None)
 
 
 def _assert_feature_auth_ready(
@@ -1199,8 +1263,8 @@ def _assert_feature_auth_ready(
     if (has_ensure or cfg_wants_storage or has_global_setup) and not creds:
         raise RuntimeError(
             "E2E auth blocked: app needs login but E2E_USERNAME/E2E_PASSWORD are empty. "
-            "Run Seed auth (AI) → `.ai-test/auth/{role}.json`, or set env / UI credentials "
-            "before Verify."
+            "Nhập tài khoản thật trên AITest → E2E (email/mật khẩu user có trong DB app). "
+            "Seed auth (AI) chỉ dùng khi app có đăng ký công khai — không tạo e2e_default."
         )
 
 
@@ -1295,21 +1359,143 @@ def _annotate_playwright_browser_errors(log: str) -> str:
     return log or ""
 
 
+def _canonical_spec_under_root(specs_rel: list[str]) -> str:
+    """
+    One Playwright target per TC folder — avoid running hash twins / orphan specs twice.
+    Prefer unique ``*.<8hex>.spec.ts`` (codegen primary); else stable first path.
+    """
+    cleaned = [p.replace("\\", "/") for p in specs_rel if (p or "").strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    hashed = [
+        p
+        for p in cleaned
+        if re.search(r"\.[a-f0-9]{8}\.(?:spec|test)\.", p, flags=re.IGNORECASE)
+    ]
+    if len(hashed) == 1:
+        return hashed[0]
+    if hashed:
+        return sorted(hashed)[-1]
+    return sorted(cleaned)[0]
+
+
+def _materialize_files_on_disk(
+    project_root: str,
+    files: list[E2EFile],
+) -> list[str]:
+    """
+    Write any missing E2E artifacts (config / POM / fixtures) before Playwright.
+    Returns relative paths that were created or refreshed.
+    """
+    root = Path(project_root).resolve()
+    wrote: list[str] = []
+    for f in files:
+        rel = (getattr(f, "path", "") or "").replace("\\", "/").strip()
+        if not rel:
+            continue
+        abs_path = root / rel
+        content = getattr(f, "content", "") or ""
+        if abs_path.is_file() and abs_path.stat().st_size > 0:
+            continue
+        if not content.strip():
+            continue
+        write_target = abs_path
+        if os.name == "nt":
+            s = str(abs_path)
+            if not s.startswith("\\\\?\\"):
+                write_target = Path("\\\\?\\" + s)
+        write_target.parent.mkdir(parents=True, exist_ok=True)
+        write_target.write_text(content, encoding="utf-8")
+        wrote.append(rel)
+    return wrote
+
+
+def _ensure_root_config_on_disk(
+    *,
+    project_root: str,
+    root_rel: str,
+    root_files: list[E2EFile],
+    all_files: list[E2EFile],
+    target_url: str = "",
+    headed: bool = False,
+) -> str:
+    """
+    Guarantee ``{root}/playwright.config.ts`` exists on disk before Playwright CLI.
+    Returns absolute config path.
+    """
+    root = Path(project_root).resolve()
+    cfg = next(
+        (
+            f
+            for f in root_files
+            if getattr(f, "kind", "") == "config"
+            or (getattr(f, "path", "") or "").replace("\\", "/").endswith(
+                "playwright.config.ts"
+            )
+        ),
+        None,
+    )
+    if cfg is None:
+        cfg = next(
+            (
+                f
+                for f in all_files
+                if (getattr(f, "path", "") or "").replace("\\", "/")
+                == f"{root_rel}/playwright.config.ts"
+            ),
+            None,
+        )
+    cfg_rel = (
+        (getattr(cfg, "path", "") or "").replace("\\", "/")
+        if cfg
+        else f"{root_rel}/playwright.config.ts"
+    )
+    cfg_abs = root / cfg_rel
+    body = (getattr(cfg, "content", "") or "").strip() if cfg else ""
+    need_write = (not cfg_abs.is_file()) or cfg_abs.stat().st_size == 0
+    if need_write:
+        if not body:
+            body = default_playwright_config(
+                base_url=target_url,
+                storage_state_rel="",
+                headed=headed,
+                include_global_setup=False,
+            )
+        write_target = cfg_abs
+        if os.name == "nt":
+            s = str(cfg_abs)
+            if not s.startswith("\\\\?\\"):
+                write_target = Path("\\\\?\\" + s)
+        write_target.parent.mkdir(parents=True, exist_ok=True)
+        write_target.write_text(body, encoding="utf-8")
+        logger.info("E2E materialize config → %s", cfg_rel)
+    return str(cfg_abs.resolve())
+
+
 async def _run_one_e2e_root(
     *,
     runner: RunCommandFn,
     project_root: str,
     root_rel: str,
     root_files: list[E2EFile],
+    all_files: list[E2EFile] | None = None,
     headed: bool,
     run_command: Sequence[str] | None,
     runner_prefix: str | None,
+    target_url: str = "",
 ) -> tuple[list[E2ESpecRunResult], list[str], str, str | None]:
     """
-    Run Playwright for a single TC/module folder.
+    Run Playwright for a single TC/module folder — **one** canonical spec only.
+    Sequential by design (caller loops roots one-by-one; CLI ``--workers=1``).
     Returns (spec_results, run_command, log_tail, work_cwd).
     Test failures are returned as failed specs — caller continues to next root.
     """
+    bundle = list(all_files or root_files)
+    # Re-write any missing shared POM/fixtures + this root's files (rollback-safe).
+    _materialize_files_on_disk(project_root, bundle)
+
     specs_rel = [
         f.path.replace("\\", "/")
         for f in root_files
@@ -1319,28 +1505,30 @@ async def _run_one_e2e_root(
     if not specs_rel:
         return [], [], "", None
 
-    cfg = next(
-        (
-            f
-            for f in root_files
-            if f.kind == "config"
-            or f.path.replace("\\", "/").endswith("playwright.config.ts")
-        ),
-        None,
+    primary = _canonical_spec_under_root(specs_rel)
+    config_arg = _ensure_root_config_on_disk(
+        project_root=project_root,
+        root_rel=root_rel,
+        root_files=root_files,
+        all_files=bundle,
+        target_url=target_url,
+        headed=headed,
     )
-    work_cwd, _spec_arg, config_arg = resolve_e2e_work_cwd(
-        project_root,
-        config_rel=cfg.path if cfg else f"{root_rel}/playwright.config.ts",
-        primary_spec_path=specs_rel[0],
-    )
-    if config_arg and not Path(config_arg).is_absolute():
-        config_arg = str((Path(work_cwd) / config_arg).resolve())
+    work = Path(config_arg).parent
+    work_cwd = str(work)
+    try:
+        spec_arg = str(
+            (Path(project_root).resolve() / primary).resolve().relative_to(work)
+        ).replace("\\", "/")
+    except ValueError:
+        spec_arg = str((Path(project_root).resolve() / primary).resolve())
 
     if run_command is not None:
         cmd = apply_headed_flag(list(run_command), headed=headed)
     else:
+        # Pass the single file (not specs/) so twin .hash.spec.ts files do not all run.
         cmd = default_playwright_run_command(
-            "specs/",
+            spec_arg,
             config_arg=config_arg,
             runner_prefix=runner_prefix,
             headed=headed,
@@ -1352,16 +1540,17 @@ async def _run_one_e2e_root(
     except Exception as exc:  # noqa: BLE001
         detail = exc_detail(exc)
         failed = [
-            E2ESpecRunResult(spec_path=p, success=False, error_excerpt=detail)
-            for p in specs_rel
+            E2ESpecRunResult(spec_path=primary, success=False, error_excerpt=detail)
         ]
         return failed, cmd, detail, work_cwd
 
     log = _annotate_playwright_browser_errors(log)
     parsed = parse_playwright_json_report(log)
+    # Map against the one intended primary; still list siblings as skipped-not-run? No —
+    # only report the primary so FE does not think every twin failed.
     return (
         _map_module_spec_results(
-            specs_rel=specs_rel, parsed=parsed, code=code, log=log
+            specs_rel=[primary], parsed=parsed, code=code, log=log
         ),
         cmd,
         log[-LOG_TAIL:] if log else "",
@@ -1524,8 +1713,32 @@ def ensure_playwright_config(
         use_storage_cfg = False
     if app_public:
         use_storage_cfg = False
-    # Path relative to playwright.config.ts (module/TC folder)
-    storage_for_cfg = "./fixtures/storageState.json" if use_storage_cfg else ""
+    root = e2e_module_root(
+        module, package_prefix=package_prefix,
+        requirement_title=requirement_title, test_case_title=test_case_title,
+    )
+    # Prefer the folder that already holds specs/ so Verify does not
+    # create playwright.config.ts under a title-based path while Specs stay elsewhere.
+    # Never infer work_cwd from E2ETest/_shared (pages/fixtures live there).
+    for f in files:
+        p = (getattr(f, "path", "") or "").replace("\\", "/")
+        low = p.lower()
+        if "/specs/" in low or low.endswith(".spec.ts"):
+            inferred = _spec_run_root(p)
+            if inferred:
+                root = inferred
+                break
+
+    from app.services.test_output_layout import e2e_shared_root
+    import os as _os
+
+    shared = e2e_shared_root(package_prefix=package_prefix)
+    storage_shared = f"{shared}/fixtures/storageState.json"
+    storage_for_cfg = ""
+    if use_storage_cfg:
+        storage_for_cfg = _os.path.relpath(storage_shared, root).replace("\\", "/")
+        if not storage_for_cfg.startswith("."):
+            storage_for_cfg = f"./{storage_for_cfg}"
 
     cfg_content = default_playwright_config(
         base_url=target_url,
@@ -1533,21 +1746,6 @@ def ensure_playwright_config(
         headed=headed,
         include_global_setup=use_storage_cfg,
     )
-    root = e2e_module_root(
-        module, package_prefix=package_prefix,
-        requirement_title=requirement_title, test_case_title=test_case_title,
-    )
-    # Prefer the folder that already holds specs/pages so Verify does not
-    # create playwright.config.ts under a title-based path while Specs stay elsewhere
-    # (Playwright → «No tests found»).
-    for f in files:
-        p = (getattr(f, "path", "") or "").replace("\\", "/")
-        low = p.lower()
-        if "/specs/" in low or "/pages/" in low or low.endswith(".spec.ts"):
-            inferred = _spec_run_root(p)
-            if inferred:
-                root = inferred
-                break
     cfg_path = f"{root}/playwright.config.ts"
 
     out: list[E2EFile] = []
@@ -1570,7 +1768,7 @@ def ensure_playwright_config(
         has_storage_line = "storageState" in body
         storage_is_canonical = bool(
             re.search(
-                r"""storageState\s*:\s*['"]\.\/fixtures\/storageState\.json['"]""",
+                r"""storageState\s*:\s*['"][^'"]*storageState\.json['"]""",
                 body,
                 flags=re.IGNORECASE,
             )
@@ -1616,30 +1814,29 @@ def ensure_playwright_config(
         )
         existing_cfg_dirs.add(root_rel)
 
-    # globalSetup only when storage mode (seed cookie once for feature specs)
-    cfg_dirs = {
-        (f.path or "").replace("\\", "/").rsplit("/", 1)[0]
-        for f in out
-        if (f.path or "").replace("\\", "/").endswith("playwright.config.ts")
-    }
-    if not cfg_dirs:
-        cfg_dirs = {cfg_out_path.replace("\\", "/").rsplit("/", 1)[0]}
+    # globalSetup under suite _shared (config points here via relative path)
     existing_setups = {
         (f.path or "").replace("\\", "/").lower()
         for f in out
-        if (f.path or "").replace("\\", "/").lower().endswith("/fixtures/global.setup.ts")
+        if (f.path or "").replace("\\", "/").lower().endswith("global.setup.ts")
     }
+    shared_setup = f"{shared}/fixtures/global.setup.ts"
     if use_storage_cfg:
-        for cfg_dir in sorted(cfg_dirs):
-            setup_path = f"{cfg_dir}/fixtures/global.setup.ts"
-            if setup_path.lower() in existing_setups:
-                # Always refresh canonical setup (cred fail messaging)
-                for f in out:
-                    if (f.path or "").replace("\\", "/").lower() == setup_path.lower():
-                        f.content = _GLOBAL_SETUP_TS
-                continue
-            out.append(E2EFile(path=setup_path, content=_GLOBAL_SETUP_TS, kind="fixture"))
-            existing_setups.add(setup_path.lower())
+        if shared_setup.lower() in existing_setups:
+            for f in out:
+                if (f.path or "").replace("\\", "/").lower() == shared_setup.lower():
+                    f.content = _GLOBAL_SETUP_TS
+        else:
+            out.append(E2EFile(path=shared_setup, content=_GLOBAL_SETUP_TS, kind="fixture"))
+        # Drop legacy per-TC global.setup copies
+        out = [
+            f
+            for f in out
+            if not (
+                (f.path or "").replace("\\", "/").lower().endswith("global.setup.ts")
+                and "/_shared/" not in (f.path or "").replace("\\", "/").lower()
+            )
+        ]
     else:
         out = [
             f
@@ -1647,7 +1844,7 @@ def ensure_playwright_config(
             if not (f.path or "")
             .replace("\\", "/")
             .lower()
-            .endswith("/fixtures/global.setup.ts")
+            .endswith("global.setup.ts")
         ]
     return out
 
@@ -1670,11 +1867,12 @@ def _strip_storage_state_lines(text: str) -> str:
     return out
 
 
-def _normalize_storage_state_line(text: str) -> str:
-    """Force canonical storageState path relative to playwright.config.ts."""
+def _normalize_storage_state_line(text: str, *, storage_rel: str = "./fixtures/storageState.json") -> str:
+    """Force storageState path relative to playwright.config.ts (TC or _shared)."""
+    rel = (storage_rel or "./fixtures/storageState.json").replace("\\", "/")
     return re.sub(
         r"""(storageState\s*:\s*)(['"])[^'"]*\2""",
-        r'\1"./fixtures/storageState.json"',
+        rf'\1"{rel}"',
         text,
         flags=re.IGNORECASE,
     )
@@ -1691,6 +1889,8 @@ def _runtime_fix_missing_storage_state(
     If the fixture is missing/invalid, always strip ``storageState`` (and
     ``globalSetup`` that only exists to seed it). Do not rely on globalSetup
     soft-skip — that previously left config pointing at a non-existent file.
+
+    Checks TC-local ``./fixtures/`` and suite ``_shared/fixtures/`` (layout SoT).
     """
     from app.services.e2e_codegen_guard import is_valid_storage_state_json
 
@@ -1709,32 +1909,74 @@ def _runtime_fix_missing_storage_state(
         return
     if "storageState" not in body:
         return
-    normalized = _normalize_storage_state_line(body)
-    if normalized != body:
-        try:
-            cfg_path.write_text(normalized, encoding="utf-8")
-            body = normalized
-            logger.info("Normalized storageState path in config: %s", cfg_path)
-        except OSError:
-            pass
 
-    state_path = Path(work_cwd) / "fixtures" / "storageState.json"
-    # Also check next to the config file (canonical for per-TC layout).
-    cfg_dir_state = cfg_path.parent / "fixtures" / "storageState.json"
+    # Resolve candidates: keep existing relative path in config if present
+    m = re.search(
+        r"""storageState\s*:\s*['"]([^'"]+)['"]""",
+        body,
+        flags=re.IGNORECASE,
+    )
+    cfg_rel = (m.group(1) if m else "").replace("\\", "/").strip()
+    cfg_dir = cfg_path.parent
+
+    def _shared_fixtures_dir() -> Path | None:
+        # {suite}/_shared/fixtures from {suite}/{Req}/{TC}/playwright.config.ts
+        for parent in [cfg_dir, *cfg_dir.parents]:
+            shared = parent / "_shared" / "fixtures"
+            if shared.is_dir() or (parent / "_shared").is_dir():
+                return shared
+            # Stop at E2ETest or AItest
+            if parent.name.lower() in ("e2etest", "aitest"):
+                cand = parent / "_shared" / "fixtures"
+                return cand
+        return None
+
+    shared_fix = _shared_fixtures_dir()
+    shared_state = (
+        (shared_fix / "storageState.json") if shared_fix is not None else None
+    )
+
+    candidates: list[Path] = []
+    if cfg_rel:
+        candidates.append((cfg_dir / cfg_rel).resolve())
+    candidates.append(Path(work_cwd) / "fixtures" / "storageState.json")
+    candidates.append(cfg_dir / "fixtures" / "storageState.json")
+    if shared_state is not None:
+        candidates.append(shared_state)
+
     has_valid = False
-    for candidate in (state_path, cfg_dir_state):
-        if not candidate.is_file():
-            continue
+    valid_path: Path | None = None
+    for candidate in candidates:
         try:
+            if not candidate.is_file():
+                continue
             raw = candidate.read_text(encoding="utf-8")
             if is_valid_storage_state_json(raw):
                 has_valid = True
+                valid_path = candidate
                 break
         except OSError:
             continue
-    if has_valid:
+
+    if has_valid and valid_path is not None:
+        try:
+            storage_rel = os.path.relpath(valid_path, cfg_dir).replace("\\", "/")
+            if not storage_rel.startswith("."):
+                storage_rel = f"./{storage_rel}"
+            normalized = _normalize_storage_state_line(body, storage_rel=storage_rel)
+            if normalized != body:
+                cfg_path.write_text(normalized, encoding="utf-8")
+                logger.info(
+                    "Normalized storageState path in config → %s (%s)",
+                    storage_rel,
+                    cfg_path,
+                )
+        except OSError:
+            pass
         return
 
+    # Missing / invalid — strip so Playwright does not ENOENT
+    # Do NOT rewrite to ./fixtures first (that undid _shared relative paths).
     fixed = _strip_storage_state_lines(body)
     fixed = re.sub(
         r"^[ \t]*globalSetup\s*:\s*['\"][^'\"]*['\"]\s*,?\s*\n",
@@ -1747,11 +1989,34 @@ def _runtime_fix_missing_storage_state(
             cfg_path.write_text(fixed, encoding="utf-8")
             logger.warning(
                 "Removed storageState/globalSetup from config "
-                "(missing/invalid fixtures/storageState.json): %s",
+                "(missing/invalid storageState.json under TC or _shared): %s",
                 cfg_path,
             )
         except OSError:
             pass
+
+    # Specs may also hardcode storageState (nested AItest/... path) → ENOENT.
+    from app.services.e2e_codegen_guard import strip_spec_storage_state
+
+    scan_roots = {Path(work_cwd), cfg_path.parent}
+    for root in scan_roots:
+        for spec in root.rglob("*.spec.ts"):
+            try:
+                raw = spec.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if "storageState" not in raw:
+                continue
+            cleaned = strip_spec_storage_state(raw)
+            if cleaned != raw:
+                try:
+                    spec.write_text(cleaned, encoding="utf-8")
+                    logger.warning(
+                        "Removed storageState from spec (missing fixtures): %s",
+                        spec,
+                    )
+                except OSError:
+                    pass
 
 
 def _looks_like_aitest_product_root(root: Path) -> bool:
@@ -2114,10 +2379,30 @@ class E2EOrchestrator:
                         ]
                     ),
                 )
-                # Merge by canonical path — last heal wins; drop superseded paths.
+                # Merge by canonical path — last heal wins; drop superseded TC-local
+                # pages/fixtures when the same leaf now lives under _shared.
                 by_path = {f.path.replace("\\", "/"): f for f in work_files}
                 for f in resolved:
                     by_path[f.path.replace("\\", "/")] = f
+                shared_leaves: set[str] = set()
+                for p in by_path:
+                    low = p.lower()
+                    if "/_shared/pages/" in low or "/_shared/fixtures/" in low:
+                        shared_leaves.add(p.rsplit("/", 1)[-1].lower())
+                if shared_leaves:
+                    by_path = {
+                        p: f
+                        for p, f in by_path.items()
+                        if not (
+                            p.rsplit("/", 1)[-1].lower() in shared_leaves
+                            and "/_shared/" not in p.lower()
+                            and (
+                                "/pages/" in p.lower()
+                                or "/fixtures/" in p.lower()
+                                or "/types/" in p.lower()
+                            )
+                        )
+                    }
                 work_files = list(by_path.values())
                 if write_file:
                     work_files = self.write_files(work_files)
@@ -2127,7 +2412,7 @@ class E2EOrchestrator:
                 primary_spec_path=primary_spec_path,
                 files=work_files,
                 attempts=max_retries,
-                error_log=last_log[-LOG_TAIL:] if last_log else None,
+                error_log=_clean_error_excerpt(last_log or "", limit=1200) or None,
                 history=history,
                 run_command=cmd,
                 work_cwd=work_cwd,
@@ -2170,8 +2455,38 @@ class E2EOrchestrator:
         )
         mod = (module if module is not None else self.module) or ""
         pkg = package_prefix if package_prefix is not None else self.package_prefix
-        work_files = list(resolve_e2e_file_paths(files, module=mod, package_prefix=pkg))
-        from app.services.e2e_codegen_guard import apply_e2e_codegen_guards
+        # Verify/Apply often already has canonical AItest/E2ETest/{Req}/{TC}/… paths.
+        # Re-running resolve_e2e_file_paths with only `module` would collapse TC folders.
+        from app.llm.base import E2EFile as _E2EFile
+
+        def _already_canonical(fs: list) -> bool:
+            for f in fs:
+                p = (getattr(f, "path", "") or "").replace("\\", "/").lower()
+                if "e2etest" in p and (
+                    "/specs/" in p
+                    or p.endswith("playwright.config.ts")
+                    or "/_shared/" in p
+                ):
+                    return True
+            return False
+
+        if _already_canonical(files):
+            work_files = [
+                _E2EFile(
+                    path=getattr(f, "path", "") or "",
+                    content=getattr(f, "content", "") or "",
+                    kind=getattr(f, "kind", "spec") or "spec",
+                )
+                for f in files
+            ]
+        else:
+            work_files = list(
+                resolve_e2e_file_paths(files, module=mod, package_prefix=pkg)
+            )
+        from app.services.e2e_codegen_guard import (
+            apply_e2e_codegen_guards,
+            infer_feature_path_from_files,
+        )
         work_files = ensure_playwright_config(
             work_files,
             module=mod,
@@ -2182,13 +2497,25 @@ class E2EOrchestrator:
             test_case_title=mod,
             auth_hints=mod,
         )
+        feat = str((env_extra or {}).get("E2E_FEATURE_PATH") or "").strip()
+        if not feat:
+            feat = infer_feature_path_from_files(work_files)
+        if feat:
+            run_env_pre = dict(env_extra or {})
+            run_env_pre["E2E_FEATURE_PATH"] = feat
+            env_extra = run_env_pre
         work_files = apply_e2e_codegen_guards(
             work_files,
+            # Verify: do not re-ground with empty DOM (would re-inject ungrounded throws).
+            # Keep auth/config fixes only.
             dom_snapshot="",
             use_storage=bool((storage_state_rel or "").strip()),
             test_case_title=mod,
             auth_hints=mod,
             headed=headed,
+            enforce_stubs=False,
+            enforce_journey=False,
+            feature_path=feat,
         )
         if not work_files:
             return E2EModuleRunResult(
@@ -2200,7 +2527,6 @@ class E2EOrchestrator:
         _ensure_auth_env_from_project(self.project_root, run_env)
         env_extra = run_env
 
-        groups = _group_files_by_run_root(work_files)
         specs_rel = [
             f.path.replace("\\", "/")
             for f in work_files
@@ -2216,6 +2542,11 @@ class E2EOrchestrator:
 
         if write_file:
             work_files = self.write_files(work_files)
+            # Fill gaps after rollback / partial Apply (config + _shared/pages).
+            _materialize_files_on_disk(self.project_root, work_files)
+
+        # Group AFTER write/remap so config paths match disk.
+        groups = _group_files_by_run_root(work_files)
 
         merged_env: dict[str, str] = dict(env_extra or {})
         runner_prefix: str | None = None
@@ -2271,12 +2602,20 @@ class E2EOrchestrator:
                 )
 
         all_spec_results: list[E2ESpecRunResult] = []
-        logs: list[str] = [preflight]
+        tc_roots = [
+            (r, fs)
+            for r, fs in groups
+            if any("/specs/" in (f.path or "").replace("\\", "/") for f in fs)
+        ]
+        logs: list[str] = [
+            preflight,
+            f"[e2e verify] sequential ×1 worker · {len(tc_roots)} TC folder(s)",
+        ]
         last_cmd: list[str] = []
         last_cwd: str | None = None
 
         try:
-            for root_rel, root_files in groups:
+            for root_rel, root_files in tc_roots:
                 root_specs = [
                     f.path.replace("\\", "/")
                     for f in root_files
@@ -2290,9 +2629,11 @@ class E2EOrchestrator:
                         project_root=self.project_root,
                         root_rel=root_rel,
                         root_files=root_files,
+                        all_files=work_files,
                         headed=headed,
                         run_command=run_command,
                         runner_prefix=runner_prefix,
+                        target_url=target_url,
                     )
                 except Exception as exc:  # noqa: BLE001
                     detail = exc_detail(exc)

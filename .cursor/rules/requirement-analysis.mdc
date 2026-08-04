@@ -18,12 +18,12 @@ Chuẩn tham chiếu: **BABOK** (scope / actors / BR / AC) + **IEEE 29148** (FR 
 | SUMMARY_SCOPE | summary | 2–5 câu Scope: in/out + actor trong SRS | Vision/marketing; «Hệ thống cho phép…» |
 | FEATURES | features | Atomic FR; name = động từ+đối tượng; ≥1 tín hiệu test | Mục lục; epic rỗng; dump markdown |
 | ACTORS_PERMISSIONS | actors | 1 role/item đúng SRS; permissions = thao tác cụ thể | Bịa Admin/User; suy diễn RBAC |
-| BUSINESS_FLOWS | useCases | Main Success Scenario `1. 2.` hành động cụ thể | «hoàn tất quy trình»; nhét validation |
+| BUSINESS_FLOWS | useCases | name ≤8 từ; mermaid TD (stadium/rect/diamond, 2–8 bước); steps 1.2. không lặp | Exception Flow trống; echo; node=name; «hoàn tất quy trình»; sequenceDiagram |
 | EXECUTION_CONTEXT | executionContexts | WHO cho scenario: actor/authRequired/roles/sessionHint | Bịa role; chọn cơ chế login (storageState/API) |
 | BUSINESS_RULES | businessRules | 1 policy atomic must/shall gần nguyên văn | «đảm bảo đúng đắn»; nhét field-rule |
-| VALIDATION_DATA | validationRules | 1 cặp field+rule đo được | «dữ liệu hợp lệ»; thiếu tên field |
+| VALIDATION_DATA | validationRules | `field`+`rule`+`module` (màn/chức năng); đủ hàng bảng | «dữ liệu hợp lệ»; cắt tên VI; field trống; policy→BR |
 | API_UI | apiSummary | 1 interface: method+path hoặc UI entry tường minh | Đoán `/api/...`; gộp nhiều endpoint |
-| ERROR_HANDLING | exceptions | Điều kiện + phản hồi quan sát được như SRS | Thêm 401/500 «cho đủ» |
+| ERROR_HANDLING | exceptions | Điều kiện + phản hồi quan sát được trong SRS | Echo tiêu chí; 401/500 «cho đủ»; heading trống → gap ngắn |
 | ACCEPTANCE | acceptanceCriteria | 1 outcome GWT/AC/Done-when thật | Heading trống; «dùng thành công» |
 | NFR_CONSTRAINTS | constraints | 1 NFR SMART (có ngưỡng/điều kiện) | «bảo mật/hiệu năng tốt» |
 | GAPS | gaps | 1 thiếu sót chặn TC (TBD / thiếu key) | Brainstorm hỏi mở / wishlist |

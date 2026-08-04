@@ -32,12 +32,12 @@ Mỗi bucket: không tín hiệu trong SRS → [] hoặc summary rỗng. Chính 
 - SUMMARY_SCOPE: 2–5 câu Scope (in/out + actor) — cấm vision/marketing / «Hệ thống cho phép…».
 - FEATURES: atomic FR; name = động từ+đối tượng; ≥1 tín hiệu test — cấm mục lục / epic rỗng / dump markdown.
 - ACTORS: 1 role/item đúng SRS; permissions = thao tác cụ thể — cấm bịa Admin/User/RBAC.
-- BUSINESS_FLOWS: Main Success Scenario «1. …\\n2. …» hành động cụ thể — cấm «hoàn tất quy trình»; lỗi → exceptions.
+- BUSINESS_FLOWS: name ngắn + mermaid flowchart TD (node ≤6 từ, 2–8 bước) + steps 1.2. không lặp — cấm Exception Flow trống / echo / «hoàn tất quy trình».
 - EXECUTION_CONTEXT: WHO cho scenario (actor/authRequired/roles/sessionHint) — cấm bịa role; không chọn cơ chế login.
 - BUSINESS_RULES: 1 policy atomic must/shall gần nguyên văn — cấm «đảm bảo đúng đắn»; field → validationRules.
-- VALIDATION_DATA: 1 cặp field+rule đo được — cấm «dữ liệu hợp lệ»; thiếu tên field → bỏ.
+- VALIDATION_DATA: field (EN/VI đủ tên) + rule đo được + module (màn/chức năng|Chung); xuất đủ hàng bảng — cấm «dữ liệu hợp lệ»; thiếu field → bỏ.
 - API_UI: 1 interface tường minh (method+path|UI entry) — cấm đoán /api/…; không có → [].
-- ERROR_HANDLING: điều kiện + phản hồi quan sát được — cấm thêm 401/403/500 «cho đủ».
+- ERROR_HANDLING: điều kiện + phản hồi quan sát được trong SRS — heading Exception Flow trống → [] (+ gap ngắn); cấm echo tiêu chí.
 - ACCEPTANCE: chỉ GWT/Done-when/AC-n có outcome — không có → []; cấm heading trống / «dùng thành công».
 - NFR_CONSTRAINTS: 1 NFR SMART (có ngưỡng) — cấm «bảo mật/hiệu năng tốt».
 - GAPS: 1 thiếu sót chặn TC (TBD/«thiếu <key>») — cấm brainstorm hỏi mở.

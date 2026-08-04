@@ -24,8 +24,24 @@ export type {
   E2eBatchProgress,
   E2eGenerateItemDone,
 } from "./e2eJobRunner";
-export { resolveE2eFeSources } from "./resolveE2eFeSources";
-export type { E2eFeSourceBundle } from "./resolveE2eFeSources";
+export { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
+export {
+  createInspectDomCache,
+  inspectCacheKey,
+  isLikelyLoginWallDom,
+  isLikelyLoginTestCase,
+} from "./inspectDomCache";
+export type { InspectDomCache, InspectCacheEntry } from "./inspectDomCache";
+export { pickDiscoveredStorageStateRel } from "./pickDiscoveredStorageState";
+export { resolveE2eFeSources, e2eFeRankBonus, createFeSourceListCache } from "./resolveE2eFeSources";
+export type { E2eFeSourceBundle, FeSourceListCache } from "./resolveE2eFeSources";
+export {
+  classifyE2eFailure,
+  aggregateE2eMetrics,
+  formatE2eMetricsReport,
+  E2E_FAIL_CATEGORY_LABELS,
+} from "./e2eFailureMetrics";
+export type { E2eFailCategory, E2eRunMetrics, E2eMetricRow } from "./e2eFailureMetrics";
 export {
   e2eSpecPathsMatch,
   findSpecReportForPrimary,
@@ -41,5 +57,7 @@ export {
   refreshE2eOverlayFromFiles,
   applyE2eStaging,
   stagingDirHint,
+  updateE2eStagedFileContent,
+  deleteE2eStagedFile,
 } from "./stagingApply";
 export type { E2eStagingSession, E2eStagedFile, ApplyE2eResult } from "./stagingApply";

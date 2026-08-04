@@ -17,7 +17,6 @@ from app.models.domain import AiBackendConnection, Project, TestCase
 from app.responses import errors, ok
 from app.services.ai_service import (
     RUNNER_AI_CLI,
-    connection_runner_mode,
     generate_unit_for_connection,
 )
 from app.services.context_packet import (
@@ -88,9 +87,8 @@ async def generate_integration_test_route(
     if conn is None or not C.is_ai_ready(conn.status):
         return errors(
             400,
-            "AI chưa Ready — vào Cấu hình AI thiết lập (API Key hoặc AI CLI) và Verify",
+            "AI chưa Ready — vào Cấu hình AI thiết lập AI CLI và Verify",
         )
-    runner_mode = connection_runner_mode(conn)
 
     packet = body.get("contextPacket") if has_packet else None
     packet_dict = packet if isinstance(packet, dict) else None
@@ -160,9 +158,7 @@ async def generate_integration_test_route(
         module=(body.get("module") or tc.module or "") or None,
     )
 
-    provider_label = meta.get("provider") or (
-        "ai-cli" if runner_mode == RUNNER_AI_CLI else "api"
-    )
+    provider_label = meta.get("provider") or "ai-cli"
     return ok(
         {
             "code": result.code,
@@ -171,7 +167,7 @@ async def generate_integration_test_route(
             "testCaseId": str(tc.id),
             "projectId": str(project.id),
             "provider": provider_label,
-            "runnerUsed": meta.get("runnerUsed") or runner_mode,
+            "runnerUsed": meta.get("runnerUsed") or RUNNER_AI_CLI,
             "cliSessionKey": meta.get("cliSessionKey"),
             "artifactKind": "integration",
         }

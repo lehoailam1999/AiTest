@@ -7,7 +7,6 @@ import types
 from app.llm.cli.json_parser import clean_and_parse_json_array
 from app.services.ai_service import (
     RUNNER_AI_CLI,
-    RUNNER_API_DIRECT,
     connection_runner_mode,
     build_cli_adapter,
 )
@@ -34,7 +33,26 @@ def test_connection_runner_mode():
     conn = types.SimpleNamespace(runner_mode="AI_CLI")
     assert connection_runner_mode(conn) == RUNNER_AI_CLI
     conn.runner_mode = None
-    assert connection_runner_mode(conn) == RUNNER_API_DIRECT
+    assert connection_runner_mode(conn) == RUNNER_AI_CLI
+    conn.runner_mode = "API_DIRECT"
+    assert connection_runner_mode(conn) == RUNNER_AI_CLI
+
+
+def test_get_adapter_always_cli():
+    from app.services.ai_service import get_adapter_for_connection
+    from app.llm.cli.adapters.base_cli import BaseCLIAdapter
+
+    conn = types.SimpleNamespace(
+        project_id="00000000-0000-0000-0000-000000000001",
+        runner_mode="API_DIRECT",
+        cli_type="cursor-cli",
+        cli_path="agent",
+        cli_args_json="",
+        model_name=None,
+    )
+    adapter = get_adapter_for_connection(conn)
+    assert isinstance(adapter, BaseCLIAdapter)
+    assert adapter.vendor == "cursor-cli"
 
 
 def test_build_gemini_cli_adapter():

@@ -58,11 +58,16 @@ import {
   BatchRunConsole,
   BATCH_NOTE_RUNNING,
   BATCH_NOTE_WAITING,
+  batchTcSnapshot,
   isBatchQueueNote,
   markBatchRowsPaused,
   markBatchRowsResumed,
   type BatchPipelineRow,
 } from "../features/unit-test/BatchRunConsole";
+import {
+  generateErrorLogRel,
+  saveErrorLogFile,
+} from "../lib/unitWorkspace/errorLogStore";
 import {
   BatchStagingPreview,
   type BatchStagingJob,
@@ -1021,7 +1026,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }, 120);
   }
 
-  async function refreshBatchStaging(rows: BatchRow[]) {
+  async function refreshBatchStaging(
+    rows: BatchRow[],
+    preferTargetRel?: string | null
+  ) {
     if (!localPath || !isTauri()) {
       setBatchJobs([]);
       return;
@@ -1048,6 +1056,17 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
     setBatchJobs(jobs);
     if (jobs.length) {
+      const want = preferTargetRel?.trim() || null;
+      const keepJob = want
+        ? jobs.find((j) =>
+            j.previews.some((p) => p.entry.targetRel === want)
+          )
+        : null;
+      if (keepJob && want) {
+        setBatchJobKey(keepJob.row.key);
+        setBatchFileRel(want);
+        return;
+      }
       const firstOk = jobs.find((j) => j.row.status === "ok" && j.previews.length);
       const pick = firstOk || jobs[0];
       setBatchJobKey(pick.row.key);
@@ -1089,6 +1108,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           title: t.title,
           status: "fail",
           error: BATCH_NOTE_WAITING,
+          ...batchTcSnapshot(t),
         });
       }
     }
@@ -1134,12 +1154,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             total: workList.length,
             label: tc.title,
           });
+          const snap = batchTcSnapshot(tc);
           rowMap.set(tc.id, {
             key: tc.id,
             testCaseId: tc.testCaseId,
             title: tc.title,
             status: "fail",
             error: BATCH_NOTE_RUNNING,
+            ...snap,
           });
           flushRows();
           try {
@@ -1153,6 +1175,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               packagePrefix: out?.packagePrefix,
               verifyStatus: "pending",
               applyStatus: "pending",
+              ...snap,
             });
             if (campaignId) {
               void audit.addCampaignTasks(campaignId, [
@@ -1166,12 +1189,29 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             }
           } catch (e) {
             const errMsg = e instanceof Error ? e.message : "Lỗi";
+            const stack = e instanceof Error && e.stack ? `\n\n${e.stack}` : "";
+            const logBody = `${new Date().toISOString()} · Generate FAIL · ${tc.testCaseId}\n${tc.title}\n\n${errMsg}${stack}`;
+            let errorLogRel: string | undefined;
+            if (localPath && isTauri()) {
+              try {
+                errorLogRel = await saveErrorLogFile(
+                  localPath,
+                  generateErrorLogRel(tc.testCaseId),
+                  logBody
+                );
+              } catch {
+                errorLogRel = undefined;
+              }
+            }
             rowMap.set(tc.id, {
               key: tc.id,
               testCaseId: tc.testCaseId,
               title: tc.title,
               status: "fail",
               error: errMsg,
+              errorDetail: logBody,
+              errorLogRel,
+              ...snap,
             });
             if (campaignId) {
               void audit.addCampaignTasks(campaignId, [
@@ -1238,6 +1278,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           title: t.title,
           status: "fail",
           error: BATCH_NOTE_WAITING,
+          ...batchTcSnapshot(t),
         });
       }
     }
@@ -1283,12 +1324,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             total: workList.length,
             label: tc.title,
           });
+          const snap = batchTcSnapshot(tc);
           rowMap.set(tc.id, {
             key: tc.id,
             testCaseId: tc.testCaseId,
             title: tc.title,
             status: "fail",
             error: BATCH_NOTE_RUNNING,
+            ...snap,
           });
           flushRows();
           try {
@@ -1302,6 +1345,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               packagePrefix: out?.packagePrefix,
               verifyStatus: "pending",
               applyStatus: "pending",
+              ...snap,
             });
             if (campaignId) {
               void audit.addCampaignTasks(campaignId, [
@@ -1315,12 +1359,29 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             }
           } catch (e) {
             const errMsg = e instanceof Error ? e.message : "Lỗi";
+            const stack = e instanceof Error && e.stack ? `\n\n${e.stack}` : "";
+            const logBody = `${new Date().toISOString()} · Generate FAIL · ${tc.testCaseId}\n${tc.title}\n\n${errMsg}${stack}`;
+            let errorLogRel: string | undefined;
+            if (localPath && isTauri()) {
+              try {
+                errorLogRel = await saveErrorLogFile(
+                  localPath,
+                  generateErrorLogRel(tc.testCaseId),
+                  logBody
+                );
+              } catch {
+                errorLogRel = undefined;
+              }
+            }
             rowMap.set(tc.id, {
               key: tc.id,
               testCaseId: tc.testCaseId,
               title: tc.title,
               status: "fail",
               error: errMsg,
+              errorDetail: logBody,
+              errorLogRel,
+              ...snap,
             });
             if (campaignId) {
               void audit.addCampaignTasks(campaignId, [
@@ -1642,6 +1703,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           status: "ok",
           workspaceRunId: manifest.runId,
           packagePrefix: manifest.packagePrefix,
+          ...batchTcSnapshot(tc),
         };
         setBatchResults([singleRow]);
         await refreshBatchStaging([singleRow]);
@@ -2022,8 +2084,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             {batchProgress ? (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {batchRunStatus === "paused"
-                  ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · có thể Verify phần đã gen · chờ Tiếp tục`
-                  : `Đang xử lý: ${batchProgress.label}`}
+                  ? `Tạm dừng · đã ${batchProgress.current}/${batchProgress.total} · có thể Kiểm thử tất cả phần đã gen · chờ Tiếp tục`
+                  : `Đang xử lý: ${batchProgress.label}`} 
               </Typography.Text>
             ) : null}
 
@@ -2350,17 +2412,21 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             }
             selectedJobKey={batchJobKey}
             selectedTargetRel={batchFileRel}
+            projectRoot={localPath}
             onSelectJob={(key) => {
               setBatchJobKey(key);
               const job = batchJobs.find((j) => j.row.key === key);
               setBatchFileRel(job?.previews[0]?.entry.targetRel ?? null);
             }}
             onSelectFile={setBatchFileRel}
+            onFilesChanged={() => {
+              void refreshBatchStaging(batchResults, batchFileRel);
+            }}
           />
           {localPath && batchResults.some((r) => r.workspaceRunId) ? (
             <BatchRunConsole
               variant="verifyApply"
-              title="3. Verify & Apply"
+              title="3. Execute & Apply"
               rows={batchResults}
               onRowsChange={(rows) => {
                 setBatchResults(rows);

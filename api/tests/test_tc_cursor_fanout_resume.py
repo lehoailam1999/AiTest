@@ -17,8 +17,11 @@ def test_connection_is_cursor_cli():
     assert connection_is_cursor_cli(conn) is True
     conn.cli_type = "gemini-cli"
     assert connection_is_cursor_cli(conn) is False
+    # Legacy runner_mode ignored — only cli_type matters
     conn.runner_mode = "API_DIRECT"
     conn.cli_type = "cursor"
+    assert connection_is_cursor_cli(conn) is True
+    conn.cli_type = "gemini-cli"
     assert connection_is_cursor_cli(conn) is False
 
 

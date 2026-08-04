@@ -105,7 +105,7 @@ class AiBackendConnection(TimestampMixin, Base):
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # API_DIRECT | AI_CLI
+    # AI_CLI only (legacy API_DIRECT coerced at runtime)
     runner_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cli_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     cli_path: Mapped[str | None] = mapped_column(String(500), nullable=True)

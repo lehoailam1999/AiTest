@@ -3,10 +3,11 @@ E2E auth bootstrap — discover credentials / roles / storageState from the SUT 
 so AITest UI does not require manual login fields.
 
 Sources (priority):
-1) AI seed artifacts under ``.ai-test/auth/{role}.json``
+1) AI seed / SUT-mine artifacts under ``.ai-test/auth/{role}.json``
 2) Valid Playwright storageState under AItest/E2ETest or fixtures/
 3) fixtures/auth/roles.json if present
-4) Project .env* fallback (E2E_USERNAME, role-scoped keys, …)
+4) Deterministic SUT mine (i18n / cypress.env / JHipster defaults) → auto-write artifacts
+5) Project .env* fallback (E2E_USERNAME, role-scoped keys, …)
 
 Idempotent: if storageState or auth artifact already valid → skip re-seed.
 """
@@ -24,7 +25,7 @@ from app.services.e2e_codegen_guard import (
     is_valid_storage_state_json,
     looks_like_storage_state_path,
 )
-from app.services.test_output_layout import e2e_module_root
+from app.services.test_output_layout import e2e_module_root, e2e_shared_root
 
 logger = logging.getLogger("aitest.e2e.auth")
 
@@ -198,6 +199,8 @@ def _roles_from_env(env: dict[str, str]) -> dict[str, AuthRoleProfile]:
 
 def _load_auth_seed_artifacts(project_root: Path) -> dict[str, AuthRoleProfile]:
     """Load AITest AI-seeded credentials from ``.ai-test/auth/{role}.json``."""
+    from app.services.e2e_auth_seed import is_invented_auth_username, load_auth_artifact
+
     roles: dict[str, AuthRoleProfile] = {}
     d = project_root / ".ai-test" / "auth"
     if not d.is_dir():
@@ -208,16 +211,14 @@ def _load_auth_seed_artifacts(project_root: Path) -> dict[str, AuthRoleProfile]:
             continue
         if name.startswith("seed-"):
             continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        role = path.stem.strip().lower() or "default"
+        # Prefer load_auth_artifact (rejects + deletes invented e2e_default).
+        data = load_auth_artifact(project_root, role)
+        if not data:
             continue
-        if not isinstance(data, dict):
-            continue
-        role = str(data.get("role") or path.stem or "").strip().lower() or "default"
         user = str(data.get("username") or data.get("email") or "").strip()
         password = str(data.get("password") or "").strip()
-        if not user or not password:
+        if not user or not password or is_invented_auth_username(user):
             continue
         roles[role] = AuthRoleProfile(
             role=role,
@@ -308,6 +309,90 @@ def _rel_to_project(project_root: Path, path: Path) -> str:
         return path.as_posix().replace("\\", "/")
 
 
+def resolve_storage_state_abs(
+    project_root: str,
+    *,
+    storage_state_rel: str = "",
+    module: str = "",
+    package_prefix: str | None = None,
+    role: str = "default",
+) -> str:
+    """
+    Absolute path to a valid Playwright storageState.json for Inspect post-auth.
+
+    Desktop often sends ``./fixtures/storageState.json`` (TC-cwd relative) which
+    does not exist under project root — fall back to AItest/E2ETest/**/fixtures
+    and .ai-test/auth discoveries.
+    """
+    rel = (storage_state_rel or "").strip().replace("\\", "/")
+    root = Path(project_root or "").expanduser()
+
+    def _ok(path: Path) -> str:
+        if not path.is_file():
+            return ""
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        if not is_valid_storage_state_json(raw):
+            return ""
+        return str(path.resolve())
+
+    if rel:
+        direct = Path(rel)
+        if direct.is_file():
+            hit = _ok(direct)
+            if hit:
+                return hit
+        if root.is_dir():
+            hit = _ok(root / rel)
+            if hit:
+                return hit
+
+    if not root.is_dir():
+        return ""
+
+    role_key = (role or "default").strip().lower() or "default"
+    for cand in _storage_candidates(
+        root, module=module, package_prefix=package_prefix, role=role_key
+    ):
+        hit = _ok(cand)
+        if hit:
+            return hit
+
+    # Broader scan — any module fixtures under AItest/E2ETest
+    e2e_root = root / "AItest" / "E2ETest"
+    if e2e_root.is_dir():
+        preferred = (
+            f"storageState-{role_key}.json",
+            "storageState.json",
+            "storageState-default.json",
+        )
+        found: list[Path] = []
+        for cand in e2e_root.rglob("storageState*.json"):
+            if cand.is_file():
+                found.append(cand)
+        for name in preferred:
+            for cand in found:
+                if cand.name.lower() == name.lower():
+                    hit = _ok(cand)
+                    if hit:
+                        return hit
+        for cand in found:
+            hit = _ok(cand)
+            if hit:
+                return hit
+
+    auth_dir = root / ".ai-test" / "auth"
+    if auth_dir.is_dir():
+        for cand in sorted(auth_dir.glob("storageState*.json")):
+            hit = _ok(cand)
+            if hit:
+                return hit
+
+    return ""
+
+
 def discover_login_path(project_root: str) -> str | None:
     """
     Best-effort login route from SUT E2E/FE sources (project-agnostic).
@@ -381,7 +466,19 @@ def discover_project_auth(
     env, env_files = _load_project_env(root)
     discovery.env_files_read = env_files
 
-    # 1) AI seed artifacts (primary — no AITest UI / no manual .env required)
+    # 0) Deterministic SUT mine → materialize missing .ai-test/auth/{role}.json (no AITest UI)
+    try:
+        from app.services.e2e_auth_sut_mine import materialize_mined_auth_artifacts
+
+        mined_roles = materialize_mined_auth_artifacts(root)
+        if mined_roles:
+            discovery.notes.append(
+                f"Auto auth từ SUT (i18n/JHipster/.env mine): {', '.join(mined_roles)}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sut auth mine failed: %s", exc)
+
+    # 1) AI seed / mined artifacts (primary — no AITest UI / no manual .env required)
     roles = _load_auth_seed_artifacts(root)
     # 2) roles.json fixtures
     for k, v in _load_roles_fixture(root).items():
@@ -448,12 +545,12 @@ def discover_project_auth(
 
     if discovery.is_ready():
         discovery.notes.append(
-            "Sẵn sàng auth (ưu tiên .ai-test/auth từ AI seed; fallback .env/storageState)."
+            "Sẵn sàng auth (ưu tiên .ai-test/auth từ SUT-mine/AI seed; fallback .env/storageState)."
         )
     else:
         discovery.notes.append(
-            "Chưa có auth artifact. Chạy «Seed auth (AI)» hoặc Generate E2E "
-            "để AI phân tích source → tạo .ai-test/auth/{role}.json."
+            "Chưa có auth. Hệ thống sẽ auto-mine JHipster/i18n/.env — "
+            "hoặc chạy «Seed auth (AI)» nếu app có register công khai."
         )
     return discovery
 
@@ -463,12 +560,15 @@ def infer_role_from_text(*parts: str) -> str | None:
     for role in (
         "admin",
         "administrator",
+        "director",
+        "investigator",
         "manager",
         "staff",
         "user",
         "guest",
         "viewer",
         "editor",
+        "head",
     ):
         if re.search(rf"\b{re.escape(role)}\b", blob):
             if role == "administrator":
@@ -480,19 +580,54 @@ def infer_role_from_text(*parts: str) -> str | None:
     return None
 
 
+def parse_roles_list(*parts: str) -> list[str]:
+    """Extract multi-role list from TC markers ``roles: a,b`` + primary authRole."""
+    blob = "\n".join(p or "" for p in parts)
+    found: list[str] = []
+    primary = None
+    m_role = re.search(r"(?im)^\s*authRole\s*[:=]\s*(\S+)\s*$", blob)
+    if m_role:
+        primary = m_role.group(1).strip().lower()
+    m_roles = re.search(r"(?im)^\s*roles\s*[:=]\s*([^\n]+)\s*$", blob)
+    if m_roles:
+        for piece in re.split(r"[,|;/\s]+", m_roles.group(1)):
+            slug = re.sub(r"[^a-z0-9_-]+", "-", piece.strip().lower()).strip("-")
+            if slug and slug not in found:
+                found.append(slug)
+    if primary:
+        found = [primary] + [r for r in found if r != primary]
+    if not found:
+        inferred = infer_role_from_text(*parts)
+        if inferred:
+            found.append(inferred)
+    return found
+
+
+def _env_role_slug(role: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", (role or "default").strip()).upper() or "DEFAULT"
+
+
 def auth_env_for_role(discovery: AuthDiscovery, role: str | None = None) -> dict[str, str]:
+    """Flat env for the preferred role + E2E_<ROLE>_* for every known role with creds."""
     profile = discovery.pick(role)
     out: dict[str, str] = {}
-    if not profile:
-        return out
-    if profile.username:
-        out["E2E_USERNAME"] = profile.username
-    if profile.password:
-        out["E2E_PASSWORD"] = profile.password
-    if profile.role and profile.role != "default":
-        out["E2E_ROLE"] = profile.role
-    if profile.storage_state_rel and profile.storage_state_valid:
-        out["E2E_STORAGE_STATE"] = profile.storage_state_rel
+    if profile:
+        if profile.username:
+            out["E2E_USERNAME"] = profile.username
+        if profile.password:
+            out["E2E_PASSWORD"] = profile.password
+        if profile.role and profile.role != "default":
+            out["E2E_ROLE"] = profile.role
+        if profile.storage_state_rel and profile.storage_state_valid:
+            out["E2E_STORAGE_STATE"] = profile.storage_state_rel
+
+    # Multi-role: always export scoped keys so dual-actor Specs can switch.
+    for r in discovery.roles:
+        if not (r.username and r.password):
+            continue
+        slug = _env_role_slug(r.role)
+        out[f"E2E_{slug}_USERNAME"] = r.username
+        out[f"E2E_{slug}_PASSWORD"] = r.password
     return out
 
 
@@ -522,24 +657,17 @@ def attach_storage_state_to_files(
 ) -> list:
     from app.llm.base import E2EFile
 
-    root = e2e_module_root(module, package_prefix=package_prefix)
-    # Per-TC layout: put storageState next to the Spec folder (not only module root),
-    # otherwise playwright.config.ts under {TC}/ looks for ./fixtures/storageState.json
-    # and hits ENOENT while the JSON landed under {Module}/fixtures/.
+    shared = e2e_shared_root(package_prefix=package_prefix)
+    # Suite-wide storage under _shared — config under {Req}/{TC} points here via relative path
     for f in files or []:
         p = (getattr(f, "path", "") or "").replace("\\", "/")
         low = p.lower()
-        for marker in ("/specs/", "/pages/", "/fixtures/", "/types/"):
-            if marker in low:
-                root = p.split(marker)[0]
-                break
-        else:
-            if low.endswith("playwright.config.ts"):
-                root = p.rsplit("/", 1)[0]
-                break
-            continue
-        break
-    dest = f"{root}/fixtures/storageState.json"
+        if "/_shared/" in low:
+            # Keep writing into the shared tree already present in the bundle
+            idx = low.find("/_shared/")
+            shared = p[: idx + len("/_shared")]
+            break
+    dest = f"{shared}/fixtures/storageState.json"
     out: list = []
     replaced = False
     for f in files:
@@ -551,7 +679,7 @@ def attach_storage_state_to_files(
             out.append(f)
     if not replaced:
         out.append(E2EFile(path=dest, content=content, kind="fixture"))
-    _ = (project_root, storage_rel)
+    _ = (project_root, storage_rel, module, e2e_module_root)
     return out
 
 
@@ -570,7 +698,11 @@ def merge_discovered_auth(
     Merge body playwright env with project discovery.
     Explicit body credentials override discovery.
     """
-    from app.services.e2e_auth_seed import load_auth_artifact, parse_auth_markers
+    from app.services.e2e_auth_seed import (
+        is_invented_auth_username,
+        load_auth_artifact,
+        parse_auth_markers,
+    )
     from app.services.e2e_orchestrator import extract_playwright_env
 
     marker_role, marker_ref = parse_auth_markers(tc_test_data, tc_precondition)
@@ -598,9 +730,14 @@ def merge_discovered_auth(
                 if isinstance(data, dict):
                     u = str(data.get("username") or data.get("email") or "").strip()
                     p = str(data.get("password") or "").strip()
-                    if u and p:
+                    if u and p and not is_invented_auth_username(u):
                         discovered["E2E_USERNAME"] = u
                         discovered["E2E_PASSWORD"] = p
+                    elif is_invented_auth_username(u):
+                        try:
+                            ref_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
             except Exception:
                 pass
     elif preferred:

@@ -24,39 +24,37 @@ def test_cursor_oneshot_uses_empty_workspace():
     assert isinstance(cmd2, list)
 
 
-def test_cursor_oneshot_timeout_default_240():
+def test_cursor_oneshot_timeout_default_360():
+    """E2E_GROUNDING ops: default oneshot budget raised 240→360 (still capped ≤600)."""
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_CURSOR_ONESHOT_TIMEOUT", None)
         try:
             timeout = max(
                 60,
-                min(600, int(os.environ.get("AITEST_CURSOR_ONESHOT_TIMEOUT", "240"))),
+                min(600, int(os.environ.get("AITEST_CURSOR_ONESHOT_TIMEOUT", "360"))),
             )
         except ValueError:
-            timeout = 240
-        assert timeout == 240
+            timeout = 360
+        assert timeout == 360
 
 
-def test_fanout_concurrency_default_3():
+def test_fanout_batch_size_default_2():
+    from app.llm.tc_speed import resolve_fanout_batch_size
+
     with mock.patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("AITEST_TC_FANOUT_CONCURRENCY", None)
-        try:
-            concurrency = max(
-                1, min(4, int(os.environ.get("AITEST_TC_FANOUT_CONCURRENCY", "3")))
-            )
-        except ValueError:
-            concurrency = 3
-        assert concurrency == 3
+        os.environ.pop("AITEST_TC_FANOUT_BATCH_MODULES", None)
+        os.environ.pop("AITEST_TC_FANOUT_BATCH_MODULES_CURSOR", None)
+        assert resolve_fanout_batch_size(is_cursor=True) == 2
 
 
-def test_e2e_speed_env_default_fast():
+def test_e2e_speed_env_default_full():
     from app.llm.tc_speed import resolve_tc_speed_mode
 
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_E2E_SPEED", None)
-        assert resolve_tc_speed_mode("e2e") == "fast"
-        os.environ["AITEST_TC_E2E_SPEED"] = "full"
         assert resolve_tc_speed_mode("e2e") == "full"
+        os.environ["AITEST_TC_E2E_SPEED"] = "fast"
+        assert resolve_tc_speed_mode("e2e") == "fast"
 
 
 def test_cursor_fanout_concurrency_default_3():

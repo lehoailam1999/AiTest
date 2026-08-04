@@ -33,6 +33,15 @@ PASS1_JSON_KEYS: tuple[str, ...] = (
     "gaps",
 )
 
+# Parallel enrich group B — interface / AC / NFR (Phase B performance)
+PASS2_JSON_KEYS: tuple[str, ...] = (
+    "apiSummary",
+    "exceptions",
+    "acceptanceCriteria",
+    "constraints",
+    "executionContexts",
+)
+
 _API_RE = re.compile(
     r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[A-Za-z0-9_\-./{}:]+)",
     re.IGNORECASE,
@@ -116,6 +125,8 @@ _CRITERION_SECTION_LABEL = re.compile(
     r"validation(?:\s*&\s*dữ liệu)?|"
     r"api(?:\s*/\s*giao diện|\s*summary|\s*định nghĩa)?|"
     r"exceptions?|xử lý lỗi|error\s*handling|"
+    r"luồng\s+ngoại\s+lệ(?:\s*\([^)]*\))?|exception\s+flows?(?:\s*\([^)]*\))?|"
+    r"alternate\s+flows?|alternative\s+flows?|"
     r"constraints?|ràng buộc(?:\s*nfr)?|nfr|"
     r"gaps?|thiếu sót|open\s*questions?|"
     r"use\s*cases?|luồng nghiệp vụ|kịch bản|"
@@ -267,10 +278,24 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
             "json_key": "useCases",
             "label": "Luồng nghiệp vụ",
             "instruction": (
-                "Mỗi item = 1 UC/flow: name = tên trong SRS; steps = «1. …\\n2. …» Main Success Scenario "
-                "(mỗi step = hành động actor hoặc phản hồi hệ thống cụ thể). "
-                "CẤM step tóm tắt («thực hiện nghiệp vụ / hoàn tất quy trình / xử lý thành công»). "
-                "Nhánh lỗi/exception trong SRS → exceptions; không gộp validation vào steps."
+                "Mỗi item = 1 Main Success Scenario (happy path) có trong SRS. "
+                "Ba field tách bạch — CẤM lặp cùng một câu ở name/mermaid/steps.\n"
+                "1) name: tên UC/flow đúng SRS (≤8 từ). VD: «Đăng nhập», «Thêm todo». "
+                "CẤM paste steps; cấm heading «Exception Flow / Luồng ngoại lệ».\n"
+                "2) mermaid: CHỈ source flowchart TD (không ```). Quy ước hình:\n"
+                "   - Start/End: stadium ([Bắt đầu]) / ([Kết thúc])\n"
+                "   - Hành động: hình chữ nhật [Động từ + đối tượng] — mỗi node ≤6 từ, ≤1 hành động\n"
+                "   - Quyết định (khi SRS có nhánh): kim cương {Hợp lệ?}\n"
+                "   - Cạnh: --> ; nhãn -->|ok| / -->|fail| chỉ khi SRS nêu\n"
+                "   ≥2 node hành động; ≤8 node hành động (gộp bước vụn). "
+                "CẤM %% comment; cấm đoạn văn/AC/BR trong node; cấm node = lặp name; "
+                "cấm «thực hiện nghiệp vụ / hoàn tất quy trình».\n"
+                "3) steps: linearize từ mermaid — «1. …\\n2. …» (1 hành động/dòng, 2–8 dòng). "
+                "CẤM paste name; cấm paste mermaid source; cấm prose giải thích.\n"
+                "Phân tầng: nhánh lỗi chi tiết / status / message → exceptions; "
+                "SRS chỉ có heading Exception trống → gaps ngắn + exceptions=[]; "
+                "không tạo UC riêng cho Exception Flow trống. "
+                "Không sequenceDiagram."
             ),
         },
         {
@@ -305,9 +330,19 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "validationRules",
         "label": "Validation & dữ liệu",
         "instruction": (
-            "Mỗi item = 1 cặp field+rule (data dictionary): field = tên trường SRS; "
-            "rule = ràng buộc đo được (required|type|length|format|range|unique|pattern|message lỗi). "
-            "CẤM «dữ liệu phải hợp lệ / nhập đúng»; thiếu tên field trong SRS → không tạo item."
+            "Mỗi item = 1 cặp atomic field+rule từ SRS (data dictionary / bảng trường):\n"
+            "- field: tên trường đúng SRS (EN hoặc VI, ≤6 từ) — CẤM trống; "
+            "giữ đủ tên («Họ tên», «Mật khẩu», email, title) — cấm cắt còn 1 âm tiết.\n"
+            "- rule: ràng buộc đo được, ngắn (≤12 từ): required|bắt buộc|type|max/min|"
+            "độ dài|format|unique|pattern|enum|Có/Không (map Có→required). "
+            "Có số/ngưỡng nếu SRS có. "
+            "CẤM lặp tên field trong rule; cấm «dữ liệu hợp lệ / nhập đúng»; "
+            "cấm policy (→ businessRules); cấm message lỗi thuần (→ exceptions).\n"
+            "- module (khuyến nghị): tên màn/chức năng/FEATURE chứa field "
+            "(VD «Đăng nhập», «Thêm todo») — để gom nhóm UI; "
+            "SRS không gắn màn → module=\"Chung\".\n"
+            "Xuất ĐỦ mọi field có ràng buộc trong SRS (không bỏ sót hàng bảng). "
+            "Thiếu tên field → không tạo item."
         ),
     },
     {
@@ -326,9 +361,12 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "exceptions",
         "label": "Xử lý lỗi",
         "instruction": (
-            "Mỗi item = 1 exception: điều kiện kích hoạt + phản hồi quan sát được "
-            "(status|message|hành vi UI/API) như SRS. "
-            "CẤM thêm 401/403/404/500 «cho đủ»; cấm «xử lý lỗi phù hợp / báo lỗi thân thiện»."
+            "Mỗi item = 1 exception CÓ trong SRS: điều kiện kích hoạt + phản hồi quan sát được "
+            "(status|message|hành vi UI/API). "
+            "CẤM thêm 401/403/404/500 «cho đủ»; cấm «xử lý lỗi phù hợp». "
+            "SRS có heading Exception Flow/Luồng ngoại lệ nhưng KHÔNG mô tả điều kiện/phản hồi "
+            "→ exceptions=[] và (tuỳ chọn) 1 gap ngắn: «SRS chưa mô tả điều kiện/phản hồi lỗi». "
+            "CẤM tạo item exceptions chỉ bằng cách nhắc lại câu tiêu chí này."
         ),
     },
     {
@@ -393,7 +431,7 @@ I. CẤM PLACEHOLDER / MỤC LỤC / MARKDOWN DUMP: Không tạo item từ:
    - Tiêu đề tài liệu / heading markdown (# ## Software Requirements Specification / SRS)
    - Dump nguyên đoạn markdown SRS vào name hoặc description
 J. PHÂN TẦNG: features = FR/capability; apiSummary = method+path|UI entry;
-   useCases = Main Success Scenario; executionContexts = WHO (actor/auth/roles) cho scenario;
+   useCases = Main Success Scenario (mermaid flowchart + steps); executionContexts = WHO (actor/auth/roles) cho scenario;
    businessRules = policy; validationRules = field;
    exceptions = lỗi; acceptanceCriteria = AC đo được; constraints = NFR SMART.
 K. CHI TIẾT CỤ THỂ: mỗi feature cần ≥1 tín hiệu kiểm thử (FR-id, path, method, field, status).
@@ -665,6 +703,172 @@ def _is_valid_acceptance_text(text: str) -> bool:
     return bool(_ACCEPTANCE_HINT.search(s))
 
 
+_VAGUE_VALIDATION_RULE = re.compile(
+    r"(?i)^(?:"
+    r"dữ\s*liệu\s*(?:phải\s*)?(?:hợp\s*lệ|đúng)|"
+    r"nhập\s*đúng|"
+    r"validate(?:\s*đúng)?|"
+    r"đúng\s*định\s*dạng|"
+    r"hợp\s*lệ|"
+    r"kiểm\s*tra\s*dữ\s*liệu|"
+    r"validation(?:\s*rule)?s?|"
+    r"required\s*fields?|"
+    r"entity/table\s+\w+"
+    r")\.?\s*$"
+)
+_MEASURABLE_VALIDATION = re.compile(
+    r"(?i)\b("
+    r"required|bắt\s*buộc|optional|không\s*bắt\s*buộc|"
+    r"unique|duy\s*nhất|"
+    r"max(?:imum)?|min(?:imum)?|độ\s*dài|length|maxlen|minlen|"
+    r"tối\s*đa|tối\s*thiểu|ký\s*tự|"
+    r"format|pattern|regex|email|phone|url|uuid|"
+    r"string|number|int(?:eger)?|boolean|bool|date|datetime|"
+    r"range|từ\s+\d+|đến\s+\d+|between|"
+    r"enum|one\s*of|chỉ\s*nhận|"
+    r"\d+\s*(?:ký\s*tự|chars?|characters?|digits?)|"
+    r"nullable|not\s*null|"
+    r"có|không"
+    r")\b"
+)
+
+
+def _compact_validation_field(field: str) -> str:
+    """Keep EN identifiers and VI multi-word labels (Họ tên, Mật khẩu…)."""
+    s = re.sub(r"\s+", " ", (field or "").strip())
+    s = s.strip(" :.-–—|")
+    if not s:
+        return ""
+    if _is_criterion_section_label(s) or _is_markdown_or_srs_dump(s):
+        return ""
+    if re.match(r"(?i)^(field|trường|column|cột)$", s):
+        return ""
+    words = s.split()
+    # Sentence-like dump → keep first 1–3 tokens; else keep full short label
+    if len(words) > 6 or len(s) > 64:
+        ident = re.match(r"^([A-Za-z_][\w.\-/]{1,47})", s)
+        if ident and " " not in s[: len(ident.group(1)) + 1]:
+            s = ident.group(1)
+        else:
+            s = " ".join(words[:3])
+    return s[:80]
+
+
+def _map_validation_cell(cell: str) -> str | None:
+    """Normalize a table cell; None = drop (header noise)."""
+    p = (cell or "").strip()
+    if not p:
+        return None
+    if re.match(r"(?i)^(trường|field|kiểu|type|column|cột)$", p):
+        return None
+    if re.match(r"(?i)^(có|yes|y|true)$", p):
+        return "required"
+    if re.match(r"(?i)^(không|no|n|false)$", p):
+        return "optional"
+    return p
+
+
+def _compact_validation_rule(rule: str, *, field: str = "") -> str:
+    s = re.sub(r"\s+", " ", (rule or "").strip())
+    s = s.strip(" :.-–—|")
+    if not s:
+        return ""
+    if field:
+        fl = re.escape(field.strip())
+        s = re.sub(rf"(?i)^{fl}\s*[—\-–:|,]+\s*", "", s).strip()
+        s = re.sub(rf"(?i)^{fl}\s+", "", s).strip()
+    if " — " in s or " | " in s:
+        parts = re.split(r"\s*[—|]\s*", s)
+        mapped: list[str] = []
+        for p in parts:
+            if field and p.strip().lower() == field.lower():
+                continue
+            cell = _map_validation_cell(p)
+            if cell:
+                mapped.append(cell)
+        s = ", ".join(mapped)
+    else:
+        cell = _map_validation_cell(s)
+        s = cell or s
+    s = re.sub(r"\s+", " ", s).strip(" ,;:")
+    if len(s) > 120:
+        s = s[:117].rstrip(" ,;:.-") + "…"
+    return s
+
+
+def _compact_validation_module(module: str) -> str:
+    s = re.sub(r"\s+", " ", (module or "").strip())
+    s = s.strip(" :.-–—|")
+    if not s or _is_criterion_section_label(s):
+        return "Chung"
+    if len(s) > 60:
+        s = s[:57].rstrip() + "…"
+    return s
+
+
+def _is_vague_validation(field: str, rule: str) -> bool:
+    if not field or not rule:
+        return True
+    if _VAGUE_VALIDATION_RULE.match(rule):
+        return True
+    if _is_criterion_section_label(rule) or _is_markdown_or_srs_dump(rule):
+        return True
+    if _is_markdown_table_row(rule):
+        return True
+    if field.lower() == rule.lower():
+        return True
+    if len(rule) <= 28 and re.match(
+        r"(?i)^(required|optional|unique|email|string|number|int|boolean|bool|date|"
+        r"bắt\s*buộc|không\s*bắt\s*buộc)$",
+        rule,
+    ):
+        return False
+    if _MEASURABLE_VALIDATION.search(rule) or re.search(r"\d", rule):
+        return False
+    # Keep short non-vague VI constraint phrases (e.g. "không được trống")
+    if len(rule) <= 40 and re.search(
+        r"(?i)trống|định\s*dạng|độ\s*dài|bắt\s*buộc|tối\s*đa|tối\s*thiểu",
+        rule,
+    ):
+        return False
+    return True
+
+
+def _normalize_validation_items(rows: list) -> list[dict]:
+    """Keep atomic field+rule(+module); drop vague / duplicate clutter — không bỏ sót field thật."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        field = _compact_validation_field(str(r.get("field") or ""))
+        raw_rule = str(r.get("rule") or "").strip()
+        rule = _compact_validation_rule(raw_rule, field=field)
+        module = _compact_validation_module(
+            str(r.get("module") or r.get("feature") or r.get("screen") or "")
+        )
+        # Recover "Field: rule" / "Field — rule" when field empty (EN + VI)
+        if not field and raw_rule:
+            m = re.match(
+                r"^(.{1,40}?)\s*[—\-–:]\s*(.+)$",
+                raw_rule,
+            )
+            if m:
+                field = _compact_validation_field(m.group(1))
+                rule = _compact_validation_rule(m.group(2), field=field)
+        if _is_vague_validation(field, rule):
+            continue
+        key = f"{module.lower()}|{field.lower()}|{rule.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        item = {"field": field, "rule": rule, "module": module}
+        out.append(item)
+        if len(out) >= MAX_ITEMS:
+            break
+    return out
+
+
 def _promote_apis_from_text(apis: list[dict], text: str, *, note: str = "") -> None:
     for m in _API_RE.finditer(text or ""):
         row = {
@@ -716,26 +920,43 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
     payload["apiSummary"] = _dedupe_apis(apis)
 
     use_cases_in = _as_list(payload.get("useCases"))
-    payload["useCases"] = _dedupe_list(
-        [
-            {
-                "name": (
-                    _parse_numbered_use_case_title(str(uc.get("name") or "").strip())
-                    or str(uc.get("name") or "").strip()
-                )[:200],
-                "steps": str(uc.get("steps") or "").strip()[:800],
-            }
-            for uc in use_cases_in
-            if isinstance(uc, dict)
-            and str(uc.get("name") or "").strip()
-            and not _is_junk_feature(str(uc.get("name") or ""), "")
-            and not _is_criterion_section_label(
-                _parse_numbered_use_case_title(str(uc.get("name") or "").strip())
-                or str(uc.get("name") or "")
-            )
-        ],
-        "name",
+    from app.features.requirement_studio.flow_mermaid import (
+        enrich_use_case_flow_fields,
+        is_hollow_use_case,
+        _META_ANALYSIS_ECHO,
     )
+
+    enriched_ucs: list[dict] = []
+    hollow_gap_texts: list[str] = []
+    for uc in use_cases_in:
+        if not isinstance(uc, dict):
+            continue
+        name_raw = str(uc.get("name") or "").strip()
+        name = _parse_numbered_use_case_title(name_raw) or name_raw
+        steps_raw = str(uc.get("steps") or "").strip()
+        mermaid_raw = str(uc.get("mermaid") or "").strip()
+        if not name or _is_junk_feature(name, "") or _is_criterion_section_label(name):
+            continue
+        if is_hollow_use_case(name, steps_raw, mermaid_raw):
+            # Promote analysis-meta about empty Exception Flow → short gap (once)
+            blob = f"{name}\n{steps_raw}"
+            if _META_ANALYSIS_ECHO.search(blob) or re.search(
+                r"(?i)exception\s+flow|luồng\s+ngoại\s+lệ", name
+            ):
+                hollow_gap_texts.append(
+                    "SRS khai báo Exception Flow / Luồng ngoại lệ nhưng chưa mô tả "
+                    "điều kiện kích hoạt và phản hồi lỗi quan sát được."
+                )
+            continue
+        row = enrich_use_case_flow_fields({**uc, "name": name[:200]})
+        if not row.get("name"):
+            continue
+        if not (row.get("steps") or row.get("mermaid")):
+            continue
+        if is_hollow_use_case(row.get("name"), row.get("steps"), row.get("mermaid")):
+            continue
+        enriched_ucs.append(row)
+    payload["useCases"] = _dedupe_list(enriched_ucs, "name")
 
     # Execution Context — WHO for E2E; only keep rows with a scenario/name ref from SRS.
     exec_in = _as_list(payload.get("executionContexts"))
@@ -789,7 +1010,9 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "text",
     )
 
-    # Drop other lists whose sole content is a section heading / table dump.
+    # Drop other lists whose sole content is a section heading / table dump / criteria echo.
+    from app.features.requirement_studio.flow_mermaid import _META_ANALYSIS_ECHO as _META_ECHO
+
     for key, dedupe_key in (
         ("businessRules", "text"),
         ("exceptions", "text"),
@@ -808,22 +1031,32 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             if _is_markdown_table_row(val):
                 continue
+            # Criteria-echo pretending to be an exception/gap — keep only as short gap below
+            if key == "exceptions" and _META_ECHO.search(val):
+                hollow_gap_texts.append(
+                    "SRS khai báo Exception Flow / Luồng ngoại lệ nhưng chưa mô tả "
+                    "điều kiện kích hoạt và phản hồi lỗi quan sát được."
+                )
+                continue
+            if key == "gaps" and _META_ECHO.search(val) and len(val) > 120:
+                # Replace long echo with short readable gap
+                hollow_gap_texts.append(
+                    "SRS khai báo Exception Flow / Luồng ngoại lệ nhưng chưa mô tả "
+                    "điều kiện kích hoạt và phản hồi lỗi quan sát được."
+                )
+                continue
             cleaned.append(r)
         payload[key] = _dedupe_list(cleaned, dedupe_key) if cleaned else []
 
+    if hollow_gap_texts:
+        gaps = list(_as_list(payload.get("gaps")))
+        for text in hollow_gap_texts:
+            if not any(str(g.get("text") or "").strip() == text for g in gaps if isinstance(g, dict)):
+                gaps.append({"text": text})
+        payload["gaps"] = _dedupe_list(gaps, "text")
+
     validations_in = _as_list(payload.get("validationRules"))
-    payload["validationRules"] = _dedupe_list(
-        [
-            r
-            for r in validations_in
-            if isinstance(r, dict)
-            and str(r.get("rule") or "").strip()
-            and not _is_criterion_section_label(str(r.get("rule") or ""))
-            and not _is_markdown_or_srs_dump(str(r.get("rule") or ""))
-            and not _is_markdown_table_row(str(r.get("rule") or ""))
-        ],
-        "rule",
-    )
+    payload["validationRules"] = _normalize_validation_items(validations_in)
 
     actors_in = _as_list(payload.get("actors"))
     payload["actors"] = _dedupe_list(
@@ -928,6 +1161,8 @@ def _fragment_already_in_use_cases(frag: str, use_cases: list) -> bool:
 
 def _append_unique_use_case(use_cases: list[dict], *, name: str, steps: str) -> None:
     """Append use case; disambiguate name if same title but different steps."""
+    from app.features.requirement_studio.flow_mermaid import enrich_use_case_flow_fields
+
     base_name = (name or "").strip()[:200]
     steps_t = (steps or "").strip()[:800]
     if not base_name or not steps_t:
@@ -946,7 +1181,9 @@ def _append_unique_use_case(use_cases: list[dict], *, name: str, steps: str) -> 
         final_name = f"{base_name} ({n})"[:200]
         n += 1
     if len(use_cases) < MAX_ITEMS:
-        use_cases.append({"name": final_name, "steps": steps_t})
+        use_cases.append(
+            enrich_use_case_flow_fields({"name": final_name, "steps": steps_t})
+        )
 
 
 def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1051,7 +1288,7 @@ def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
     payload["businessRules"] = _dedupe_list(business_rules, "text")
     for i, r in enumerate(payload["businessRules"], start=1):
         r["id"] = f"BR-{i}"
-    payload["validationRules"] = _dedupe_list(validations, "rule")
+    payload["validationRules"] = _normalize_validation_items(validations)
     payload["apiSummary"] = _dedupe_apis(apis)
     payload["exceptions"] = _dedupe_list(exceptions, "text")
     payload["acceptanceCriteria"] = _dedupe_list(acceptance, "text")
@@ -1148,7 +1385,7 @@ def normalize_knowledge_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
             base["validationRules"].append(
                 {
                     "field": name,
-                    "rule": note or f"Entity/table {name}",
+                    "rule": note if _MEASURABLE_VALIDATION.search(note or "") else "",
                 }
             )
         base["validationRules"] = base["validationRules"][:MAX_ITEMS]
@@ -1360,7 +1597,7 @@ def build_knowledge_heuristic(
                         and not re.search(r"(?i)FR[\s\-_]*\d+|UC[\s\-_]*\d+|→|->", cells[0])
                         and len(cells[0]) <= 40
                     ):
-                        rule = " — ".join(c for c in cells if c)[:500]
+                        rule = ", ".join(c for c in cells[1:] if c)[:200]
                         validations.append({"field": cells[0][:80], "rule": rule})
                 for m in _API_RE.finditer(s):
                     path = m.group(2)
@@ -1460,7 +1697,7 @@ def build_knowledge_heuristic(
         r["id"] = f"BR-{i}"
     payload["actors"] = _dedupe_list(actors, "name")
     payload["useCases"] = _dedupe_list(use_cases, "name")
-    payload["validationRules"] = _dedupe_list(validations, "rule")
+    payload["validationRules"] = _normalize_validation_items(validations)
     payload["apiSummary"] = _dedupe_apis(apis)
     payload["exceptions"] = _dedupe_list(exceptions, "text")
     payload["acceptanceCriteria"] = _dedupe_list(acceptance, "text")
@@ -1694,9 +1931,9 @@ def knowledge_system_prompt(*, pass1: bool = True) -> str:
             "- summary (string)\n"
             "- features ([{name,description}])\n"
             "- actors ([{name,description,permissions}])\n"
-            "- useCases ([{name,steps}])\n"
+            "- useCases ([{name,mermaid,steps}]): mermaid flowchart TD + steps linearize\n"
             "- businessRules ([{id,text}])\n"
-            "- validationRules ([{field,rule}])\n"
+            "- validationRules ([{field,rule,module}]): đủ field SRS, gom theo màn/chức năng\n"
             "- gaps ([{text}]): ONLY real missing info that blocks accurate TCs (max ~10)\n\n"
             "Extraction criteria (fill content accurately per key):\n"
             f"{criteria_lines}\n\n"
@@ -1714,9 +1951,9 @@ def knowledge_system_prompt(*, pass1: bool = True) -> str:
         "- summary (string): chỉ phạm vi/overview có trong tài liệu\n"
         "- features ([{name,description}]): module/chức năng đúng tên SRS\n"
         "- actors ([{name,description,permissions}]): chỉ role/quyền đã nêu\n"
-        "- useCases ([{name,steps}]): flow + steps theo tài liệu\n"
+        "- useCases ([{name,mermaid,steps}]): flowchart TD + steps theo tài liệu\n"
         "- businessRules ([{id,text}]): rule kiểm thử được, gần nguyên văn\n"
-        "- validationRules ([{field,rule}]): field/format/range/required như SRS\n"
+        "- validationRules ([{field,rule,module}]): field+rule đo được; module=màn/FEATURE|Chung\n"
         "- apiSummary ([{method,path,note}]): chỉ endpoint/UI entry đã nêu\n"
         "- exceptions ([{text}]): lỗi/status đã mô tả\n"
         "- acceptanceCriteria ([{text}]): AC/Done-when gần nguyên văn\n"
@@ -1731,6 +1968,81 @@ def knowledge_system_prompt(*, pass1: bool = True) -> str:
         "Empty list if absent — never pad."
     )
     return append_analysis_tc_checklist(base)
+
+
+def knowledge_system_prompt_pass2() -> str:
+    """Group-B enrich: API / exceptions / AC / NFR / executionContexts only."""
+    from app.llm.analysis_rules import append_analysis_tc_checklist
+
+    guide = tuple(
+        c for c in ANALYSIS_CRITERIA_GUIDE if c["json_key"] in PASS2_JSON_KEYS
+    )
+    criteria_lines = "\n".join(
+        f"- {c['type']} ({c['json_key']}): {c['instruction']}" for c in guide
+    )
+    fidelity = ANALYSIS_FIDELITY_RULES.strip()
+    base = (
+        "You are a requirements analyst (pass 2 — interface/AC/NFR only). "
+        "Return ONLY one JSON object (no markdown) with keys:\n"
+        "- apiSummary ([{method,path,note}])\n"
+        "- exceptions ([{text}])\n"
+        "- acceptanceCriteria ([{text}])\n"
+        "- constraints ([{text}])\n"
+        "- executionContexts ([{name,actor,authRequired,roles,sessionHint,description}])\n"
+        "- gaps ([{text}]): only blockers for these keys (max ~8)\n\n"
+        f"{fidelity}\n\n"
+        "Extraction criteria:\n"
+        f"{criteria_lines}\n\n"
+        "Empty lists if absent — never invent endpoints or AC."
+    )
+    return append_analysis_tc_checklist(base)
+
+
+def build_knowledge_user_prompt_pass2(
+    chunks: list[tuple[str | None, str]],
+    *,
+    file_names: list[str] | None = None,
+) -> str:
+    files = ", ".join((file_names or [])[:20]) or "(unknown)"
+    guide = tuple(
+        c for c in ANALYSIS_CRITERIA_GUIDE if c["json_key"] in PASS2_JSON_KEYS
+    )
+    criteria = "\n".join(
+        f"{idx + 1}. {c['label']} [{c['type']}] -> JSON key '{c['json_key']}'\n"
+        f"   → {c['instruction']}"
+        for idx, c in enumerate(guide)
+    )
+    excerpt = chunks_to_prompt_text(
+        chunks,
+        max_chars=MAX_CHUNK_CHARS_FOR_BUILD_PASS1,
+        rank=True,
+    )
+    return (
+        "SRS nguồn — pass 2 (API/AC/NFR/execution). Chỉ bám excerpts.\n"
+        f"Files: {files}\n\n"
+        f"{criteria}\n\n"
+        "## Document excerpts\n"
+        f"{excerpt}\n"
+    )
+
+
+def chunks_input_hash(
+    pairs: list[tuple[str | None, str]],
+    file_names: list[str] | None = None,
+) -> str:
+    """Stable hash of chunk text used to skip LLM enrich when SRS unchanged."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for name in file_names or []:
+        h.update(name.encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+    for heading, text in pairs:
+        h.update((heading or "").encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+        h.update((text or "").encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+    return h.hexdigest()[:32]
 
 
 def build_knowledge_user_prompt(

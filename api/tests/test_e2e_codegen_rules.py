@@ -14,8 +14,10 @@ def test_e2ecg_covers_both_pillars():
     text = E2E_CODEGEN_SPEC
     assert "Auth & Role" in text or "Execution Context" in text
     assert "Implementation Mapping" in text
-    for n in range(1, 19):
+    for n in range(1, 20):
         assert f"{n}." in text or str(n) in text
+    assert "ACT/ARRANGE" in text
+    assert "ungrounded" in text.lower()
     assert "NO DUPLICATE" in text or "duplicate" in text.lower()
     assert "RUNNABLE" in text
     assert "expect(await" in text.lower() or "NEVER" in text

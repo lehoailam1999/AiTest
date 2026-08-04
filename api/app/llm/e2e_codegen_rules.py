@@ -3,7 +3,7 @@ E2ECG — E2E Code Generation Specification (System-tier).
 
 Two pillars for multi-project Playwright codegen:
   I.  Execution Context Resolution (Rules 1–6) — WHO / auth / role / session
-  II. Implementation Mapping (Rules 7–16) — HOW from Source + DOM + convention
+  II. Implementation Mapping (Rules 7–19) — HOW from Source + DOM + convention
 
 Approved TC = *what* to test. Source/DOM/convention = *how*.
 Analysis ``executionContexts`` + TC precondition/testData = business context.
@@ -47,7 +47,9 @@ E2E_CODEGEN_SPEC = """\
 
 ## II. Implementation Mapping (TC intent → code via Source)
 7. WORKFLOW: Map every numbered TC Step → `test.step`; order = Auth → Feature entry →
-   Arrange → Act → Assert (see Feature journey skeleton).
+   Arrange → Act → Assert. Step indexes MUST be continuous `0..N` (never restart at 1
+   after Arrange). Guard renumbers after Auth/Feature inject. Phase 2 guard FAILS
+   codegen if Auth/Entry/Act missing or reordered.
 8. UI REVERSE: Routes/menus/forms from FE source (routerLink, Routes, templates) —
    never invent `/admin/...`.
 9. ELEMENT DISCOVERY: Fields/buttons from DOM snapshot + FE attrs only.
@@ -56,37 +58,39 @@ E2E_CODEGEN_SPEC = """\
 11. LOCATOR VALIDATION: Sync getters `get*|find*|locate*` return Locator (not Promise);
     `readonly foo: Locator` init in constructor; scope duplicates;
     native `<select>` → selectOption({label|value: string}) — NEVER RegExp label.
+    Path/fixture helpers (`*Path`/`*Fixture`/`ensure*File`) MUST be sync `(): string` —
+    NEVER `async (): Promise<string>` (Playwright setInputFiles/getByText coerce Promise →
+    "[object Promise]" / TypeError path).
+    Imports: `import { Foo, type Bar }` or `import type { Bar }` — NEVER orphan
+    `import { Foo, type }` (breaks tsc/Playwright).
 12. ACTIONABILITY: Wait visible/enabled before click/fill; open dialog/tab if fields
-    live there (list vs form).
+    live there (list vs form). NEVER `locator('input:not([type=hidden]), textarea').first()`
+    — use FE-proven label/role/testid (file/checkbox are often first and break fill).
 13. SYNC: goto waitUntil `domcontentloaded` (never networkidle); landmark after entry.
-14. ASSERTION: Expected on feature UI only; Validation/Boundary → disable/error not
-    happy-submit; soft text via regex/partial.
-    POM `expect*`/`assert*` = `async (...): Promise<void>` — Spec: `await pom.expectX(...)`
-    ONLY. NEVER `expect(await pom.expectX(...)).toBeVisible()` (void → undefined → crash).
-    `await expect(loc).toBeVisible()` ONLY with a real Locator from `page` / POM field /
-    sync getter — never undefined property.
-15. CONVENTION: Match existing POM/helpers/path layout / AItest/E2ETest/{Req}/{TC}/;
-    reuse ## Current E2E files methods. Prefer Spec-only when POM already exists.
-16. SELF-CHECK: auth matches context · no invented route/role/credential · locators
-    grounded · Expected covered · no login-wall asserts · no `expect(await …expect|assert…)`
-    · every Locator field initialized · then Rule 18.
-17. NO DUPLICATE FILES: one canonical path per page/spec/config under the TC folder.
-    Re-emit overwrites the same path — never create `*.<hash>.spec.ts` twins or a second
-    POM for the same import. Extend existing page methods; do not copy full journey twice.
-18. RUNNABLE EMIT (Playwright must load + run steps): Spec has `test(` / `test.describe(`;
-    files end `*.spec.ts` + `*.page.ts`; `import { ExactClass }` matches `export class ExactClass`
-    in that page file — no extra named imports that are not exported; call
-    `const pom = new ExactClass(page); await pom.method(...)` — NEVER `ExactClass.method()`
-    static; every Spec call exists as instance method on that class (fixture helpers =
-    instance methods returning path/string, not freestanding missing exports). Emit Spec+POM
-    in one shot so imports resolve — broken import → Playwright «No tests found»;
-    nested expect on void POM → `toBeVisible(undefined)` and browser exits before steps.
+14. ASSERTION: Expected on feature UI; Validation → disable/error not happy-submit.
+    POM expect*/assert* = Promise<void> → Spec `await pom.expectX(...)` ONLY.
+    NEVER expect(await pom.expectX()).toBeVisible · getByText(pom.expectX)/Promise →
+    "[object Promise]" · String(object) → "[object Object]" (unpack string fields; skip
+    fixture paths). toBeVisible only on real Locators.
+15. CONVENTION: AItest/E2ETest/{Req}/{TC}/specs + config; POM/auth/shim under
+    AItest/E2ETest/_shared/; reuse existing _shared/pages/*.page.ts when present.
+16. SELF-CHECK: no invented route/role/credential · DOM/FE locators · no empty POM stubs ·
+    no expect(await expect*) · Rules 18–19.
+17. NO DUPLICATE: one path per page/spec/config; overwrite same path — no hash twins.
+18. RUNNABLE: test(/describe; *.spec.ts+*.page.ts; import ExactClass = export class;
+    `new ExactClass(page)` never static; Spec+POM one shot; one canonical spec; FE labels.
+19. ACT/ARRANGE (all projects): ground in this FE+DOM/Spec args — no app hardcode.
+    Prefer E2E_FEATURE_PATH deep-link (gotoFeature ≠ auto-Create); menu no-op if
+    shell/dialog visible; Create via openCreate* + modal before fill; fill/select/
+    open*Combobox via getByRole|Label|testid from DOM/FE; wizard Next from Spec/DOM.
+    Spec passes values; unpack object asserts. Guard heal = safety net only.
+    Missing DOM/FE hook → Phase-3 ungrounded (E2E_GROUNDING fail-closed) — never
+    invent `button.first()` / Save-regex click.
 
 ## Forbidden
-Hardcode accounts · invent PUBLIC on protected apps · invent routes/testids · assert
-feature widgets on login page · skip Feature entry · modify production app source ·
-duplicate Spec/POM · static POM calls · import symbols not exported from the page file ·
-`expect(await pom.expect*|assert*|…).toBe*()` · expect on undefined Locator.
+Hardcode accounts · invent PUBLIC/routes/testids · skip Feature entry · modify app source ·
+duplicate/static POM · expect(await pom.expect*) · Promise/String(object) into getByText ·
+invent locators when Inspect empty · input.first() fill · missing storage JSON.
 """
 
 
@@ -103,7 +107,9 @@ _EXEC_LINE_RE = re.compile(
 
 
 def e2ecg_system_block() -> str:
-    return E2E_CODEGEN_SPEC.strip()
+    from app.llm.e2e_grounding_rules import e2e_grounding_system_pointer
+
+    return E2E_CODEGEN_SPEC.strip() + "\n" + e2e_grounding_system_pointer()
 
 
 def derive_execution_context_block(

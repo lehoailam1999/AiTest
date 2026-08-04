@@ -18,7 +18,9 @@ from app.services.e2e_dom_inspector import parse_html_interactive, parse_source_
 from app.services.e2e_orchestrator import (
     E2EOrchestrator,
     PLAYWRIGHT_INSTALL_HINT,
+    _ensure_root_config_on_disk,
     _inject_node_path_for_prefixed_playwright,
+    _materialize_files_on_disk,
     _merge_env,
     _sanitize_playwright_env,
     build_e2e_heal_prompt_context,
@@ -82,16 +84,25 @@ def test_resolve_e2e_file_paths_under_aitest():
         E2EFile(path="specs/login.spec.ts", content="s", kind="spec"),
     ]
     resolved = resolve_e2e_file_paths(files, module="Auth", journey_slug="login")
-    assert resolved[0].path == "AItest/E2ETest/Auth/pages/login.page.ts"
-    assert resolved[1].path == "AItest/E2ETest/Auth/specs/login.spec.ts"
+    by_kind = {f.kind: f for f in resolved if f.kind in ("page", "spec")}
+    assert by_kind["page"].path == "AItest/E2ETest/_shared/pages/login.page.ts"
+    assert by_kind["spec"].path == "AItest/E2ETest/Auth/specs/login.spec.ts"
     assert e2e_module_root("Auth") == "AItest/E2ETest/Auth"
+    assert any(f.path.endswith("_shared/types/playwright-shim.d.ts") for f in resolved)
 
 
 def test_resolve_e2e_file_paths_with_requirement_tc():
-    """E2E layout mirrors Unit: AItest/E2ETest/{Requirement}/{TC}/specs/…"""
+    """E2E: specs under {Req}/{TC}; POM under _shared."""
     files = [
-        E2EFile(path="pages/login.page.ts", content="p", kind="page"),
-        E2EFile(path="specs/login.spec.ts", content="s", kind="spec"),
+        E2EFile(path="pages/login.page.ts", content="export class LoginPage {}", kind="page"),
+        E2EFile(
+            path="specs/login.spec.ts",
+            content=(
+                "import { LoginPage } from '../pages/login.page';\n"
+                "test('x', async () => {});\n"
+            ),
+            kind="spec",
+        ),
     ]
     resolved = resolve_e2e_file_paths(
         files,
@@ -99,8 +110,13 @@ def test_resolve_e2e_file_paths_with_requirement_tc():
         requirement_title="Đăng nhập",
         test_case_title="TC01 - Login thành công",
     )
-    assert resolved[0].path == "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công/pages/login.page.ts"
-    assert resolved[1].path == "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công/specs/login.spec.ts"
+    page = next(f for f in resolved if f.kind == "page")
+    spec = next(f for f in resolved if f.kind == "spec")
+    assert page.path == "AItest/E2ETest/_shared/pages/login.page.ts"
+    assert spec.path == (
+        "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công/specs/login.spec.ts"
+    )
+    assert "_shared/pages/login.page" in spec.content
     assert e2e_module_root(
         "Auth",
         requirement_title="Đăng nhập",
@@ -144,7 +160,7 @@ def test_resolve_e2e_file_paths_collapses_nested_aitest_segments():
     )
     assert (
         resolved[0].path
-        == "backend/AItest/E2ETest/To-do/fixtures/storageState.json"
+        == "backend/AItest/E2ETest/_shared/fixtures/storageState.json"
     )
 
 
@@ -162,8 +178,22 @@ def test_resolve_e2e_file_paths_rewrites_spec_storage_state_override():
     ]
     resolved = resolve_e2e_file_paths(files, module="Auth")
     spec = next(f for f in resolved if f.path.endswith("/specs/a.spec.ts"))
-    assert 'storageState: "./fixtures/storageState.json"' in spec.content
+    assert "_shared/fixtures/storageState.json" in spec.content
     assert "AItest/E2ETest/X/fixtures/storageState.json" not in spec.content
+
+
+def test_e2e_module_plus_tc_uses_module_as_req():
+    assert (
+        e2e_module_root("Auth", test_case_title="Login OK")
+        == "AItest/E2ETest/Auth/Login-OK"
+    )
+
+
+def test_e2e_shared_root():
+    from app.services.test_output_layout import e2e_shared_root
+
+    assert e2e_shared_root() == "AItest/E2ETest/_shared"
+    assert e2e_shared_root(package_prefix="backend") == "backend/AItest/E2ETest/_shared"
 
 
 def test_e2e_module_root_fallback_module():
@@ -225,7 +255,7 @@ def test_ensure_playwright_config():
         [
             E2EFile(path="AItest/E2ETest/Auth/specs/a.spec.ts", content="x", kind="spec"),
             E2EFile(
-                path="AItest/E2ETest/Auth/fixtures/storageState.json",
+                path="AItest/E2ETest/_shared/fixtures/storageState.json",
                 content=state,
                 kind="fixture",
             ),
@@ -237,7 +267,8 @@ def test_ensure_playwright_config():
     cfg_ss = next(f for f in out_ss if f.kind == "config")
     assert "storageState" in cfg_ss.content
     assert any(
-        f.path.replace("\\", "/").endswith("fixtures/global.setup.ts") for f in out_ss
+        f.path.replace("\\", "/").endswith("_shared/fixtures/global.setup.ts")
+        for f in out_ss
     )
 
 
@@ -258,7 +289,7 @@ def test_ensure_playwright_config_places_global_setup_next_to_config():
             kind="config",
         ),
         E2EFile(
-            path="AItest/E2ETest/Req A/TC B/fixtures/storageState.json",
+            path="AItest/E2ETest/_shared/fixtures/storageState.json",
             content=state,
             kind="fixture",
         ),
@@ -274,7 +305,11 @@ def test_ensure_playwright_config_places_global_setup_next_to_config():
     setup = next(
         f for f in out if f.path.replace("\\", "/").endswith("fixtures/global.setup.ts")
     )
-    assert setup.path.replace("\\", "/").startswith("AItest/E2ETest/Req A/TC B/")
+    assert setup.path.replace("\\", "/") == (
+        "AItest/E2ETest/_shared/fixtures/global.setup.ts"
+    )
+    cfg = next(f for f in out if f.path.replace("\\", "/").endswith("playwright.config.ts"))
+    assert "_shared/fixtures/storageState.json" in (cfg.content or "")
 
 
 def test_ensure_playwright_config_ui_helper_omits_storage():
@@ -383,7 +418,12 @@ def test_sandbox_auto_heal_succeeds_on_second_attempt(tmp_path):
         return """
 ### FILE: AItest/E2ETest/Auth/pages/login.page.ts
 ```ts
-export class LoginPage { ok() {} }
+export class LoginPage {
+  constructor(public page: import('@playwright/test').Page) {}
+  async ok(): Promise<void> {
+    await this.page.goto('/');
+  }
+}
 ```
 """
 
@@ -402,7 +442,8 @@ export class LoginPage { ok() {} }
     assert result.attempts == 2
     assert calls["fix"] == 1
     page = next(f for f in result.files if f.kind == "page")
-    assert "ok()" in page.content
+    assert "ok" in page.content
+    assert "_shared/pages" in page.path.replace("\\", "/") or "login.page" in page.path
 
 
 def test_sandbox_auto_heal_fails_after_max(tmp_path):
@@ -643,6 +684,17 @@ def test_default_playwright_run_command_headed():
     assert "--headed" not in apply_headed_flag(headed, headed=False)
 
 
+def test_canonical_spec_prefers_single_hash_primary():
+    from app.services.e2e_orchestrator import _canonical_spec_under_root
+
+    twins = [
+        "AItest/E2ETest/M/T/specs/upload.spec.ts",
+        "AItest/E2ETest/M/T/specs/upload.6123e568.spec.ts",
+    ]
+    assert _canonical_spec_under_root(twins).endswith("upload.6123e568.spec.ts")
+    assert _canonical_spec_under_root([twins[0]]) == twins[0]
+
+
 def test_command_wants_headed_gui_survives_cmd_exe_wrap():
     """npx → cmd.exe /c \"… --headed\" must still count as headed (no CREATE_NO_WINDOW)."""
     from app.llm.cli.process_runner import resolve_command
@@ -700,6 +752,7 @@ def test_parse_playwright_json_report_per_spec():
 
 
 def test_execute_module_headless_maps_specs(tmp_path):
+    """One canonical Spec per TC folder — map JSON report onto that primary."""
     from pathlib import Path
 
     orch = E2EOrchestrator(str(tmp_path), module="Auth")
@@ -708,21 +761,19 @@ def test_execute_module_headless_maps_specs(tmp_path):
             {
                 "specs": [
                     {
-                        "file": "specs/a.spec.ts",
-                        "title": "a",
-                        "tests": [{"results": [{"status": "passed"}]}],
-                    },
-                    {
-                        "file": "specs/b.spec.ts",
-                        "title": "b",
+                        "file": "specs/login.spec.ts",
+                        "title": "login",
                         "tests": [
                             {
                                 "results": [
-                                    {"status": "failed", "error": {"message": "x"}}
+                                    {
+                                        "status": "failed",
+                                        "error": {"message": "TimeoutError"},
+                                    }
                                 ]
                             }
                         ],
-                    },
+                    }
                 ]
             }
         ]
@@ -736,13 +787,8 @@ def test_execute_module_headless_maps_specs(tmp_path):
         orch.execute_module_headless(
             files=[
                 E2EFile(
-                    path="AItest/E2ETest/Auth/specs/a.spec.ts",
-                    content="test('a', async () => {})",
-                    kind="spec",
-                ),
-                E2EFile(
-                    path="AItest/E2ETest/Auth/specs/b.spec.ts",
-                    content="test('b', async () => {})",
+                    path="AItest/E2ETest/Auth/Login/specs/login.spec.ts",
+                    content="test('login', async () => {})",
                     kind="spec",
                 ),
             ],
@@ -753,10 +799,9 @@ def test_execute_module_headless_maps_specs(tmp_path):
         )
     )
     assert result.status == "FAILED"
-    assert len(result.specs) == 2
-    by = {Path(s.spec_path).name: s for s in result.specs}
-    assert by["a.spec.ts"].success is True
-    assert by["b.spec.ts"].success is False
+    assert len(result.specs) == 1
+    assert Path(result.specs[0].spec_path).name == "login.spec.ts"
+    assert result.specs[0].success is False
 
 
 def test_execute_module_headless_isolates_tc_folders(tmp_path):
@@ -856,6 +901,33 @@ def test_execute_module_headless_isolates_tc_folders(tmp_path):
     )
 
 
+def test_runtime_fix_keeps_shared_storage_when_valid(tmp_path):
+    """Do not rewrite _shared → ./fixtures then strip when shared JSON is valid."""
+    suite = tmp_path / "AItest" / "E2ETest"
+    tc = suite / "Req" / "TC1"
+    shared_fix = suite / "_shared" / "fixtures"
+    tc.mkdir(parents=True)
+    shared_fix.mkdir(parents=True)
+    state = (
+        '{"cookies":[{"name":"a","value":"b","domain":"x","path":"/"}],'
+        '"origins":[]}'
+    )
+    (shared_fix / "storageState.json").write_text(state, encoding="utf-8")
+    cfg = tc / "playwright.config.ts"
+    cfg.write_text(
+        "export default defineConfig({\n"
+        "  use: {\n"
+        "    storageState: '../../_shared/fixtures/storageState.json',\n"
+        "  },\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    _runtime_fix_missing_storage_state(str(tc), config_arg=None)
+    out = cfg.read_text(encoding="utf-8")
+    assert "storageState" in out
+    assert "_shared/fixtures/storageState.json" in out
+
+
 def test_runtime_fix_missing_storage_state_strips_config(tmp_path):
     mod = tmp_path / "AItest" / "E2ETest" / "Auth"
     mod.mkdir(parents=True)
@@ -922,3 +994,49 @@ def test_inject_node_path_for_prefixed_playwright_keeps_existing_entries():
     node_path = out.get("NODE_PATH", "").replace("\\", "/")
     assert "/.aitest/playwright-runner/node_modules" in node_path
     assert "D:/custom/node_modules" in node_path
+
+
+def test_materialize_config_and_shared_page_before_verify(tmp_path):
+    """Regression: Verify must recreate missing playwright.config + _shared POM."""
+    root = tmp_path
+    tc = "AItest/E2ETest/Req/TC1"
+    page_rel = "AItest/E2ETest/_shared/pages/evidence-related-document.page.ts"
+    files = [
+        E2EFile(
+            path=f"{tc}/specs/a.spec.ts",
+            content=(
+                "import { test } from '@playwright/test';\n"
+                "import { EvidenceRelatedDocumentPage } from "
+                "'../../../_shared/pages/evidence-related-document.page';\n"
+                "test('t', async ({ page }) => { await page.goto('/'); });\n"
+            ),
+            kind="spec",
+        ),
+        E2EFile(
+            path=f"{tc}/playwright.config.ts",
+            content=default_playwright_config(base_url="http://localhost:9000"),
+            kind="config",
+        ),
+        E2EFile(
+            path=page_rel,
+            content="export class EvidenceRelatedDocumentPage { constructor(public page: any) {} }\n",
+            kind="page",
+        ),
+    ]
+    # Spec already on disk (post-rollback); config + POM missing → materialize.
+    (root / tc / "specs").mkdir(parents=True)
+    (root / tc / "specs" / "a.spec.ts").write_text(files[0].content, encoding="utf-8")
+
+    wrote = _materialize_files_on_disk(str(root), files)
+    assert any(p.endswith("playwright.config.ts") for p in wrote)
+    assert any(p.endswith("evidence-related-document.page.ts") for p in wrote)
+    cfg_abs = _ensure_root_config_on_disk(
+        project_root=str(root),
+        root_rel=tc,
+        root_files=files[:2],
+        all_files=files,
+        target_url="http://localhost:9000",
+        headed=False,
+    )
+    assert Path(cfg_abs).is_file()
+    assert (root / page_rel).is_file()

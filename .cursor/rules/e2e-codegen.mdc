@@ -1,62 +1,45 @@
 ---
-description: E2ECG — sinh code Playwright E2E đa dự án (Auth/Role Context + Implementation Mapping)
+description: E2ECG — sinh code Playwright E2E đa dự án (SoT mirror cho Cursor)
 globs: api/app/llm/e2e_codegen_rules.py,api/app/llm/base.py,api/app/routers/generate_e2e.py,api/app/services/e2e_*.py,desktop/src/lib/e2eWorkspace/**/*,desktop/src/features/e2e-test/**
 alwaysApply: false
 ---
 
 # E2ECG — Generate E2E Test Code
 
-> Runtime: [`e2e_codegen_rules.py`](api/app/llm/e2e_codegen_rules.py) inject **một lần** trong `e2e_system_prompt`.  
-> Journey skeleton: [`e2e_journey_rules.py`](api/app/llm/e2e_journey_rules.py) — Phase A–F sau khi Context đã resolve.  
-> Khác Sinh TC E2E (`e2e-tc-from-analysis.mdc`).
+## Chỗ nào là SoT? (tránh sửa loạn / lặp)
 
-## Phân tách
+| Việc | File SoT | Mirror Cursor |
+|------|----------|---------------|
+| Rules 1–19 inject Generate | `api/app/llm/e2e_codegen_rules.py` | **file này** |
+| Phase C Feature entry only | `api/app/llm/e2e_journey_rules.py` | `e2e-feature-journey.mdc` |
+| Grounding portable (path/fail-closed) | `api/app/llm/e2e_grounding_rules.py` | `e2e-grounding.mdc` |
+| Sinh TC từ Phân tích | `e2e_tc_analysis_rules.py` | `e2e-tc-from-analysis.mdc` |
+| Heal stub runtime | `e2e_codegen_guard.py` | không viết rule app vào đây |
 
-| Nguồn | Quyết định |
-|-------|------------|
-| Analysis `executionContexts` + `actors` + Approved TC | **Ai** (authRequired/role) + **nghiệp vụ** |
-| Source / DOM / Project Convention / auth_mode | **Cách** login + route + locator + sync |
+**Sửa contract → `.py` + `.mdc` cùng lúc.** Guard chỉ heal — không thay SoT.
 
-Layout giống Unit: `AItest/E2ETest/{Requirement}/{TC}/pages|specs/` — **một path / một file**; overwrite không salt-fork.
+## Portable (mọi dự án)
 
-**Staging FE:** một batch Generate = **một** `.ai-test/staging/e2e-{id}-{ts}/`.
+- Deep-link `E2E_FEATURE_PATH` / FE route · locator từ DOM/FE label của **dự án đó**
+- Cấm hardcode app/Forensic · cấm `Phase 3: ungrounded` trên menu/arrange/fill/select/`open*Combobox|Search`/create/wizard (`completeStep*|goNext*`)
+- Spec truyền value/label · unpack object assert · không `String(object)` / `input.first()` chung
+- Inspect DOM + FE source → Generate; giữ `domSnapshot` per-TC cho Verify/Heal
+- Feature path: auto từ TC/Spec/FE/Inspect — bake `gotoFeature`; cấm bắt user set tay khi đã có tín hiệu
+- Layout: `{Req}/{TC}/specs` + config · `_shared/{pages|fixtures|types}` (không copy auth/POM mỗi TC)
+- Import: mỗi `import` một dòng; `ensureAuthenticated` chỉ từ `_shared/fixtures/auth.helper` (guard heal mash/`from 'x'import`)
+- `test.step` indexes liên tục `0..N` (guard renumber sau Auth/Feature inject)
+- Cấm orphan `import { Foo, type }` — dùng `import { Foo, type Bar }` / `import type { Bar }`
 
-**Runnable:** Spec `import { ExactClass }` = `export class ExactClass`; gọi instance `new ExactClass(page)` — cấm static / import ảo.
+## Rule 19 (tóm tắt)
 
-**Assert contract:** POM `expect*`/`assert*` = `Promise<void>` → Spec `await pom.expectX(...)` trực tiếp.  
-Cấm `expect(await pom.expectX()).toBeVisible()` (void → `toBeVisible(undefined)` → Chromium tắt sớm).
+Feature deep-link · menu no-op nếu shell mở · Create/fill/select/open-combobox từ getByRole|Label ·
+wizard Next từ Spec/DOM · Spec args · Guard = safety net (không thay Inspect).
 
-## I. Auth & Role (Rules 1–6)
-
-1. Authentication Context · 2. Authorization/Role · 3. Login Strategy (HOW) ·  
-4. Session Reuse · 5. Multi-Role/Transition · 6. Permission Verify  
-
-Cấm: hardcode login mặc định · suy luận role từ source · hardcode tài khoản.
-
-## II. Implementation Mapping (Rules 7–18)
-
-7–13 mapping/locator · **14 Assert** (void POM / real Locator only) · 15 Convention ·  
-16 Self-check · **17 No duplicate** · **18 RUNNABLE emit**
-
-## Auth pass (thực thi — không hardcode trong Spec)
-
-| Bước | Việc |
-|------|------|
-| P0 | Analysis có `executionContexts` (WHO); TC precondition mang role/authRequired |
-| P1 | Credentials `E2E_*` / `E2E_<ROLE>_*` trên desktop; seed login thành công |
-| P2 | auth_mode=`storage` khi có JSON hợp lệ → feature Spec **không** UI login lại |
-| P3 | Thiếu storage → `ui_helper` + `ensureAuthenticated` (overlay); locator từ DOM/FE |
-| P4 | Multi-role chỉ khi Analysis/TC nói ≥2 actors |
-
-## Phân tầng prompt
-
-| Tầng | Nội dung |
-|------|----------|
-| E2ECG Spec | Rules 1–18 (**SoT**) |
-| auth_mode overlay | 1 dòng `resolve_auth_mode` |
-| Feature journey | Phase C Feature entry |
-| User prompt | TC + Execution Context + Auth resolved + DOM/FE |
+Chi tiết Rules 1–18: xem `e2e_codegen_rules.py` (inject system prompt).
 
 ## Khi sửa
 
-Chỉ sửa contract trong `e2e_codegen_rules.py` (+ file này). Journey/auth essay **không** copy lại Rules 1–18.
+1. Contract codegen → `e2e_codegen_rules.py` + file này  
+2. Feature entry → `e2e_journey_rules.py` + `e2e-feature-journey.mdc`  
+3. Không nhét selector cụ thể app vào rule
+4. Step renumber / type-import heal → `e2e_codegen_guard.py` (`renumber_spec_test_steps`, `_parse_import_entries`)

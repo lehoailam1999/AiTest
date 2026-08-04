@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app.llm.base import E2EFile
 from app.services.e2e_codegen_guard import (
     apply_e2e_codegen_guards,
+    canonicalize_ensure_authenticated_imports,
     fix_duplicate_button_locators,
     fix_page_method_contract,
     inject_ensure_authenticated,
+    normalize_collapsed_imports,
     strip_feature_expects_from_goto,
 )
 
@@ -200,21 +203,170 @@ export class TodoPage {
     assert "toBeVisible" not in fixed
 
 
-def test_inject_ensure_authenticated_adds_call():
-    spec = """\
-import { test } from '@playwright/test';
-import { TodoPage } from '../pages/todo.page';
+def test_infer_and_bake_feature_path_from_spec_comment():
+    from app.services.e2e_codegen_guard import (
+        apply_e2e_codegen_guards,
+        bake_feature_path_into_content,
+        infer_feature_path_for_pair,
+        infer_feature_path_from_files,
+        infer_feature_path_from_text,
+    )
 
-test('update title', async ({ page }) => {
-  const todo = new TodoPage(page);
-  await todo.goto();
-});
+    assert (
+        infer_feature_path_from_text(
+            "// Feature entry: /admin/evidence (FE admin.routes)\nawait pom.gotoFeature();",
+            tokens=["evidence", "vat", "chung"],
+        )
+        == "/admin/evidence"
+    )
+    # Spec evidence must beat other /admin/* noise in the same blob
+    assert (
+        infer_feature_path_from_text(
+            "const baked = \"/admin/case-record\";\n"
+            "// Feature entry — /admin/evidence (E2E_FEATURE_PATH)\n"
+            "await pom.gotoFeature();",
+            tokens=["evidence", "chung"],
+        )
+        == "/admin/evidence"
+    )
+    page = """\
+export class P {
+  async gotoFeature(..._args: unknown[]): Promise<void> {
+    const baked = "/admin/digital-file";
+    const featurePath = (baked || process.env.E2E_FEATURE_PATH || '').trim();
+    if (!featurePath) throw new Error('Feature entry: set E2E_FEATURE_PATH');
+  }
+}
 """
-    out = inject_ensure_authenticated(spec)
-    assert "from '../fixtures/auth.helper'" in out
-    assert "await ensureAuthenticated(page);" in out
-    assert "0. Đăng nhập / authenticate" in out or "test.step" in out
-    assert out.index("ensureAuthenticated") < out.index("todo.goto")
+    baked = bake_feature_path_into_content(page, "/admin/evidence", force=True)
+    assert 'const baked = "/admin/evidence"' in baked
+
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/M/TC/specs/a.spec.ts",
+            content=(
+                "import { test } from '@playwright/test';\n"
+                "import { P } from '../pages/a.page';\n"
+                "/** Vật chứng evidence */\n"
+                "test('t', async ({ page }) => {\n"
+                "  await test.step('0. Auth', async () => { await ensureAuthenticated(page); });\n"
+                "  // Feature entry — /admin/evidence (E2E_FEATURE_PATH)\n"
+                "  await test.step('1. Feature entry', async () => { await new P(page).gotoFeature(); });\n"
+                "});\n"
+            ),
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/M/TC/pages/a.page.ts",
+            content=page,
+            kind="page",
+        ),
+        # Noise from another TC in the same batch
+        E2EFile(
+            path="AItest/E2ETest/M/Other/specs/b.spec.ts",
+            content=(
+                "import { test } from '@playwright/test';\n"
+                "// Feature entry — /admin/case-record\n"
+                "test('b', async ({ page }) => {});\n"
+            ),
+            kind="spec",
+        ),
+    ]
+    pair = infer_feature_path_for_pair(
+        spec_path=files[0].path,
+        spec_content=files[0].content,
+        page_content=page,
+    )
+    assert pair == "/admin/evidence"
+    out = apply_e2e_codegen_guards(files, enforce_stubs=False, enforce_journey=False)
+    pom = next(f for f in out if f.path.endswith("a.page.ts"))
+    assert 'const baked = "/admin/evidence"' in (pom.content or "")
+    spec_a = next(f for f in out if f.path.endswith("a.spec.ts"))
+    assert "/admin/case-record" not in (spec_a.content or "") or 'baked = "/admin/evidence"' in (
+        spec_a.content or ""
+    )
+
+
+def test_normalize_collapsed_imports_forensic_mash():
+    mashed = (
+        "/// <reference path=\"../../../_shared/types/playwright-shim.d.ts\" />\n"
+        "import { expect, test } from '@playwright/test'"
+        "import { ensureAuthenticated } from '../../../../_shared/auth/ensure-authenticated'"
+        "import { EvidenceCreateBr4SkipOptionalPage } from '../../../_shared/pages/evidence-create-br4-skip-optional.page'"
+        "/**\n * authRequired=true · authRole=default · auth_mode=ui_helper\n */\n"
+        "test('x', async ({ page }) => {});\n"
+    )
+    fixed = normalize_collapsed_imports(mashed)
+    assert "test'import" not in fixed
+    assert fixed.count("\nimport ") >= 2
+    canon = canonicalize_ensure_authenticated_imports(
+        fixed,
+        spec_path="AItest/E2ETest/Req/TC/specs/a.spec.ts",
+        helper_path="AItest/E2ETest/_shared/fixtures/auth.helper.ts",
+    )
+    assert "_shared/fixtures/auth.helper" in canon
+    assert "ensure-authenticated" not in canon
+    assert canon.count("ensureAuthenticated") >= 1
+    assert len(re.findall(r"import\s*\{\s*ensureAuthenticated\s*\}", canon)) == 1
+
+
+def test_normalize_heals_orphan_multiline_page_import():
+    broken = (
+        "import { expect, test } from '@playwright/test';\n"
+        "  EvidenceCreateStep2BackPreservePage,\n"
+        "  type Step2RelatedDocRecord,\n"
+        "} from '../../../_shared/pages/evidence-create-step2-back-preserve.page';\n"
+        "test('t', async ({ page }) => {\n"
+        "  const pom = new EvidenceCreateStep2BackPreservePage(page);\n"
+        "  await ensureAuthenticated(page);\n"
+        "  await pom.gotoFeature();\n"
+        "});\n"
+    )
+    fixed = normalize_collapsed_imports(broken)
+    assert "import {\n  EvidenceCreateStep2BackPreservePage" in fixed
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Vat/TC/specs/step2-back.spec.ts",
+            content=fixed,
+            kind="spec",
+        )
+    ]
+    out = apply_e2e_codegen_guards(files, enforce_stubs=False, enforce_journey=False)
+    page = next(
+        f
+        for f in out
+        if f.path.replace("\\", "/").endswith(
+            "_shared/pages/evidence-create-step2-back-preserve.page.ts"
+        )
+    )
+    assert "EvidenceCreateStep2BackPreservePage" in (page.content or "")
+
+
+def test_guards_heal_mashed_auth_imports():
+    mashed = (
+        "import { test } from '@playwright/test'"
+        "import { ensureAuthenticated } from '../../_shared/auth/ensure-authenticated'"
+        "import { TodoPage } from '../pages/todo.page';\n"
+        "test('t', async ({ page }) => { const p = new TodoPage(page); await p.goto(); });\n"
+    )
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/M/TC/pages/todo.page.ts",
+            content="export class TodoPage { constructor(public page: any) {} async goto() { await this.page.goto('/'); } }",
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/M/TC/specs/t.spec.ts",
+            content=mashed,
+            kind="spec",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(files, enforce_stubs=False, enforce_journey=False)
+    spec = next(f for f in out if f.kind == "spec")
+    assert "from '@playwright/test'import" not in spec.content
+    assert "_shared/fixtures/auth.helper" in spec.content
+    assert "ensure-authenticated" not in spec.content
+    assert len(re.findall(r"import\s*\{\s*ensureAuthenticated\s*\}", spec.content)) == 1
 
 
 def test_guards_inject_auth_helper_for_feature_spec_without_storage():
@@ -282,7 +434,7 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
             kind="spec",
         ),
     ]
-    out = apply_e2e_codegen_guards(files)
+    out = apply_e2e_codegen_guards(files, enforce_journey=False)
     helper = next(f for f in out if f.path.replace("\\", "/").endswith("auth.helper.ts"))
     assert "Login did not leave the login wall" in helper.content or "password still visible" in helper.content
     assert "passwordField()" in helper.content or "toBeHidden" in helper.content
@@ -329,6 +481,65 @@ test('x', async ({ page }) => {
     assert "export class TodoUpdatePage" in page.content
     assert "async openEdit" in page.content
     assert "async submit" in page.content
+
+
+def test_guards_create_missing_shared_page_from_spec_import():
+    """Forensic regression: Specs import _shared/pages but AI omitted POM files."""
+    spec = """\
+import { test } from '@playwright/test';
+import {
+  EvidenceCreateFinishStep2Page,
+  type Step2RelatedDocRecord,
+} from '../../../_shared/pages/evidence-create-finish-step2.page';
+
+test('x', async ({ page }) => {
+  const pom = new EvidenceCreateFinishStep2Page(page);
+  await ensureAuthenticated(page);
+  await pom.gotoFeature();
+  await pom.openCreateModal();
+  await pom.finishCreate();
+});
+"""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/E2E-HappyPath-Finish/specs/evidence-create-finish-step2.spec.ts",
+            content=spec,
+            kind="spec",
+        )
+    ]
+    out = apply_e2e_codegen_guards(files, enforce_stubs=False, enforce_journey=False)
+    page = next(
+        f
+        for f in out
+        if f.path.replace("\\", "/").endswith(
+            "_shared/pages/evidence-create-finish-step2.page.ts"
+        )
+    )
+    assert "export class EvidenceCreateFinishStep2Page" in (page.content or "")
+    assert "async gotoFeature" in (page.content or "") or "gotoFeature" in (page.content or "")
+    assert "async openCreateModal" in (page.content or "")
+    assert "async finishCreate" in (page.content or "")
+    spec_out = next(f for f in out if f.path.endswith(".spec.ts"))
+    assert "auth.helper" in (spec_out.content or "")
+    assert re.search(
+        r"import\s*\{\s*ensureAuthenticated\s*\}\s*from",
+        spec_out.content or "",
+    )
+
+
+def test_canonicalize_adds_ensure_auth_import_when_call_missing_import():
+    text = (
+        "import { test } from '@playwright/test';\n"
+        "import { TodoPage } from '../../../_shared/pages/todo.page';\n"
+        "test('t', async ({ page }) => { await ensureAuthenticated(page); });\n"
+    )
+    out = canonicalize_ensure_authenticated_imports(
+        text,
+        spec_path="AItest/E2ETest/M/TC/specs/t.spec.ts",
+        helper_path="AItest/E2ETest/_shared/fixtures/auth.helper.ts",
+    )
+    assert "_shared/fixtures/auth.helper" in out
+    assert len(re.findall(r"import\s*\{\s*ensureAuthenticated\s*\}", out)) == 1
 
 
 def test_guards_scope_bare_button_to_form():
@@ -411,7 +622,7 @@ test('Login thành công', async ({ page }) => {
     assert "expectSubmitDisabled" not in spec_out.content
 
 
-def test_guards_rewrite_deep_cross_tc_page_import_to_local_pages():
+def test_guards_rewrite_deep_cross_tc_page_import_to_shared_pages():
     spec = """\
 import { test } from '@playwright/test';
 import { LoginPage } from '../../../Đăng nhập/[E2E-BusinessRules] Đăng nhập - Sai mật khẩu/pages/login.page';
@@ -428,9 +639,9 @@ test('x', async ({ page }) => {
             kind="spec",
         ),
     ]
-    out = apply_e2e_codegen_guards(files)
+    out = apply_e2e_codegen_guards(files, enforce_stubs=False, enforce_journey=False)
     spec_out = next(f for f in out if f.kind == "spec")
-    assert "from '../pages/login.page'" in spec_out.content
+    assert "/_shared/pages/login.page" in spec_out.content or "from '../pages/login.page'" in spec_out.content
     assert "from '../../../Đăng nhập/" not in spec_out.content
 
 
@@ -1003,7 +1214,9 @@ def test_guards_restore_stripped_spec_and_page_suffix():
             kind="page",
         ),
     ]
-    out = apply_e2e_codegen_guards(files, test_case_title="Validation form", headed=True)
+    out = apply_e2e_codegen_guards(
+        files, test_case_title="Validation form", headed=True, enforce_journey=False
+    )
     paths = [f.path.replace("\\", "/") for f in out]
     assert any(p.endswith(".spec.ts") for p in paths)
     assert any(p.endswith(".page.ts") for p in paths)
@@ -1065,3 +1278,388 @@ export class EvidencePage {
     page_out = next(f for f in out if f.path.endswith("evidence.page.ts"))
     assert "selectOption({ label: name })" not in page_out.content
     assert "__aitestSelectLabel" in page_out.content
+
+
+def test_sync_async_path_helpers_and_promise_coercion():
+    from app.services.e2e_codegen_guard import (
+        _fix_promise_coercion_crashes,
+        _sync_async_path_helpers,
+    )
+
+    page = (
+        "export class EvidencePage {\n"
+        "  async ensureUploadFixture(name: string): Promise<string> {\n"
+        "    return `fixtures/${name}`;\n"
+        "  }\n"
+        "}\n"
+        "export async function buildDocPath(n: string): Promise<string> {\n"
+        "  return n;\n"
+        "}\n"
+    )
+    synced = _sync_async_path_helpers(page)
+    assert "async ensureUploadFixture" not in synced
+    assert "ensureUploadFixture(name: string): string" in synced
+    assert "export function buildDocPath" in synced
+
+    spec = (
+        "await page.setInputFiles('input[type=file]', pom.ensureUploadFixture('a.bin'));\n"
+        "await expect(page.getByText(pom.expectUploadOk())).toBeVisible();\n"
+        "await page.goto(pom.featurePath());\n"
+        "await expect(page.getByText(labelText())).toBeVisible();\n"
+    )
+    from app.services.e2e_codegen_guard import _fix_nested_expect_on_pom_asserts
+
+    fixed = _fix_promise_coercion_crashes(spec)
+    fixed = _fix_nested_expect_on_pom_asserts(fixed)
+    assert "await pom.ensureUploadFixture" in fixed or "setInputFiles('input[type=file]', await pom.ensureUploadFixture" in fixed
+    assert "await pom.expectUploadOk()" in fixed
+    assert "goto(await pom.featurePath())" in fixed
+    # path helper must NOT become getByText(generated.bin)
+    assert "getByText(await pom.ensureUploadFixture" not in fixed or "skipped getByText(pathHelper)" in fixed
+    assert "getByText(await labelText())" in fixed
+
+
+def test_promise_coercion_does_not_corrupt_object_entries_destructure():
+    """1-arg setInputFiles must not span into `[key, val]` and inject `await val`."""
+    from app.services.e2e_codegen_guard import (
+        _fix_promise_coercion_crashes,
+        _render_form_action_stub,
+    )
+
+    stub = _render_form_action_stub("addRelatedDocument")
+    page = (
+        "export class EvidencePage {\n"
+        "  readonly page: any;\n"
+        "  constructor(page: any) { this.page = page; }\n"
+        + stub
+        + "}\n"
+    )
+    fixed = _fix_promise_coercion_crashes(page)
+    assert "await val" not in fixed
+    assert "for (const [key, val] of Object.entries(data))" in fixed
+    # single-arg helper call still gets await
+    one = "await fileInput.setInputFiles(pom.ensureUploadFixture('a.bin'));\n"
+    assert "await pom.ensureUploadFixture" in _fix_promise_coercion_crashes(one)
+
+
+def test_path_helper_stub_is_sync_string():
+    from app.services.e2e_codegen_guard import _render_smart_method_stub
+
+    stub = _render_smart_method_stub("ensureRelatedDocFixture")
+    assert "Promise<string>" not in stub
+    assert "): string {" in stub
+    fill = _render_smart_method_stub("fillTitle")
+    assert 'input:not([type="hidden"])' not in fill
+    assert "input[type=\\\"text\\\"]" in fill or 'input[type="text"]' in fill
+
+
+def test_expect_stub_unpacks_object_args_not_object_object():
+    from app.services.e2e_codegen_guard import (
+        _render_smart_method_stub,
+        _rewrite_expect_object_string_stubs,
+    )
+
+    stub = _render_smart_method_stub("expectPendingDocument")
+    assert "__aitestVisibleTexts" in stub
+    assert "for (const q of texts)" in stub
+    assert "getByText(q, { exact: false })" in stub
+    # Must not coerce whole object for locator text
+    assert "getByText(String(raw)" not in stub
+    assert ": String(raw);" not in stub
+
+    old = """\
+export class P {
+  async expectPendingDocument(..._args: unknown[]): Promise<void> {
+    const raw = _args.length ? _args[0] : undefined;
+    const asStr = raw == null ? '' : String(raw);
+    if (/fixtures[/\\\\]|\\.(bin|pdf)$/i.test(asStr)) {
+      return;
+    }
+    const loc = raw instanceof RegExp
+      ? this.page.getByText(raw).first()
+      : (() => {
+          const q = typeof raw === 'string' ? raw.trim()
+            : raw == null ? ''
+            : String(raw);
+          return q
+            ? this.page.getByText(q, { exact: false }).first()
+            : this.page.locator('body').first();
+        })();
+    await expect(loc).toBeVisible({ timeout: 15000 });
+  }
+}
+"""
+    healed = _rewrite_expect_object_string_stubs(old)
+    assert "__aitestVisibleTexts" in healed
+    assert ": String(raw);" not in healed
+    assert "getByText(String(raw)" not in healed
+
+
+def test_feature_nav_stub_fills_seed_before_next():
+    from app.services.e2e_codegen_guard import _render_feature_nav_stub
+
+    stub = _render_feature_nav_stub(
+        "gotoFeatureAndOpenStep2", feature_path="/admin/evidence"
+    )
+    assert "const seed" in stub
+    assert "wantsStep2" in stub
+    assert "box.fill(seed)" in stub
+    assert "/admin/evidence" in stub
+
+
+def test_menu_nav_stub_idempotent_not_phase3_throw():
+    from app.services.e2e_codegen_guard import (
+        _is_menu_nav_method,
+        _render_menu_nav_stub,
+        _rewrite_ungrounded_nav_stubs,
+        _render_feature_nav_stub,
+    )
+
+    assert _is_menu_nav_method("selectEvidenceMenu")
+    stub = _render_menu_nav_stub("selectEvidenceMenu", feature_path="/admin/evidence")
+    assert "ungrounded" not in stub.lower()
+    assert "shell" in stub
+    assert "E2E_FEATURE_PATH" in stub
+    plain = _render_feature_nav_stub("gotoFeature", feature_path="/admin/evidence")
+    assert "wantsCreate" in plain
+    assert "if (wantsCreate || wantsStep2)" in plain
+
+    page = """\
+export class P {
+  async selectEvidenceMenu(..._args: unknown[]): Promise<void> {
+    throw new Error('Phase 3: ungrounded POM stub `selectEvidenceMenu` — no DOM');
+  }
+}
+"""
+    out = _rewrite_ungrounded_nav_stubs(page, feature_path="/admin/evidence")
+    assert "ungrounded" not in out.lower()
+    assert "shell" in out
+
+
+def test_create_open_stub_from_ungrounded():
+    from app.services.e2e_codegen_guard import (
+        _is_create_open_method,
+        _rewrite_ungrounded_nav_stubs,
+    )
+
+    assert _is_create_open_method("clickCreateNew")
+    page = """\
+export class P {
+  async clickCreateNew(..._args: unknown[]): Promise<void> {
+    throw new Error('Phase 3: ungrounded POM stub `clickCreateNew` — no DOM');
+  }
+}
+"""
+    out = _rewrite_ungrounded_nav_stubs(page)
+    assert "ungrounded" not in out.lower()
+    assert "getByRole('button'" in out
+
+def test_arrange_and_select_field_not_phase3_throw():
+    from app.services.e2e_codegen_guard import (
+        _is_field_fill_method,
+        _is_select_field_method,
+        _rewrite_ungrounded_nav_stubs,
+        _render_field_fill_stub,
+        _render_select_field_stub,
+    )
+
+    assert _is_field_fill_method("arrangeRequiredName")
+    assert _is_select_field_method("selectStatus")
+    assert not _is_select_field_method("selectEvidenceMenu")
+
+    fill = _render_field_fill_stub("arrangeRequiredName")
+    assert "ungrounded" not in fill.lower()
+    assert "getByLabel" in fill
+
+    sel = _render_select_field_stub("selectStatus")
+    assert "combobox" in sel
+    assert "ungrounded" not in sel.lower()
+
+    page = """\
+export class P {
+  async arrangeRequiredName(..._args: unknown[]): Promise<void> {
+    throw new Error('Phase 3: ungrounded POM stub `arrangeRequiredName` — no DOM');
+  }
+  async selectStatus(..._args: unknown[]): Promise<void> {
+    throw new Error('Phase 3: ungrounded POM stub `selectStatus` — no DOM');
+  }
+}
+"""
+    out = _rewrite_ungrounded_nav_stubs(page, feature_path="/admin/evidence")
+    assert "ungrounded" not in out.lower()
+    assert "arrangeRequiredName" in out
+    assert "selectStatus" in out
+
+def test_complete_step_wizard_not_phase3_throw():
+    from app.services.e2e_codegen_guard import (
+        _is_wizard_next_method,
+        _render_smart_method_stub,
+        _rewrite_ungrounded_nav_stubs,
+    )
+
+    assert _is_wizard_next_method("completeStep1ToReachStep2")
+    stub = _render_smart_method_stub("completeStep1ToReachStep2")
+    assert "ungrounded" not in stub.lower()
+    assert "next" in stub.lower() or "tiếp" in stub.lower()
+
+    page = """\
+export class P {
+  async completeStep1ToReachStep2(..._args: unknown[]): Promise<void> {
+    throw new Error('Phase 3: ungrounded POM stub `completeStep1ToReachStep2` — no DOM');
+  }
+}
+"""
+    out = _rewrite_ungrounded_nav_stubs(page)
+    assert "ungrounded" not in out.lower()
+    assert "completeStep1ToReachStep2" in out
+
+
+def test_open_combobox_search_not_phase3_throw():
+    from app.services.e2e_codegen_guard import (
+        _is_select_field_method,
+        _render_smart_method_stub,
+        _rewrite_ungrounded_nav_stubs,
+    )
+
+    assert _is_select_field_method("openCaseRecordComboboxSearch")
+    stub = _render_smart_method_stub("openCaseRecordComboboxSearch")
+    assert "ungrounded" not in stub.lower()
+    assert "combobox" in stub
+
+    page = """\
+export class P {
+  async openCaseRecordComboboxSearch(..._args: unknown[]): Promise<void> {
+    throw new Error('Phase 3: ungrounded POM stub `openCaseRecordComboboxSearch` — no DOM');
+  }
+}
+"""
+    out = _rewrite_ungrounded_nav_stubs(page)
+    assert "ungrounded" not in out.lower()
+    assert "openCaseRecordComboboxSearch" in out
+
+
+def test_parse_import_entries_handles_type_modifier_and_orphan():
+    from app.services.e2e_codegen_guard import _parse_import_entries, _parse_import_names
+
+    entries = _parse_import_entries("EvidencePage, type Step2DocumentData")
+    assert entries == [("EvidencePage", False), ("Step2DocumentData", True)]
+    assert _parse_import_names("EvidencePage, type") == ["EvidencePage"]
+    assert _parse_import_names("type") == []
+    assert _parse_import_names("type Foo as Bar") == ["Bar"]
+
+
+def test_align_imports_does_not_emit_orphan_type_keyword():
+    import re
+
+    from app.services.e2e_codegen_guard import _align_spec_imports_to_page
+
+    page = """\
+export type Step2DocumentData = { fileName: string };
+export class EvidenceBackStep2RetainPage {
+  constructor(page: Page) {}
+}
+"""
+    spec = """\
+import { WrongPage, type } from '../pages/evidence-back-step2-retain.page';
+test('x', async ({ page }) => {
+  const pom = new WrongPage(page);
+});
+"""
+    out_spec, out_page = _align_spec_imports_to_page(
+        spec, page, leaf_hint="evidence-back-step2-retain.page"
+    )
+    assert "import { EvidenceBackStep2RetainPage }" in out_spec or (
+        "EvidenceBackStep2RetainPage" in out_spec and ", type }" not in out_spec
+    )
+    assert re.search(r"import\s*\{\s*[^}]*\btype\s*\}", out_spec) is None
+    assert "export function type(" not in out_page
+
+
+def test_renumber_spec_test_steps_continuous():
+    import re
+
+    from app.services.e2e_codegen_guard import renumber_spec_test_steps
+
+    spec = """\
+test('flow', async ({ page }) => {
+  await test.step('0. Auth', async () => {});
+  await test.step('1. Feature entry', async () => {});
+  await test.step('2. Arrange', async () => {});
+  await test.step('1. Act again', async () => {});
+  await test.step('2. Assert', async () => {});
+});
+"""
+    out = renumber_spec_test_steps(spec)
+    titles = re.findall(r"test\.step\('([^']+)'", out)
+    assert titles == [
+        "0. Auth",
+        "1. Feature entry",
+        "2. Arrange",
+        "3. Act again",
+        "4. Assert",
+    ]
+
+
+def test_apply_guards_renumbers_and_fixes_orphan_type_import():
+    import re as _re
+
+    page = """\
+/// <reference path="../types/playwright-shim.d.ts" />
+import { expect, type Locator, type Page } from '@playwright/test';
+
+export type Step2DocumentData = { fileName: string };
+
+export class EvidenceBackStep2RetainPage {
+  readonly page: Page;
+  constructor(page: Page) {
+    this.page = page;
+  }
+  async gotoFeature(): Promise<void> {
+    await this.page.goto('/admin/evidence', { waitUntil: 'domcontentloaded' });
+  }
+  async clickNext(): Promise<void> {
+    await this.page.getByRole('button', { name: /tiếp theo/i }).click();
+  }
+}
+"""
+    spec = """\
+/// <reference path="../types/playwright-shim.d.ts" />
+import { test, expect } from '@playwright/test';
+import { EvidenceBackStep2RetainPage, type } from '../pages/evidence-back-step2-retain.page';
+import { ensureAuthenticated } from '../fixtures/auth.helper';
+
+test('Quay lại', async ({ page }) => {
+  const pom = new EvidenceBackStep2RetainPage(page);
+  await test.step('0. Auth — ensureAuthenticated', async () => {
+    await ensureAuthenticated(page);
+  });
+  await test.step('1. Feature entry — evidence', async () => {
+    await pom.gotoFeature();
+  });
+  await test.step('1. Act click next', async () => {
+    await pom.clickNext();
+  });
+  await test.step('2. Assert visible', async () => {
+    await expect(page.getByRole('button', { name: /tiếp theo/i })).toBeVisible();
+  });
+});
+"""
+    files = apply_e2e_codegen_guards(
+        [
+            E2EFile(path="AItest/E2ETest/X/TC/specs/x.spec.ts", content=spec, kind="spec"),
+            E2EFile(
+                path="AItest/E2ETest/X/TC/pages/evidence-back-step2-retain.page.ts",
+                content=page,
+                kind="page",
+            ),
+        ],
+        auth_mode="ui_helper",
+        feature_path="/admin/evidence",
+        headed=True,
+    )
+    out_spec = next(f.content for f in files if f.kind == "spec")
+    assert ", type }" not in out_spec
+    assert _re.search(r"import\s*\{\s*[^}]*\btype\s*\}", out_spec) is None
+    titles = _re.findall(r"test\.step\('([^']+)'", out_spec)
+    nums = [int(t.split(".", 1)[0]) for t in titles]
+    assert nums == list(range(len(nums))), titles

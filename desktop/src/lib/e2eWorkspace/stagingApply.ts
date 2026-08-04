@@ -300,3 +300,81 @@ export function stagingDirHint(runId: string, packagePrefix?: string | null): st
 export function e2eAiTestDir(packagePrefix?: string | null): string {
   return aiTestDir(packagePrefix);
 }
+
+function matchStagedPath(filePath: string, staged: E2eStagedFile): boolean {
+  const a = norm(filePath);
+  const b = norm(staged.targetRel);
+  if (a === b) return true;
+  const aBase = a.split("/").pop() || "";
+  const bBase = b.split("/").pop() || "";
+  return !!aBase && aBase === bBase && (a.endsWith(b) || b.endsWith(a));
+}
+
+/**
+ * Edit one generated E2E file: memory DTO path + staging overlay + AItest target if on disk.
+ */
+export async function updateE2eStagedFileContent(
+  projectRoot: string,
+  session: E2eStagingSession,
+  filePath: string,
+  content: string
+): Promise<{ session: E2eStagingSession; syncedTarget: string | null }> {
+  if (!isTauri()) throw new Error("Sửa file E2E cần Desktop (Tauri).");
+
+  const nextFiles = session.files.map((f) =>
+    matchStagedPath(filePath, f) ? { ...f, content } : f
+  );
+  const hit = nextFiles.find((f) => matchStagedPath(filePath, f));
+  if (!hit) throw new Error(`File không có trong staging: ${filePath}`);
+
+  assertE2eTarget(hit.targetRel);
+  await writeTextFile(projectRoot, hit.workspaceRel, content);
+
+  let syncedTarget: string | null = null;
+  if (await fileExists(projectRoot, hit.targetRel)) {
+    await writeTextFile(projectRoot, hit.targetRel, content);
+    syncedTarget = hit.targetRel;
+  }
+
+  const next: E2eStagingSession = { ...session, files: nextFiles };
+  await writeE2eOverlay(projectRoot, next);
+  return { session: next, syncedTarget };
+}
+
+/**
+ * Delete one generated E2E file from staging + AItest target if present.
+ */
+export async function deleteE2eStagedFile(
+  projectRoot: string,
+  session: E2eStagingSession,
+  filePath: string
+): Promise<{ session: E2eStagingSession; syncedTarget: string | null }> {
+  if (!isTauri()) throw new Error("Xóa file E2E cần Desktop (Tauri).");
+
+  const hit = session.files.find((f) => matchStagedPath(filePath, f));
+  if (!hit) throw new Error(`File không có trong staging: ${filePath}`);
+  assertE2eTarget(hit.targetRel);
+
+  try {
+    await deleteTextFile(projectRoot, hit.workspaceRel);
+  } catch {
+    /* overlay may already be gone */
+  }
+
+  let syncedTarget: string | null = null;
+  if (await fileExists(projectRoot, hit.targetRel)) {
+    try {
+      await deleteTextFile(projectRoot, hit.targetRel);
+      syncedTarget = hit.targetRel;
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  const next: E2eStagingSession = {
+    ...session,
+    files: session.files.filter((f) => !matchStagedPath(filePath, f)),
+  };
+  await writeE2eOverlay(projectRoot, next);
+  return { session: next, syncedTarget };
+}

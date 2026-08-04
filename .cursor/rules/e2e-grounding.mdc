@@ -1,0 +1,32 @@
+---
+description: E2E Grounding — portable conventions (path, landmark, data-cy, fail-closed); học Forensic, mọi dự án
+globs: api/app/llm/e2e_grounding_rules.py,api/app/llm/e2e_tc_analysis_rules.py,api/app/llm/e2e_codegen_rules.py,api/app/llm/e2e_journey_rules.py,api/app/services/e2e_codegen_guard.py,api/app/services/e2e_stub_grounding.py,desktop/src/lib/e2eWorkspace/**
+alwaysApply: false
+---
+
+# E2E Grounding (portable)
+
+> SoT: [`e2e_grounding_rules.py`](../api/app/llm/e2e_grounding_rules.py).  
+> Chi tiết Auth/locator → [`e2e-codegen.mdc`](e2e-codegen.mdc). Feature entry → [`e2e-feature-journey.mdc`](e2e-feature-journey.mdc).  
+> TC `path:` → [`e2e-tc-from-analysis.mdc`](e2e-tc-from-analysis.mdc).
+
+## 10 conventions (mọi dự án)
+
+1. **path:** / **featurePath:** bắt buộc trên TC post-login (từ FE/Analysis — không invent)
+2. Entry = `goto(path)` + landmark; menu chỉ khi thiếu path
+3. storageState ưu tiên; login-wall ≠ locator feature
+4. Locator: data-cy|testid → #id → name → role+name → text cuối
+5. Create = list button + modal trước fill
+6. POM verbs; Spec `test.step` gọi verbs (giữ hybrid AITest)
+7. Validation → disable/error — không force save
+8. **Fail-closed** stubs khi thiếu DOM/FE (cấm `button.first()` invent)
+9. `*.spec.ts` + primarySpec align
+10. Timeout/concurrency Cursor = host env — không nhét vào prompt
+
+## Cấm
+
+Hardcode route/role/testid app · soft-pass stub mù · gen Spec khi login-wall + không path + FE nghèo.
+
+## Khi sửa
+
+Sửa `.py` + file này cùng lúc. Không copy Forensic `modules.ts` / role seed vào rule.

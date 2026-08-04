@@ -193,6 +193,29 @@ describe("P5 AItest path jail", () => {
     assert.equal(path, "AItest/UnitTest/Todo-App-SRS/todos.service.test.ts");
   });
 
+  it("E2E shared root + module-as-req with TC", async () => {
+    const {
+      e2eSharedRoot,
+      e2eModuleRoot,
+      e2eStorageStateRel,
+      buildRequirementTcModule: buildMod,
+    } = await import("./testOutputLayout.js");
+    assert.equal(e2eSharedRoot(), "AItest/E2ETest/_shared");
+    assert.equal(e2eSharedRoot({ packagePrefix: "backend" }), "backend/AItest/E2ETest/_shared");
+    assert.equal(
+      buildMod(null, "Login OK", "Auth"),
+      "Auth/Login-OK"
+    );
+    assert.equal(
+      e2eModuleRoot("Auth", { requirementTitle: "Req", testCaseTitle: "TC1" }),
+      "AItest/E2ETest/Req/TC1"
+    );
+    assert.equal(
+      e2eStorageStateRel("Auth"),
+      "AItest/E2ETest/_shared/fixtures/storageState.json"
+    );
+  });
+
 });
 
 describe("AItest Jest tsconfig scaffold", () => {

@@ -2,9 +2,10 @@
  * R3 Knowledge — tiêu chí đánh giá SRS sẵn sàng Sinh TC (master–detail).
  */
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Empty, List, Space, Tag, Typography } from "antd";
+import { Alert, Button, Collapse, Empty, List, Space, Tag, Typography } from "antd";
 import { ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import type { KnowledgePayload, KnowledgeWorkspaceView } from "../../api/types";
+import MermaidBlock from "./MermaidBlock";
 
 type KnowledgePanelProps = {
   knowledge: KnowledgeWorkspaceView | null;
@@ -108,7 +109,9 @@ export default function KnowledgePanel({
     if (prefer && sectionCount(payload, "summary") === 0) setActive(prefer.key);
   }, [knowledge?.version]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (enrichPending || status === "building" || building) {
+  // Only block UI while enrich is actually in flight. Do not key off status=building
+  // alone — a failed enrich used to leave building forever and hide payload/errors.
+  if ((enrichPending || building) && !knowledge?.enrichError) {
     return (
       <div className="knowledge-panel">
         <Empty
@@ -118,7 +121,7 @@ export default function KnowledgePanel({
               Đang phân tích bằng AI…
               <br />
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Kết quả sẽ hiện khi hoàn tất — không dùng bản tạm.
+                Cursor oneshot có thể mất vài phút — kết quả hiện khi xong (không dùng bản tạm).
               </Typography.Text>
             </span>
           }
@@ -130,6 +133,23 @@ export default function KnowledgePanel({
       </div>
     );
   }
+
+  const enrichTiming = knowledge?.enrichTiming;
+  const timingLine =
+    enrichTiming && typeof enrichTiming === "object"
+      ? [
+          enrichTiming.prepare_ms != null ? `prep ${enrichTiming.prepare_ms}ms` : null,
+          enrichTiming.llm_ms != null ? `llm ${enrichTiming.llm_ms}ms` : null,
+          enrichTiming.persist_ms != null ? `persist ${enrichTiming.persist_ms}ms` : null,
+          enrichTiming.prompt_chars != null
+            ? `${Number(enrichTiming.prompt_chars).toLocaleString()} chars`
+            : null,
+          enrichTiming.total_ms != null ? `Σ ${enrichTiming.total_ms}ms` : null,
+          knowledge?.enrichCacheHit ? "cache hit" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "";
 
   if (status === "empty" || !payload) {
     return (
@@ -196,6 +216,7 @@ export default function KnowledgePanel({
             {knowledge?.sourceChunkCount
               ? ` · ${knowledge.sourceFileCount} file / ${knowledge.sourceChunkCount} đoạn`
               : ""}
+            {timingLine ? ` · ${timingLine}` : ""}
           </Typography.Text>
         </Space>
         <Space wrap>
@@ -401,11 +422,18 @@ function renderSection(key: SectionKey, payload: KnowledgePayload) {
         size="small"
         dataSource={useCases}
         renderItem={(u) => (
-          <List.Item>
-            <Space orientation="vertical" size={0} style={{ width: "100%" }}>
-              <Typography.Text strong>{u.name}</Typography.Text>
-              {u.steps ? (
-                <Typography.Text type="secondary" style={{ whiteSpace: "pre-wrap" }}>
+          <List.Item style={{ paddingBlock: 8 }}>
+            <Space orientation="vertical" size={4} style={{ width: "100%" }}>
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                {u.name}
+              </Typography.Text>
+              {u.mermaid ? (
+                <MermaidBlock chart={u.mermaid} />
+              ) : u.steps ? (
+                <Typography.Text
+                  type="secondary"
+                  style={{ whiteSpace: "pre-wrap", fontSize: 12 }}
+                >
                   {u.steps}
                 </Typography.Text>
               ) : null}
@@ -455,16 +483,59 @@ function renderSection(key: SectionKey, payload: KnowledgePayload) {
   if (key === "validationRules") {
     const rows = payload.validationRules ?? [];
     if (!rows.length) return <EmptyHint label="Chưa có Validation & dữ liệu" />;
-    return (
+
+    const groups = new Map<string, typeof rows>();
+    for (const v of rows) {
+      const mod = (v.module || "Chung").trim() || "Chung";
+      const list = groups.get(mod) ?? [];
+      list.push(v);
+      groups.set(mod, list);
+    }
+    const modules = [...groups.keys()].sort((a, b) => {
+      if (a === "Chung") return 1;
+      if (b === "Chung") return -1;
+      return a.localeCompare(b, "vi");
+    });
+
+    const renderRows = (items: typeof rows) => (
       <List
         size="small"
-        dataSource={rows}
+        dataSource={items}
         renderItem={(v) => (
-          <List.Item>
-            {v.field ? <Typography.Text code>{v.field}</Typography.Text> : null}
-            <span>{v.field ? ` — ${v.rule}` : v.rule}</span>
+          <List.Item style={{ paddingBlock: 6 }}>
+            <Space size={8} wrap>
+              {v.field ? <Typography.Text code>{v.field}</Typography.Text> : null}
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {v.rule}
+              </Typography.Text>
+            </Space>
           </List.Item>
         )}
+      />
+    );
+
+    // One module only → flat list (no Collapse chrome)
+    if (modules.length <= 1) {
+      return renderRows(rows);
+    }
+
+    return (
+      <Collapse
+        size="small"
+        ghost
+        defaultActiveKey={modules.slice(0, 3)}
+        items={modules.map((mod) => ({
+          key: mod,
+          label: (
+            <Space size={8}>
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                {mod}
+              </Typography.Text>
+              <Tag style={{ marginInlineEnd: 0 }}>{groups.get(mod)?.length ?? 0}</Tag>
+            </Space>
+          ),
+          children: renderRows(groups.get(mod) ?? []),
+        }))}
       />
     );
   }

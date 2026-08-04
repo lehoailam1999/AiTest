@@ -8,6 +8,7 @@ from pathlib import Path
 from app.services.e2e_auth_bootstrap import discover_project_auth, merge_discovered_auth
 from app.services.e2e_auth_seed import (
     attach_auth_markers_to_test_data,
+    is_invented_auth_username,
     load_auth_artifact,
     parse_auth_markers,
     save_auth_artifact,
@@ -25,6 +26,21 @@ def test_save_and_load_auth_artifact(tmp_path: Path):
     assert art is not None
     assert art["username"] == "e2e@aitest.local"
     assert (tmp_path / ".ai-test" / "auth" / ".gitignore").is_file()
+
+
+def test_rejects_invented_e2e_default_artifact(tmp_path: Path):
+    assert is_invented_auth_username("e2e_default")
+    assert is_invented_auth_username("e2e.default@aitest.local")
+    assert is_invented_auth_username("e2e.admin.a1b2c3@aitest.local")
+    assert not is_invented_auth_username("admin@forensic.local")
+    save_auth_artifact(
+        tmp_path,
+        role="default",
+        username="e2e_default",
+        password="whatever",
+    )
+    assert load_auth_artifact(tmp_path, "default") is None
+    assert not (tmp_path / ".ai-test" / "auth" / "default.json").is_file()
 
 
 def test_discover_prefers_auth_seed_over_env(tmp_path: Path):

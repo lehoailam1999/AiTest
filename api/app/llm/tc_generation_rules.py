@@ -103,10 +103,10 @@ QUY TẮC CHUNG (SPEED):
 """
 
 E2E_SPEED_SHARED_TC_RULES = """\
-QUY TẮC CHUNG E2E (SPEED format):
+QUY TẮC CHUNG E2E (SPEED format — gọn prompt, đủ cover):
 1. module = FEATURES; title VN [Chức năng]-[Hành động]-[Kết quả].
 2. Steps/expected/precondition/testData cụ thể; thiếu → [Giả định].
-3. Tôn trọng SPEED MODE (trần mềm) — ưu tiên journey chính trong SoT.
+3. Cover đủ tín hiệu Output; cấm TC thừa/trùng — không trần số TC cố định.
 """
 
 
@@ -196,14 +196,18 @@ def engine_generation_rules(
         parts = [
             "=== PHIÊN SINH E2E (SPEED) ===",
             "1. type=`E2E` only.",
-            "2. Tag khi khớp: [E2E-HappyPath], [E2E-Validation], [E2E-Auth/Permission], [E2E-Boundary].",
+            "2. Tag khi khớp: [E2E-HappyPath], [E2E-Validation], [E2E-Auth/Permission], "
+            "[E2E-Boundary], [E2E-Error].",
         ]
         if cap:
             parts.append(
-                f"3. Trần mềm ≤{cap} TC/module — dừng khi đủ tín hiệu chính, không bịa."
+                f"3. Trần tùy chọn ≤{cap}: chỉ bỏ journey phụ/trùng — "
+                "không cắt FLOWS/happy/AUTH/VALIDATION/ERROR; không pad."
             )
         else:
-            parts.append("3. Ưu tiên journey chính (FLOWS/FEATURES) theo SoT.")
+            parts.append(
+                "3. Cover đủ tín hiệu SoT; cấm thừa (trùng trace / cùng expected+flow)."
+            )
         if target_url.strip():
             parts.append(
                 f"4. TARGET URL: baseURL trong precondition/testData: {target_url.strip()}"
@@ -219,8 +223,12 @@ def engine_generation_rules(
                 "5. AUTH: TC sau login → precondition «phiên storageState/auth setup»; "
                 "chỉ TC Auth/Login mới mô tả bước đăng nhập UI."
             )
+        parts.append(
+            "6. FEATURE PATH (E2E_GROUNDING): post-login → testData `path: /…` hoặc "
+            "`featurePath: /…` từ Output routes — cấm invent; Login/PUBLIC miễn."
+        )
         if focus_modules.strip():
-            parts.append(f"6. FOCUS: {focus_modules.strip()}")
+            parts.append(f"7. FOCUS: {focus_modules.strip()}")
         return append_e2e_tc_from_analysis_rules("\n".join(parts), speed=True)
 
     parts = [
@@ -248,6 +256,11 @@ def engine_generation_rules(
             "5. AUTH: TC sau login → «Phiên đã xác thực qua storageState / auth setup» — "
             "không bịa credential; chỉ TC [E2E-Auth/Permission]/Login mô tả bước login UI."
         )
+    parts.append(
+        "6. FEATURE PATH (E2E_GROUNDING): mọi TC post-login / không PUBLIC → "
+        "`testData` có `path: /…` hoặc `featurePath: /…` từ FLOWS|API_UI|FEATURES "
+        "(không invent). Tuỳ chọn `landmark:` nhãn màn. Login/Logout/PUBLIC: miễn."
+    )
     if focus_modules.strip():
-        parts.append(f"6. FOCUS MODULES (khớp FEATURES): {focus_modules.strip()}")
+        parts.append(f"7. FOCUS MODULES (khớp FEATURES): {focus_modules.strip()}")
     return append_e2e_tc_from_analysis_rules("\n".join(parts), speed=False)

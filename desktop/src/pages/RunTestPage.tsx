@@ -11,6 +11,7 @@ import {
   Space,
   Statistic,
   Table,
+  Tabs,
   Tag,
   Typography,
 } from "antd";
@@ -19,6 +20,12 @@ import { PlayCircleOutlined, ReloadOutlined } from "@ant-design/icons";
 import { executions, projects } from "../api";
 import type { Execution, Project } from "../api/types";
 import { runnerLabelFromCommand, suggestTestCommand } from "../lib/stackHints";
+import {
+  classifyExecutionLane,
+  resolveE2eRunCommand,
+  resolveUnitRunCommand,
+  type RunLane,
+} from "../lib/runCenter";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
 import {
@@ -27,15 +34,23 @@ import {
   runTestCommand,
   type TestRunResult,
 } from "../tauri/bridge";
-
 import { ensureAitestJestTsconfigInWorkspace } from "../lib/unitWorkspace/ensureAitestJestTsconfig";
+import { ROUTES, e2eTestUrl, unitTestUrl } from "../lib/productRoutes";
 
 type HistoryFilter = "all" | "Passed" | "Failed" | "Error";
 
+function laneFromSearch(raw: string | null): RunLane {
+  const v = (raw || "").toLowerCase();
+  if (v === "e2e" || v === "unit" || v === "advanced") return v;
+  return "unit";
+}
+
 export default function RunTestPage() {
   const { project } = useProject();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [serverProject, setServerProject] = useState<Project | null>(null);
+  const [lane, setLane] = useState<RunLane>(() => laneFromSearch(searchParams.get("lane")));
+  const [packagePrefix, setPackagePrefix] = useState("");
   const [command, setCommand] = useState("");
   const [filter, setFilter] = useState("");
   const [running, setRunning] = useState(false);
@@ -72,10 +87,38 @@ export default function RunTestPage() {
       .then((p) => {
         setServerProject(p);
         const fromUrl = searchParams.get("cmd")?.trim();
-        setCommand((prev) => fromUrl || prev || suggestTestCommand(p));
+        const urlLane = laneFromSearch(searchParams.get("lane"));
+        if (fromUrl) {
+          setLane("advanced");
+          setCommand(fromUrl);
+          return;
+        }
+        setLane(urlLane);
+        const pkg = packagePrefix.trim() || null;
+        if (urlLane === "e2e") setCommand(resolveE2eRunCommand(pkg));
+        else if (urlLane === "unit") setCommand(resolveUnitRunCommand(p, pkg));
+        else setCommand((prev) => prev || suggestTestCommand(p));
       })
       .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- packagePrefix applied via Apply preset buttons
   }, [project?.id, searchParams]);
+
+  const applyLanePreset = useCallback(
+    (next: RunLane) => {
+      setLane(next);
+      const q = new URLSearchParams(searchParams);
+      if (next === "unit") q.set("lane", "unit");
+      else if (next === "e2e") q.set("lane", "e2e");
+      else q.set("lane", "advanced");
+      q.delete("cmd");
+      setSearchParams(q, { replace: true });
+      const pkg = packagePrefix.trim() || null;
+      if (next === "unit") setCommand(resolveUnitRunCommand(serverProject, pkg));
+      else if (next === "e2e") setCommand(resolveE2eRunCommand(pkg));
+      else setCommand(suggestTestCommand(serverProject));
+    },
+    [packagePrefix, searchParams, serverProject, setSearchParams]
+  );
 
   const runnerLabel = useMemo(() => runnerLabelFromCommand(command), [command]);
 
@@ -91,12 +134,12 @@ export default function RunTestPage() {
 
   async function execute() {
     if (!project || !localPath) {
-      setError("Cần mở project local (tab Mở dự án).");
+      setError("Cần gắn project root (Unit test / E2E → Gắn root).");
       return;
     }
     const cmd = command.trim();
     if (!cmd) {
-      setError("Nhập lệnh chạy test phù hợp stack dự án (vd. npm test, pytest, dotnet test).");
+      setError("Chưa có lệnh chạy — chọn Unit/E2E hoặc nhập lệnh Advanced.");
       return;
     }
     setRunning(true);
@@ -115,7 +158,7 @@ export default function RunTestPage() {
               runId: "run-page",
               testCaseId: "",
               status: "draft",
-              packagePrefix: "",
+              packagePrefix: packagePrefix.trim(),
               createdAt: new Date().toISOString(),
               files: [],
             },
@@ -127,8 +170,9 @@ export default function RunTestPage() {
           runCmd = "npx jest --config AItest/jest.config.cjs --runInBand --passWithNoTests";
         }
       }
-      const isDotnet = /^dotnet\s+test\b/i.test(runCmd);
-      const result = isDotnet
+      const isBareDotnet =
+        /^dotnet\s+test\b/i.test(runCmd) && !/\.csproj\b/i.test(runCmd);
+      const result = isBareDotnet
         ? await runDotnetTest(localPath, filter.trim() || undefined)
         : await runTestCommand(localPath, runCmd);
       setRun(result);
@@ -151,7 +195,7 @@ export default function RunTestPage() {
         trxFileName: result.trxFileName,
         filter: result.filter,
       });
-      setMessage("Đã upload kết quả execution lên server.");
+      setMessage("Đã lưu kết quả vào lịch sử Execution.");
       await loadHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Run failed");
@@ -170,7 +214,7 @@ export default function RunTestPage() {
           message="Chưa chọn project"
           description={
             <>
-              Vào tab <Link to="/projects">Dự án</Link> để chọn hoặc tạo dự án trước.
+              Vào tab <Link to={ROUTES.projects}>Dự án</Link> để chọn hoặc tạo dự án trước.
             </>
           }
         />
@@ -191,16 +235,32 @@ export default function RunTestPage() {
             Chạy test
           </Typography.Title>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            Phase B — chạy lệnh local, parse kết quả, lưu Execution · {project.name}
+            Regression trên code đã <strong>Apply</strong> — không sinh TC / không sinh code tại đây.
             <br />
-            Stack: <Typography.Text strong>{stackHint}</Typography.Text>
+            {project.name} · Stack: <Typography.Text strong>{stackHint}</Typography.Text>
             {" · "}
             Parser: <Typography.Text code>{runnerLabel}</Typography.Text>
             {" · "}
-            <Link to="/reports">Báo cáo / Coverage</Link>
+            <Link to={ROUTES.reports}>Báo cáo</Link>
           </Typography.Paragraph>
         </div>
       </header>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="Tách flow"
+        description={
+          <>
+            Sinh / Verify / Apply:{" "}
+            <Link to={unitTestUrl()}>Unit test</Link>
+            {" · "}
+            <Link to={e2eTestUrl()}>E2E</Link>
+            . Trang này chỉ chạy lại test đã nằm trong repo (AItest/).
+          </>
+        }
+      />
 
       {!isTauri() ? (
         <Alert
@@ -219,67 +279,186 @@ export default function RunTestPage() {
           message="Chưa mở project local"
           description={
             <>
-              Vào <Link to="/unit-test">Unit test</Link> → <strong>Gắn root Apply</strong> trước khi
-              chạy lệnh test.
+              Vào <Link to={ROUTES.unitTest}>Unit test</Link> hoặc{" "}
+              <Link to={ROUTES.e2eTest}>E2E</Link> → gắn root Apply trước.
             </>
           }
         />
       ) : null}
       {error ? (
-        <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} closable onClose={() => setError(null)} />
+        <Alert
+          type="error"
+          showIcon
+          message={error}
+          style={{ marginBottom: 16 }}
+          closable
+          onClose={() => setError(null)}
+        />
       ) : null}
       {message ? (
-        <Alert type="success" showIcon message={message} style={{ marginBottom: 16 }} closable onClose={() => setMessage(null)} />
+        <Alert
+          type="success"
+          showIcon
+          message={message}
+          style={{ marginBottom: 16 }}
+          closable
+          onClose={() => setMessage(null)}
+        />
       ) : null}
 
-      <Card title="Lệnh test" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <div>
-            <Typography.Text type="secondary">Lệnh chạy test</Typography.Text>
-            <Input
-              style={{ marginTop: 4 }}
-              placeholder="vd. npm test · pytest · go test ./... · dotnet test"
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-            />
-            {localPath ? (
-              <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
-                Root Apply: <Typography.Text code>{localPath}</Typography.Text>
-                {" — "}npm tự chạy trong thư mục có{" "}
-                <Typography.Text code>package.json</Typography.Text> (vd. backend/) nếu root monorepo
-                không có.
-              </Typography.Text>
-            ) : null}
-          </div>
-          {/^dotnet\s+test\b/i.test(command.trim()) ? (
-            <div>
-              <Typography.Text type="secondary">Filter (tuỳ chọn, .sln / .csproj tương đối)</Typography.Text>
-              <Input
-                style={{ marginTop: 4 }}
-                placeholder="Tests/My.Tests.csproj"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              />
-            </div>
-          ) : null}
-          <Space wrap>
-            <Button
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              onClick={() => void execute()}
-              loading={running}
-              disabled={!isTauri() || !localPath}
-            >
-              Chạy test
-            </Button>
-            <Button
-              icon={<ReloadOutlined />}
-              disabled={!serverProject}
-              onClick={() => setCommand(suggestTestCommand(serverProject))}
-            >
-              Gợi ý theo stack
-            </Button>
-          </Space>
+      <Card style={{ marginBottom: 16 }}>
+        <Tabs
+          activeKey={lane}
+          onChange={(k) => applyLanePreset(k as RunLane)}
+          items={[
+            {
+              key: "unit",
+              label: "Unit",
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                  <Typography.Text type="secondary">
+                    Chạy AItest Unit đã Apply (dotnet / jest / vitest / pytest theo stack). Không gọi AI
+                    generate.
+                  </Typography.Text>
+                  <div>
+                    <Typography.Text type="secondary">Package prefix (monorepo, tuỳ chọn)</Typography.Text>
+                    <Input
+                      style={{ marginTop: 4 }}
+                      placeholder="vd. backend · src/Lib · để trống = root"
+                      value={packagePrefix}
+                      onChange={(e) => setPackagePrefix(e.target.value)}
+                      onBlur={() => {
+                        if (lane === "unit") {
+                          setCommand(
+                            resolveUnitRunCommand(serverProject, packagePrefix.trim() || null)
+                          );
+                        }
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <Typography.Text type="secondary">Lệnh</Typography.Text>
+                    <Input
+                      style={{ marginTop: 4 }}
+                      value={command}
+                      onChange={(e) => setCommand(e.target.value)}
+                    />
+                  </div>
+                  {/^dotnet\s+test\b/i.test(command.trim()) ? (
+                    <div>
+                      <Typography.Text type="secondary">
+                        Filter .NET (tuỳ chọn) — truyền vào runDotnetTest
+                      </Typography.Text>
+                      <Input
+                        style={{ marginTop: 4 }}
+                        placeholder="FullyQualifiedName~MyTest"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      />
+                    </div>
+                  ) : null}
+                </Space>
+              ),
+            },
+            {
+              key: "e2e",
+              label: "E2E",
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                  <Typography.Text type="secondary">
+                    Playwright trên suite <Typography.Text code>AItest/E2ETest</Typography.Text> đã
+                    Apply. Auth/env cấu hình ở trang E2E — trang này không regenerate Spec/POM.
+                  </Typography.Text>
+                  <div>
+                    <Typography.Text type="secondary">Package prefix (tuỳ chọn)</Typography.Text>
+                    <Input
+                      style={{ marginTop: 4 }}
+                      placeholder="vd. frontend"
+                      value={packagePrefix}
+                      onChange={(e) => setPackagePrefix(e.target.value)}
+                      onBlur={() => {
+                        if (lane === "e2e") {
+                          setCommand(resolveE2eRunCommand(packagePrefix.trim() || null));
+                        }
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <Typography.Text type="secondary">Lệnh</Typography.Text>
+                    <Input
+                      style={{ marginTop: 4 }}
+                      value={command}
+                      onChange={(e) => setCommand(e.target.value)}
+                    />
+                  </div>
+                </Space>
+              ),
+            },
+            {
+              key: "advanced",
+              label: "Advanced",
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                  <Typography.Text type="secondary">
+                    Lệnh tùy chỉnh (giữ hành vi cũ). Dùng khi preset Unit/E2E chưa khớp monorepo.
+                  </Typography.Text>
+                  <div>
+                    <Typography.Text type="secondary">Lệnh chạy test</Typography.Text>
+                    <Input
+                      style={{ marginTop: 4 }}
+                      placeholder="vd. npm test · pytest · go test ./... · dotnet test"
+                      value={command}
+                      onChange={(e) => setCommand(e.target.value)}
+                    />
+                    {localPath ? (
+                      <Typography.Text
+                        type="secondary"
+                        style={{ display: "block", marginTop: 6, fontSize: 12 }}
+                      >
+                        Root: <Typography.Text code>{localPath}</Typography.Text>
+                      </Typography.Text>
+                    ) : null}
+                  </div>
+                  {/^dotnet\s+test\b/i.test(command.trim()) ? (
+                    <div>
+                      <Typography.Text type="secondary">Filter (tuỳ chọn)</Typography.Text>
+                      <Input
+                        style={{ marginTop: 4 }}
+                        placeholder="Tests/My.Tests.csproj"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      />
+                    </div>
+                  ) : null}
+                  <Button
+                    icon={<ReloadOutlined />}
+                    disabled={!serverProject}
+                    onClick={() => setCommand(suggestTestCommand(serverProject))}
+                  >
+                    Gợi ý theo stack
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
+        <Space wrap style={{ marginTop: 16 }}>
+          <Button
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            onClick={() => void execute()}
+            loading={running}
+            disabled={!isTauri() || !localPath}
+          >
+            Chạy {lane === "unit" ? "Unit" : lane === "e2e" ? "E2E" : "test"}
+          </Button>
+          <Button
+            icon={<ReloadOutlined />}
+            disabled={!serverProject || lane === "advanced"}
+            onClick={() => applyLanePreset(lane)}
+          >
+            Reset preset
+          </Button>
         </Space>
       </Card>
 
@@ -291,7 +470,11 @@ export default function RunTestPage() {
                 <Statistic title="Passed" value={run.passed} valueStyle={{ color: "#3f8600" }} />
               </Col>
               <Col xs={12} sm={6}>
-                <Statistic title="Failed" value={run.failed} valueStyle={{ color: run.failed > 0 ? "#cf1322" : undefined }} />
+                <Statistic
+                  title="Failed"
+                  value={run.failed}
+                  valueStyle={{ color: run.failed > 0 ? "#cf1322" : undefined }}
+                />
               </Col>
               <Col xs={12} sm={6}>
                 <Statistic title="Skipped" value={run.skipped} />
@@ -305,37 +488,35 @@ export default function RunTestPage() {
                 <Typography.Text type="secondary">Tỷ lệ pass</Typography.Text>
                 <Progress percent={passRate} status={run.failed > 0 ? "exception" : "success"} />
               </div>
-            ) : (
-              <Alert
-                type="info"
-                showIcon
-                message="Không parse được số test từ log"
-                description="Kiểm tra log bên dưới — parser hỗ trợ pytest, Jest/Vitest, go test, dotnet console/TRX."
-              />
-            )}
-            <Space wrap>
-              <Tag color={run.success ? "success" : "error"}>{run.success ? "Passed" : "Failed"}</Tag>
-              <Tag>exit {run.exitCode}</Tag>
-              <Tag>{run.durationMs} ms</Tag>
-              <Typography.Text type="secondary" copyable={{ text: run.command }}>
-                {run.command}
-              </Typography.Text>
-            </Space>
+            ) : null}
             <Typography.Paragraph>
-              <pre className="code" style={{ maxHeight: 360, overflow: "auto" }}>
-                {run.log}
-              </pre>
+              <Typography.Text type="secondary">Command: </Typography.Text>
+              <Typography.Text code>{run.command}</Typography.Text>
             </Typography.Paragraph>
+            {run.log ? (
+              <pre
+                style={{
+                  maxHeight: 240,
+                  overflow: "auto",
+                  background: "var(--ant-color-fill-quaternary, #f5f5f5)",
+                  padding: 12,
+                  borderRadius: 8,
+                  fontSize: 12,
+                }}
+              >
+                {run.log.slice(0, 8000)}
+              </pre>
+            ) : null}
           </Space>
         </Card>
       ) : null}
 
       <Card
-        title="Lịch sử execution"
+        title="Lịch sử Execution"
         extra={
-          <Select<HistoryFilter>
+          <Select
+            style={{ width: 140 }}
             value={historyFilter}
-            style={{ width: 160 }}
             onChange={setHistoryFilter}
             options={[
               { value: "all", label: "Tất cả" },
@@ -346,47 +527,47 @@ export default function RunTestPage() {
           />
         }
       >
-        <Table<Execution>
+        <Table
           rowKey="id"
           size="small"
-          pagination={{ pageSize: 10, hideOnSinglePage: true }}
-          locale={{ emptyText: "Chưa có lần chạy nào." }}
           dataSource={filteredHistory}
+          pagination={{ pageSize: 8 }}
           columns={[
             {
-              title: "Trạng thái",
+              title: "Lane",
+              width: 90,
+              render: (_: unknown, row: Execution) => {
+                const l = classifyExecutionLane(row.command);
+                const color = l === "e2e" ? "purple" : l === "unit" ? "blue" : "default";
+                return <Tag color={color}>{l}</Tag>;
+              },
+            },
+            {
+              title: "Status",
               dataIndex: "status",
-              render: (status: string) => (
-                <Tag color={status === "Passed" ? "success" : status === "Failed" ? "error" : "default"}>
-                  {status}
+              width: 90,
+              render: (s: string) => (
+                <Tag color={s === "Passed" ? "success" : s === "Failed" ? "error" : "warning"}>
+                  {s}
                 </Tag>
               ),
             },
             {
-              title: "Passed / Failed / Skipped / Total",
-              render: (_, e) => `${e.passed} / ${e.failed} / ${e.skipped ?? 0} / ${e.total}`,
+              title: "P/F/T",
+              width: 100,
+              render: (_: unknown, row: Execution) =>
+                `${row.passed}/${row.failed}/${row.total}`,
             },
             {
-              title: "Lệnh",
+              title: "Command",
               dataIndex: "command",
               ellipsis: true,
-              render: (cmd: string) => (
-                <Typography.Text ellipsis={{ tooltip: cmd }} style={{ maxWidth: 280 }}>
-                  {cmd || "—"}
-                </Typography.Text>
-              ),
             },
             {
-              title: "Thời gian",
-              dataIndex: "durationMs",
-              width: 100,
-              render: (ms: number) => `${ms} ms`,
-            },
-            {
-              title: "Lúc",
-              dataIndex: "startedAt",
+              title: "When",
+              dataIndex: "finishedAt",
               width: 180,
-              render: (t: string) => new Date(t).toLocaleString(),
+              render: (v: string) => (v ? new Date(v).toLocaleString() : "—"),
             },
           ]}
         />

@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Collapse,
+  Modal,
   Progress,
   Space,
   Table,
@@ -14,14 +15,27 @@ import {
 import {
   CheckCircleOutlined,
   DeleteOutlined,
+  EyeOutlined,
   PlayCircleOutlined,
   SaveOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import type { BatchRunControl, BatchRunStatus } from "../../lib/batchRunControl";
 import { loadManifest, saveManifest } from "../../lib/unitWorkspace/manager";
 import { applyManyWorkspacesToRepo } from "../../lib/unitWorkspace/applyManager";
 import { runCombinedBatchVerify } from "../../lib/unitWorkspace/combinedBatchVerify";
 import { discardWorkspaceRuns } from "../../lib/unitWorkspace/discardManager";
+import {
+  batchVerifyPass,
+  extractFailedPathTokens,
+  extractUnitFailureExcerpt,
+} from "../../lib/unitWorkspace/batchVerifyFailureMap";
+import {
+  formatVerifyStagesLog,
+  saveErrorLogFile,
+  unitErrorLogRel,
+  unitVerifyLogRel,
+} from "../../lib/unitWorkspace/errorLogStore";
 import {
   formatDurationMs,
   parseTestRunSummary,
@@ -31,8 +45,9 @@ import type {
   VerifyStageResult,
 } from "../../lib/unitWorkspace/types";
 import { suggestWorkspaceVerifyCommands } from "../../lib/stackHints";
-import type { ProjectMeta, StackInspect } from "../../api/types";
-import { isTauri } from "../../tauri/bridge";
+import type { ProjectMeta, StackInspect, TestCase } from "../../api/types";
+import { isTauri, readTextFile } from "../../tauri/bridge";
+import { labelOf, priorityLabel, typeLabel } from "../../i18n/labels";
 
 /** Queue notes for batch Generate list (Ghi chú column). */
 export const BATCH_NOTE_WAITING = "Đang chờ…";
@@ -49,68 +64,6 @@ export function isBatchQueueNote(error?: string | null): boolean {
 
 export function isBatchWaitingOrPaused(error?: string | null): boolean {
   return error === BATCH_NOTE_WAITING || error === BATCH_NOTE_PAUSED;
-}
-
-function extractFailedPathTokens(log: string): string[] {
-  const out = new Set<string>();
-  const push = (raw: string) => {
-    const norm = (raw || "").replace(/\\/g, "/").trim();
-    if (!norm) return;
-    const base = norm.split("/").pop() || norm;
-    if (base) out.add(base.toLowerCase());
-    out.add(norm.toLowerCase());
-  };
-  const failLine = /^\s*FAIL\s+(.+)$/gim;
-  let m: RegExpExecArray | null;
-  while ((m = failLine.exec(log)) !== null) {
-    push(m[1] || "");
-  }
-  const specLine = /^\s*(?:at|in)\s+([^\s]+(?:\.test|\.spec)\.[a-z]+)(?::\d+)?/gim;
-  while ((m = specLine.exec(log)) !== null) {
-    push(m[1] || "");
-  }
-  return [...out];
-}
-
-function rowMatchesFailedTokens(
-  row: BatchPipelineRow,
-  manifest: UnitWorkspaceManifest | undefined,
-  tokens: string[]
-): boolean {
-  if (!tokens.length) return false;
-  const hay = new Set<string>();
-  const add = (s?: string | null) => {
-    const norm = (s || "").replace(/\\/g, "/").trim();
-    if (!norm) return;
-    hay.add(norm.toLowerCase());
-    const base = norm.split("/").pop() || norm;
-    hay.add(base.toLowerCase());
-  };
-  add(row.testCaseId);
-  add(row.workspaceRunId);
-  add(row.title);
-  for (const f of manifest?.files || []) {
-    add(f.targetRel);
-    add(f.workspaceRel);
-  }
-  for (const t of tokens) {
-    for (const h of hay) {
-      if (h.includes(t) || t.includes(h)) return true;
-    }
-  }
-  return false;
-}
-
-/** Batch verify PASS for one row (shared by table + log units). */
-function batchVerifyPass(
-  row: BatchPipelineRow,
-  manifest: UnitWorkspaceManifest | undefined,
-  failedTokens: string[],
-  hasMappedFailure: boolean
-): boolean {
-  if (manifest?.verify?.overallPass) return true;
-  if (!hasMappedFailure) return false;
-  return !rowMatchesFailedTokens(row, manifest, failedTokens);
 }
 
 /** Mark not-yet-started rows as paused (current RUNNING row keeps running until done). */
@@ -131,6 +84,40 @@ export function markBatchRowsResumed(rows: BatchPipelineRow[]): BatchPipelineRow
   );
 }
 
+/** Snapshot TC fields onto a batch row for «Chi tiết Test case». */
+export function batchTcSnapshot(tc: Pick<
+  TestCase,
+  | "module"
+  | "precondition"
+  | "steps"
+  | "expectedResult"
+  | "testData"
+  | "priority"
+  | "severity"
+  | "type"
+>): Pick<
+  BatchPipelineRow,
+  | "module"
+  | "precondition"
+  | "steps"
+  | "expectedResult"
+  | "testData"
+  | "priority"
+  | "severity"
+  | "type"
+> {
+  return {
+    module: tc.module ?? undefined,
+    precondition: tc.precondition ?? undefined,
+    steps: tc.steps,
+    expectedResult: tc.expectedResult,
+    testData: tc.testData ?? undefined,
+    priority: tc.priority,
+    severity: tc.severity,
+    type: tc.type,
+  };
+}
+
 export type BatchPipelineRow = {
   key: string;
   testCaseId: string;
@@ -138,10 +125,23 @@ export type BatchPipelineRow = {
   /** Generate ok/fail — queue rows use fail + queue note in `error`. */
   status: "ok" | "fail";
   error?: string;
+  /** Full generate/verify error body for «Chi tiết lỗi» (may be longer than Ghi chú). */
+  errorDetail?: string;
+  /** Relative path under project root where error log was saved (e.g. …/logs/error.log). */
+  errorLogRel?: string;
   workspaceRunId?: string;
   packagePrefix?: string;
   verifyStatus?: "pending" | "pass" | "fail" | "skipped";
   applyStatus?: "pending" | "done" | "skipped";
+  /** TC snapshot — Chi tiết Test case */
+  module?: string;
+  precondition?: string;
+  steps?: string;
+  expectedResult?: string;
+  testData?: string;
+  priority?: string;
+  severity?: string;
+  type?: string;
 };
 
 type BatchVerifyLog = {
@@ -153,6 +153,8 @@ type BatchVerifyLog = {
     title: string;
     verifyStatus: "pass" | "fail";
     workspaceRunId?: string;
+    errorDetail?: string;
+    errorLogRel?: string;
   }>;
 };
 
@@ -213,6 +215,11 @@ export function BatchRunConsole({
   const [verifyLog, setVerifyLog] = useState<BatchVerifyLog | null>(null);
   const [logTab, setLogTab] = useState<"units" | "summary" | "full">("units");
   const [activeLogStage, setActiveLogStage] = useState<string>("test");
+  const [tcDetail, setTcDetail] = useState<BatchPipelineRow | null>(null);
+  const [errorDetail, setErrorDetail] = useState<{
+    row: BatchPipelineRow;
+    body: string;
+  } | null>(null);
 
   const visible = useMemo(() => {
     if (filter === "unverified") {
@@ -347,17 +354,22 @@ export function BatchRunConsole({
       const hasMappedFailure = failedTokens.length > 0;
 
       const promotions: Promise<void>[] = [];
-      const nextRows = rows.map((r) => {
+      const fullVerifyLog = formatVerifyStagesLog(result.stages);
+      const nextRows: BatchPipelineRow[] = [];
+      for (const r of rows) {
         if (!r.workspaceRunId || r.status !== "ok") {
-          return { ...r, verifyStatus: "skipped" as const };
+          nextRows.push({ ...r, verifyStatus: "skipped" as const });
+          continue;
         }
         const m = byRun.get(r.workspaceRunId);
         if (!m) {
-          return {
+          nextRows.push({
             ...r,
             verifyStatus: "fail" as const,
             error: "Thiếu staging sau verify",
-          };
+            errorDetail: "Thiếu staging sau verify",
+          });
+          continue;
         }
         const pass = batchVerifyPass(r, m, failedTokens, hasMappedFailure);
         if (pass && !m.verify?.overallPass) {
@@ -376,13 +388,43 @@ export function BatchRunConsole({
             })
           );
         }
-        return {
+        const excerpt = pass
+          ? undefined
+          : extractUnitFailureExcerpt(testStageLog, r, m, failedTokens) ||
+            (hasMappedFailure
+              ? undefined
+              : testStageLog.trim().slice(0, 6000) || undefined);
+        let errorLogRel: string | undefined;
+        try {
+          await saveErrorLogFile(
+            projectRoot,
+            unitVerifyLogRel(r.workspaceRunId, r.packagePrefix || m.packagePrefix),
+            fullVerifyLog
+          );
+          if (!pass) {
+            const errBody =
+              excerpt?.trim() ||
+              `Verify FAIL (batch)\n\n${fullVerifyLog.slice(-12_000)}`;
+            errorLogRel = await saveErrorLogFile(
+              projectRoot,
+              unitErrorLogRel(r.workspaceRunId, r.packagePrefix || m.packagePrefix),
+              errBody
+            );
+          }
+        } catch {
+          // best-effort persist
+        }
+        nextRows.push({
           ...r,
           verifyStatus: (pass ? "pass" : "fail") as "pass" | "fail",
           error: pass ? undefined : "Verify FAIL (batch)",
+          errorDetail: pass
+            ? undefined
+            : excerpt || fullVerifyLog.slice(-12_000) || r.errorDetail,
+          errorLogRel: pass ? undefined : errorLogRel || r.errorLogRel,
           applyStatus: r.applyStatus ?? ("pending" as const),
-        };
-      });
+        });
+      }
       if (promotions.length) {
         await Promise.all(promotions);
       }
@@ -391,11 +433,19 @@ export function BatchRunConsole({
       const units = work.map((r) => {
         const m = byRun.get(r.workspaceRunId!);
         const pass = batchVerifyPass(r, m, failedTokens, hasMappedFailure);
+        const next = nextRows.find((x) => x.key === r.key || x.workspaceRunId === r.workspaceRunId);
+        const excerpt = pass
+          ? undefined
+          : extractUnitFailureExcerpt(testStageLog, r, m, failedTokens) ||
+            next?.errorDetail ||
+            undefined;
         return {
           testCaseId: r.testCaseId,
           title: r.title,
           verifyStatus: (pass ? "pass" : "fail") as "pass" | "fail",
           workspaceRunId: r.workspaceRunId,
+          errorDetail: excerpt,
+          errorLogRel: next?.errorLogRel,
         };
       });
       setVerifyLog({
@@ -599,6 +649,165 @@ export function BatchRunConsole({
 
   if (rows.length === 0) return null;
 
+  function resolveErrorBody(r: BatchPipelineRow): string {
+    if (r.errorDetail?.trim()) return r.errorDetail.trim();
+    if (r.error && !isBatchQueueNote(r.error)) return r.error;
+    return "";
+  }
+
+  async function openErrorDetail(r: BatchPipelineRow) {
+    let body = resolveErrorBody(r);
+    if (r.errorLogRel && isTauri()) {
+      try {
+        const fromDisk = await readTextFile(projectRoot, r.errorLogRel);
+        if (fromDisk?.trim()) body = fromDisk.trim();
+      } catch {
+        // keep in-memory body
+      }
+    }
+    if (!body) {
+      message.info("Chưa có chi tiết lỗi cho dòng này.");
+      return;
+    }
+    setErrorDetail({ row: r, body });
+  }
+
+  const detailModals = (
+    <>
+      <Modal
+        open={!!tcDetail}
+        title={tcDetail ? `Chi tiết ${tcDetail.testCaseId}` : "Chi tiết TC"}
+        onCancel={() => setTcDetail(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setTcDetail(null)}>
+            Đóng
+          </Button>,
+        ]}
+        width={640}
+      >
+        {tcDetail ? (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Tiêu đề</Typography.Text>
+              <div style={{ marginTop: 4 }}>{tcDetail.title || "—"}</div>
+            </div>
+            <Space
+              wrap
+              style={{ width: "100%", marginBottom: 4 }}
+              styles={{ item: { flex: 1, minWidth: 160 } }}
+            >
+              <div style={{ marginBottom: 12, width: "100%" }}>
+                <Typography.Text type="secondary">Module</Typography.Text>
+                <div style={{ marginTop: 4 }}>{tcDetail.module?.trim() || "—"}</div>
+              </div>
+              <div style={{ marginBottom: 12, width: "100%" }}>
+                <Typography.Text type="secondary">Loại (engine)</Typography.Text>
+                <div style={{ marginTop: 4 }}>
+                  {labelOf(typeLabel, tcDetail.type || "") || tcDetail.type || "—"}
+                </div>
+              </div>
+              <div style={{ marginBottom: 12, width: "100%" }}>
+                <Typography.Text type="secondary">Ưu tiên</Typography.Text>
+                <div style={{ marginTop: 4 }}>
+                  {labelOf(priorityLabel, tcDetail.priority || "") ||
+                    tcDetail.priority ||
+                    "—"}
+                </div>
+              </div>
+            </Space>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Tiền điều kiện</Typography.Text>
+              <pre className="detail-block">
+                {tcDetail.precondition?.trim() || "—"}
+              </pre>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Các bước</Typography.Text>
+              <pre className="detail-block">{tcDetail.steps?.trim() || "—"}</pre>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text type="secondary">Kết quả mong đợi</Typography.Text>
+              <pre className="detail-block">
+                {tcDetail.expectedResult?.trim() || "—"}
+              </pre>
+            </div>
+            <div style={{ marginBottom: 0 }}>
+              <Typography.Text type="secondary">Test data</Typography.Text>
+              <pre className="detail-block">{tcDetail.testData?.trim() || "—"}</pre>
+            </div>
+            {!tcDetail.steps?.trim() && !tcDetail.expectedResult?.trim() ? (
+              <Typography.Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+                Chưa có snapshot nội dung TC trên dòng này — chạy lại Generate batch để gắn chi
+                tiết.
+              </Typography.Text>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
+      <Modal
+        open={!!errorDetail}
+        title={
+          errorDetail
+            ? `Chi tiết lỗi · ${errorDetail.row.testCaseId} · ${errorDetail.row.title}`
+            : "Chi tiết lỗi"
+        }
+        onCancel={() => setErrorDetail(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setErrorDetail(null)}>
+            Đóng
+          </Button>,
+        ]}
+        width={780}
+      >
+        {errorDetail?.row.errorLogRel ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
+            Đã lưu:{" "}
+            <Typography.Text code style={{ fontSize: 11 }}>
+              {errorDetail.row.errorLogRel}
+            </Typography.Text>
+          </Typography.Paragraph>
+        ) : null}
+        <pre
+          className="detail-block"
+          style={{ maxHeight: 460, overflow: "auto", margin: 0 }}
+        >
+          {errorDetail?.body || ""}
+        </pre>
+      </Modal>
+    </>
+  );
+
+  const actionColumn = {
+    title: "Chi tiết",
+    width: 180,
+    fixed: "right" as const,
+    render: (_: unknown, r: BatchPipelineRow) => {
+      const hasErr = Boolean(resolveErrorBody(r) || r.errorLogRel);
+      return (
+        <Space size={0} wrap>
+          <Button
+            type="link"
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => setTcDetail(r)}
+          >
+            Test case
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            danger={hasErr}
+            disabled={!hasErr}
+            icon={<WarningOutlined />}
+            onClick={() => void openErrorDetail(r)}
+          >
+            Lỗi
+          </Button>
+        </Space>
+      );
+    },
+  };
+
   const statusSummary = (
     <Space wrap style={{ marginBottom: variant === "table" ? 8 : 12 }}>
       <Typography.Text type="secondary">
@@ -654,7 +863,9 @@ export function BatchRunConsole({
           sidePhaseBusy
         }
       >
-        {batchRunStatus === "paused" ? "Kiểm thử phần đã gen" : "Kiểm thử"}
+        {batchRunStatus === "paused"
+          ? `Kiểm thử tất cả phần đã gen (${genOk})`
+          : `Kiểm thử tất cả (${genOk})`}
       </Button>
       <Button
         icon={<SaveOutlined />}
@@ -705,9 +916,10 @@ export function BatchRunConsole({
 
   if (variant === "verifyApply") {
     return (
+      <>
       <Card
         id="aitest-batch-verify-apply"
-        title={title || "3. Verify & Apply"}
+        title={title || "3. Execute & Apply"}
         style={{ marginTop: 8 }}
       >
         {statusSummary}
@@ -716,13 +928,15 @@ export function BatchRunConsole({
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
           {batchRunStatus === "paused" ? (
             <>
-              Generate đang <strong>tạm dừng</strong> — có thể{" "}
-              <strong>Kiểm thử / Apply</strong> các unit đã gen xong, rồi bấm Tiếp tục để gen tiếp.
+              Generate đang <strong>tạm dừng</strong> — bấm{" "}
+              <strong>Kiểm thử tất cả phần đã gen</strong> / Apply các unit đã gen xong (không phụ thuộc
+              bộ lọc bảng), rồi bấm Tiếp tục để gen tiếp.
             </>
           ) : (
             <>
-              Verify chạy <strong>một lệnh test</strong> cho toàn bộ file AItest đã sinh trong batch.
-              Apply ghi từng job PASS vào AItest/. Hủy bỏ = không Apply + xóa file gen + dọn staging.
+              <strong>Kiểm thử tất cả</strong> chạy <strong>một lệnh test</strong> cho toàn bộ unit
+              Generate OK trong batch — không phụ thuộc bộ lọc bảng. Apply ghi từng job PASS vào
+              AItest/. Hủy bỏ = không Apply + xóa file gen + dọn staging.
             </>
           )}
         </Typography.Paragraph>
@@ -820,6 +1034,36 @@ export function BatchRunConsole({
                               <Tag color="error">FAIL</Tag>
                             ),
                         },
+                        {
+                          title: "Chi tiết",
+                          width: 100,
+                          render: (_, r) =>
+                            r.verifyStatus === "fail" &&
+                            (r.errorDetail || r.errorLogRel) ? (
+                              <Button
+                                type="link"
+                                size="small"
+                                danger
+                                icon={<WarningOutlined />}
+                                onClick={() =>
+                                  void openErrorDetail({
+                                    key: r.workspaceRunId || r.testCaseId,
+                                    testCaseId: r.testCaseId,
+                                    title: r.title,
+                                    status: "fail",
+                                    error: "Verify FAIL (batch)",
+                                    errorDetail: r.errorDetail,
+                                    errorLogRel: r.errorLogRel,
+                                    workspaceRunId: r.workspaceRunId,
+                                  })
+                                }
+                              >
+                                Lỗi
+                              </Button>
+                            ) : (
+                              <Typography.Text type="secondary">—</Typography.Text>
+                            ),
+                        },
                       ]}
                     />
                   ),
@@ -884,6 +1128,8 @@ export function BatchRunConsole({
           </div>
         ) : null}
       </Card>
+      {detailModals}
+    </>
     );
   }
 
@@ -895,7 +1141,7 @@ export function BatchRunConsole({
         pagination={false}
         rowKey="key"
         dataSource={visible}
-        scroll={{ x: 720 }}
+        scroll={{ x: 900 }}
         columns={[
           { title: "TC", dataIndex: "testCaseId", width: 90 },
           { title: "Tiêu đề", dataIndex: "title", ellipsis: true },
@@ -916,7 +1162,7 @@ export function BatchRunConsole({
               ),
           },
           {
-            title: "Verify",
+            title: "Execute",
             width: 90,
             render: (_, r) => {
               if (r.verifyStatus === "pass")
@@ -965,8 +1211,10 @@ export function BatchRunConsole({
               return v;
             },
           },
+          actionColumn,
         ]}
       />
+      {detailModals}
     </Card>
   );
 }

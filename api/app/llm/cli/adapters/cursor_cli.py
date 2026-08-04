@@ -281,10 +281,10 @@ class CursorCLIAdapter(BaseCLIAdapter):
             try:
                 timeout = max(
                     60,
-                    min(600, int(os.environ.get("AITEST_CURSOR_ONESHOT_TIMEOUT", "240"))),
+                    min(600, int(os.environ.get("AITEST_CURSOR_ONESHOT_TIMEOUT", "360"))),
                 )
             except ValueError:
-                timeout = 240
+                timeout = 360
         resolved = resolve_command(command)
         # Prefer empty workspace cwd when command carries --workspace
         run_cwd = None

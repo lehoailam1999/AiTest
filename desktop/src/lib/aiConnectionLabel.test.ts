@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { aiConnectionDisplayLabel } from "./aiConnectionLabel.ts";
 
 describe("aiConnectionDisplayLabel", () => {
-  it("shows Cursor CLI when runner is AI_CLI even if provider is openai", () => {
+  it("shows Cursor CLI when cliType is cursor-cli even if provider is openai", () => {
     assert.equal(
       aiConnectionDisplayLabel({
         provider: "openai",
@@ -15,15 +15,15 @@ describe("aiConnectionDisplayLabel", () => {
     );
   });
 
-  it("falls back to Direct API provider when not CLI", () => {
+  it("defaults to AI CLI when cliType missing", () => {
     assert.equal(
       aiConnectionDisplayLabel({
         provider: "openai",
         backendType: "openai",
-        runnerMode: "API_DIRECT",
+        runnerMode: "AI_CLI",
         cliType: null,
       }),
-      "openai"
+      "AI CLI"
     );
   });
 });

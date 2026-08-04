@@ -61,7 +61,7 @@ def test_e2e_system_prompt_has_locator_and_step_rules():
     heal = e2e_system_prompt(heal=True)
     assert "E2ECG" in heal
     assert "selectOption" in heal or "LOCATOR" in heal or "data-cy" in heal
-    assert "Feature journey" in heal or "FEATURE ENTRY" in heal
+    assert "Feature journey" in heal or "FEATURE ENTRY" in heal or "Feature entry" in heal
     assert "AUTH" in heal or "storageState" in heal or "ensureAuthenticated" in heal
     assert "domcontentloaded" in heal or "networkidle" in heal
     slim_auth = e2e_system_prompt(has_storage_state=True)

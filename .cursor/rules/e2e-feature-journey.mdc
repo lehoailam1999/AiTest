@@ -1,26 +1,32 @@
 ---
-description: E2E Feature entry skeleton — Phase A–F; auth/locator → e2e-codegen
+description: E2E Feature entry skeleton — Phase C only; còn lại → e2e-codegen
 globs: api/app/llm/e2e_journey_rules.py
 alwaysApply: false
 ---
 
-# E2E Feature Journey (Feature entry only)
+# E2E Feature Journey (Phase C only)
 
-> Runtime: [`e2e_journey_rules.py`](api/app/llm/e2e_journey_rules.py).  
-> **Auth / role / locator / assert / session** → [`e2e-codegen.mdc`](e2e-codegen.mdc) (E2ECG). Không copy Rules 1–16 vào đây.
+> SoT: [`e2e_journey_rules.py`](../api/app/llm/e2e_journey_rules.py).  
+> Auth / locator / Act-Arrange / assert / Spec order → [`e2e-codegen.mdc`](e2e-codegen.mdc) (E2ECG 1–19).  
+> **Không** copy Rule 7 skeleton / Rule 19 / Auth vào đây (tránh lặp).
 
-## Giá trị duy nhất
+## Phase C
 
-**Phase C Feature entry** sau auth, trước fill:
+1. Deep-link **tự lấy theo từng TC** (không bake 1 path cả suite):
+   - Spec `Feature entry: /…` thắng FE dump route khác module
+   - TC `path:` / `featurePath:` · token từ title/FE · Inspect routes (scored)
+   - FE file → URL: suy từ **source dự án đang test**, không copy path app khác
+2. Guard **force-bake** đúng path vào `gotoFeature` / Feature-entry mỗi Spec+POM
+3. Menu chỉ khi vẫn chưa có path — label từ Inspect DOM dự án đó
+4. Landmark trước Act · Create/Edit trước fill nếu field trong dialog
+5. `gotoFeature` ≠ tự Create
+6. Verify: **tuần tự** (`workers: 1`, lần lượt từng TC folder) — không parallel browser
+7. Trước Playwright: materialize `playwright.config.ts` + `_shared/pages/*.page.ts` nếu thiếu
 
-1. Path từ TC Precondition / FE Routes / `E2E_FEATURE_PATH` / menu đúng label FE  
-2. Landmark visible trước Act  
-3. List vs form — mở Create/Edit nếu field chỉ có trong dialog  
-
-## Spec order
-
-`Auth (overlay) → Feature entry → Arrange → Act → Assert (E2ECG 14)`
+Arrange/Act sau entry → **E2ECG Rule 19**.  
+Spec order Auth→Entry→Arrange→Act → **E2ECG Rule 7** (Phase-2 guard).
+Category `[E2E-Auth/Permission]` + «phiên đã xác thực» = feature TC (không phải Login).
 
 ## Khi sửa
 
-Chỉ sửa Feature entry / Phase C. Mọi rule khác sửa trong `e2e_codegen_rules.py`.
+Chỉ Phase C / anti-pattern Feature entry. Mọi rule khác → `e2e-codegen.mdc` + `e2e_codegen_rules.py`.

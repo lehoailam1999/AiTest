@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -29,10 +30,12 @@ from app.services.e2e_auth_bootstrap import (
     discover_project_auth,
     infer_role_from_text,
     merge_discovered_auth,
+    parse_roles_list,
 )
 from app.services.e2e_auth_seed import (
     apply_auth_to_testcase,
     ensure_auth_seed,
+    ensure_auth_seed_roles,
     parse_auth_markers,
 )
 from app.services.e2e_orchestrator import (
@@ -111,6 +114,12 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         execution_context=str(
             body.get("executionContext") or body.get("execution_context") or ""
         ).strip(),
+        feature_path=str(
+            body.get("featurePath")
+            or body.get("feature_path")
+            or body.get("E2E_FEATURE_PATH")
+            or ""
+        ).strip(),
     )
 
 
@@ -148,7 +157,7 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
     if conn is None or not C.is_ai_ready(conn.status):
         return errors(
             400,
-            "AI chưa Ready — vào Cấu hình AI thiết lập (API Key hoặc AI CLI) và Verify",
+            "AI chưa Ready — vào Cấu hình AI thiết lập AI CLI và Verify",
         )
 
     # Source-context enrichment (same spirit as Unit/API generate):
@@ -263,31 +272,46 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
 
     auth_seed_dto = None
     project_root = str(body.get("projectRoot") or "").strip()
-    if project_root:
+    skip_auth_seed = bool(body.get("skipAuthSeed") or body.get("skip_auth_seed"))
+    if project_root and not skip_auth_seed:
         marker_role, _ref = parse_auth_markers(tc.test_data, tc.precondition)
-        role = (
-            marker_role
-            or infer_role_from_text(tc.precondition or "", tc.title or "", req.module)
-            or "default"
+        roles = parse_roles_list(
+            tc.test_data or "",
+            tc.precondition or "",
+            tc.title or "",
+            req.module or "",
         )
-        seed_res = await ensure_auth_seed(
+        if marker_role and marker_role not in roles:
+            roles.insert(0, marker_role)
+        if not roles:
+            roles = [
+                infer_role_from_text(tc.precondition or "", tc.title or "", req.module)
+                or "default"
+            ]
+        seed_results = await ensure_auth_seed_roles(
             project_root=project_root,
             conn=conn,
-            role=role,
+            roles=roles,
             target_url=req.target_url,
             source_code=req.source_code,
             dom_snapshot=req.dom_snapshot,
             source_file_name=req.source_file_name,
         )
-        auth_seed_dto = seed_res.to_dict()
-        if seed_res.ok and seed_res.auth_rel:
-            apply_auth_to_testcase(tc, role=seed_res.role, auth_rel=seed_res.auth_rel)
+        primary = next((r for r in seed_results if r.ok), seed_results[0] if seed_results else None)
+        auth_seed_dto = {
+            "primary": primary.to_dict() if primary else None,
+            "roles": [r.to_dict() for r in seed_results],
+        }
+        if primary and primary.ok and primary.auth_rel:
+            apply_auth_to_testcase(tc, role=primary.role, auth_rel=primary.auth_rel)
             try:
                 db.commit()
                 db.refresh(tc)
             except Exception:  # noqa: BLE001
                 db.rollback()
                 log.warning("attach auth markers to TC failed", exc_info=True)
+    elif skip_auth_seed:
+        auth_seed_dto = {"skipped": True, "reason": "skipAuthSeed"}
 
     return ok(
         {
@@ -381,8 +405,9 @@ async def e2e_auth_ensure_route(request: Request, db: Annotated[Session, Depends
         .filter(AiBackendConnection.project_id == project_id)
         .first()
     )
-    if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — không thể gen seed auth")
+    # AI Ready optional — SUT mine (JHipster i18n/defaults) works without LLM.
+    if conn is not None and not C.is_ai_ready(conn.status):
+        conn = None
 
     tc = None
     tc_id = _uuid(str(body.get("testCaseId") or ""))
@@ -397,16 +422,27 @@ async def e2e_auth_ensure_route(request: Request, db: Annotated[Session, Depends
         (tc.test_data if tc else "") or str(body.get("testData") or ""),
         (tc.precondition if tc else "") or "",
     )
-    role = (
-        str(body.get("role") or body.get("e2eRole") or "").strip()
-        or marker_role
-        or infer_role_from_text(
-            (tc.precondition if tc else "") or "",
-            (tc.title if tc else "") or "",
-            str(body.get("module") or ""),
-        )
-        or "default"
+    roles = parse_roles_list(
+        (tc.test_data if tc else "") or str(body.get("testData") or ""),
+        (tc.precondition if tc else "") or "",
+        (tc.title if tc else "") or "",
+        str(body.get("module") or ""),
     )
+    explicit = str(body.get("role") or body.get("e2eRole") or "").strip()
+    if explicit:
+        roles = [explicit] + [r for r in roles if r != explicit]
+    elif marker_role and marker_role not in roles:
+        roles.insert(0, marker_role)
+    if not roles:
+        roles = ["default"]
+
+    # Optional: body.roles = ["admin","investigator"]
+    extra_roles = body.get("roles")
+    if isinstance(extra_roles, list):
+        for r in extra_roles:
+            slug = str(r or "").strip().lower()
+            if slug and slug not in roles:
+                roles.append(slug)
 
     source_code = str(body.get("sourceCode") or "").strip()
     dom_snapshot = str(body.get("domSnapshot") or "").strip()
@@ -425,24 +461,30 @@ async def e2e_auth_ensure_route(request: Request, db: Annotated[Session, Depends
             if part.split("\n", 1)[-1].strip()
         )
 
-    seed_res = await ensure_auth_seed(
+    seed_results = await ensure_auth_seed_roles(
         project_root=project_root,
         conn=conn,
-        role=role,
+        roles=roles,
         target_url=str(body.get("targetUrl") or "").strip(),
         source_code=source_code,
         dom_snapshot=dom_snapshot,
         source_file_name=source_file_name or (tc.title if tc else "") or "",
         force=bool(body.get("force")),
     )
-    if tc is not None and seed_res.ok and seed_res.auth_rel:
-        apply_auth_to_testcase(tc, role=seed_res.role, auth_rel=seed_res.auth_rel)
+    primary = next((r for r in seed_results if r.ok), seed_results[0] if seed_results else None)
+    if tc is not None and primary and primary.ok and primary.auth_rel:
+        apply_auth_to_testcase(tc, role=primary.role, auth_rel=primary.auth_rel)
         try:
             db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()
 
-    return ok(seed_res.to_dict())
+    return ok(
+        {
+            **(primary.to_dict() if primary else {"ok": False, "message": "no roles"}),
+            "roles": [r.to_dict() for r in seed_results],
+        }
+    )
 
 
 
@@ -488,37 +530,35 @@ async def e2e_inspect_route(request: Request, db: Annotated[Session, Depends(get
     source_code = str(body.get("sourceCode") or "").strip()
     project_root = str(body.get("projectRoot") or "").strip()
     source_paths = body.get("sourcePaths") or body.get("relatedPaths") or []
+    feature_path = str(body.get("featurePath") or body.get("E2E_FEATURE_PATH") or "").strip()
+    storage_state_rel = str(
+        body.get("storageStatePath")
+        or body.get("storageStateRel")
+        or body.get("E2E_STORAGE_STATE")
+        or ""
+    ).strip()
+    username = str(body.get("username") or body.get("e2eUsername") or "").strip()
+    password = str(body.get("password") or body.get("e2ePassword") or "").strip()
+    module = str(body.get("module") or "").strip()
+    role = str(body.get("role") or body.get("authRole") or "default").strip() or "default"
+    pkg = body.get("packagePrefix", body.get("package_prefix"))
+    package_prefix = None if pkg is None else str(pkg)
 
     pairs: list[tuple[str, str]] = []
+    # Phase 1: bare string paths → read from disk, then MERGE with URL (do not early-return).
     if project_root and isinstance(source_paths, list) and source_paths:
-        from app.services.e2e_dom_inspector import inspect_source_files
-
-        # Prefer disk read when paths are bare strings
         rels = [str(p) for p in source_paths if isinstance(p, str)]
         if rels:
-            result = inspect_source_files(project_root, rels)
-            return ok(
-                {
-                    "targetUrl": target_url or None,
-                    "source": result.source,
-                    "routes": result.routes,
-                    "elements": [
-                        {
-                            "tag": e.tag,
-                            "role": e.role,
-                            "name": e.name,
-                            "testId": e.test_id,
-                            "ariaLabel": e.aria_label,
-                            "placeholder": e.placeholder,
-                            "type": e.type,
-                            "href": e.href,
-                            "selectorCandidates": e.selector_candidates,
-                        }
-                        for e in result.elements
-                    ],
-                    "promptJson": result.to_prompt_json(),
-                }
-            )
+            root = Path(project_root)
+            for rel in rels:
+                p = root / rel.replace("\\", "/")
+                if p.is_file():
+                    try:
+                        pairs.append(
+                            (rel, p.read_text(encoding="utf-8", errors="replace"))
+                        )
+                    except OSError:
+                        pass
         for item in source_paths:
             if isinstance(item, dict) and item.get("path") and item.get("content") is not None:
                 pairs.append((str(item["path"]), str(item["content"])))
@@ -531,6 +571,16 @@ async def e2e_inspect_route(request: Request, db: Annotated[Session, Depends(get
         or body.get("render") in ("playwright", "chromium", "browser")
     )
 
+    from app.services.e2e_auth_bootstrap import resolve_storage_state_abs
+
+    storage_abs = resolve_storage_state_abs(
+        project_root,
+        storage_state_rel=storage_state_rel,
+        module=module,
+        package_prefix=package_prefix,
+        role=role,
+    )
+
     from app.services.e2e_dom_inspector import inspect_target
 
     try:
@@ -540,6 +590,10 @@ async def e2e_inspect_route(request: Request, db: Annotated[Session, Depends(get
             source_paths=pairs,
             use_playwright=use_playwright,
             project_root=project_root,
+            storage_state_path=storage_abs,
+            feature_path=feature_path,
+            username=username,
+            password=password,
         )
     except Exception as exc:  # noqa: BLE001
         return errors(400, f"inspect failed: {exc}")
@@ -549,6 +603,8 @@ async def e2e_inspect_route(request: Request, db: Annotated[Session, Depends(get
             "targetUrl": result.target_url or None,
             "source": result.source,
             "routes": result.routes,
+            "storageStateAbs": storage_abs or None,
+            "storageStateUsed": bool(storage_abs),
             "elements": [
                 {
                     "tag": e.tag,
@@ -565,7 +621,8 @@ async def e2e_inspect_route(request: Request, db: Annotated[Session, Depends(get
             ],
             "promptJson": result.to_prompt_json(),
             "rawSnippet": result.raw_snippet[:2000] if result.raw_snippet else None,
-            "usePlaywright": use_playwright,
+            "featurePath": feature_path or None,
+            "postAuth": bool(storage_abs or feature_path or (username and password)),
         }
     )
 
@@ -852,9 +909,10 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
                 }
             )
 
-        # Map primarySpecPath → testCaseId from healItems / items
+        # Map primarySpecPath → testCaseId (+ optional per-TC Inspect DOM) from healItems
         items = body.get("healItems") or body.get("items") or []
         spec_to_tc: dict[str, str] = {}
+        spec_to_dom: dict[str, str] = {}
         if isinstance(items, list):
             for it in items:
                 if not isinstance(it, dict):
@@ -863,9 +921,13 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
                     "\\", "/"
                 )
                 tid = str(it.get("testCaseId") or "").strip()
+                dom = str(it.get("domSnapshot") or it.get("dom_snapshot") or "").strip()
                 if sp and tid:
                     spec_to_tc[sp] = tid
                     spec_to_tc[sp.split("/")[-1]] = tid
+                if sp and dom:
+                    spec_to_dom[sp] = dom
+                    spec_to_dom[sp.split("/")[-1]] = dom
 
         max_retries = int(body.get("maxRetries") or DEFAULT_MAX_RETRIES)
         max_retries = max(1, min(max_retries, 5))
@@ -902,7 +964,12 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
                     }
                 )
                 continue
-            req = _build_e2e_req(tc, body, project=project)
+            # Prefer per-TC Inspect from Generate over shared warm-up body DOM
+            heal_body = body
+            per_dom = spec_to_dom.get(sp) or spec_to_dom.get(sp.split("/")[-1]) or ""
+            if per_dom:
+                heal_body = {**body, "domSnapshot": per_dom}
+            req = _build_e2e_req(tc, heal_body, project=project)
             try:
                 env_extra, work_auth, _disc = merge_discovered_auth(
                     body,

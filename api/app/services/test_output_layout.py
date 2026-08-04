@@ -3,8 +3,9 @@ Output layout for generated tests applied into the user's repo.
 
 [{pkg}/]AItest/                 ← always sibling of the package that owns src/lib
   UnitTest/ | IntegrationTest/ | APITest/ | E2ETest/
-    {Module}/
-      {TestFile}
+    E2ETest/_shared/            ← auth.helper, storage, shim, shared POM pages
+    E2ETest/{Requirement}/{TC}/ ← specs/ + playwright.config.ts only
+    {other kinds}/{Module}/…
 
 Monorepo (e.g. root with backend/ + frontend/):
   backend/src/…  → backend/AItest/…
@@ -652,22 +653,49 @@ def _build_e2e_module(
     test_case_title: str = "",
 ) -> str:
     """
-    Build E2E subfolder from requirement + test case (like Unit test layout).
+    Build E2E subfolder — always prefer {Requirement}/{TC}.
 
     Priority:
       1) requirement_title / test_case_title  → {Requirement}/{TC}
-      2) requirement_title only               → {Requirement}
-      3) module (legacy fallback)             → {Module}
+      2) module / test_case_title             → {ModuleAsReq}/{TC}
+      3) requirement_title only               → {Requirement}
+      4) test_case_title only                 → {TC}
+      5) module (last resort)                 → {Module}
     """
     req = sanitize_path_segment(requirement_title)
     tc = sanitize_path_segment(test_case_title)
+    mod = sanitize_path_segment(module)
     if req and tc:
         return f"{req}/{tc}"
+    if mod and tc:
+        return f"{mod}/{tc}"
     if req:
         return req
     if tc:
         return tc
-    return sanitize_path_segment(module)
+    return mod
+
+
+def e2e_suite_root(
+    *,
+    package_prefix: str | None = None,
+    source_file_name: str | None = None,
+) -> str:
+    """[{pkg}/]AItest/E2ETest (no trailing slash) — parent of _shared and {Req}/{TC}."""
+    kind_root = aitest_kind_root("e2e")
+    pkg = package_prefix_from_source(source_file_name, package_prefix=package_prefix)
+    if pkg:
+        return f"{pkg}/{kind_root}".replace("//", "/")
+    return kind_root
+
+
+def e2e_shared_root(
+    *,
+    package_prefix: str | None = None,
+    source_file_name: str | None = None,
+) -> str:
+    """[{pkg}/]AItest/E2ETest/_shared — auth, storage, shim, shared POMs."""
+    return f"{e2e_suite_root(package_prefix=package_prefix, source_file_name=source_file_name)}/_shared"
 
 
 def e2e_module_root(
@@ -679,14 +707,36 @@ def e2e_module_root(
     test_case_title: str = "",
 ) -> str:
     """[{pkg}/]AItest/E2ETest/{Requirement}/{TC} (no trailing slash)."""
-    kind_root = aitest_kind_root("e2e")
-    pkg = package_prefix_from_source(source_file_name, package_prefix=package_prefix)
-    if pkg:
-        kind_root = f"{pkg}/{kind_root}"
+    kind_root = e2e_suite_root(
+        package_prefix=package_prefix, source_file_name=source_file_name
+    )
     mod = _build_e2e_module(module, requirement_title, test_case_title)
     if mod:
         return f"{kind_root}/{mod}".replace("//", "/")
     return kind_root
+
+
+def _is_e2e_shared_artifact(path: str, kind: str = "") -> bool:
+    """True when file belongs under E2ETest/_shared (not per-TC)."""
+    p = (path or "").replace("\\", "/").lower()
+    base = os.path.basename(p)
+    k = (kind or "").lower()
+    if k == "page" or p.endswith(".page.ts") or "/pages/" in f"/{p}/":
+        return True
+    if base in (
+        "auth.helper.ts",
+        "storagestate.json",
+        "global.setup.ts",
+        "playwright-shim.d.ts",
+    ):
+        return True
+    if "/types/" in f"/{p}/" and "shim" in base:
+        return True
+    if k == "fixture" and base.endswith((".json", ".ts")) and (
+        "storage" in base or "auth" in base or "global.setup" in base
+    ):
+        return True
+    return False
 
 
 def resolve_e2e_file_paths(
@@ -700,7 +750,11 @@ def resolve_e2e_file_paths(
     test_case_title: str = "",
 ) -> list:
     """
-    Normalize LLM-returned E2E paths under AItest/E2ETest/{Requirement}/{TC}/…
+    Normalize LLM E2E paths:
+
+      {suite}/_shared/pages|fixtures|types/…  — POM, auth, storage, shim
+      {suite}/{Req}/{TC}/specs|playwright.config.ts — TC-local only
+
     Accepts objects with .path / .content / .kind (E2EFile) or dicts.
     """
     from app.llm.base import E2EFile
@@ -712,12 +766,15 @@ def resolve_e2e_file_paths(
         requirement_title=requirement_title,
         test_case_title=test_case_title,
     )
+    shared = e2e_shared_root(
+        package_prefix=package_prefix, source_file_name=source_file_name
+    )
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", journey_slug or "journey").strip("-") or "journey"
     out: list[E2EFile] = []
     seen: dict[str, int] = {}
 
     def _normalize_under_root(raw_path: str) -> str:
-        """Collapse duplicated AItest/E2ETest prefixes into one canonical root."""
+        """Collapse duplicated AItest/E2ETest prefixes; keep _shared tails intact."""
         p = _norm_rel(raw_path)
         if not p:
             return ""
@@ -730,17 +787,64 @@ def resolve_e2e_file_paths(
                 pairs.append((i, i + 1))
         if not pairs:
             return p
-        # Keep the deepest AItest/E2ETest suffix to avoid nested mirrors.
         last_ai, last_kind = pairs[-1]
         tail = segs[last_kind + 1 :]
+        # Already under _shared — re-root to canonical shared
+        if tail and tail[0].lower() == "_shared":
+            rest = tail[1:]
+            return "/".join([shared] + rest).replace("//", "/") if rest else shared
         base = root.split("/")
-        # Avoid duplicated first segment when root already includes it
-        # e.g. root=AItest/E2ETest/To-do and tail starts with To-do/...
         if tail and base and tail[0].lower() == base[-1].lower():
             tail = tail[1:]
         if tail:
             return "/".join(base + tail).replace("//", "/")
         return root
+
+    def _route_final(path: str, kind: str, base_name: str) -> tuple[str, str]:
+        """Return (final_path, kind) under shared or TC root."""
+        low = path.lower()
+        leaf = base_name or ""
+
+        if low.endswith("playwright.config.ts") or low.endswith("playwright.config.js") or kind == "config":
+            return f"{root}/playwright.config.ts", "config"
+
+        if leaf.lower() == "playwright-shim.d.ts" or (
+            "/types/" in f"/{low}/" and "shim" in leaf.lower()
+        ):
+            return f"{shared}/types/playwright-shim.d.ts", "fixture"
+
+        if leaf.lower() == "auth.helper.ts":
+            return f"{shared}/fixtures/auth.helper.ts", "fixture"
+
+        if leaf.lower() in ("storagestate.json", "global.setup.ts") or (
+            leaf.lower().startswith("storagestate") and leaf.lower().endswith(".json")
+        ):
+            return f"{shared}/fixtures/{leaf}", "fixture"
+
+        if (
+            kind == "page"
+            or leaf.endswith(".page.ts")
+            or low.startswith("pages/")
+            or "/pages/" in f"/{low}/"
+        ):
+            name = leaf or f"{slug}.page.ts"
+            return f"{shared}/pages/{name}", "page"
+
+        if kind == "fixture" or low.startswith("fixtures/") or "/fixtures/" in f"/{low}/":
+            name = leaf or "data.json"
+            # Non-shared fixtures still go shared when auth/storage-like; else shared/fixtures
+            return f"{shared}/fixtures/{name}", "fixture"
+
+        if kind == "spec" or low.startswith("specs/") or "/specs/" in f"/{low}/":
+            name = leaf or f"{slug}.spec.ts"
+            if not name.endswith(".spec.ts") and not name.endswith(".test.ts"):
+                name = f"{slug}.spec.ts"
+            return f"{root}/specs/{name}", "spec"
+
+        name = leaf or f"{slug}.spec.ts"
+        if not name.endswith(".spec.ts") and not name.endswith(".test.ts"):
+            name = f"{slug}.spec.ts"
+        return f"{root}/specs/{name}", "spec"
 
     for item in files:
         if isinstance(item, E2EFile):
@@ -759,64 +863,13 @@ def resolve_e2e_file_paths(
 
         low = path.lower()
         base_name = os.path.basename(path)
-        # Already under AItest/E2ETest => still normalize to canonical root.
         if "aitest/" in low and "e2etest" in low:
-            normalized = _normalize_under_root(path)
-            if normalized == path:
-                final = path
-            else:
-                low_norm = normalized.lower()
-                if low_norm.endswith("playwright.config.ts") or low_norm.endswith("playwright.config.js"):
-                    final = f"{root}/playwright.config.ts"
-                    kind = "config"
-                elif "/pages/" in f"/{low_norm}/" or kind == "page":
-                    final = f"{root}/pages/{base_name or f'{slug}.page.ts'}"
-                    kind = "page"
-                elif "/specs/" in f"/{low_norm}/" or kind == "spec":
-                    name = base_name or f"{slug}.spec.ts"
-                    if not name.endswith(".spec.ts") and not name.endswith(".test.ts"):
-                        name = f"{slug}.spec.ts"
-                    final = f"{root}/specs/{name}"
-                    kind = "spec"
-                elif "/fixtures/" in f"/{low_norm}/" or kind == "fixture":
-                    final = f"{root}/fixtures/{base_name or 'data.json'}"
-                    kind = "fixture"
-                else:
-                    final = normalized
-        elif low.endswith("playwright.config.ts") or low.endswith("playwright.config.js"):
-            final = f"{root}/playwright.config.ts"
-            kind = "config"
-        elif low.startswith("pages/") or "/pages/" in f"/{low}/":
-            name = os.path.basename(path)
-            final = f"{root}/pages/{name}"
-            kind = "page"
-        elif low.startswith("specs/") or "/specs/" in f"/{low}/":
-            name = os.path.basename(path)
-            final = f"{root}/specs/{name}"
-            kind = "spec"
-        elif low.startswith("fixtures/") or "/fixtures/" in f"/{low}/":
-            name = os.path.basename(path)
-            final = f"{root}/fixtures/{name}"
-            kind = "fixture"
-        elif kind == "page" or path.endswith(".page.ts"):
-            name = os.path.basename(path) or f"{slug}.page.ts"
-            final = f"{root}/pages/{name}"
-            kind = "page"
-        elif kind == "config":
-            final = f"{root}/playwright.config.ts"
-        elif kind == "fixture":
-            name = os.path.basename(path) or "data.json"
-            final = f"{root}/fixtures/{name}"
-        else:
-            name = os.path.basename(path) or f"{slug}.spec.ts"
-            if not name.endswith(".spec.ts") and not name.endswith(".test.ts"):
-                name = f"{slug}.spec.ts"
-            final = f"{root}/specs/{name}"
-            kind = "spec"
+            path = _normalize_under_root(path)
+            low = path.lower()
+            base_name = os.path.basename(path)
 
+        final, kind = _route_final(path, kind or "", base_name)
         final = final.replace("//", "/")
-        # Same canonical path → last wins (overwrite). Salt-fork created duplicate
-        # specs/pages for one TC and broke Unit-like "one file per path" layout.
         if final in seen:
             idx = seen[final]
             out[idx] = E2EFile(path=final, content=content, kind=kind)
@@ -824,10 +877,8 @@ def resolve_e2e_file_paths(
         seen[final] = len(out)
         out.append(E2EFile(path=final, content=content, kind=kind))
 
-    # TS portability guard:
-    # Some target repos do not install @playwright/test in their main workspace.
-    # Add a local ambient-module shim so generated E2E files don't raise TS2307.
-    shim_path = f"{root}/types/playwright-shim.d.ts".replace("//", "/")
+    # Shim under _shared/types (once)
+    shim_path = f"{shared}/types/playwright-shim.d.ts".replace("//", "/")
     shim_content = (
         "declare module '@playwright/test' {\n"
         "  export const test: any;\n"
@@ -842,8 +893,6 @@ def resolve_e2e_file_paths(
         seen[shim_path] = len(out)
         out.append(E2EFile(path=shim_path, content=shim_content, kind="fixture"))
 
-    # Post-check: keep internal imports stable after relocating files under AItest/E2ETest/{Module}.
-    # This fixes common AI drift like importing pages via "./pages/..." from specs folder.
     by_page_base: dict[str, str] = {}
     for f in out:
         p = f.path.replace("\\", "/")
@@ -852,18 +901,41 @@ def resolve_e2e_file_paths(
         base = os.path.splitext(os.path.basename(p))[0].lower()
         by_page_base[base] = p
 
+    auth_helper_path = next(
+        (
+            f.path.replace("\\", "/")
+            for f in out
+            if f.path.replace("\\", "/").lower().endswith("auth.helper.ts")
+        ),
+        f"{shared}/fixtures/auth.helper.ts",
+    )
+    storage_shared = f"{shared}/fixtures/storageState.json"
+
     import_re = re.compile(r"""(from\s+['"])([^'"]+)(['"])""", re.MULTILINE)
     req_re = re.compile(r"""(require\(\s*['"])([^'"]+)(['"]\s*\))""", re.MULTILINE)
 
     def _norm_no_ext(spec: str) -> str:
         return re.sub(r"\.(tsx?|jsx?)$", "", spec.replace("\\", "/"), flags=re.IGNORECASE)
 
-    def _normalize_spec_storage_state(text: str) -> str:
-        # Keep spec-level override compatible with per-TC config directory.
-        # If model emits absolute-ish AItest/... path, rewrite to local fixtures.
+    def _rel_import(from_file: str, to_file: str) -> str:
+        from_dir = os.path.dirname(from_file.replace("\\", "/")) or "."
+        rel = os.path.relpath(to_file.replace("\\", "/"), from_dir).replace("\\", "/")
+        rel = _norm_no_ext(rel)
+        if not rel.startswith("."):
+            rel = f"./{rel}"
+        return rel
+
+    def _normalize_spec_storage_state(text: str, spec_path: str) -> str:
+        rel = _rel_import(spec_path, storage_shared)
+        # keep .json extension in storageState string
+        storage_rel = os.path.relpath(
+            storage_shared, os.path.dirname(spec_path.replace("\\", "/")) or "."
+        ).replace("\\", "/")
+        if not storage_rel.startswith("."):
+            storage_rel = f"./{storage_rel}"
         return re.sub(
             r"""(storageState\s*:\s*)(['"])[^'"]*\2""",
-            r'\1"./fixtures/storageState.json"',
+            rf'\1"{storage_rel}"',
             text,
             flags=re.IGNORECASE,
         )
@@ -873,7 +945,6 @@ def resolve_e2e_file_paths(
         low = _norm_no_ext(raw).lower()
         if "node_modules" in low or low.startswith("@playwright/"):
             return None
-        # identify leaf candidate
         leaf = os.path.basename(low)
         if not leaf:
             return None
@@ -889,12 +960,19 @@ def resolve_e2e_file_paths(
                 break
         if not page_path:
             return None
-        spec_dir = os.path.dirname(spec_path.replace("\\", "/")) or "."
-        rel = os.path.relpath(page_path, spec_dir).replace("\\", "/")
-        rel = _norm_no_ext(rel)
-        if not rel.startswith("."):
-            rel = f"./{rel}"
-        return rel
+        return _rel_import(spec_path, page_path)
+
+    def _rewrite_auth_helper(spec_path: str, import_spec: str) -> str | None:
+        low = import_spec.strip().lower().replace("\\", "/")
+        if "auth.helper" not in low:
+            return None
+        return _rel_import(spec_path, auth_helper_path)
+
+    def _shim_ref_for(file_path: str) -> str:
+        rel = os.path.relpath(
+            shim_path, os.path.dirname(file_path.replace("\\", "/")) or "."
+        ).replace("\\", "/")
+        return f'/// <reference path="{rel}" />\n'
 
     fixed: list[E2EFile] = []
     for f in out:
@@ -902,32 +980,51 @@ def resolve_e2e_file_paths(
         content = f.content
         low_content = content.lower()
         if "@playwright/test" in low_content and "reference path=" not in low_content:
-            ref = None
-            if "/specs/" in p or "/pages/" in p:
-                ref = "/// <reference path=\"../types/playwright-shim.d.ts\" />\n"
-            elif p.endswith("/playwright.config.ts") or p.endswith("/playwright.config.js"):
-                ref = "/// <reference path=\"./types/playwright-shim.d.ts\" />\n"
-            if ref:
-                content = f"{ref}{content}"
+            if "/specs/" in p or "/pages/" in p or p.endswith("/playwright.config.ts"):
+                content = f"{_shim_ref_for(p)}{content}"
         if f.kind == "spec" or "/specs/" in p:
-            content = _normalize_spec_storage_state(content)
+            content = _normalize_spec_storage_state(content, p)
+
             def _from_repl(m: re.Match[str]) -> str:
                 prefix, spec, suffix = m.group(1), m.group(2), m.group(3)
-                # only rewrite page-object imports; keep npm imports unchanged
-                new_spec = _rewrite_to_page(p, spec)
+                new_spec = _rewrite_auth_helper(p, spec) or _rewrite_to_page(p, spec)
                 if not new_spec:
                     return m.group(0)
                 return f"{prefix}{new_spec}{suffix}"
 
             def _req_repl(m: re.Match[str]) -> str:
                 prefix, spec, suffix = m.group(1), m.group(2), m.group(3)
-                new_spec = _rewrite_to_page(p, spec)
+                new_spec = _rewrite_auth_helper(p, spec) or _rewrite_to_page(p, spec)
                 if not new_spec:
                     return m.group(0)
                 return f"{prefix}{new_spec}{suffix}"
 
             content = import_re.sub(_from_repl, content)
             content = req_re.sub(_req_repl, content)
+        elif f.kind == "config" or p.endswith("playwright.config.ts"):
+            # Point storageState / globalSetup at _shared/fixtures
+            storage_rel = os.path.relpath(
+                storage_shared, os.path.dirname(p) or "."
+            ).replace("\\", "/")
+            if not storage_rel.startswith("."):
+                storage_rel = f"./{storage_rel}"
+            setup_rel = os.path.relpath(
+                f"{shared}/fixtures/global.setup.ts", os.path.dirname(p) or "."
+            ).replace("\\", "/")
+            if not setup_rel.startswith("."):
+                setup_rel = f"./{setup_rel}"
+            content = re.sub(
+                r"""(storageState\s*:\s*)(['"])[^'"]*\2""",
+                rf'\1"{storage_rel}"',
+                content,
+                flags=re.IGNORECASE,
+            )
+            content = re.sub(
+                r"""(globalSetup\s*:\s*)(['"])[^'"]*\2""",
+                rf"\1'{setup_rel}'",
+                content,
+                flags=re.IGNORECASE,
+            )
         fixed.append(E2EFile(path=f.path, content=content, kind=f.kind))
 
     return fixed

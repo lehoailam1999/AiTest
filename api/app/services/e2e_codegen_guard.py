@@ -6,6 +6,8 @@ Fixes common AI drift without hardcoding project-specific routes:
 - Page Object method contract mismatches between spec and page files
 - goto() asserting feature widgets before auth (login wall)
 - missing ensureAuthenticated when no valid storageState
+- Phase 2: Spec must keep Auth → Feature entry → Act order (fail codegen if missing)
+- Phase 3: POM stubs use DOM selector_candidates; empty fake-pass stubs fail codegen
 """
 
 from __future__ import annotations
@@ -14,6 +16,15 @@ import json
 import os
 import re
 from typing import Iterable
+
+
+class E2ECodegenJourneyError(ValueError):
+    """Phase 2 — generated Spec missing Auth → Feature entry → Act (or wrong order)."""
+
+
+# Re-export Phase 3 error for callers importing from this module.
+from app.services.e2e_stub_grounding import E2ECodegenStubError  # noqa: E402
+
 
 # Generic login-wall helper (env-driven; no app-specific routes/credentials).
 # Keep in sync with ensure_auth_helper_files() — guards always rewrite this file.
@@ -368,6 +379,16 @@ _EXPORT_FN_RE = re.compile(
     r"export\s+(?:async\s+)?function\s+(\w+)\s*\(",
     re.MULTILINE,
 )
+_EXPORT_TYPE_RE = re.compile(r"export\s+type\s+(\w+)\b")
+_EXPORT_INTERFACE_RE = re.compile(r"export\s+interface\s+(\w+)\b")
+# TS reserved / keywords that must never become import locals or stub fn names
+_TS_IMPORT_RESERVED = frozenset(
+    {"type", "typeof", "from", "import", "as", "assert", "with", "default"}
+)
+_TEST_STEP_TITLE_CALL_RE = re.compile(
+    r"(test\.step\s*\(\s*)(['\"])([^'\"]+)\2",
+    re.IGNORECASE,
+)
 _NEW_PAGE_RE = re.compile(
     r"(?:const|let)\s+(\w+)\s*=\s*new\s+(\w+)\s*\(",
     re.MULTILINE,
@@ -382,9 +403,12 @@ _UNSCOPED_BUTTON_ROLE_RE = re.compile(
     r"\{\s*name\s*:\s*(?P<name>(?:['\"][^'\"]+['\"]|/[^/]+/[a-z]*))\s*\}\s*\)",
     re.IGNORECASE,
 )
-# Single or multi: import { A, B as C } from '../pages/foo'
+# Spec↔POM import — sibling ../pages/ OR suite _shared/pages/ (any depth).
+# import { A, B as C } from '../pages/foo'
+# import { A } from '../../../_shared/pages/foo.page'
 _SPEC_PAGE_IMPORT_RE = re.compile(
-    r"""import\s+\{\s*(?P<names>[^}]+)\s*\}\s+from\s+['"]\.\./pages/(?P<leaf>[^'"]+)['"]""",
+    r"""import\s+\{\s*(?P<names>[^}]+)\s*\}\s+from\s+['"]"""
+    r"""(?P<imp>(?:[^'"]*?/)?pages/(?P<leaf>[^'"]+))['"]""",
     re.IGNORECASE,
 )
 
@@ -393,28 +417,97 @@ def _norm_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
-def _parse_import_names(names_blob: str) -> list[str]:
-    """Parse `Foo, bar as baz` → ['Foo', 'baz'] (local binding names)."""
-    out: list[str] = []
+def _parse_import_entries(names_blob: str) -> list[tuple[str, bool]]:
+    """Parse named import list → [(local_name, is_type_only), ...].
+
+    Supports:
+      Foo | Bar as Baz | type Foo | type Bar as Baz
+    Skips orphan keyword ``type`` (no identifier) — that previously became
+    ``import { Page, type }`` and broke Playwright/tsc.
+    """
+    out: list[tuple[str, bool]] = []
     for part in (names_blob or "").split(","):
         part = part.strip()
         if not part:
             continue
-        # Foo as Bar → Bar
+        is_type = False
+        # inline type-only: `type Foo` / `type Foo as Bar`
+        tm = re.match(r"^type(?:\s+|$)(.*)$", part, re.IGNORECASE)
+        if tm:
+            is_type = True
+            part = (tm.group(1) or "").strip()
+            if not part:
+                # orphan `type` keyword alone — drop
+                continue
         m = re.match(r"(\w+)(?:\s+as\s+(\w+))?", part, re.IGNORECASE)
         if not m:
             continue
-        out.append(m.group(2) or m.group(1))
+        local = m.group(2) or m.group(1)
+        if not local or local.lower() in _TS_IMPORT_RESERVED:
+            continue
+        out.append((local, is_type))
     return out
 
 
+def _parse_import_names(names_blob: str) -> list[str]:
+    """Parse `Foo, type Bar as Baz` → ['Foo', 'Baz'] (local binding names)."""
+    return [name for name, _ in _parse_import_entries(names_blob)]
+
+
 def _exported_page_symbols(page_content: str) -> tuple[str | None, set[str]]:
-    """Return (primary export class, set of exported class+function names)."""
+    """Return (primary export class, set of exported class/fn/type/interface names)."""
     classes = _CLASS_RE.findall(page_content or "")
     primary = classes[0] if classes else None
     syms: set[str] = set(classes)
     syms |= set(_EXPORT_FN_RE.findall(page_content or ""))
+    syms |= set(_EXPORT_TYPE_RE.findall(page_content or ""))
+    syms |= set(_EXPORT_INTERFACE_RE.findall(page_content or ""))
     return primary, syms
+
+
+def renumber_spec_test_steps(content: str) -> str:
+    """Rewrite ``test.step`` titles to continuous indexes ``0..N`` in doc order.
+
+    Auth/Feature inject adds ``0.`` / ``1.`` while LLM often restarts Act at ``1.``.
+    That breaks step capture / headed step runner — normalize after inject.
+    """
+    text = content or ""
+    if not _TEST_STEP_TITLE_CALL_RE.search(text):
+        return text
+    n = 0
+
+    def _repl(m: re.Match[str]) -> str:
+        nonlocal n
+        prefix, quote, title = m.group(1), m.group(2), m.group(3)
+        rest = re.sub(r"^\d+\.\s*", "", title).strip() or title.strip()
+        out = f"{prefix}{quote}{n}. {rest}{quote}"
+        n += 1
+        return out
+
+    return _TEST_STEP_TITLE_CALL_RE.sub(_repl, text)
+
+
+def _strip_orphan_type_imports(content: str) -> str:
+    """Remove bare ``type`` tokens left in ``import { Foo, type }`` lists."""
+    text = content or ""
+
+    def _repl(m: re.Match[str]) -> str:
+        names = m.group("names")
+        entries = _parse_import_entries(names)
+        if not entries:
+            # drop entire import if nothing left
+            return ""
+        parts: list[str] = []
+        for name, is_type in entries:
+            parts.append(f"type {name}" if is_type else name)
+        return f"import {{ {', '.join(parts)} }} from {m.group('quote')}{m.group('mod')}{m.group('quote')}"
+
+    return re.sub(
+        r"""import\s+\{\s*(?P<names>[^}]+)\s*\}\s+from\s+(?P<quote>['"])(?P<mod>[^'"]+)(?P=quote)\s*;?""",
+        _repl,
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def _collect_static_class_calls(spec_content: str, class_name: str) -> set[str]:
@@ -478,6 +571,7 @@ def _align_spec_imports_to_page(
     Make Spec imports match page exports (Rule 18).
     - Rename imported class → export class when mismatched
     - Stub missing helper exports on the page file
+    - Preserve TS ``type`` imports; never emit orphan ``type`` keyword
     """
     primary, exported = _exported_page_symbols(page_content)
     if not primary and not exported:
@@ -498,7 +592,7 @@ def _align_spec_imports_to_page(
         leaf = (m.group("leaf") or "").strip()
         if not _leaf_matches(leaf):
             continue
-        for name in _parse_import_names(m.group("names")):
+        for name, _is_type in _parse_import_entries(m.group("names")):
             if name in exported:
                 continue
             if not primary:
@@ -518,36 +612,62 @@ def _align_spec_imports_to_page(
         if not _leaf_matches(leaf):
             return m.group(0)
         keep: list[str] = []
-        for name in _parse_import_names(m.group("names")):
+        seen: set[str] = set()
+        for name, is_type in _parse_import_entries(m.group("names")):
+            if name.lower() in _TS_IMPORT_RESERVED:
+                continue
             if name in exported:
-                if name not in keep:
-                    keep.append(name)
+                token = f"type {name}" if is_type else name
+                if name not in seen:
+                    keep.append(token)
+                    seen.add(name)
                 continue
             if primary and (
                 name[:1].isupper()
                 or name.lower().endswith("page")
                 or bool(re.search(rf"\bnew\s+{re.escape(name)}\s*\(", spec))
             ):
-                if primary not in keep:
+                if primary not in seen:
                     keep.append(primary)
+                    seen.add(primary)
                 continue
-            if f"function {name}" not in page and f"export async function {name}" not in page:
+            # Type-only missing symbol: keep as type import if still referenced;
+            # do NOT stub a runtime function named after a type.
+            if is_type:
+                if name not in seen:
+                    keep.append(f"type {name}")
+                    seen.add(name)
+                continue
+            if (
+                f"function {name}" not in page
+                and f"export async function {name}" not in page
+                and f"export function {name}" not in page
+            ):
+                # SYNC string — Specs pass this into setInputFiles/getByText without await.
+                # async Promise<string> coerced to "[object Promise]" / path TypeError.
                 page = (
                     page.rstrip()
-                    + f"\nexport async function {name}(..._args: unknown[]): Promise<string> {{\n"
-                    + "  // Guard stub — missing export caused Playwright load failure.\n"
+                    + f"\nexport function {name}(..._args: unknown[]): string {{\n"
+                    + "  // Guard stub — sync path/label for upload & asserts (never Promise).\n"
                     + "  return String(_args[0] ?? 'fixtures/generated.bin');\n"
                     + "}\n"
                 )
                 exported = set(exported)
                 exported.add(name)
-            if name not in keep:
+            if name not in seen:
                 keep.append(name)
+                seen.add(name)
         if not keep and primary:
             keep = [primary]
-        return f"import {{ {', '.join(keep)} }} from '../pages/{leaf}'"
+        if not keep:
+            return m.group(0)
+        # Preserve original import path (_shared/pages vs ../pages) — only fix names.
+        imp = (m.group("imp") or f"../pages/{leaf}").replace("\\", "/")
+        imp = re.sub(r"\.tsx?$", "", imp, flags=re.IGNORECASE)
+        return f"import {{ {', '.join(keep)} }} from '{imp}'"
 
     spec = _SPEC_PAGE_IMPORT_RE.sub(_repl_import, spec)
+    spec = _strip_orphan_type_imports(spec)
     return spec, page
 
 
@@ -769,8 +889,22 @@ def _render_missing_page_file(class_name: str, methods: set[str]) -> str:
     return "\n".join(body)
 
 
+def _shared_pages_dir_from_spec(spec_path: str) -> str | None:
+    """``…/E2ETest/_shared/pages`` from a Spec under ``…/E2ETest/{Req}/{TC}/specs``."""
+    parts = [s for s in (spec_path or "").replace("\\", "/").split("/") if s]
+    for i, seg in enumerate(parts):
+        if seg.lower() == "e2etest":
+            return "/".join(parts[: i + 1] + ["_shared", "pages"])
+    return None
+
+
 def _ensure_referenced_page_files(files: list) -> list:
-    """If Spec imports ../pages/*.page but file is missing, add fallback page file."""
+    """If Spec imports pages/*.page but file is missing, add fallback page file.
+
+    Supports classic ``../pages/`` and suite ``_shared/pages/`` imports. Without
+    this, AI Specs that import ``../../../_shared/pages/X`` with no POM file
+    ship as Verify ``Cannot find module`` failures.
+    """
     from app.llm.base import E2EFile
 
     out: list = list(files)
@@ -799,25 +933,31 @@ def _ensure_referenced_page_files(files: list) -> list:
         if not is_spec:
             continue
         spec_dir = p.rsplit("/", 1)[0]
-        page_dir = spec_dir.rsplit("/", 1)[0] + "/pages"
+        tc_page_dir = spec_dir.rsplit("/", 1)[0] + "/pages"
+        shared_page_dir = _shared_pages_dir_from_spec(p)
         content = getattr(f, "content", "") or ""
         bindings = _find_page_bindings(content)
         call_by_var = {var: _collect_spec_method_calls(content, var) for var, _ in bindings}
         for m in _SPEC_PAGE_IMPORT_RE.finditer(content):
             names = _parse_import_names(m.group("names"))
             leaf = m.group("leaf").strip()
-            # Prefer class-like import for fallback page generation
+            imp = (m.group("imp") or "").replace("\\", "/")
+            # Prefer *Page class over type-only symbols (e.g. Step2RelatedDocRecord).
             cls = next(
-                (
-                    n
-                    for n in names
-                    if n[:1].isupper() or n.lower().endswith("page")
-                ),
+                (n for n in names if n.lower().endswith("page")),
+                None,
+            ) or next(
+                (n for n in names if n[:1].isupper()),
                 names[0] if names else "GeneratedPage",
             )
             # Import may omit .ts extension.
-            page_path = f"{page_dir}/{leaf}.ts" if not leaf.endswith(".ts") else f"{page_dir}/{leaf}"
-            page_path = page_path.replace("//", "/")
+            leaf_file = leaf if leaf.endswith(".ts") else f"{leaf}.ts"
+            # Suite _shared import → create under _shared/pages (layout SoT).
+            if "/_shared/" in imp.lower() and shared_page_dir:
+                page_dir = shared_page_dir
+            else:
+                page_dir = tc_page_dir
+            page_path = f"{page_dir}/{os.path.basename(leaf_file)}".replace("//", "/")
             if _has_page(page_path):
                 continue
             methods: set[str] = set()
@@ -1040,14 +1180,885 @@ def _render_get_page_text() -> str:
     )
 
 
-def _render_smart_method_stub(method: str) -> str:
+def _ts_visible_texts_from_arg_helper(*, indent: str = "    ") -> str:
     """
-    Generic POM stub for any project — safe coerce (string|RegExp|unknown),
-    no empty void methods that cause expect(undefined) / .trim() TypeError.
+    Unpack Spec args for getByText asserts — never String(object) → '[object Object]'.
+    Objects: assert each non-path string field (documentInfo, labels, …).
     """
+    i = indent
+    return (
+        f"{i}const __aitestVisibleTexts = (raw: unknown): string[] => {{\n"
+        f"{i}  if (raw == null) return [];\n"
+        f"{i}  if (typeof raw === 'string') {{\n"
+        f"{i}    const s = raw.trim();\n"
+        f"{i}    if (!s) return [];\n"
+        f"{i}    if (/fixtures[/\\\\]|\\.(bin|pdf|docx?|xlsx?|png|jpg|zip)$/i.test(s)) return [];\n"
+        f"{i}    return [s];\n"
+        f"{i}  }}\n"
+        f"{i}  if (typeof raw === 'number' || typeof raw === 'boolean') return [String(raw)];\n"
+        f"{i}  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {{\n"
+        f"{i}    const out: string[] = [];\n"
+        f"{i}    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {{\n"
+        f"{i}      if (v == null) continue;\n"
+        f"{i}      if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') continue;\n"
+        f"{i}      const s = String(v).trim();\n"
+        f"{i}      if (!s) continue;\n"
+        f"{i}      if (/file|path/i.test(k) && /fixtures[/\\\\]|\\.(bin|pdf|docx?|xlsx?|png|jpg|zip)$/i.test(s)) continue;\n"
+        f"{i}      if (/^\\[object \\w+\\]$/i.test(s)) continue;\n"
+        f"{i}      out.push(s);\n"
+        f"{i}    }}\n"
+        f"{i}    return out;\n"
+        f"{i}  }}\n"
+        f"{i}  return [];\n"
+        f"{i}}};\n"
+    )
+
+
+def infer_feature_path_from_text(
+    *blobs: str,
+    tokens: list[str] | None = None,
+) -> str:
+    """
+    Portable Feature deep-link from Spec/POM/TC prose — never invent without evidence.
+
+    Scores candidates so suite FE dumps (many /admin/*) do not steal the TC path.
+    Prefer: Feature-entry prose · path leaf matching TC tokens · explicit markers.
+    """
+    text = "\n".join((b or "") for b in blobs)
+    if not text.strip():
+        return ""
+    tok = [t.lower() for t in (tokens or []) if t and len(t) >= 3]
+
+    scored: list[tuple[int, str]] = []
+
+    def _add(raw: str, base: int) -> None:
+        p = _normalize_feature_path(raw)
+        if not p or _is_auth_feature_path(p):
+            return
+        leaf = p.rstrip("/").rsplit("/", 1)[-1].lower()
+        score = base
+        for t in tok:
+            if t in leaf or leaf in t or t in p.lower():
+                score += 4
+        # Common UI nouns in path help when TC is Vietnamese-only
+        if re.search(
+            r"/(evidence|case-record|person|device|file|user|role|menu|docs)(/|$)",
+            p,
+            re.I,
+        ):
+            score += 1
+        scored.append((score, p))
+
+    for m in re.finditer(
+        r"(?:E2E_FEATURE_PATH|Feature\s*entry|deep-?link|gotoFeature|feature\s*path)"
+        r"[^\n]{0,80}?(/[A-Za-z][\w\-./]{1,100})",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        # Skip error-string noise: "Feature entry: set E2E_FEATURE_PATH / Feature"
+        frag = m.group(0)
+        if re.search(r"set\s+E2E_FEATURE_PATH\s*/\s*Feature", frag, re.I):
+            continue
+        _add(m.group(1), 12)
+
+    marked = re.search(
+        r"(?m)^\s*(?:path|route|url|featurePath|feature_path)\s*[:=]\s*([^\n;,|]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if marked:
+        _add(marked.group(1).strip().strip("\"'"), 10)
+
+    for m in re.finditer(
+        r"(?<![\w/])(/(?:admin|app|portal|dashboard|console|features?|modules?|workspace)"
+        r"/[A-Za-z][\w\-./]{1,80})(?![\w/])",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        _add(m.group(1), 2)
+
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: (-x[0], -len(x[1])))
+    best_score, best = scored[0]
+    # Require some signal when only weak ABS hits (avoid random /admin/foo from FE dump)
+    if best_score < 3 and tok:
+        # still allow if leaf overlaps tokens at least once via re-check
+        leaf = best.rsplit("/", 1)[-1].lower()
+        if not any(t in leaf or leaf in t for t in tok):
+            return ""
+    if best_score < 2 and not tok:
+        return best  # single weak hit OK when no tokens
+    return best
+
+
+def _tokens_from_blob(*blobs: str) -> list[str]:
+    text = "\n".join((b or "") for b in blobs).lower()
+    # strip diacritics lightly for VN
+    try:
+        import unicodedata
+
+        text = "".join(
+            c
+            for c in unicodedata.normalize("NFD", text)
+            if unicodedata.category(c) != "Mn"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    parts = re.split(r"[^a-z0-9]+", text)
+    return [p for p in parts if len(p) >= 3]
+
+
+def infer_feature_path_from_files(files: list, *, hint: str = "") -> str:
+    """Suite-level fallback — prefer hint; else score across Specs (may be multi-TC)."""
+    hinted = _normalize_feature_path(hint)
+    if hinted:
+        return hinted
+    blobs: list[str] = []
+    for f in files or []:
+        p = (getattr(f, "path", "") or "").replace("\\", "/")
+        c = getattr(f, "content", "") or ""
+        low = p.lower()
+        if (
+            getattr(f, "kind", "") == "spec"
+            or "/specs/" in f"/{low}/"
+            or low.endswith(".spec.ts")
+        ):
+            # Specs only for suite fallback — avoid POM error strings / wrong bakes
+            blobs.append(c)
+            blobs.append(p)
+    return infer_feature_path_from_text(*blobs, tokens=_tokens_from_blob(*blobs))
+
+
+def infer_feature_path_for_pair(
+    *,
+    spec_path: str = "",
+    spec_content: str = "",
+    page_content: str = "",
+    hint: str = "",
+) -> str:
+    """Per-TC path: Spec prose + path tokens beat suite/FE noise."""
+    hinted = _normalize_feature_path(hint)
+    tokens = _tokens_from_blob(spec_path, spec_content)
+    # Prefer Spec alone first
+    from_spec = infer_feature_path_from_text(
+        spec_content, spec_path, tokens=tokens
+    )
+    if from_spec:
+        return from_spec
+    if hinted:
+        return hinted
+    return infer_feature_path_from_text(
+        spec_content, page_content, spec_path, tokens=tokens
+    )
+
+
+def _normalize_feature_path(raw: str) -> str:
+    p = (raw or "").strip().replace("\\", "/").strip("\"'`")
+    if not p:
+        return ""
+    if p.startswith("http://") or p.startswith("https://"):
+        try:
+            from urllib.parse import urlparse
+
+            p = urlparse(p).path or p
+        except Exception:  # noqa: BLE001
+            pass
+    if not p.startswith("/"):
+        p = f"/{p}"
+    p = re.sub(r"/{2,}", "/", p)
+    if len(p) > 1 and p.endswith("/"):
+        p = p[:-1]
+    if re.search(r"\.(ts|js|css|png|svg|json)(\?|$)", p, re.I):
+        return ""
+    return p
+
+
+def _is_auth_feature_path(path: str) -> bool:
+    return bool(
+        re.search(r"/(login|signin|sign-in|signup|sign-up|register|auth)(/|$)", path, re.I)
+    )
+
+
+def bake_feature_path_into_content(
+    content: str, feature_path: str, *, force: bool = False
+) -> str:
+    """
+    Fill / correct ``const baked = …`` in gotoFeature / Feature-entry stubs.
+
+    force=True overwrites a wrong non-empty bake (suite noise → /admin/case-record).
+    """
+    path = _normalize_feature_path(feature_path)
+    if not path or not content:
+        return content or ""
+    baked_js = json.dumps(path)
+    text = content
+    if force:
+        text = re.sub(
+            r"""(const\s+baked\s*=\s*)(?:""|''|"[^"]*"|'[^']*')(\s*;)""",
+            rf"\1{baked_js}\2",
+            text,
+        )
+    else:
+        text = re.sub(
+            r"""(const\s+baked\s*=\s*)(?:""|'')(\s*;)""",
+            rf"\1{baked_js}\2",
+            text,
+        )
+    return text
+
+
+def _bake_feature_paths_per_tc(files: list, *, hint: str = "") -> list:
+    """Bake the right deep-link into each Spec↔POM pair (never one path for whole suite)."""
+    from app.llm.base import E2EFile
+
+    specs = []
+    pages_by_leaf: dict[str, object] = {}
+    for f in files:
+        p = (getattr(f, "path", "") or "").replace("\\", "/")
+        low = p.lower()
+        is_spec = (
+            getattr(f, "kind", "") == "spec"
+            or "/specs/" in f"/{low}/"
+            or low.endswith(".spec.ts")
+        )
+        is_page = (
+            getattr(f, "kind", "") == "page"
+            or "/pages/" in f"/{low}/"
+            or low.endswith(".page.ts")
+        )
+        if is_spec:
+            specs.append(f)
+        if is_page:
+            pages_by_leaf[p.rsplit("/", 1)[-1].lower()] = f
+
+    for spec in specs:
+        sp = (getattr(spec, "path", "") or "").replace("\\", "/")
+        sc = getattr(spec, "content", "") or ""
+        # Resolve linked page from import
+        page_f = None
+        for m in re.finditer(r"""from\s+['"]([^'"]+)['"]""", sc):
+            leaf = m.group(1).rsplit("/", 1)[-1].lower()
+            if not leaf.endswith(".page") and "pages/" not in m.group(1).replace("\\", "/"):
+                continue
+            if not leaf.endswith(".ts"):
+                leaf = f"{leaf}.ts" if leaf.endswith(".page") else f"{leaf}.page.ts"
+            if leaf.endswith(".page"):
+                leaf = f"{leaf}.ts"
+            page_f = pages_by_leaf.get(leaf) or pages_by_leaf.get(
+                leaf.replace(".ts", "") + ".ts"
+            )
+            if page_f:
+                break
+        pc = getattr(page_f, "content", "") or "" if page_f else ""
+        path = infer_feature_path_for_pair(
+            spec_path=sp, spec_content=sc, page_content=pc, hint=hint
+        )
+        if not path:
+            continue
+        spec.content = bake_feature_path_into_content(sc, path, force=True)
+        if page_f is not None:
+            page_f.content = bake_feature_path_into_content(pc, path, force=True)
+
+    # Shared pages not imported by any Spec in this batch — bake from filename tokens only
+    for leaf, page_f in pages_by_leaf.items():
+        pc = getattr(page_f, "content", "") or ""
+        if re.search(r"""const\s+baked\s*=\s*(?:""|''|"/admin/[^"]+")""", pc):
+            path = infer_feature_path_for_pair(
+                spec_path=getattr(page_f, "path", "") or "",
+                spec_content="",
+                page_content=pc,
+                hint=hint,
+            )
+            # Only force-fix when filename clearly names the feature
+            if path and re.search(
+                r"evidence|case-record|person|device|digital-file", leaf, re.I
+            ):
+                # Prefer leaf-aligned path
+                leaf_tok = re.sub(r"[^a-z0-9]+", "-", leaf.replace(".page.ts", ""))
+                aligned = infer_feature_path_from_text(
+                    getattr(page_f, "path", "") or "",
+                    pc,
+                    tokens=_tokens_from_blob(leaf_tok, hint),
+                )
+                use = aligned or path
+                if use:
+                    page_f.content = bake_feature_path_into_content(pc, use, force=True)
+
+    return files
+
+
+def _render_feature_nav_stub(method: str, *, feature_path: str = "") -> str:
+    """
+    Navigation / open-feature POM methods — deep-link via E2E_FEATURE_PATH (or bake).
+
+    No baked sidebar/menu selectors (those are project-specific). Collapsed nav is
+    handled by setting Feature Feature path, or by AI/Phase-3 stubs grounded from
+    that project's Inspect DOM — never a fixed toggle list.
+    """
+    name = method or "gotoFeature"
+    baked = (feature_path or "").strip().replace("\\", "/")
+    if baked and not baked.startswith("/") and not baked.startswith("http"):
+        baked = f"/{baked}"
+    baked_js = json.dumps(baked) if baked else '""'
+    return (
+        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+        f"    const baked = {baked_js};\n"
+        "    const featurePath = (baked || process.env.E2E_FEATURE_PATH || '').trim();\n"
+        "    if (!featurePath) {\n"
+        "      throw new Error(\n"
+        "        'Feature entry: set E2E_FEATURE_PATH / Feature path (deep-link). '\n"
+        "        + 'Do not invent sidebar toggles — ground menu from Inspect DOM if path unknown.'\n"
+        "      );\n"
+        "    }\n"
+        "    const path = featurePath.startsWith('http') || featurePath.startsWith('/')\n"
+        "      ? featurePath\n"
+        "      : `/${featurePath}`;\n"
+        "    await this.page.goto(path, { waitUntil: 'domcontentloaded' });\n"
+        "    await this.page.locator('main, [role=\"main\"], nav, h1, h2, [data-cy], [data-testid]')\n"
+        "      .first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => undefined);\n"
+        "    const seed = typeof _args[0] === 'string' ? String(_args[0]).trim() : '';\n"
+        f"    const wantsStep2 = /step\\s*2|openstep2|gotostep2|tostep2|andopen/i.test({json.dumps(name)});\n"
+        f"    const wantsCreate = /create|openform|openmodal|newpopup|themmoi/i.test({json.dumps(name)});\n"
+        "    if (wantsCreate || wantsStep2) {\n"
+        "      const addBtn = this.page.getByRole('button', {\n"
+        "        name: /tạo mới|thêm mới|create|add(?! to)|new|\\+/i,\n"
+        "      }).first();\n"
+        "      if (await addBtn.isVisible().catch(() => false)) await addBtn.click();\n"
+        "    }\n"
+        "    if (seed) {\n"
+        "      const box = this.page.locator(\n"
+        "        'input[type=\"text\"], input:not([type]), textarea, [role=\"textbox\"]'\n"
+        "      ).first();\n"
+        "      if (await box.isVisible().catch(() => false)) await box.fill(seed);\n"
+        "    }\n"
+        "    if (seed || wantsStep2) {\n"
+        "      const nextBtn = this.page.getByRole('button', { name: /tiếp|next|continue/i }).first();\n"
+        "      if (await nextBtn.isVisible().catch(() => false)) await nextBtn.click();\n"
+        "    }\n"
+        "  }\n"
+    )
+
+
+def _is_feature_nav_method(method: str) -> bool:
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if norm.startswith("goto") and "login" not in norm:
+        return True
+    if "gotofeature" in norm or "openfeature" in norm or "openform" in norm:
+        return True
+    if norm.startswith("open") and any(
+        x in norm for x in ("feature", "module", "page", "list", "create", "wizard", "step")
+    ):
+        return True
+    return False
+
+
+def _is_menu_nav_method(method: str) -> bool:
+    """selectEvidenceMenu / clickSidebarXxx / openNavItem — not Phase-3 throw."""
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    has_nav = any(
+        x in norm for x in ("menu", "sidebar", "sidenav", "navitem", "menuitem", "drawer")
+    )
+    if not has_nav:
+        return False
+    return bool(
+        re.match(r"^(select|click|open|goto|choose|pick|navigate|go)", norm)
+        or norm.endswith("menu")
+        or "sidebar" in norm
+    )
+
+
+def _menu_hint_regex_from_method(method: str) -> str:
+    """selectEvidenceMenu → 'evidence' for /evidence/i (language-agnostic token)."""
+    from app.services.e2e_stub_grounding import method_tokens
+
+    stop = {
+        "menu",
+        "sidebar",
+        "sidenav",
+        "nav",
+        "item",
+        "link",
+        "module",
+        "drawer",
+        "navitem",
+        "menuitem",
+    }
+    tokens = [t for t in method_tokens(method or "") if t not in stop and len(t) >= 3]
+    if not tokens:
+        return ".*"
+    # Longest token first for specificity
+    tokens.sort(key=len, reverse=True)
+    return tokens[0]
+
+
+def _render_menu_nav_stub(method: str, *, feature_path: str = "") -> str:
+    """
+    Soft menu/sidebar navigation — portable across apps/languages.
+    Prefer Spec arg label; else method-name token; else no-op if already on feature shell;
+    else deep-link E2E_FEATURE_PATH. Never Phase-3 throw mid-journey.
+    """
+    name = method or "selectMenu"
+    hint = _menu_hint_regex_from_method(name)
+    hint_js = json.dumps(hint)
+    baked = (feature_path or "").strip().replace("\\", "/")
+    if baked and not baked.startswith("/") and not baked.startswith("http"):
+        baked = f"/{baked}"
+    baked_js = json.dumps(baked) if baked else '""'
+    return f"""
+  async {name}(..._args: unknown[]): Promise<void> {{
+    const raw = _args.length ? _args[0] : undefined;
+    const hint = new RegExp({hint_js}, 'i');
+    const byArg = raw instanceof RegExp
+      ? this.page.getByRole('link', {{ name: raw }})
+          .or(this.page.getByRole('button', {{ name: raw }}))
+          .or(this.page.getByRole('menuitem', {{ name: raw }}))
+          .first()
+      : typeof raw === 'string' && raw.trim()
+        ? this.page.getByRole('link', {{ name: raw }})
+            .or(this.page.getByRole('button', {{ name: raw }}))
+            .or(this.page.getByRole('menuitem', {{ name: raw }}))
+            .or(this.page.getByText(raw, {{ exact: false }}))
+            .first()
+        : null;
+    if (byArg && (await byArg.isVisible().catch(() => false))) {{
+      await byArg.click();
+      return;
+    }}
+    const byHint = this.page.getByRole('navigation').getByRole('link', {{ name: hint }})
+      .or(this.page.getByRole('link', {{ name: hint }}))
+      .or(this.page.getByRole('menuitem', {{ name: hint }}))
+      .first();
+    if (await byHint.isVisible().catch(() => false)) {{
+      await byHint.click();
+      return;
+    }}
+    // Already on feature (deep-link / prior step) — idempotent, do not fail journey
+    const shell = this.page.locator('main, [role="main"], h1, h2, [role="dialog"]').first();
+    if (await shell.isVisible().catch(() => false)) return;
+    const baked = {baked_js};
+    const featurePath = (baked || process.env.E2E_FEATURE_PATH || '').trim();
+    if (featurePath) {{
+      const path = featurePath.startsWith('http') || featurePath.startsWith('/')
+        ? featurePath
+        : `/${{featurePath}}`;
+      await this.page.goto(path, {{ waitUntil: 'domcontentloaded' }});
+      return;
+    }}
+    throw new Error(
+      'Menu nav: pass visible menu label as arg, or set E2E_FEATURE_PATH (deep-link).'
+    );
+  }}
+"""
+
+
+def _is_create_open_method(method: str) -> bool:
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if re.search(
+        r"(click|open|press|tap)?(createnew|createbutton|entitycreate|addnew|newrecord|taomoi)",
+        norm,
+    ):
+        return True
+    return norm in (
+        "clickcreate",
+        "opencreate",
+        "clickadd",
+        "clicknew",
+        "opennew",
+        "createnew",
+    )
+
+
+def _render_create_open_stub(method: str) -> str:
+    """Click visible Create/Add/New — role names only (any language UI via Spec arg)."""
+    name = method or "clickCreateNew"
+    return (
+        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+        "    const raw = _args.length ? _args[0] : undefined;\n"
+        "    const loc = raw instanceof RegExp\n"
+        "      ? this.page.getByRole('button', { name: raw }).first()\n"
+        "      : typeof raw === 'string' && raw.trim()\n"
+        "        ? this.page.getByRole('button', { name: raw }).first()\n"
+        "        : this.page.getByRole('button', {\n"
+        "            name: /tạo mới|thêm mới|create|add(?! to)|new|\\+/i,\n"
+        "          }).first();\n"
+        "    await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+        "    await loc.click();\n"
+        "  }\n"
+    )
+
+
+def _field_hint_from_method(method: str) -> str:
+    """arrangeRequiredName → 'name'; fillSeizureLocation → 'seizure location'."""
+    from app.services.e2e_stub_grounding import method_tokens
+
+    stop = {
+        "arrange",
+        "prepare",
+        "setup",
+        "provide",
+        "input",
+        "fill",
+        "type",
+        "enter",
+        "set",
+        "select",
+        "choose",
+        "pick",
+        "verify",
+        "or",
+        "and",
+        "the",
+        "required",
+        "optional",
+        "field",
+        "value",
+        "form",
+        "open",
+        "click",
+        "expand",
+        "toggle",
+        "focus",
+        "search",
+        "filter",
+        "clear",
+        "combobox",
+        "dropdown",
+        "autocomplete",
+        "typeahead",
+        "multiselect",
+        "ngselect",
+        "matselect",
+        "picker",
+        "option",
+    }
+    tokens = [t for t in method_tokens(method or "") if t not in stop and len(t) >= 2]
+    if not tokens:
+        return ".*"
+    return " ".join(tokens[:4])
+
+
+def _is_select_field_method(method: str) -> bool:
+    """selectStatus / chooseOption / open*Combobox* — not sidebar menu."""
+    if _is_menu_nav_method(method):
+        return False
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if any(
+        x in norm
+        for x in (
+            "combobox",
+            "dropdown",
+            "autocomplete",
+            "typeahead",
+            "multiselect",
+            "ngselect",
+            "matselect",
+        )
+    ):
+        return True
+    if re.match(r"^(open|click|expand|toggle|focus|search|filter)", norm) and any(
+        x in norm
+        for x in ("select", "search", "filter", "picker", "combo", "dropdown", "option")
+    ):
+        return True
+    return bool(re.match(r"^(select|choose|pick)", norm)) and not any(
+        x in norm for x in ("menu", "sidebar", "sidenav", "drawer")
+    )
+
+
+def _is_field_fill_method(method: str) -> bool:
+    """arrangeRequiredName / fillSeizureLocation / setTitle — not Phase-3 throw."""
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if _is_menu_nav_method(method) or _is_feature_nav_method(method):
+        return False
+    if _is_select_field_method(method):
+        return False
+    return bool(
+        re.match(
+            r"^(arrange|prepare|setup|provide|input|fill|type|enter|set)",
+            norm,
+        )
+    )
+
+
+def _render_field_fill_stub(method: str) -> str:
+    """
+    Fill by label/placeholder derived from method tokens + Spec args.
+    Portable: getByLabel / getByPlaceholder — no app-specific selectors.
+    """
+    name = method or "fillField"
+    hint = _field_hint_from_method(name)
+    hint_js = json.dumps(hint)
+    return f"""
+  async {name}(..._args: unknown[]): Promise<void> {{
+    const raw = _args.length ? _args[0] : undefined;
+    let q = '';
+    if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {{
+      q = String(raw).trim();
+    }} else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {{
+      const data = raw as Record<string, unknown>;
+      for (const k of ['value', 'name', 'text', 'label', 'title']) {{
+        if (data[k] != null && String(data[k]).trim()) {{ q = String(data[k]).trim(); break; }}
+      }}
+      if (!q) {{
+        for (const v of Object.values(data)) {{
+          if (typeof v === 'string' && v.trim() && !/fixtures[/\\\\]|\\.(bin|pdf)$/i.test(v)) {{
+            q = v.trim(); break;
+          }}
+        }}
+      }}
+    }}
+    if (!q) q = `E2E ${{Date.now()}}`;
+    const hint = new RegExp({hint_js}.replace(/\\s+/g, '\\\\s*'), 'i');
+    const field = this.page.getByLabel(hint)
+      .or(this.page.getByPlaceholder(hint))
+      .or(this.page.getByRole('textbox', {{ name: hint }}))
+      .first();
+    if (await field.isVisible().catch(() => false)) {{
+      await field.fill(q);
+      return;
+    }}
+    // Required textboxes often expose "*" in accessible name (any language)
+    const requiredBox = this.page.getByRole('textbox', {{ name: /\\*/ }}).first();
+    if (await requiredBox.isVisible().catch(() => false)) {{
+      await requiredBox.fill(q);
+      return;
+    }}
+    const box = this.page.locator(
+      'input[type="text"], input:not([type]), textarea, [role="textbox"]'
+    ).first();
+    await box.waitFor({{ state: 'visible', timeout: 15000 }});
+    await box.fill(q);
+  }}
+"""
+
+
+def _render_select_field_stub(method: str) -> str:
+    """Combobox/select by method token + optional Spec option label."""
+    name = method or "selectField"
+    hint = _field_hint_from_method(name)
+    hint_js = json.dumps(hint)
+    return f"""
+  async {name}(..._args: unknown[]): Promise<void> {{
+    const raw = _args.length ? _args[0] : undefined;
+    const optLabel = typeof raw === 'string' ? raw.trim()
+      : raw instanceof RegExp ? raw
+      : '';
+    const hint = new RegExp({hint_js}.replace(/\\s+/g, '\\\\s*'), 'i');
+    const field = this.page.getByRole('combobox', {{ name: hint }})
+      .or(this.page.getByLabel(hint))
+      .or(this.page.getByRole('combobox'))
+      .or(this.page.getByRole('searchbox'))
+      .or(this.page.locator('select').first())
+      .first();
+    await field.waitFor({{ state: 'visible', timeout: 15000 }});
+    const tag = await field.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+    if (tag === 'select') {{
+      if (typeof optLabel === 'string' && optLabel) {{
+        await field.selectOption({{ label: optLabel }}).catch(async () => {{
+          await field.selectOption({{ index: 1 }});
+        }});
+      }} else {{
+        await field.selectOption({{ index: 1 }});
+      }}
+      return;
+    }}
+    await field.click();
+    // Searchable combobox: type query when Spec passed a string
+    if (typeof optLabel === 'string' && optLabel) {{
+      await field.fill(optLabel).catch(() => undefined);
+    }}
+    if (optLabel instanceof RegExp) {{
+      const opt = this.page.getByRole('option', {{ name: optLabel }}).first();
+      if (await opt.isVisible().catch(() => false)) {{ await opt.click(); return; }}
+    }} else if (optLabel) {{
+      const opt = this.page.getByRole('option', {{ name: optLabel }})
+        .or(this.page.getByText(optLabel, {{ exact: false }}))
+        .first();
+      if (await opt.isVisible().catch(() => false)) {{ await opt.click(); return; }}
+    }}
+    // open*Search / open*Combobox with no arg — leave dropdown open (Act continues)
+    if (/open|expand|toggle|search/i.test({json.dumps(name)})) return;
+    const firstOpt = this.page.getByRole('option').nth(1)
+      .or(this.page.getByRole('option').first());
+    if (await firstOpt.isVisible().catch(() => false)) await firstOpt.click();
+  }}
+"""
+
+
+def _is_form_action_method(method: str) -> bool:
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if any(
+        x in norm
+        for x in (
+            "addrelated",
+            "relateddocument",
+            "uploaddoc",
+            "uploadfile",
+            "attach",
+            "setinputfiles",
+            "fillform",
+            "submitform",
+        )
+    ):
+        return True
+    if norm.startswith("add") and any(
+        x in norm for x in ("doc", "file", "upload", "record", "item", "row")
+    ):
+        return True
+    if norm.startswith("upload"):
+        return True
+    return False
+
+
+def _is_wizard_next_method(method: str) -> bool:
+    """
+    Advance wizard / complete step N → Next/Continue button.
+    Covers LLM names: goNext, completeStep1ToReachStep2, finishStep1, …
+    """
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if re.search(
+        r"(gonext|clicknext|continuenext|nextstep|nextfrom|gotostep|"
+        r"completestep|finishstep|submitstep|advancestep|reachstep|"
+        r"tostep\d|step\d+to|movetonext)",
+        norm,
+    ):
+        return True
+    # completeXToReachY / finishXAndGoToY
+    if re.search(r"(complete|finish|submit|advance).*(step|next|reach)", norm):
+        return True
+    if re.search(r"(reach|goto|moveto).*step", norm) and "login" not in norm:
+        return True
+    return False
+
+
+def _render_wizard_next_stub(method: str) -> str:
+    """Click Next/Continue — Spec label or portable Next regex; soft if missing."""
+    name = method or "goNext"
+    return (
+        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+        "    const raw = _args.length ? _args[0] : undefined;\n"
+        "    const nextBtn = raw instanceof RegExp\n"
+        "      ? this.page.getByRole('button', { name: raw }).first()\n"
+        "      : typeof raw === 'string' && raw.trim()\n"
+        "        ? this.page.getByRole('button', { name: raw }).first()\n"
+        "        : this.page.getByRole('button', {\n"
+        "            name: /tiếp|next|continue|tiếp theo|xong|done|finish|lưu và tiếp/i,\n"
+        "          }).first();\n"
+        "    if (await nextBtn.isVisible().catch(() => false)) {\n"
+        "      await nextBtn.click();\n"
+        "      return;\n"
+        "    }\n"
+        "    // No Next yet — soft skip (wrong screen / Inspect should ground next Generate)\n"
+        "  }\n"
+    )
+
+
+
+def _render_form_action_stub(method: str) -> str:
+    """
+    add/upload/fill form actions — use args object (filePath, labels) + role heuristics.
+    Avoid Phase-3 ungrounded throw after feature entry already succeeded.
+    """
+    name = method or "addRelatedDocument"
+    return (
+        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+        "    const raw = _args.length ? _args[0] : undefined;\n"
+        "    const data = raw && typeof raw === 'object' && !Array.isArray(raw)\n"
+        "      ? (raw as Record<string, unknown>)\n"
+        "      : {};\n"
+        "    const filePath = String(\n"
+        "      (data.filePath ?? data.path ?? data.file ??\n"
+        "        (typeof raw === 'string' ? raw : '')) ||\n"
+        "      'fixtures/generated.bin'\n"
+        "    );\n"
+        "    const fileInput = this.page.locator('input[type=\"file\"]').first();\n"
+        "    if (await fileInput.count().catch(() => 0)) {\n"
+        "      await fileInput.setInputFiles(filePath);\n"
+        "    }\n"
+        "    for (const [key, val] of Object.entries(data)) {\n"
+        "      if (/file|path/i.test(key) || val == null) continue;\n"
+        "      if (typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') continue;\n"
+        "      const q = String(val).trim();\n"
+        "      if (!q) continue;\n"
+        "      const hint = key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());\n"
+        "      const field = this.page\n"
+        "        .getByLabel(new RegExp(hint, 'i'))\n"
+        "        .or(this.page.getByPlaceholder(new RegExp(hint, 'i')))\n"
+        "        .or(this.page.getByRole('combobox', { name: new RegExp(hint, 'i') }))\n"
+        "        .first();\n"
+        "      if (!(await field.isVisible().catch(() => false))) continue;\n"
+        "      const tag = await field.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');\n"
+        "      if (tag === 'select' || (await field.getAttribute('role').catch(() => '')) === 'combobox') {\n"
+        "        await field.click();\n"
+        "        const opt = this.page.getByRole('option', { name: q }).or(this.page.getByText(q, { exact: false })).first();\n"
+        "        if (await opt.isVisible().catch(() => false)) await opt.click();\n"
+        "      } else {\n"
+        "        await field.fill(q);\n"
+        "      }\n"
+        "    }\n"
+        "    const commit = this.page.getByRole('button', {\n"
+        "      name: /thêm vào danh sách|add to list|lưu|save|thêm|add/i,\n"
+        "    }).first();\n"
+        "    if (await commit.isVisible().catch(() => false)) await commit.click();\n"
+        "  }\n"
+    )
+
+
+def _render_smart_method_stub(
+    method: str, *, dom_snapshot: str = "", feature_path: str = ""
+) -> str:
+    """
+    Prefer: classified journey stubs → DOM grounded → Spec-arg clicks.
+    E2E_GROUNDING fail-closed: no inventing button.first()/Save-regex when DOM+args empty.
+    """
+    from app.services.e2e_stub_grounding import (
+        best_element_for_method,
+        parse_dom_elements,
+        render_dom_grounded_stub,
+        render_ungrounded_fail_stub,
+    )
+
     name = method or "action"
     low = name.lower()
     norm = _norm_key(name)
+
+    # Known journey families first (portable — not app-specific selectors)
+    if _is_feature_nav_method(name):
+        return _render_feature_nav_stub(name, feature_path=feature_path)
+    if _is_menu_nav_method(name):
+        return _render_menu_nav_stub(name, feature_path=feature_path)
+    if _is_create_open_method(name):
+        return _render_create_open_stub(name)
+    if _is_wizard_next_method(name):
+        return _render_wizard_next_stub(name)
+    if _is_select_field_method(name):
+        return _render_select_field_stub(name)
+    if _is_field_fill_method(name):
+        return _render_field_fill_stub(name)
+    if _is_form_action_method(name):
+        return _render_form_action_stub(name)
+
+    # This project's Inspect DOM (selector_candidates / testId / role+name)
+    el = best_element_for_method(name, parse_dom_elements(dom_snapshot))
+    if el:
+        grounded = render_dom_grounded_stub(name, el)
+        if grounded:
+            return grounded
 
     if norm in ("clicklogout", "logout", "signout", "clicksignout"):
         return (
@@ -1083,73 +2094,155 @@ def _render_smart_method_stub(method: str) -> str:
         )
 
     if low.startswith(("get", "find", "locate")):
+        helper = _ts_visible_texts_from_arg_helper(indent="    ")
         return (
             f"\n  {name}(..._args: unknown[]): Locator {{\n"
             "    const raw = _args.length ? _args[0] : undefined;\n"
+            f"{helper}"
             "    if (raw instanceof RegExp) return this.page.getByText(raw).first();\n"
-            "    const q = typeof raw === 'string' ? raw.trim()\n"
-            "      : raw == null ? ''\n"
-            "      : String(raw);\n"
-            "    if (q) return this.page.getByText(q, { exact: false }).first();\n"
+            "    const texts = __aitestVisibleTexts(raw);\n"
+            "    if (texts.length) return this.page.getByText(texts[0], { exact: false }).first();\n"
             "    return this.page.locator('main, [role=\"main\"], body').first();\n"
             "  }\n"
         )
 
     if low.startswith(("expect", "assert")):
+        helper = _ts_visible_texts_from_arg_helper(indent="    ")
         return (
             f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
             "    const raw = _args.length ? _args[0] : undefined;\n"
-            "    const loc = raw instanceof RegExp\n"
-            "      ? this.page.getByText(raw).first()\n"
-            "      : (() => {\n"
-            "          const q = typeof raw === 'string' ? raw.trim()\n"
-            "            : raw == null ? ''\n"
-            "            : String(raw);\n"
-            "          return q\n"
-            "            ? this.page.getByText(q, { exact: false }).first()\n"
-            "            : this.page.locator('main, [role=\"main\"], body').first();\n"
-            "        })();\n"
-            "    await expect(loc).toBeVisible({ timeout: 15000 });\n"
+            f"{helper}"
+            "    if (raw instanceof RegExp) {\n"
+            "      await expect(this.page.getByText(raw).first()).toBeVisible({ timeout: 15000 });\n"
+            "      return;\n"
+            "    }\n"
+            "    const texts = __aitestVisibleTexts(raw);\n"
+            "    if (!texts.length) {\n"
+            "      // No string payload — landmark only (avoid getByText('[object Object]'))\n"
+            "      await expect(\n"
+            "        this.page.locator('main, [role=\"main\"], h1, h2, [data-cy], [data-testid]').first()\n"
+            "      ).toBeVisible({ timeout: 15000 });\n"
+            "      return;\n"
+            "    }\n"
+            "    for (const q of texts) {\n"
+            "      await expect(this.page.getByText(q, { exact: false }).first())\n"
+            "        .toBeVisible({ timeout: 15000 });\n"
+            "    }\n"
             "  }\n"
         )
 
     if low.startswith("click") or low.startswith("tap") or low.startswith("press"):
+        # Spec arg → labeled click; bare invent button.first() → fail-closed (E2E_GROUNDING).
         return (
             f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
             "    const raw = _args.length ? _args[0] : undefined;\n"
-            "    const loc = raw instanceof RegExp\n"
-            "      ? this.page.getByText(raw).first()\n"
-            "      : typeof raw === 'string' && raw.trim()\n"
-            "        ? this.page.getByRole('button', { name: raw }).or(this.page.getByText(raw, { exact: false })).first()\n"
-            "        : this.page.locator('button, [role=\"button\"]').first();\n"
-            "    if (await loc.isVisible().catch(() => false)) await loc.click();\n"
+            "    if (raw instanceof RegExp) {\n"
+            "      const loc = this.page.getByText(raw).first();\n"
+            "      await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+            "      await loc.click();\n"
+            "      return;\n"
+            "    }\n"
+            "    if (typeof raw === 'string' && raw.trim()) {\n"
+            "      const loc = this.page.getByRole('button', { name: raw })\n"
+            "        .or(this.page.getByText(raw, { exact: false })).first();\n"
+            "      await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+            "      await loc.click();\n"
+            "      return;\n"
+            "    }\n"
+            f"    throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+            "no Spec label and no DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
             "  }\n"
         )
 
     if low.startswith("fill") or low.startswith("type") or low.startswith("enter"):
-        return (
-            f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
-            "    const value = _args.length > 1 ? _args[1] : _args[0];\n"
-            "    const q = value == null ? '' : String(value);\n"
-            "    const box = this.page.locator('input:not([type=\"hidden\"]), textarea').first();\n"
-            "    await box.fill(q);\n"
-            "  }\n"
-        )
+        return _render_field_fill_stub(name)
 
-    # Fixture helpers: ensureInvalidExeFixture / buildTcRelatedDocFiles style
-    if "fixture" in low or norm.startswith("ensure") or norm.startswith("build"):
+    # Fixture / path helpers MUST be sync string (setInputFiles / getByText / goto).
+    path_like = (
+        "fixture" in low
+        or "filepath" in low
+        or (low.endswith("path") and "xpath" not in low)
+        or "filename" in low
+        or (
+            ("file" in low or "doc" in low or "upload" in low or "fixture" in low)
+            and (
+                norm.startswith("ensure")
+                or norm.startswith("build")
+                or norm.startswith("make")
+                or norm.startswith("create")
+                or norm.startswith("get")
+            )
+        )
+    )
+    if path_like:
         return (
-            f"\n  async {name}(..._args: unknown[]): Promise<string> {{\n"
-            "    // Guard stub — return a path-like string for upload/fixture steps.\n"
+            f"\n  {name}(..._args: unknown[]): string {{\n"
+            "    // Guard stub — sync path string (never Promise — avoids setInputFiles/getByText crash).\n"
             "    return String(_args[0] ?? 'fixtures/generated.bin');\n"
             "  }\n"
         )
 
-    return (
-        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
-        "    // Generated stub — extend with project-specific locators when healing.\n"
-        "  }\n"
-    )
+    # Act/Arrange leftovers — prefer classified soft stubs; else fail-closed (no invent).
+    if _is_select_field_method(name) or re.match(r"^(select|choose|pick)", norm):
+        return _render_select_field_stub(name)
+    if re.match(r"^(arrange|prepare|setup|provide|input|set)", norm):
+        return _render_field_fill_stub(name)
+    if re.match(r"^(open|expand|toggle|focus|search|filter|clear)", norm):
+        if _is_select_field_method(name) or any(
+            x in norm
+            for x in ("combo", "select", "search", "filter", "dropdown", "picker")
+        ):
+            return _render_select_field_stub(name)
+        return (
+            f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+            "    const raw = _args.length ? _args[0] : undefined;\n"
+            "    if (raw instanceof RegExp) {\n"
+            "      const loc = this.page.getByRole('button', { name: raw })\n"
+            "        .or(this.page.getByText(raw)).first();\n"
+            "      await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+            "      await loc.click();\n"
+            "      return;\n"
+            "    }\n"
+            "    if (typeof raw === 'string' && raw.trim()) {\n"
+            "      const loc = this.page.getByRole('button', { name: raw })\n"
+            "        .or(this.page.getByText(raw, { exact: false })).first();\n"
+            "      await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+            "      await loc.click();\n"
+            "      return;\n"
+            "    }\n"
+            f"    throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+            "no Spec label and no DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
+            "  }\n"
+        )
+
+    if re.match(
+        r"^(click|tap|press|do|run|trigger|invoke|complete|finish|submit|advance)",
+        norm,
+    ):
+        # Wizard already handled above; bare invent Save/Next → fail-closed.
+        return (
+            f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+            "    const raw = _args.length ? _args[0] : undefined;\n"
+            "    if (raw instanceof RegExp) {\n"
+            "      const loc = this.page.getByText(raw).first();\n"
+            "      await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+            "      await loc.click();\n"
+            "      return;\n"
+            "    }\n"
+            "    if (typeof raw === 'string' && raw.trim()) {\n"
+            "      const loc = this.page.getByRole('button', { name: raw })\n"
+            "        .or(this.page.getByText(raw, { exact: false })).first();\n"
+            "      await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
+            "      await loc.click();\n"
+            "      return;\n"
+            "    }\n"
+            f"    throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+            "no Spec label and no DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
+            "  }\n"
+        )
+
+    # E2E_GROUNDING: fail-closed — never invent button.first() / Save-regex last resort.
+    return render_ungrounded_fail_stub(name)
 
 
 def _insert_methods_before_class_end(
@@ -1189,12 +2282,58 @@ def _insert_methods_before_class_end(
     return page_content[:idx] + joined + page_content[idx:]
 
 
-def fix_page_method_contract(spec_content: str, page_content: str) -> tuple[str, str]:
+def _rewrite_pom_auth_calls_to_helper(spec_content: str, var_names: set[str]) -> str:
+    """
+    ``pom.ensureAuthenticated()`` is invalid — auth lives in fixtures/auth.helper
+    (same contract as inject_ensure_authenticated). Rewrite calls; do not invent UI locators.
+    """
+    text = spec_content or ""
+    if not var_names:
+        return text
+    changed = False
+    for var in var_names:
+        if not var:
+            continue
+        pat = re.compile(
+            rf"await\s+{re.escape(var)}\.ensureAuthenticated\s*\([^)]*\)\s*;?",
+        )
+        if pat.search(text):
+            text = pat.sub("await ensureAuthenticated(page)", text)
+            changed = True
+    if not changed:
+        return text
+    if not re.search(r"""from\s+['"][^'"]*auth\.helper['"]""", text):
+        import_line = (
+            "import { ensureAuthenticated } from '../../../_shared/fixtures/auth.helper';\n"
+        )
+        last_import = None
+        for m in _IMPORT_LINE_RE.finditer(text):
+            last_import = m
+        if last_import:
+            insert_at = last_import.end()
+            rest = text[insert_at:]
+            text = (
+                text[:insert_at]
+                + ("\n" if not rest.startswith("\n") else "")
+                + import_line
+                + (rest if rest.startswith("\n") else "\n" + rest)
+            )
+        else:
+            text = import_line + text
+    return normalize_collapsed_imports(text)
+
+
+def fix_page_method_contract(
+    spec_content: str, page_content: str, *, dom_snapshot: str = "", feature_path: str = ""
+) -> tuple[str, str]:
     """
     Ensure Spec↔POM contract is runnable (Rule 18):
     - import names match exports
     - no Class.staticMethod( — rewrite to instance
     - every instance method call exists on the page class
+    - Phase 3: new stubs prefer DOM selector_candidates
+    - pom.ensureAuthenticated → auth.helper (never stub auth as UI)
+    - gotoFeature* → E2E_FEATURE_PATH nav stub (not ungrounded throw)
     """
     if not (spec_content or "").strip() or not (page_content or "").strip():
         return spec_content, page_content
@@ -1233,13 +2372,22 @@ def fix_page_method_contract(spec_content: str, page_content: str) -> tuple[str,
         return spec_content, page_content
 
     target_bindings = [(v, c) for v, c in bindings if c == class_name]
+    var_names = {v for v, _ in target_bindings}
+    # Before collecting missing POM methods: move auth off the page object.
+    spec_content = _rewrite_pom_auth_calls_to_helper(spec_content, var_names)
+
     existing = _extract_class_methods(page_content, class_name)
     existing_norm = {_norm_key(m): m for m in existing}
     needed: set[str] = set()
     for var_name, cls in target_bindings:
         needed |= _collect_spec_method_calls(spec_content, var_name)
 
-    missing = [m for m in sorted(needed) if _norm_key(m) not in existing_norm]
+    # ensureAuthenticated is provided by auth.helper after rewrite — never POM-stub it.
+    missing = [
+        m
+        for m in sorted(needed)
+        if _norm_key(m) not in existing_norm and _norm_key(m) != "ensureauthenticated"
+    ]
     if not missing:
         return spec_content, page_content
 
@@ -1263,12 +2411,113 @@ def fix_page_method_contract(spec_content: str, page_content: str) -> tuple[str,
             continue
         if norm.startswith("expect") and f"assert{norm[6:]}" in {_norm_key(x) for x in missing}:
             continue
-        snippets.append(_render_smart_method_stub(method))
+        snippets.append(
+            _render_smart_method_stub(
+                method, dom_snapshot=dom_snapshot, feature_path=feature_path
+            )
+        )
 
     page_content = _insert_methods_before_class_end(
         page_content, snippets, class_name=class_name
     )
+    # Replace leftover Phase-3 ungrounded throws on navigation methods
+    page_content = _rewrite_ungrounded_nav_stubs(
+        page_content, feature_path=feature_path, dom_snapshot=dom_snapshot
+    )
     return spec_content, page_content
+
+
+def _rewrite_ungrounded_nav_stubs(
+    page_content: str, *, feature_path: str = "", dom_snapshot: str = ""
+) -> str:
+    """Swap Phase-3 ungrounded throws for soft / DOM stubs (Rule 19)."""
+    text = page_content or ""
+    pattern = re.compile(
+        r"async\s+(\w+)\s*\([^)]*\)\s*:\s*Promise<\s*void\s*>\s*\{"
+        r"\s*throw\s+new\s+Error\(\s*['\"]Phase 3: ungrounded POM stub[^'\"]*['\"]\s*\)\s*;?\s*"
+        r"\}",
+        re.IGNORECASE,
+    )
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(1)
+        stub = _render_smart_method_stub(
+            name, feature_path=feature_path, dom_snapshot=dom_snapshot
+        )
+        if "ungrounded" in (stub or "").lower():
+            return m.group(0)
+        return stub.strip()
+
+    return pattern.sub(repl, text)
+
+
+def _rewrite_expect_object_string_stubs(page_content: str) -> str:
+    """
+    Heal expect*/assert* stubs that do String(raw) → getByText('[object Object]').
+    Re-emit smart stub when the old coercion pattern is present.
+    """
+    text = page_content or ""
+    if "String(raw)" not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    header_re = re.compile(
+        r"async\s+(?P<name>expect\w*|assert\w*)\s*\([^)]*\)\s*:\s*Promise<\s*void\s*>\s*\{",
+        re.IGNORECASE,
+    )
+    while i < len(text):
+        m = header_re.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i : m.start()])
+        # Brace-match method body
+        brace_at = m.end() - 1  # position of '{'
+        depth = 0
+        j = brace_at
+        while j < len(text):
+            ch = text[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        body = text[m.end() : j - 1]
+        if "__aitestVisibleTexts" in body:
+            out.append(text[m.start() : j])
+        elif "String(raw)" in body or "asStr" in body:
+            out.append(_render_smart_method_stub(m.group("name")).strip())
+        else:
+            out.append(text[m.start() : j])
+        i = j
+    return "".join(out)
+
+
+def _rewrite_feature_nav_seed_stubs(page_content: str, *, feature_path: str = "") -> str:
+    """Re-emit gotoFeature* stubs that lack seed-fill / wantsStep2 handling."""
+    text = page_content or ""
+    pattern = re.compile(
+        r"async\s+(?P<name>goto\w*|openFeature\w*|openForm\w*)\s*\([^)]*\)\s*:\s*Promise<\s*void\s*>\s*\{"
+        r"(?P<body>[^{}]*(?:\{[^{}]*\}[^{}]*)*)"
+        r"\}",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group("name")
+        if not _is_feature_nav_method(name):
+            return m.group(0)
+        body = m.group("body") or ""
+        if "const seed" in body and "wantsStep2" in body:
+            return m.group(0)
+        if "E2E_FEATURE_PATH" not in body and "ungrounded" not in body.lower():
+            return m.group(0)
+        return _render_feature_nav_stub(name, feature_path=feature_path).strip()
+
+    return pattern.sub(repl, text)
 
 
 def restore_playwright_file_suffixes(files: list) -> list:
@@ -1359,8 +2608,16 @@ def apply_e2e_codegen_guards(
     test_case_title: str = "",
     auth_hints: str = "",
     headed: bool = False,
+    feature_path: str = "",
+    enforce_journey: bool = True,
+    enforce_stubs: bool = True,
 ) -> list:
-    """Run deterministic guards across generated E2E files."""
+    """Run deterministic guards across generated E2E files.
+
+    Phase 2: after auth/entry inject, validate Auth → Feature entry → Act or raise
+    ``E2ECodegenJourneyError`` (fail codegen — do not ship incomplete Specs).
+    Phase 3: empty POM stubs rewritten from DOM or fail ``E2ECodegenStubError``.
+    """
     from app.llm.base import E2EFile
     from app.services.e2e_auth_mode import (
         is_login_or_auth_tc,
@@ -1386,6 +2643,23 @@ def apply_e2e_codegen_guards(
                 )
             )
 
+    # Soft suite hint only — never bake one path into every TC (batch Verify noise).
+    feature_path = (feature_path or "").strip()
+    if not feature_path:
+        feature_path = infer_feature_path_from_files(normalized, hint="")
+    multi_spec = (
+        sum(
+            1
+            for f in normalized
+            if getattr(f, "kind", "") == "spec"
+            or "/specs/" in f"/{(f.path or '').replace(chr(92), '/').lower()}/"
+            or (f.path or "").lower().endswith(".spec.ts")
+        )
+        > 1
+    )
+    # When batch has many Specs, leave bake empty in stubs — per-TC bake at end.
+    stub_feature_path = "" if multi_spec else feature_path
+
     # Heal bad shorten leftovers: specs/*.ts (no .spec) / pages/*.ts (no .page)
     # → Playwright testMatch requires *.spec.ts|*.test.ts.
     normalized = restore_playwright_file_suffixes(normalized)
@@ -1399,6 +2673,13 @@ def apply_e2e_codegen_guards(
             continue
         cleaned.append(f)
     normalized = cleaned
+    # Heal mashed / orphan imports BEFORE missing-POM synthesis so Specs that
+    # lost ``import {`` still match _SPEC_PAGE_IMPORT_RE and get a page file.
+    for f in normalized:
+        p = (f.path or "").replace("\\", "/").lower()
+        is_spec = f.kind == "spec" or "/specs/" in f"/{p}/" or p.endswith(".spec.ts")
+        if is_spec:
+            f.content = normalize_collapsed_imports(f.content or "")
     normalized = _ensure_referenced_page_files(normalized)
 
     # Empty / invalid storageState.json breaks Playwright load — drop the file
@@ -1442,10 +2723,27 @@ def apply_e2e_codegen_guards(
             if page_file is None:
                 continue
             f.content, page_file.content = fix_page_method_contract(
-                f.content, page_file.content
+                f.content,
+                page_file.content,
+                dom_snapshot=dom_snapshot,
+                feature_path=stub_feature_path,
             )
             f.content, page_file.content = _ensure_locator_fields_for_spec_expects(
                 f.content, page_file.content
+            )
+
+    # Always rewrite leftover ungrounded throws (even if Spec↔POM already matched)
+    for f in normalized:
+        p = (f.path or "").replace("\\", "/")
+        if f.kind == "page" or "/pages/" in p:
+            f.content = _rewrite_ungrounded_nav_stubs(
+                f.content or "",
+                feature_path=stub_feature_path,
+                dom_snapshot=dom_snapshot,
+            )
+            f.content = _rewrite_expect_object_string_stubs(f.content or "")
+            f.content = _rewrite_feature_nav_seed_stubs(
+                f.content or "", feature_path=stub_feature_path
             )
 
     has_valid_state = any(
@@ -1519,6 +2817,7 @@ def apply_e2e_codegen_guards(
         p = f.path.replace("\\", "/")
         is_spec = f.kind == "spec" or "/specs/" in f"/{p.lower()}/" or p.lower().endswith(".spec.ts")
         if is_spec:
+            f.content = normalize_collapsed_imports(f.content or "")
             f.content = _rewrite_cross_tc_imports(f.content, f.path, normalized)
 
     # Strip test.use({ storageState }) from specs when not in storage mode
@@ -1550,12 +2849,16 @@ def apply_e2e_codegen_guards(
             f.content = _relax_exact_gettext(f.content)
             f.content = _fix_literal_regex_gettext(f.content)
             f.content = _fix_nested_expect_on_pom_asserts(f.content)
+            f.content = _fix_promise_coercion_crashes(f.content)
+            f.content = _sync_async_path_helpers(f.content)
             f.content = _sync_async_locator_getters(f.content)
             f.content = fix_select_option_label_regexp(f.content)
 
     # Mutual exclusion: ui_helper injects ensureAuthenticated; storage/public/none strip it
     if wants_ui_auth_helper(mode):
-        normalized = ensure_auth_helper_files(normalized)
+        normalized = ensure_auth_helper_files(
+            normalized, feature_path=stub_feature_path
+        )
     else:
         for f in normalized:
             p = (f.path or "").replace("\\", "/").lower()
@@ -1571,6 +2874,72 @@ def apply_e2e_codegen_guards(
                     (f.path or "").replace("\\", "/"),
                 )
             ]
+        # Phase 2: storage/public feature Specs still need Feature entry
+        if mode in ("storage", "public"):
+            normalized = ensure_feature_entry_on_feature_specs(
+                normalized, feature_path=stub_feature_path, require_auth_call=False
+            )
+
+    # Final Feature-entry pass for every non-login Spec (ui_helper may have already
+    # injected; idempotent). require_auth_call=False so storage leftovers / Auth
+    # category TCs still get ``test.step('1. Feature entry')`` before Phase-2 enforce.
+    if mode not in ("none",):
+        normalized = ensure_feature_entry_on_feature_specs(
+            normalized, feature_path=stub_feature_path, require_auth_call=False
+        )
+
+    # After Auth(0) + Feature entry(1) inject, LLM Act steps often restart at 1.
+    # Renumber every test.step to continuous 0..N so step capture / headed runner works.
+    for f in normalized:
+        p = (f.path or "").replace("\\", "/").lower()
+        is_spec = f.kind == "spec" or "/specs/" in f"/{p}/" or p.endswith(".spec.ts")
+        if not is_spec:
+            continue
+        f.content = renumber_spec_test_steps(f.content or "")
+        f.content = _strip_orphan_type_imports(f.content or "")
+        f.content = normalize_collapsed_imports(f.content or "")
+        f.content = canonicalize_ensure_authenticated_imports(
+            f.content,
+            spec_path=getattr(f, "path", "") or "",
+            helper_path=next(
+                (
+                    (x.path or "").replace("\\", "/")
+                    for x in normalized
+                    if (x.path or "").replace("\\", "/").lower().endswith(
+                        "auth.helper.ts"
+                    )
+                ),
+                "",
+            ),
+        )
+        f.content = normalize_collapsed_imports(f.content or "")
+
+    if enforce_journey:
+        from app.services.e2e_journey_enforce import assert_feature_journey_ok
+
+        assert_feature_journey_ok(
+            normalized,
+            mode=mode,
+            test_case_title=test_case_title,
+        )
+
+    if enforce_stubs:
+        from app.services.e2e_stub_grounding import assert_no_empty_pass_stubs
+
+        assert_no_empty_pass_stubs(normalized, dom_snapshot=dom_snapshot)
+        # Empty→DOM fail path injects Phase-3 throws AFTER the soft rewrite above.
+        # Re-heal so journey Act/Arrange never ships ungrounded (Rule 19).
+        for f in normalized:
+            p = (f.path or "").replace("\\", "/")
+            if f.kind == "page" or "/pages/" in p:
+                f.content = _rewrite_ungrounded_nav_stubs(
+                    f.content or "",
+                    feature_path=stub_feature_path,
+                    dom_snapshot=dom_snapshot,
+                )
+
+    # Per-TC deep-link bake (force) — fixes suite noise like /admin/case-record on Evidence TCs
+    _bake_feature_paths_per_tc(normalized, hint=feature_path)
 
     return normalized
 
@@ -1650,35 +3019,144 @@ def _is_login_or_auth_spec(path: str, content: str) -> bool:
 
 
 def _module_prefix_for_fixtures(files: Iterable) -> str:
-    """Pick AItest/E2ETest/{Module}/ or relative fixtures/ from existing paths."""
+    """Return E2ETest/_shared prefix for suite-wide fixtures (auth/storage)."""
+    from app.services.test_output_layout import e2e_shared_root
+
     for f in files:
         p = (getattr(f, "path", "") or "").replace("\\", "/")
         if not p:
             continue
-        # Prefer path that already has fixtures/ or pages/ or specs/
-        for marker in ("/fixtures/", "/pages/", "/specs/", "/playwright.config.ts"):
-            if marker in f"/{p.lower()}" or p.lower().endswith("playwright.config.ts"):
-                # Truncate at marker parent
-                lower = p
-                for m in ("/fixtures/", "/pages/", "/specs/"):
-                    idx = lower.lower().find(m)
-                    if idx >= 0:
-                        return p[:idx]
-                if p.lower().endswith("playwright.config.ts"):
-                    return p.rsplit("/", 1)[0]
-    return ""
+        low = p.lower()
+        if "/_shared/" in low:
+            return p[: low.find("/_shared/") + len("/_shared")]
+        if "/e2etest/" in low:
+            idx = low.find("/e2etest/")
+            return p[: idx + len("/e2etest")] + "/_shared"
+    return e2e_shared_root()
 
 
-def ensure_auth_helper_files(files: list) -> list:
+def _auth_helper_import_line(spec_path: str, helper_path: str) -> str:
+    import os
+
+    spec_dir = os.path.dirname((spec_path or "").replace("\\", "/")) or "."
+    rel = os.path.relpath((helper_path or "").replace("\\", "/"), spec_dir).replace(
+        "\\", "/"
+    )
+    if rel.endswith(".ts"):
+        rel = rel[:-3]
+    if not rel.startswith("."):
+        rel = f"./{rel}"
+    # Always end with `;\n` — callers must NOT .strip() this or the next import glues on.
+    return f"import {{ ensureAuthenticated }} from '{rel}';\n"
+
+
+_IMPORT_LINE_RE = re.compile(
+    r"^import\s.+?(?:;|$)",
+    re.MULTILINE,
+)
+
+
+def normalize_collapsed_imports(content: str) -> str:
     """
-    Ensure fixtures/auth.helper.ts is the canonical helper and inject
+    Heal mashed import glue into separate lines.
+
+    Staging Forensic showed mashed imports → SyntaxError → 6/6 FAIL.
+    Also restores ``import {`` when a multiline named import lost its opener.
+    """
+    text = content or ""
+    if not text:
+        return text
+    # from '…'import / from "…"import  (missing newline + optional semicolon)
+    text = re.sub(
+        r"""(from\s*['"][^'"]+['"])\s*(import\b)""",
+        r"\1;\n\2",
+        text,
+    )
+    # `;import` when previous import ended mid-line
+    text = re.sub(r""";(import\b)""", r";\n\1", text)
+    # Orphan multiline named-import body (missing `import {`)
+    text = re.sub(
+        r"(;)\s*\n(?P<body>(?:[ \t]+(?:type\s+)?[\w$]+(?:\s+as\s+[\w$]+)?\s*,\s*\n)+"
+        r"[ \t]*\})\s*from\s+(?P<q>['\"][^'\"]+['\"])\s*;?",
+        r"\1\nimport {\n\g<body> from \g<q>;",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Ensure each import … from '…' ends with semicolon before EOL (when alone on line)
+    text = re.sub(
+        r"""^(import\s.+from\s*['"][^'"]+['"])\s*$""",
+        r"\1;",
+        text,
+        flags=re.MULTILINE,
+    )
+    return text
+
+
+def canonicalize_ensure_authenticated_imports(
+    content: str, *, spec_path: str = "", helper_path: str = ""
+) -> str:
+    """Point every ensureAuthenticated import at suite ``_shared/fixtures/auth.helper``.
+
+    Also inserts the import when Spec *calls* ``ensureAuthenticated(page)`` but
+    AI forgot the import line (common with multiline POM imports).
+    """
+    text = normalize_collapsed_imports(content or "")
+    if "ensureAuthenticated" not in text:
+        return text
+    if spec_path and helper_path:
+        want = _auth_helper_import_line(spec_path, helper_path)
+    else:
+        want = (
+            "import { ensureAuthenticated } from '../../../_shared/fixtures/auth.helper';\n"
+        )
+    pat = re.compile(
+        r"""import\s*\{\s*ensureAuthenticated\s*\}\s*from\s*['"][^'"]+['"]\s*;?"""
+    )
+    has_import = bool(pat.search(text))
+    has_call = bool(re.search(r"\bensureAuthenticated\s*\(", text))
+    if not has_import and not has_call:
+        return text
+    # Drop existing ensureAuthenticated imports (if any), then insert one canonical line
+    if has_import:
+        text = pat.sub("", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = normalize_collapsed_imports(text)
+
+    last_import = None
+    for m in _IMPORT_LINE_RE.finditer(text):
+        last_import = m
+    if last_import:
+        insert_at = last_import.end()
+        rest = text[insert_at:]
+        text = (
+            text[:insert_at]
+            + ("\n" if not rest.startswith("\n") else "")
+            + want
+            + (rest if rest.startswith("\n") else "\n" + rest)
+        )
+    elif text.lstrip().startswith("///"):
+        nl = text.find("\n")
+        text = (
+            (text[: nl + 1] + want + text[nl + 1 :]) if nl >= 0 else (want + text)
+        )
+    else:
+        text = want + text
+    return normalize_collapsed_imports(text)
+
+
+def ensure_auth_helper_files(
+    files: list, *, feature_path: str = ""
+) -> list:
+    """
+    Ensure _shared/fixtures/auth.helper.ts is the canonical helper and inject
     ensureAuthenticated into feature specs when storageState is absent.
-    Always rewrite helper content so Verify picks up auth fixes without regen.
+    Phase 2: always inject Feature entry on feature Specs (even if auth already present).
     """
     from app.llm.base import E2EFile
 
     out: list = list(files)
-    feature_need_inject: list = []
+    feature_specs: list = []
+    feature_need_auth: list = []
     has_feature_spec = False
     for f in out:
         p = (getattr(f, "path", "") or "").replace("\\", "/")
@@ -1690,53 +3168,220 @@ def ensure_auth_helper_files(files: list) -> list:
         if _is_login_or_auth_spec(p, getattr(f, "content", "") or ""):
             continue
         has_feature_spec = True
+        feature_specs.append(f)
         content = getattr(f, "content", "") or ""
-        # Comment-only mentions («Auth: … không ensureAuthenticated») must still inject.
         if not _spec_calls_ensure_authenticated(content):
-            feature_need_inject.append(f)
+            feature_need_auth.append(f)
 
-    helpers = [
-        f
-        for f in out
-        if (getattr(f, "path", "") or "").replace("\\", "/").lower().endswith("auth.helper.ts")
-    ]
-    if helpers:
-        for h in helpers:
-            h.content = _AUTH_HELPER_TS
-    elif has_feature_spec or feature_need_inject:
-        prefix = _module_prefix_for_fixtures(out)
-        helper_path = (
-            f"{prefix}/fixtures/auth.helper.ts" if prefix else "fixtures/auth.helper.ts"
-        )
+    shared_prefix = _module_prefix_for_fixtures(out)
+    helper_path = f"{shared_prefix}/fixtures/auth.helper.ts"
+
+    # Collapse duplicate per-TC auth.helper copies into the suite _shared path
+    cleaned: list = []
+    helper_written = False
+    for f in out:
+        p = (getattr(f, "path", "") or "").replace("\\", "/").lower()
+        if p.endswith("auth.helper.ts"):
+            if helper_written:
+                continue
+            f.path = helper_path
+            f.content = _AUTH_HELPER_TS
+            cleaned.append(f)
+            helper_written = True
+            continue
+        cleaned.append(f)
+    out = cleaned
+
+    if not helper_written and (has_feature_spec or feature_need_auth):
         out.append(E2EFile(path=helper_path, content=_AUTH_HELPER_TS, kind="fixture"))
 
-    for f in feature_need_inject:
-        f.content = inject_ensure_authenticated(f.content or "")
+    for f in feature_need_auth:
+        f.content = inject_ensure_authenticated(
+            f.content or "",
+            spec_path=getattr(f, "path", "") or "",
+            helper_path=helper_path,
+        )
+    for f in feature_specs:
+        f.content = inject_feature_entry_step(
+            f.content or "",
+            feature_path=feature_path,
+            require_auth_call=True,
+        )
+        # Normalize any ensureAuthenticated import (auth.helper or AI wrong path) → _shared
+        sp = getattr(f, "path", "") or ""
+        content = normalize_collapsed_imports(f.content or "")
+        if "ensureAuthenticated" in content:
+            content = canonicalize_ensure_authenticated_imports(
+                content, spec_path=sp, helper_path=helper_path
+            )
+        f.content = normalize_collapsed_imports(content)
 
     return out
 
 
-def inject_ensure_authenticated(spec_content: str) -> str:
-    """Add import + visible test.step for login before POM actions."""
-    text = spec_content or ""
-    has_import = bool(
-        re.search(
-            r"""from\s+['"][^'"]*auth\.helper['"]""",
-            text,
+def ensure_feature_entry_on_feature_specs(
+    files: list,
+    *,
+    feature_path: str = "",
+    require_auth_call: bool = False,
+) -> list:
+    """Phase 2 — inject Feature entry on every non-login Spec."""
+    for f in files:
+        p = (getattr(f, "path", "") or "").replace("\\", "/")
+        is_spec = getattr(f, "kind", "") == "spec" or "/specs/" in f"/{p}/" or p.endswith(
+            ".spec.ts"
         )
-    )
-    if not has_import:
-        import_line = "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
-        last_import = None
-        for m in re.finditer(r"^import\s.+?;\s*$", text, re.MULTILINE):
-            last_import = m
-        if last_import:
-            insert_at = last_import.end()
-            text = text[:insert_at] + "\n" + import_line + text[insert_at:]
-        else:
-            text = import_line + text
+        if not is_spec:
+            continue
+        if _is_login_or_auth_spec(p, getattr(f, "content", "") or ""):
+            continue
+        f.content = inject_feature_entry_step(
+            f.content or "",
+            feature_path=feature_path,
+            require_auth_call=require_auth_call,
+        )
+        f.content = _reorder_feature_entry_after_auth(f.content or "")
+    return files
 
-    return _inject_ensure_auth_calls(text)
+
+def inject_feature_entry_step(
+    spec_content: str,
+    *,
+    feature_path: str = "",
+    require_auth_call: bool = True,
+) -> str:
+    """
+    After auth, ensure Viewer opens the feature under test (Phase C).
+    Uses E2E_FEATURE_PATH (or baked feature_path). Never invents routes.
+
+    Skip only when Phase-2 ``spec_has_feature_entry`` already passes.
+    Always insert AFTER ``ensureAuthenticated`` when present — never before Auth.
+    """
+    from app.services.e2e_journey_enforce import spec_has_feature_entry
+
+    text = spec_content or ""
+    if spec_has_feature_entry(text):
+        # Repair: injected Feature entry sometimes landed before Auth.
+        return _reorder_feature_entry_after_auth(text)
+    if require_auth_call and not re.search(r"ensureAuthenticated\s*\(\s*page\s*\)", text):
+        return text
+
+    baked = (feature_path or "").strip().replace("\\", "/")
+    if baked and not baked.startswith("/") and not baked.startswith("http"):
+        baked = f"/{baked}"
+    baked_js = json.dumps(baked) if baked else '""'
+
+    step = (
+        "\n  await test.step('1. Feature entry', async () => {\n"
+        f"    const baked = {baked_js};\n"
+        "    const featurePath = (baked || process.env.E2E_FEATURE_PATH || '').trim();\n"
+        "    if (featurePath) {\n"
+        "      const path = featurePath.startsWith('http') || featurePath.startsWith('/')\n"
+        "        ? featurePath\n"
+        "        : `/${featurePath}`;\n"
+        "      await page.goto(path, { waitUntil: 'domcontentloaded' });\n"
+        "    }\n"
+        "    // Landmark on feature shell — never invent routes when path empty\n"
+        "    await page.locator('main, [role=\"main\"], nav, h1, h2, [data-cy], [data-testid]')"
+        ".first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => undefined);\n"
+        "  });"
+    )
+
+    # Prefer Auth test.step that contains ensureAuthenticated (any index, multiline).
+    auth_step = re.search(
+        r"await\s+test\.step\s*\(\s*['\"][^'\"]*(?:[Aa]uth|[Ll]ogin|[Dd]ăng)[^'\"]*['\"]\s*,\s*"
+        r"async\s*\(\s*\)\s*=>\s*\{"
+        r".*?ensureAuthenticated\s*\(\s*page\s*\)\s*;?"
+        r".*?\}\s*\)\s*;",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if auth_step:
+        return _reorder_feature_entry_after_auth(text[: auth_step.end()] + step + text[auth_step.end() :])
+    # Bare ensureAuthenticated — semicolon optional
+    m = re.search(r"await\s+ensureAuthenticated\s*\(\s*page\s*\)\s*;?", text)
+    if m:
+        return _reorder_feature_entry_after_auth(text[: m.end()] + step + text[m.end() :])
+    # Do NOT prepend at test() open when Auth exists only as import — wait for call.
+    if re.search(r"ensureAuthenticated", text):
+        return text
+    pattern = re.compile(
+        r"(test(?:\.(?:only|skip))?\s*\("
+        r"(?:[^;]*?)"
+        r"async\s*\(\s*\{(?P<fix>[^}]*)\}\s*(?:,\s*\w+)?\s*\)\s*=>\s*\{)",
+        re.DOTALL,
+    )
+
+    def repl(m: "re.Match[str]") -> str:
+        fixtures = m.group("fix")
+        if not re.search(r"\bpage\b", fixtures):
+            return m.group(0)
+        return m.group(0) + step
+
+    new_text, n = pattern.subn(repl, text, count=1)
+    return new_text if n else text
+
+
+_FEATURE_ENTRY_BLOCK_RE = re.compile(
+    r"\n?\s*await\s+test\.step\s*\(\s*['\"][^'\"]*Feature entry[^'\"]*['\"]\s*,\s*"
+    r"async\s*\(\s*\)\s*=>\s*\{.*?\}\s*\)\s*;",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _reorder_feature_entry_after_auth(spec_content: str) -> str:
+    """Move a Feature-entry test.step to immediately after ensureAuthenticated when misplaced."""
+    text = spec_content or ""
+    entry = _FEATURE_ENTRY_BLOCK_RE.search(text)
+    auth = re.search(r"await\s+ensureAuthenticated\s*\(\s*page\s*\)\s*;?", text)
+    if not entry or not auth:
+        return text
+    if entry.start() > auth.end():
+        return text
+    block = entry.group(0)
+    without = text[: entry.start()] + text[entry.end() :]
+    auth2 = re.search(r"await\s+ensureAuthenticated\s*\(\s*page\s*\)\s*;?", without)
+    if not auth2:
+        return text
+    return without[: auth2.end()] + block + without[auth2.end() :]
+
+
+def inject_ensure_authenticated(
+    spec_content: str,
+    *,
+    spec_path: str = "",
+    helper_path: str = "",
+) -> str:
+    """Add import + visible test.step for login before POM actions."""
+    text = normalize_collapsed_imports(spec_content or "")
+    # Already imported from anywhere — canonicalize path instead of double-import
+    if re.search(r"""import\s*\{\s*ensureAuthenticated\s*\}""", text):
+        text = canonicalize_ensure_authenticated_imports(
+            text, spec_path=spec_path, helper_path=helper_path
+        )
+        return _inject_ensure_auth_calls(normalize_collapsed_imports(text))
+
+    if spec_path and helper_path:
+        import_line = _auth_helper_import_line(spec_path, helper_path)
+    else:
+        import_line = (
+            "import { ensureAuthenticated } from '../../../_shared/fixtures/auth.helper';\n"
+        )
+    last_import = None
+    for m in _IMPORT_LINE_RE.finditer(text):
+        last_import = m
+    if last_import:
+        insert_at = last_import.end()
+        # Ensure we don't glue onto the remainder of the line
+        rest = text[insert_at:]
+        sep = "" if rest.startswith("\n") else "\n"
+        text = text[:insert_at] + sep + import_line + (
+            rest if rest.startswith("\n") or not rest else "\n" + rest.lstrip()
+        )
+    else:
+        text = import_line + text
+
+    return _inject_ensure_auth_calls(normalize_collapsed_imports(text))
 
 
 def _inject_ensure_auth_calls(text: str) -> str:
@@ -1809,32 +3454,63 @@ def is_bogus_spec_content(content: str) -> bool:
 
 def _rewrite_cross_tc_imports(content: str, spec_path: str, all_files: list) -> str:
     """
-    Specs must only import from their own sibling ../pages/ folder.
-    AI sometimes generates cross-TC imports like '../../OtherTC/pages/foo.page'.
-    Rewrite to '../pages/foo.page' and ensure the local page exists (placeholder if needed).
+    Specs import POM from suite ``_shared/pages`` (or legacy sibling ``../pages``).
+    AI sometimes generates cross-TC imports like ``../../OtherTC/pages/foo.page``.
+    Rewrite those to ``_shared/pages`` (preferred) or local ``../pages``.
     """
     if not content:
         return content
 
-    # Any import that targets ".../pages/..." but is not local "../pages/..."
-    # should be rewritten to local sibling pages folder (one TC = one pages/).
     import_re = re.compile(r"""(from\s+['"])([^'"]+)(['"])""")
 
     def _repl(m: re.Match[str]) -> str:
         prefix, raw_path, suffix = m.group(1), m.group(2).replace("\\", "/"), m.group(3)
         if "/pages/" not in raw_path:
             return m.group(0)
-        if raw_path.startswith("../pages/"):
+        # Already suite-shared or classic sibling — keep
+        if "/_shared/pages/" in raw_path or raw_path.startswith("../pages/"):
             return m.group(0)
         leaf = raw_path.rsplit("/pages/", 1)[-1].lstrip("/")
         if not leaf:
             return m.group(0)
-        return f"{prefix}../pages/{leaf}{suffix}"
+        # Prefer relative import into suite _shared from this Spec path
+        if spec_path:
+            import os
+
+            shared_page = None
+            for f in all_files or []:
+                p = (getattr(f, "path", "") or "").replace("\\", "/")
+                if "/_shared/pages/" in p.lower() and p.rsplit("/", 1)[-1] == leaf.split("/")[-1]:
+                    shared_page = p
+                    break
+                if p.lower().endswith("/" + leaf.lower()) or p.lower().endswith(
+                    "/" + leaf.lower() + ".ts"
+                ):
+                    if "/_shared/pages/" in p.lower():
+                        shared_page = p
+                        break
+            if shared_page:
+                spec_dir = os.path.dirname(spec_path.replace("\\", "/")) or "."
+                target = shared_page
+                if not target.endswith(".ts") and leaf.endswith(".ts"):
+                    pass
+                elif target.endswith(".ts"):
+                    target = target[:-3]
+                elif not leaf.endswith(".ts"):
+                    # import specs usually omit .ts
+                    pass
+                rel = os.path.relpath(shared_page, spec_dir).replace("\\", "/")
+                if rel.endswith(".ts"):
+                    rel = rel[:-3]
+                if not rel.startswith("."):
+                    rel = f"./{rel}"
+                return f"{prefix}{rel}{suffix}"
+        return f"{prefix}../../../_shared/pages/{leaf}{suffix}"
 
     return import_re.sub(_repl, content)
 
 
-def _strip_spec_storage_state(content: str) -> str:
+def strip_spec_storage_state(content: str) -> str:
     """Remove test.use({ storageState: ... }) from spec when storageState file is missing."""
     return re.sub(
         r"test\.use\(\s*\{\s*storageState\s*:\s*['\"][^'\"]*['\"]\s*,?\s*\}\s*\)\s*;?\s*\n?",
@@ -1842,6 +3518,10 @@ def _strip_spec_storage_state(content: str) -> str:
         content,
         flags=re.IGNORECASE,
     )
+
+
+def _strip_spec_storage_state(content: str) -> str:
+    return strip_spec_storage_state(content)
 
 
 # Playwright selectOption({ label }) requires string — AI often passes a RegExp var.
@@ -2032,6 +3712,140 @@ def _fix_nested_expect_on_pom_asserts(content: str) -> str:
         return f"await expect({var}.{method}({args})).toBeVisible();"
 
     out = _NESTED_EXPECT_POM_RE.sub(_repl_call, content)
+
+    # await expect(page.getByText(pom.expectX(...))).toBeVisible()
+    # → await pom.expectX(...)   (void assert passed as text → "[object Promise]")
+    def _repl_gettext_assert(m: re.Match[str]) -> str:
+        var, method, args = m.group(1), m.group(2), m.group(3)
+        return f"await {var}.{method}({args});"
+
+    out = re.sub(
+        r"""await\s+expect\s*\(\s*(?:this\.)?page\.getByText\s*\(\s*(?:await\s+)?"""
+        r"""(\w+)\.(expect\w+|assert\w+)\s*\(([^)]*)\)\s*\)\s*\)\s*\."""
+        r"""toBe(?:Visible|Hidden|Attached)\s*\([^;]*\)\s*;""",
+        _repl_gettext_assert,
+        out,
+        flags=re.IGNORECASE,
+    )
+    return out
+
+
+_ASYNC_PATH_HELPER_RE = re.compile(
+    r"""async\s+(?P<name>\w*(?:fixture|Fixture|FilePath|filePath|FileName|fileName|UploadPath|uploadPath|\w*Path)\w*)"""
+    r"""\s*\((?P<args>[^)]*)\)\s*:\s*Promise\s*<\s*string\s*>\s*\{""",
+    re.IGNORECASE,
+)
+
+_ASYNC_PATH_HELPER_ENSURE_RE = re.compile(
+    r"""async\s+(?P<name>(?:ensure|build|make|create|get)\w*(?:File|Doc|Upload|Fixture)\w*)"""
+    r"""\s*\((?P<args>[^)]*)\)\s*:\s*Promise\s*<\s*string\s*>\s*\{""",
+    re.IGNORECASE,
+)
+
+
+def _sync_async_path_helpers(content: str) -> str:
+    """async fooPath(): Promise<string> → fooPath(): string (avoids path/getByText Promise)."""
+    if not content:
+        return content
+
+    def _repl(m: re.Match[str]) -> str:
+        return f"{m.group('name')}({m.group('args')}): string {{"
+
+    out = _ASYNC_PATH_HELPER_RE.sub(_repl, content)
+    out = _ASYNC_PATH_HELPER_ENSURE_RE.sub(_repl, out)
+    # Freestanding export async function → sync
+    out = re.sub(
+        r"""export\s+async\s+function\s+(\w*(?:fixture|Fixture|File|Path|Upload)\w*)\s*\(([^)]*)\)\s*:\s*Promise\s*<\s*string\s*>""",
+        r"export function \1(\2): string",
+        out,
+        flags=re.IGNORECASE,
+    )
+    return out
+
+
+def _fix_promise_coercion_crashes(content: str) -> str:
+    """
+    Fix Spec patterns that pass a Promise into Playwright APIs:
+    - setInputFiles(sel, helper()) → setInputFiles(sel, await helper())
+    - getByText(helper()) → getByText(await helper()) when helper looks async-named
+    - goto(pom.getUrl()) → goto(await pom.getUrl()) for async getters still present
+    After _sync_async_path_helpers, await on sync fn is harmless in TS? Actually await on
+    non-Promise wraps value — fine at runtime. Prefer adding await for call sites that
+    still reference async helpers from AI output.
+    """
+    if not content:
+        return content
+    out = content
+
+    # setInputFiles(..., expr) without await on call.
+    # First arg must be [^,)]+ — never cross the closing ')' of a 1-arg call
+    # (old [^,]+ matched past ');' into `[key, val]` and injected `await val`).
+    def _await_files(m: re.Match[str]) -> str:
+        prefix, arg = m.group(1), m.group(2).strip()
+        if arg.startswith("await ") or arg.startswith("'") or arg.startswith('"') or arg.startswith("`"):
+            return m.group(0)
+        if re.match(r"^[\w.]+$", arg):  # bare var — leave
+            return m.group(0)
+        # function / method call
+        if re.search(r"\w+\s*\(", arg) and not arg.lstrip().startswith("await"):
+            return f"{prefix}await {arg})"
+        return m.group(0)
+
+    out = re.sub(
+        r"""(setInputFiles\s*\(\s*[^,)]+,\s*)([^)]+)\)""",
+        _await_files,
+        out,
+    )
+    # Single-arg: setInputFiles(helper()) → setInputFiles(await helper())
+    def _await_files_1(m: re.Match[str]) -> str:
+        prefix, arg = m.group(1), m.group(2).strip()
+        if arg.startswith("await ") or arg.startswith("'") or arg.startswith('"') or arg.startswith("`"):
+            return m.group(0)
+        if re.match(r"^[\w.]+$", arg):
+            return m.group(0)
+        if re.search(r"\w+\s*\(", arg):
+            return f"{prefix}await {arg})"
+        return m.group(0)
+
+    out = re.sub(
+        r"""(setInputFiles\s*\(\s*)((?:await\s+)?\w+(?:\.\w+)*\s*\([^)]*\))\s*\)""",
+        _await_files_1,
+        out,
+    )
+
+    # getByText(pom.foo()) — single call arg only (skip getByText(x, { exact }))
+    # Path/fixture helpers must NOT become visible-text asserts (generated.bin).
+    def _gettext_call(m: re.Match[str]) -> str:
+        inner = m.group(1).strip()
+        low = inner.lower()
+        if re.search(
+            r"(?:fixture|filepath|filename|uploadpath|docpath|ensure\w*file|build\w*file|make\w*file)\s*\(",
+            low,
+        ):
+            return (
+                "/* guard: skipped getByText(pathHelper) — use setInputFiles instead */ "
+                "await Promise.resolve()"
+            )
+        if inner.startswith("await "):
+            return m.group(0)
+        return f"getByText(await {inner})"
+
+    out = re.sub(
+        r"""getByText\s*\(\s*((?:await\s+)?\w+(?:\.\w+)*\s*\([^)]*\))\s*\)""",
+        _gettext_call,
+        out,
+    )
+
+    # goto(pom.getUrl()) — single call arg only
+    out = re.sub(
+        r"""goto\s*\(\s*((?:await\s+)?\w+(?:\.\w+)*\s*\([^)]*\))\s*\)""",
+        lambda m: (
+            m.group(0)
+            if m.group(1).strip().startswith("await ")
+            else f"goto(await {m.group(1).strip()})"
+        ),
+        out,
+    )
     return out
 
 
@@ -2069,6 +3883,13 @@ def _ensure_locator_fields_for_spec_expects(
             # Method call form handled elsewhere; bare prop only
             if _norm_key(prop) in existing_methods:
                 continue
+            needed.add(prop)
+    # this.foo.or(...) in page — undeclared Locator → TypeError reading 'or'
+    for m in re.finditer(r"this\.(\w+)\.or\s*\(", page_content or ""):
+        prop = m.group(1)
+        if prop in ("page", "locator", "context"):
+            continue
+        if prop not in existing_fields and _norm_key(prop) not in existing_methods:
             needed.add(prop)
     if not needed:
         return spec_content, page_content

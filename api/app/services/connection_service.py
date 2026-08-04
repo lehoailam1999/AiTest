@@ -29,6 +29,7 @@ def get_or_create_conn(db: Session, project_id: uuid.UUID) -> AiBackendConnectio
             # so that deleting connection rows and recreating yields same behavior.
             backend_type=C.PROVIDER_OLLAMA,
             status=C.STATUS_DISCONNECTED,
+            runner_mode="AI_CLI",
         )
         db.add(conn)
         db.commit()
