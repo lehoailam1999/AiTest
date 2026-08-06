@@ -1,6 +1,9 @@
 /**
  * Batch route catalog — scan FE routing files once, match TC module/title → featurePath.
  * Cheap preflight for E2E batch (avoids per-TC full-tree walks).
+ *
+ * Portable: no product-specific VI↔EN synonym tables. Match via path-segment /
+ * module-slug token overlap only. Weak scores must not override FE-derived paths.
  */
 import type { TestCase } from "../../api/types";
 
@@ -17,21 +20,15 @@ const ABS_ROUTE_RE =
 const AUTH_ROUTE_RE =
   /\/(login|signin|sign-in|signup|sign-up|register|auth)(\/|$)/i;
 
-const MIN_MATCH_SCORE = 1.5;
+/** Require strong token/module overlap — weak hits must not beat FE path. */
+export const MIN_MATCH_SCORE = 3;
 const AMBIGUOUS_GAP = 0.75;
 
-/** Light VI/EN synonyms so catalog can match Forensic-style modules. */
-const TOKEN_SYNONYMS: Record<string, string[]> = {
-  evidence: ["vat", "chung", "vatchung", "forensic"],
-  storage: ["phong", "kho", "phongkho", "room", "rooms"],
-  room: ["phong", "kho"],
-  rooms: ["phong", "kho"],
-  case: ["vu", "an", "ho", "so", "hoso"],
-  cases: ["vu", "an", "hoso"],
-  user: ["nguoi", "dung", "nguoidung"],
-  account: ["tai", "khoan", "taikhoan"],
-  login: ["dang", "nhap", "dangnhap"],
-};
+/**
+ * When FE primary already resolved, catalog must clear this bar to replace nothing
+ * (catalog only runs when featurePath empty — still skip weak matches).
+ */
+export const STRONG_CATALOG_SCORE = 4;
 
 export type E2eRouteCatalog = {
   routes: string[];
@@ -138,13 +135,9 @@ function scoreRoute(route: string, tokens: string[], module?: string): number {
   for (const t of tokens) {
     if (low.includes(t)) score += 1;
     for (const seg of segs) {
-      const syns = TOKEN_SYNONYMS[seg] || [];
-      if (syns.includes(t)) score += 1.25;
-      // reverse: token maps to route segment
-      for (const [eng, viList] of Object.entries(TOKEN_SYNONYMS)) {
-        if (viList.includes(t) && (seg.includes(eng) || eng.includes(seg))) {
-          score += 1.25;
-        }
+      const segSlug = seg.replace(/[^a-z0-9]+/g, "");
+      if (segSlug && (segSlug.includes(t) || t.includes(segSlug))) {
+        score += 0.5;
       }
     }
   }
@@ -152,7 +145,10 @@ function scoreRoute(route: string, tokens: string[], module?: string): number {
   if (mod.length >= 3 && low.includes(mod)) score += 2;
   // module slug often matches leaf: "StorageRoom" → storage-room
   if (mod) {
-    const slug = mod.replace(/[^a-z0-9]+/g, "");
+    const slug = mod
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "")
+      .replace(/[^a-z0-9]+/g, "");
     for (const seg of segs) {
       const segSlug = seg.replace(/[^a-z0-9]+/g, "");
       if (slug && segSlug && (slug.includes(segSlug) || segSlug.includes(slug))) {
@@ -166,7 +162,8 @@ function scoreRoute(route: string, tokens: string[], module?: string): number {
 
 export function matchFeaturePathFromCatalog(
   tc: Pick<TestCase, "title" | "module" | "steps" | "testData" | "precondition">,
-  catalog: E2eRouteCatalog
+  catalog: E2eRouteCatalog,
+  opts?: { minScore?: number; hasFePrimary?: boolean }
 ): RouteMatchResult {
   if (!catalog.routes.length) {
     return { score: 0, candidates: [], ambiguous: false };
@@ -188,10 +185,13 @@ export function matchFeaturePathFromCatalog(
   }
   const top = scored[0];
   const second = scored[1];
+  const minScore =
+    opts?.minScore ??
+    (opts?.hasFePrimary ? STRONG_CATALOG_SCORE : MIN_MATCH_SCORE);
   const ambiguous =
     second &&
-    top.score >= MIN_MATCH_SCORE &&
-    second.score >= MIN_MATCH_SCORE &&
+    top.score >= minScore &&
+    second.score >= minScore &&
     top.score - second.score < AMBIGUOUS_GAP;
   if (ambiguous) {
     return {
@@ -200,7 +200,7 @@ export function matchFeaturePathFromCatalog(
       ambiguous: true,
     };
   }
-  if (top.score < MIN_MATCH_SCORE) {
+  if (top.score < minScore) {
     return { score: top.score, candidates: scored.slice(0, 3), ambiguous: false };
   }
   return {

@@ -7,8 +7,11 @@ import type { TestPlan } from "../testPlanner/types";
 import {
   clampTopK,
   e2ePathBonus,
+  extractDomainTokens,
   featurePathTokenBonus,
+  hasSemanticE2eReasons,
   isExcludedFromE2eRetrieve,
+  modulePathTokenBonus,
   normalizeKeywords,
   pathKeywordScore,
   symbolKeywordScore,
@@ -26,10 +29,17 @@ export function retrieveE2eSources(
 ): RetrieveFilesResult {
   const topK = clampTopK(opts?.topK);
   const featurePath = plan.hints.featurePath;
+  const domainTokens = extractDomainTokens(
+    plan.module,
+    featurePath,
+    plan.action,
+    ...(plan.keywords || [])
+  );
   const keywords = normalizeKeywords([
     ...plan.keywords,
     plan.module,
     plan.action,
+    ...domainTokens,
     ...(featurePath ? featurePath.split("/").filter(Boolean) : []),
   ]);
   const notes: string[] = [];
@@ -58,6 +68,11 @@ export function retrieveE2eSources(
       score += fb;
       reasons.push(`featurePath+${fb}`);
     }
+    const mb = modulePathTokenBonus(pathRel, domainTokens);
+    if (mb) {
+      score += mb;
+      reasons.push(`domainTokens${mb >= 0 ? "+" : ""}${mb}`);
+    }
     const eb = e2ePathBonus(pathRel);
     if (eb) {
       score += eb;
@@ -71,23 +86,24 @@ export function retrieveE2eSources(
   ranked.sort(
     (a, b) => b.rankScore - a.rankScore || a.pathRel.localeCompare(b.pathRel)
   );
-  const top = ranked.slice(0, topK);
 
-  if (!top.length) {
-    notes.push("No E2E hits — fallback FE-shaped paths");
-    const fallback = paths
-      .map((pathRel) => ({
-        pathRel,
-        rankScore: e2ePathBonus(pathRel),
-        reasons: ["fallbackE2ePath"],
-      }))
-      .filter((h) => h.rankScore > 0)
-      .sort((a, b) => b.rankScore - a.rankScore)
-      .slice(0, topK);
-    return { files: fallback, primary: fallback[0] || null, notes, plan };
+  // Prefer TC/plan token overlap. Shape-only hits (create/update/modal) tie-break by
+  // path sort and often pick the wrong feature folder — defer to legacy FE resolve.
+  const semantic = ranked.filter((h) => hasSemanticE2eReasons(h.reasons));
+  if (!semantic.length) {
+    notes.push(
+      "No semantic E2E hits (shape-only) — defer to legacy FE resolve"
+    );
+    if (featurePath) notes.push(`featurePath=${featurePath}`);
+    if (domainTokens.length)
+      notes.push(`domainTokens=${domainTokens.slice(0, 8).join(",")}`);
+    return { files: [], primary: null, notes, plan };
   }
 
+  const top = semantic.slice(0, topK);
+
   if (featurePath) notes.push(`featurePath=${featurePath}`);
+  if (domainTokens.length) notes.push(`domainTokens=${domainTokens.slice(0, 8).join(",")}`);
   notes.push(`E2eRetriever topK=${top.length}`);
   return { files: top, primary: top[0] || null, notes, plan };
 }

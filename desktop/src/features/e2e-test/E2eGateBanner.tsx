@@ -31,6 +31,11 @@ type Props = {
   localPath: string | null;
   targetUrl: string;
   testCaseId: string;
+  /** S3.5 — Auth Discover / credentials / storageState readiness (soft gate) */
+  authReady?: boolean;
+  authLabel?: string;
+  /** When set, show soft Auth tip (does not block CTA) */
+  authHint?: string;
   /** Gate reasons → parent disables CTA */
   onGateChange: (gate: { ready: boolean; reasons: string[] }) => void;
 };
@@ -41,6 +46,9 @@ export function E2eGateBanner({
   localPath,
   targetUrl,
   testCaseId,
+  authReady,
+  authLabel,
+  authHint,
   onGateChange,
 }: Props) {
   const { message } = App.useApp();
@@ -53,6 +61,8 @@ export function E2eGateBanner({
   const [pwBypass, setPwBypass] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
 
+  const [authBypass, setAuthBypass] = useState(false);
+
   useEffect(() => {
     setFeBypass(false);
   }, [targetUrl]);
@@ -60,6 +70,10 @@ export function E2eGateBanner({
   useEffect(() => {
     setPwBypass(false);
   }, [localPath]);
+
+  useEffect(() => {
+    setAuthBypass(false);
+  }, [authReady, authLabel]);
 
   useEffect(() => {
     const url = targetUrl.trim();
@@ -118,6 +132,7 @@ export function E2eGateBanner({
           "Chưa có @playwright/test trong project root — Headless sẽ fail"
       );
     }
+    // Auth is soft-only (S3.5) — do not block CTA; separate Alert below
     return r;
   }, [
     aiReady,
@@ -244,6 +259,16 @@ export function E2eGateBanner({
           <Tag color={pwTag.color} title={pwMessage || undefined}>
             {pwTag.text}
           </Tag>
+          {authReady !== undefined ? (
+            <Tag
+              color={authReady ? "success" : "warning"}
+              title={authHint || undefined}
+            >
+              {authReady
+                ? `Auth OK${authLabel ? ` · ${authLabel}` : ""}`
+                : "Auth?"}
+            </Tag>
+          ) : null}
           {!testCaseId ? <Tag color="warning">Chưa chọn TC</Tag> : null}
         </Space>
       </div>
@@ -351,6 +376,30 @@ export function E2eGateBanner({
         />
       ) : null}
 
+      {authHint && !authBypass ? (
+        <Alert
+          className="e2e-gate-alert"
+          type="warning"
+          showIcon
+          title={
+            authReady === false
+              ? "Auth chưa đủ cho Inspect/Verify (không chặn Gen)"
+              : "Auth: nên Đồng bộ storageState trước Inspect/Verify"
+          }
+          description={
+            <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+              <Typography.Text style={{ fontSize: 12 }}>{authHint}</Typography.Text>
+              <Typography.Link
+                style={{ fontSize: 12 }}
+                onClick={() => setAuthBypass(true)}
+              >
+                Ẩn cảnh báo Auth lần này
+              </Typography.Link>
+            </Space>
+          }
+        />
+      ) : null}
+
       {reasons.length > 0 ? (
         <Alert
           className="e2e-gate-alert"
@@ -388,6 +437,10 @@ export function E2eGateBanner({
           Đủ điều kiện — có thể Chạy E2E Job.
           {feBypass ? " (đã bỏ qua kiểm FE)" : ""}
           {pwBypass ? " (đã bỏ qua kiểm Playwright)" : ""}
+          {authBypass ? " (đã ẩn cảnh báo Auth)" : ""}
+          {authReady === false && !authBypass
+            ? " · Auth vẫn khuyến nghị Đồng bộ trước Verify"
+            : ""}
         </Typography.Text>
       )}
 

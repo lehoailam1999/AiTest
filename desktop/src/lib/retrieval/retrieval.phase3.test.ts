@@ -159,6 +159,46 @@ describe("retrieval Phase 3", () => {
     assert.ok(res.files.length <= 10);
   });
 
+  it("E2eRetriever defers when only shape-bonus hits (no TC token overlap)", () => {
+    const now = new Date().toISOString();
+    const snap = sampleSnapshot();
+    snap.files["src/app/admin/case-person/update/case-person-update.component.ts"] = {
+      pathRel: "src/app/admin/case-person/update/case-person-update.component.ts",
+      language: "ts",
+      contentHash: "cp",
+      byteSize: 100,
+      symbolCount: 0,
+      importCount: 0,
+      indexedAt: now,
+    };
+    snap.files["src/app/admin/evidence/create/evidence-create.component.ts"] = {
+      pathRel: "src/app/admin/evidence/create/evidence-create.component.ts",
+      language: "ts",
+      contentHash: "ev",
+      byteSize: 100,
+      symbolCount: 0,
+      importCount: 0,
+      indexedAt: now,
+    };
+    snap.symbolsByFile[
+      "src/app/admin/case-person/update/case-person-update.component.ts"
+    ] = [];
+    snap.symbolsByFile[
+      "src/app/admin/evidence/create/evidence-create.component.ts"
+    ] = [];
+    // Vietnamese title/module — no latin slug matching English FE folders
+    const plan = planFromTestCase({
+      title: "Tao moi vat chung - de trong ten",
+      type: "E2E",
+      module: "Vat chung",
+      steps: "Mo form tao moi; de trong ten; assert bat buoc",
+    });
+    const res = retrieveE2eSources(snap, plan, { topK: 5 });
+    assert.equal(res.primary, null);
+    assert.equal(res.files.length, 0);
+    assert.ok(res.notes.some((n) => /shape-only|legacy FE/i.test(n)));
+  });
+
   it("BusinessRetriever is TC-first without Knowledge", () => {
     const plan = planFromTestCase({
       title: "X",
@@ -256,6 +296,43 @@ describe("retrieval Phase 3", () => {
     );
     assert.equal(isUnsuitableE2ePrimary("AItest/E2ETest/_shared/pages/login.page.ts"), true);
     assert.equal(isExcludedFromE2eRetrieve("src/pages/CheckoutPage.tsx"), false);
+  });
+
+  it("excludes Playwright fixture / *.E2E trees from E2E FE retrieve (S1)", () => {
+    assert.equal(
+      isExcludedFromE2eRetrieve(
+        "test/App.E2E/support/fixtures/auth.fixture.ts"
+      ),
+      true
+    );
+    assert.equal(
+      isExcludedFromE2eRetrieve(
+        "D:/Xlab/Demo/test/Demo.E2E/support/fixtures/auth.fixture.ts"
+      ),
+      true
+    );
+    assert.equal(isExcludedFromE2eRetrieve("src/app/auth/auth.fixture.ts"), true);
+    assert.equal(
+      isExcludedFromE2eRetrieve(
+        "src/ClientApp/src/app/admin/orders/create/order-create.component.html"
+      ),
+      false
+    );
+    assert.equal(isUnsuitableE2ePrimary("test/App.E2E/support/fixtures/auth.fixture.ts"), true);
+  });
+
+  it("modulePathTokenBonus prefers path sharing module tokens (S1)", async () => {
+    const { modulePathTokenBonus, extractDomainTokens, e2ePathBonus } = await import(
+      "./rankScore.js"
+    );
+    const tokens = extractDomainTokens("Orders", "/admin/orders", "create order");
+    assert.ok(tokens.includes("orders"));
+    const ordersHtml =
+      "src/app/admin/orders/create/order-create-modal.component.html";
+    const otherHtml =
+      "src/app/admin/customers/create/customer-create-dialog.component.html";
+    assert.ok(modulePathTokenBonus(ordersHtml, tokens) > modulePathTokenBonus(otherHtml, tokens));
+    assert.ok(e2ePathBonus("src/app/account/activate/activate.service.ts") < 0);
   });
 
   it("E2eRetriever ignores generated POM even if keywords match", () => {

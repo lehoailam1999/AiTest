@@ -2,7 +2,7 @@
 
 Bounded repair loops classify the error, then send a slim repair packet
 (error excerpt + failing file + Top-K deps). Standard E2E names match
-docs/AI_TEST_RULES.md.
+docs/AI_TEST_RULES.md (+ AuthRequired for S3 auth/login-wall).
 """
 
 from __future__ import annotations
@@ -20,9 +20,10 @@ UnitFailClass = Literal[
     "Other",
 ]
 
-# --- E2E (AI_TEST_RULES) ---
+# --- E2E (AI_TEST_RULES + S3 AuthRequired) ---
 E2eStandardTaxonomy = Literal[
     "ContextMissing",
+    "AuthRequired",
     "PreconditionFailed",
     "LocatorNotFound",
     "BusinessAssertionFailed",
@@ -82,11 +83,22 @@ _E2E_LOG_RULES: list[tuple[E2eStandardTaxonomy, re.Pattern[str]]] = [
             re.I,
         ),
     ),
+    # S3.3 — auth/login-wall before LocatorNotFound (timeouts on login mislabeled otherwise)
+    (
+        "AuthRequired",
+        re.compile(
+            r"AuthRequired|login wall|storageState|E2E_USERNAME|E2E_PASSWORD|"
+            r"auth required|still on (?:the )?login|password still visible|"
+            r"ENOENT.*storage|credentials?|Unauthorized|sign[\s-]*in failed|"
+            r"Login did not leave|ensureAuthenticated|Đăng nhập",
+            re.I,
+        ),
+    ),
     (
         "PreconditionFailed",
         re.compile(
-            r"PreconditionFailed|login wall|storageState|E2E_USERNAME|"
-            r"ExecutionGateFailed|auth required|still on (?:the )?login",
+            r"PreconditionFailed|ExecutionGateFailed|artifact contract|"
+            r"missing locator tried|missing endpoint wait",
             re.I,
         ),
     ),
@@ -111,7 +123,7 @@ _E2E_LOG_RULES: list[tuple[E2eStandardTaxonomy, re.Pattern[str]]] = [
 
 # Desktop E2eFailCategory → standard taxonomy
 _DESKTOP_CAT_TO_STANDARD: dict[str, E2eStandardTaxonomy] = {
-    "auth": "PreconditionFailed",
+    "auth": "AuthRequired",
     "feature_entry": "ContextMissing",
     "locator": "LocatorNotFound",
     "timeout": "LocatorNotFound",
@@ -190,7 +202,11 @@ def format_unit_repair_taxonomy_block(fail_class: UnitFailClass) -> str:
 def format_e2e_heal_taxonomy_block(taxonomy: E2eStandardTaxonomy) -> str:
     hints = {
         "ContextMissing": "Restore grounding (featurePath / FE seed / DOM); do not invent routes.",
-        "PreconditionFailed": "Fix auth/storageState/precondition before Act assertions.",
+        "AuthRequired": (
+            "Fix Auth Discover / storageState / E2E_USERNAME+PASSWORD / role before "
+            "rewriting locators — failure is auth wall, not selector."
+        ),
+        "PreconditionFailed": "Fix seed/precondition/execution gate before Act assertions.",
         "LocatorNotFound": "Rewrite locators from FE/DOM contract; scope strict-mode matches.",
         "BusinessAssertionFailed": "Assert business outcomes from the Approved TC expected result.",
         "Other": "Minimal heal: fix the failing file(s) only.",

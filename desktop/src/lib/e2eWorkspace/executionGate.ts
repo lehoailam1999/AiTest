@@ -12,7 +12,7 @@ function hasExecutionGateArtifacts(text: string): boolean {
 }
 
 function isStandardE2eFailure(text: string): boolean {
-  return /ContextMissing|PreconditionFailed|LocatorNotFound|BusinessAssertionFailed|E2E_GROUNDING|Thiếu Context/i.test(
+  return /ContextMissing|PreconditionFailed|LocatorNotFound|BusinessAssertionFailed|E2E_GROUNDING|Thiếu Context|No tests found|Unexpected token|SyntaxError/i.test(
     text || ""
   );
 }

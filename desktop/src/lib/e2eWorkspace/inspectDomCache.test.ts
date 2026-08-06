@@ -87,6 +87,58 @@ describe("createInspectDomCache", () => {
     assert.equal(fetches, 1);
   });
 
+  it("does not cache login-wall DOM (S3.2)", async () => {
+    const cache = createInspectDomCache();
+    let fetches = 0;
+    const key = inspectCacheKey({
+      targetUrl: "http://x",
+      featurePath: "/feature",
+    });
+    const fetchWall = async () => {
+      fetches += 1;
+      return {
+        domSnapshot:
+          '{"elements":[{"type":"password","name":"password"},{"name":"Đăng nhập"}]}',
+        elementCount: 2,
+        routeCount: 0,
+        source: "url",
+        routes: [] as string[],
+        loginWall: true,
+      };
+    };
+    const r1 = await cache.getOrFetch(key, fetchWall);
+    assert.equal(r1.fromCache, false);
+    assert.equal(r1.entry.loginWall, true);
+    assert.equal(cache.size(), 0);
+    const r2 = await cache.getOrFetch(key, fetchWall);
+    assert.equal(r2.fromCache, false);
+    assert.equal(fetches, 2);
+  });
+
+  it("still caches non-login feature DOM", async () => {
+    const cache = createInspectDomCache();
+    let fetches = 0;
+    const key = inspectCacheKey({
+      targetUrl: "http://x",
+      featurePath: "/rooms",
+    });
+    const fetchOk = async () => {
+      fetches += 1;
+      return {
+        domSnapshot: '{"elements":[{"name":"Thêm mới"}]}',
+        elementCount: 1,
+        routeCount: 0,
+        source: "url",
+        routes: [] as string[],
+        loginWall: false,
+      };
+    };
+    await cache.getOrFetch(key, fetchOk);
+    const hit = await cache.getOrFetch(key, fetchOk);
+    assert.equal(hit.fromCache, true);
+    assert.equal(fetches, 1);
+  });
+
   it("separate keys fetch separately", async () => {
     const cache = createInspectDomCache();
     let fetches = 0;

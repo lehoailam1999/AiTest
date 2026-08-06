@@ -2110,11 +2110,11 @@ def _render_smart_method_stub(
             "    }\n"
             "    const texts = __aitestVisibleTexts(raw);\n"
             "    if (!texts.length) {\n"
-            "      // No string payload — landmark only (avoid getByText('[object Object]'))\n"
-            "      await expect(\n"
-            "        this.page.locator('main, [role=\"main\"], h1, h2, [data-cy], [data-testid]').first()\n"
-            "      ).toBeVisible({ timeout: 15000 });\n"
-            "      return;\n"
+            "      // R6 — do not treat main|h1 as business proof; Spec must pass expected text\n"
+            "      throw new Error(\n"
+            "        'BusinessAssertionFailed: expect* needs Expected outcome text from Spec '\n"
+            "        + '(no shell landmark assert — R6)'\n"
+            "      );\n"
             "    }\n"
             "    for (const q of texts) {\n"
             "      await expect(this.page.getByText(q, { exact: false }).first())\n"
@@ -2446,13 +2446,24 @@ def _rewrite_ungrounded_nav_stubs(
     return pattern.sub(repl, text)
 
 
+_POM_LANDMARK_EXPECT_RE = re.compile(
+    r"await\s+expect\s*\(\s*this\.page\.locator\(\s*['\"]main,\s*\[role=",
+    re.IGNORECASE,
+)
+
+
 def _rewrite_expect_object_string_stubs(page_content: str) -> str:
     """
-    Heal expect*/assert* stubs that do String(raw) → getByText('[object Object]').
-    Re-emit smart stub when the old coercion pattern is present.
+    Heal expect*/assert* stubs that do String(raw) → getByText('[object Object]')
+    or R6-forbidden this.page.locator('main…').toBeVisible landmark fallback.
+    Re-emit smart stub when those patterns are present.
     """
     text = page_content or ""
-    if "String(raw)" not in text:
+    if (
+        "String(raw)" not in text
+        and "asStr" not in text
+        and not _POM_LANDMARK_EXPECT_RE.search(text)
+    ):
         return text
     out: list[str] = []
     i = 0
@@ -2481,9 +2492,10 @@ def _rewrite_expect_object_string_stubs(page_content: str) -> str:
                     break
             j += 1
         body = text[m.end() : j - 1]
-        if "__aitestVisibleTexts" in body:
+        landmark_fake = bool(_POM_LANDMARK_EXPECT_RE.search(body))
+        if "__aitestVisibleTexts" in body and not landmark_fake:
             out.append(text[m.start() : j])
-        elif "String(raw)" in body or "asStr" in body:
+        elif "String(raw)" in body or "asStr" in body or landmark_fake:
             out.append(_render_smart_method_stub(m.group("name")).strip())
         else:
             out.append(text[m.start() : j])
@@ -2709,6 +2721,11 @@ def _bucket_active(key: str, allowed: dict[str, set[str]]) -> bool:
     return False
 
 
+def _is_invented_locator_placeholder(value: str) -> bool:
+    """Reject template / dynamic locator fragments the LLM invents (e.g. ${fieldKey})."""
+    return "${" in ((value or "").strip())
+
+
 def _assert_locator_contract(files: list, locator_contract: str) -> None:
     allowed = _parse_locator_contract(locator_contract)
     if not any(allowed.values()):
@@ -2729,40 +2746,65 @@ def _assert_locator_contract(files: list, locator_contract: str) -> None:
         "formControlName": re.compile(r"""formControlName\s*=\s*["'`]([^"'`]+)["'`]"""),
         "routes": re.compile(r"""routerLink\s*=\s*["'`](/[^"'`]+)["'`]"""),
     }
+    # Always reject invented ${…} placeholders (even when that hook bucket is empty).
+    placeholder_pats: list[tuple[str, re.Pattern[str]]] = [
+        ("name", patterns["name"]),
+        ("formControlName", patterns["formControlName"]),
+        ("data-cy", patterns["data-cy"]),
+        ("data-testid", patterns["data-testid"]),
+        ("id", patterns["id"]),
+    ]
     violations: list[str] = []
     for f in files:
         path = (getattr(f, "path", "") or "").replace("\\", "/").lower()
         if "/pages/" not in f"/{path}/" and "/specs/" not in f"/{path}/":
             continue
         content = getattr(f, "content", "") or ""
+        for key, pat in placeholder_pats:
+            for m in pat.finditer(content):
+                value = next((g for g in m.groups() if g), "")
+                value = (value or "").strip()
+                if value and _is_invented_locator_placeholder(value):
+                    violations.append(f"{f.path}: {key}={value}")
         for key, pat in patterns.items():
             if not _bucket_active(key, allowed):
                 continue
             for m in pat.finditer(content):
                 value = next((g for g in m.groups() if g), "")
                 value = (value or "").strip()
-                if value and not _value_allowed(key, value, allowed):
+                if not value or _is_invented_locator_placeholder(value):
+                    continue
+                if not _value_allowed(key, value, allowed):
                     violations.append(f"{f.path}: {key}={value}")
         # locator("…") bodies: validate #id roots + formControlName attrs (CSS OR safe)
         if _bucket_active("id", allowed) or _bucket_active("formControlName", allowed):
             for str_pat in _LOCATOR_STR_RES:
                 for m in str_pat.finditer(content):
                     body = m.group(1) or ""
+                    if _is_invented_locator_placeholder(body):
+                        violations.append(f"{f.path}: locator=${{…}}")
+                        continue
                     if _bucket_active("id", allowed):
                         for id_m in _HASH_ID_IN_CSS_RE.finditer(body):
                             raw = (id_m.group(1) or "").strip()
-                            if raw and not _value_allowed("id", raw, allowed):
+                            if raw and _is_invented_locator_placeholder(raw):
+                                violations.append(f"{f.path}: id={raw}")
+                            elif raw and not _value_allowed("id", raw, allowed):
                                 violations.append(f"{f.path}: id={raw}")
                     if _bucket_active("formControlName", allowed):
                         for fcn_m in _LOCATOR_ATTR_FCN_RE.finditer(body):
                             fcn = (fcn_m.group(1) or "").strip()
-                            if fcn and not _value_allowed(
+                            if fcn and _is_invented_locator_placeholder(fcn):
+                                violations.append(f"{f.path}: formControlName={fcn}")
+                            elif fcn and not _value_allowed(
                                 "formControlName", fcn, allowed
                             ):
                                 violations.append(f"{f.path}: formControlName={fcn}")
                         for fcn_m in _LOCATOR_ATTR_FCN_BARE_RE.finditer(body):
                             fcn = (fcn_m.group(1) or "").strip()
-                            if fcn and not _value_allowed(
+                            if fcn and _is_invented_locator_placeholder(fcn):
+                                violations.append(f"{f.path}: formControlName={fcn}")
+                            elif fcn and not _value_allowed(
                                 "formControlName", fcn, allowed
                             ):
                                 violations.append(f"{f.path}: formControlName={fcn}")
@@ -2800,6 +2842,18 @@ _EMPTY_OUTCOME = frozenset(
     {"", "(none)", "-", "n/a", "na", "null", "none", "tbd", "todo"}
 )
 
+_CONTEXT_MISSING_HINTS: dict[str, str] = {
+    "featurePath": (
+        "thêm `path:` / `featurePath:` usable vào testData, hoặc FE routerLink / route-catalog"
+    ),
+    "role/authRef": (
+        "thêm `authRole: <role>` vào testData/precondition, hoặc Auth Discover defaultRole / "
+        "executionContext `authRole=…` (không invent role)"
+    ),
+    "landmark": "thêm landmark/screen/form trong context, hoặc FE locator contract + featurePath",
+    "expectedOutcome": "thêm expectedResult / expectedOutcome rõ trên TC",
+}
+
 
 def _has_expected_outcome(auth_hints: str) -> bool:
     """True when TC carries a real expected outcome (field or keyword), not just empty."""
@@ -2836,9 +2890,12 @@ def _validate_required_context(
         missing.append("expectedOutcome")
     if missing:
         need = ", ".join(missing)
+        how = "; ".join(
+            f"{k}: {_CONTEXT_MISSING_HINTS.get(k, 'bổ sung context')}" for k in missing
+        )
         raise E2EStrictGateError(
             "ContextMissing",
-            f"[Thiếu Context] thiếu {need}. Vui lòng bổ sung context trước khi Generate E2E.",
+            f"[Thiếu Context] thiếu {need}. {how}.",
         )
 
 
@@ -3371,6 +3428,7 @@ def apply_e2e_codegen_guards(
                         )
                     )
         from app.services.e2e_journey_enforce import (
+            assert_e2e_ts_syntax_ok,
             assert_feature_journey_ok,
             heal_feature_journey_order,
             heal_missing_business_assertions,
@@ -3406,6 +3464,7 @@ def apply_e2e_codegen_guards(
                     continue
                 if _is_login_or_auth_spec(p, getattr(f, "content", "") or ""):
                     continue
+                # R6: strip fake heals only — never inject generic main|nav asserts
                 f.content = heal_missing_business_assertions(
                     f.content or "",
                     expected_hint=auth_hints or "",
@@ -3417,6 +3476,8 @@ def apply_e2e_codegen_guards(
             test_case_title=test_case_title,
             enforce_business_assertions=strict_gate,
         )
+        # R9 — brace/syntax before publish
+        assert_e2e_ts_syntax_ok(normalized)
 
     if enforce_stubs:
         from app.services.e2e_stub_grounding import assert_no_empty_pass_stubs
@@ -3880,51 +3941,16 @@ def _is_meta_step_title(title: str) -> bool:
 
 def _reorder_feature_entry_after_auth(spec_content: str) -> str:
     """Move a Feature-entry test.step to immediately after ensureAuthenticated when misplaced."""
-    text = spec_content or ""
-    entry = _FEATURE_ENTRY_BLOCK_RE.search(text)
-    auth = re.search(r"await\s+ensureAuthenticated\s*\(\s*page\s*\)\s*;?", text)
-    if not entry or not auth:
-        return text
-    if entry.start() > auth.end():
-        return text
-    block = entry.group(0)
-    without = text[: entry.start()] + text[entry.end() :]
-    auth2 = re.search(r"await\s+ensureAuthenticated\s*\(\s*page\s*\)\s*;?", without)
-    if not auth2:
-        return text
-    return without[: auth2.end()] + block + without[auth2.end() :]
+    from app.services.e2e_journey_enforce import reorder_feature_entry_after_auth
+
+    return reorder_feature_entry_after_auth(spec_content)
 
 
 def _reorder_feature_entry_before_act(spec_content: str) -> str:
     """Move Feature entry test.step before the first Act test.step when misplaced."""
-    text = spec_content or ""
-    entry = _FEATURE_ENTRY_BLOCK_RE.search(text)
-    if not entry:
-        return text
-    first_act: re.Match[str] | None = None
-    for m in _TEST_STEP_BLOCK_RE.finditer(text):
-        title = (m.group("title") or "").strip()
-        if _is_meta_step_title(title):
-            continue
-        first_act = m
-        break
-    if not first_act:
-        return text
-    if entry.start() < first_act.start():
-        return text
-    block = entry.group(0)
-    without = text[: entry.start()] + text[entry.end() :]
-    act2 = None
-    for m in _TEST_STEP_BLOCK_RE.finditer(without):
-        title = (m.group("title") or "").strip()
-        if _is_meta_step_title(title):
-            continue
-        act2 = m
-        break
-    if not act2:
-        return text
-    return without[: act2.start()] + block + without[act2.start() :]
+    from app.services.e2e_journey_enforce import reorder_feature_entry_before_act
 
+    return reorder_feature_entry_before_act(spec_content)
 
 def inject_ensure_authenticated(
     spec_content: str,

@@ -16,9 +16,10 @@ export type E2eFailCategory =
   | "execution_gate"
   | "other";
 
-/** docs/AI_TEST_RULES.md standard names */
+/** docs/AI_TEST_RULES.md standard names (+ S3 AuthRequired) */
 export type E2eStandardTaxonomy =
   | "ContextMissing"
+  | "AuthRequired"
   | "PreconditionFailed"
   | "LocatorNotFound"
   | "BusinessAssertionFailed"
@@ -38,7 +39,7 @@ export const E2E_FAIL_CATEGORY_LABELS: Record<E2eFailCategory, string> = {
 };
 
 const CATEGORY_TO_STANDARD: Record<E2eFailCategory, E2eStandardTaxonomy> = {
-  auth: "PreconditionFailed",
+  auth: "AuthRequired",
   feature_entry: "ContextMissing",
   locator: "LocatorNotFound",
   timeout: "LocatorNotFound",
@@ -107,6 +108,16 @@ export function classifyE2eFailure(
 ): E2eFailCategory {
   const text = stripAnsi(error || "").trim();
   if (!text) return "other";
+  // S3.3 — timeout/locator on login wall is AuthRequired, not LocatorNotFound
+  const authSignal =
+    /login wall|password still visible|storageState|E2E_USERNAME|E2E_PASSWORD|still on (?:the )?login|Đăng nhập|sign[\s-]*in failed|Login did not leave|ensureAuthenticated|Unauthorized|credentials?/i.test(
+      text
+    );
+  const locatorOrTimeout =
+    /Timeout \d+ms|waiting for (?:locator|selector)|getBy(?:Role|Text|Label|TestId)|locator\(|strict mode violation|toBeVisible/i.test(
+      text
+    );
+  if (authSignal && locatorOrTimeout) return "auth";
   for (const { cat, re } of CATEGORY_RULES) {
     if (re.test(text)) return cat;
   }

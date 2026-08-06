@@ -397,6 +397,11 @@ export const generateE2e = {
     existingFiles?: { path: string; content: string; kind?: string }[];
     /** WHO from Analysis/TC — actor/authRequired/authRole (not login mechanism) */
     executionContext?: string;
+    /**
+     * Optional in-memory enriched testData (path/authRole strip+append).
+     * When set, API prefers this over DB TC.test_data for Gen gates/prompts.
+     */
+    testData?: string;
     /** Feature entry path — baked into Spec at Generate (Phase wire) */
     featurePath?: string;
     /** Grounding allow-list built from FE/DOM hooks */

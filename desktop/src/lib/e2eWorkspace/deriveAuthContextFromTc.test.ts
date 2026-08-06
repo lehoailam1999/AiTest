@@ -13,6 +13,7 @@ describe("deriveAuthContextFromTestCase", () => {
     assert.deepEqual(r.roles, ["Staff"]);
     assert.match(r.executionContext, /authRole=Staff/);
     assert.match(r.executionContext, /authRequired=true/);
+    assert.equal(r.roleSource, "tc");
   });
 
   it("collects multi roles list", () => {
@@ -32,5 +33,33 @@ describe("deriveAuthContextFromTestCase", () => {
     assert.equal(r.role, undefined);
     assert.deepEqual(r.roles, []);
     assert.equal(r.executionContext, "");
+  });
+
+  it("falls back to analysis actors then project default", () => {
+    const fromAnalysis = deriveAuthContextFromTestCase(
+      { title: "X", testData: "" },
+      { analysisActors: ["Investigator"], fallbackRole: "admin" }
+    );
+    assert.equal(fromAnalysis.role, "Investigator");
+    assert.equal(fromAnalysis.roleSource, "analysis");
+    assert.match(fromAnalysis.executionContext, /authRoleSource=analysis/);
+
+    const fromDefault = deriveAuthContextFromTestCase(
+      { title: "X", testData: "" },
+      { fallbackRole: "admin" }
+    );
+    assert.equal(fromDefault.role, "admin");
+    assert.equal(fromDefault.roleSource, "project-default");
+    assert.match(fromDefault.executionContext, /authRole=admin/);
+  });
+
+  it("TC authRole wins over fallbacks", () => {
+    const r = deriveAuthContextFromTestCase(
+      { testData: "authRole: Staff" },
+      { analysisActors: ["Investigator"], fallbackRole: "admin" }
+    );
+    assert.equal(r.role, "Staff");
+    assert.equal(r.roleSource, "tc");
+    assert.doesNotMatch(r.executionContext, /authRoleSource=/);
   });
 });

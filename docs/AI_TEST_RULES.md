@@ -8,6 +8,8 @@ Audit chi tiết để ở:
 - [`rule_inventory.csv`](rule_inventory.csv)
 - [`rule_flow_matrix.csv`](rule_flow_matrix.csv)
 
+**Target repo conventions (E2E):** [`TARGET_RULES_PROJECT_PROFILE_PLAN.md`](TARGET_RULES_PROJECT_PROFILE_PLAN.md) — tách Engine AITest vs `.ai-test/project.profile.json` trên SUT.
+
 Phase 1 status:
 - `api/app/rules/rule_registry.yaml` + loader đã có.
 - Runtime đã wire `UUTGS` đọc từ registry (behavior giữ nguyên).

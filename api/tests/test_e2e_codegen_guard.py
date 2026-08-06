@@ -159,6 +159,45 @@ def test_guards_enforce_locator_contract_reject_unknown_hook():
         assert "data-testid=wrong-id" in str(e)
 
 
+def test_guards_reject_invented_locator_template_placeholder():
+    """LLM sometimes emits name=${fieldKey} / formControlName=${fieldKey} — fail-closed."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/_shared/pages/evidence.page.ts",
+            content=(
+                "export class EvidencePage {\n"
+                "  constructor(public page: any) {}\n"
+                "  field(fieldKey: string) {\n"
+                "    return this.page.locator(`[name=\"${fieldKey}\"]`);\n"
+                "  }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/_shared/specs/evidence.spec.ts",
+            content="import { test } from '@playwright/test';\ntest('x', async () => {});",
+            kind="spec",
+        ),
+    ]
+    contract = "\n".join(
+        [
+            "data-cy: (none)",
+            "data-testid: (none)",
+            "id: evidenceName",
+            "name: evidenceName, evidenceCode",
+            "formControlName: evidenceName",
+            "routes: /admin/evidence",
+        ]
+    )
+    try:
+        apply_e2e_codegen_guards(files, locator_contract=contract)
+        assert False, "expected placeholder locator grounding failure"
+    except ValueError as e:
+        assert "E2E_GROUNDING" in str(e)
+        assert "fieldKey" in str(e) or "${" in str(e)
+
+
 def test_guards_enforce_locator_contract_accepts_allowed_hook():
     files = [
         E2EFile(
@@ -1704,6 +1743,9 @@ def test_expect_stub_unpacks_object_args_not_object_object():
     assert "__aitestVisibleTexts" in stub
     assert "for (const q of texts)" in stub
     assert "getByText(q, { exact: false })" in stub
+    # R6 — no shell landmark as business proof
+    assert 'main, [role="main"]' not in stub
+    assert "BusinessAssertionFailed" in stub
     # Must not coerce whole object for locator text
     assert "getByText(String(raw)" not in stub
     assert ": String(raw);" not in stub
@@ -1734,6 +1776,38 @@ export class P {
     assert "__aitestVisibleTexts" in healed
     assert ": String(raw);" not in healed
     assert "getByText(String(raw)" not in healed
+
+
+def test_rewrite_expect_stubs_strips_pom_landmark_fake():
+    from app.services.e2e_codegen_guard import _rewrite_expect_object_string_stubs
+
+    old = """\
+export class P {
+  async expectExpectedState(..._args: unknown[]): Promise<void> {
+    const raw = _args.length ? _args[0] : undefined;
+    const __aitestVisibleTexts = (raw: unknown): string[] => {
+      if (typeof raw === 'string') return [raw.trim()].filter(Boolean);
+      return [];
+    };
+    const texts = __aitestVisibleTexts(raw);
+    if (!texts.length) {
+      // No string payload — landmark only
+      await expect(
+        this.page.locator('main, [role="main"], h1, h2, [data-cy], [data-testid]').first()
+      ).toBeVisible({ timeout: 15000 });
+      return;
+    }
+    for (const q of texts) {
+      await expect(this.page.getByText(q, { exact: false }).first())
+        .toBeVisible({ timeout: 15000 });
+    }
+  }
+}
+"""
+    healed = _rewrite_expect_object_string_stubs(old)
+    assert 'main, [role="main"]' not in healed
+    assert "BusinessAssertionFailed" in healed
+    assert "__aitestVisibleTexts" in healed
 
 
 def test_feature_nav_stub_fills_seed_before_next():
@@ -2004,3 +2078,29 @@ test('Quay lại', async ({ page }) => {
     titles = _re.findall(r"test\.step\('([^']+)'", out_spec)
     nums = [int(t.split(".", 1)[0]) for t in titles]
     assert nums == list(range(len(nums))), titles
+
+
+def test_validate_required_context_accepts_execution_context_role():
+    from app.services.e2e_codegen_guard import (
+        E2EStrictGateError,
+        _validate_required_context,
+    )
+
+    _validate_required_context(
+        feature_path="/admin/rooms",
+        auth_hints="authRole=admin; authRequired=true\nexpectedOutcome: list visible",
+        mode="storage",
+        locator_contract="testid:room-list",
+    )
+    try:
+        _validate_required_context(
+            feature_path="/admin/rooms",
+            auth_hints="expectedOutcome: list visible",
+            mode="storage",
+            locator_contract="testid:room-list",
+        )
+        raise AssertionError("expected ContextMissing for role")
+    except E2EStrictGateError as e:
+        assert e.category == "ContextMissing"
+        assert "role/authRef" in str(e)
+        assert "authRole" in str(e)

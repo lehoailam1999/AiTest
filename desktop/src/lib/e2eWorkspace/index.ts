@@ -1,7 +1,7 @@
 export type { E2EEnvConfig, E2EFileEntry, E2EWorkspaceManifest } from "./types";
 export { defaultE2EEnv } from "./types";
 export { runE2EWithAutoHeal, E2E_AUTO_HEAL_MAX_ATTEMPTS } from "./autoHealLoop";
-export { buildE2EEnvConfig, playwrightEnvFromConfig } from "./env";
+export { buildE2EEnvConfig, normalizeE2eStorageStateRel, playwrightEnvFromConfig } from "./env";
 export {
   syncE2eWorkspaceRun,
   syncE2eVerifyReport,
@@ -24,19 +24,39 @@ export type {
   E2eBatchProgress,
   E2eGenerateItemDone,
 } from "./e2eJobRunner";
+export {
+  checkE2eArtifactsSyntax,
+  formatE2eSyntaxGateError,
+  hasFakeBusinessAssert,
+} from "./e2eSyntaxGate";
+export type { E2eSyntaxIssue } from "./e2eSyntaxGate";
+
+export type {
+  SmokeJobReport,
+  SmokeTcOutcome,
+  SmokeGateResult,
+  SmokeTaxonomyReport,
+} from "./e2eSmokeSet";
+export { runE2eSmokeJob } from "./e2eSmokeRunner";
+export type { RunE2eSmokeJobOpts, RunE2eSmokeJobResult } from "./e2eSmokeRunner";
 export { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
 export {
   assertTcReadyForE2eGen,
+  enrichTestDataWithAuthRole,
   enrichTestDataWithFeaturePath,
+  hasAuthRoleMarker,
   hasPathMarker,
   hasTestDataSeed,
   hasActionableStep,
   isUsableFeaturePath,
+  mergeTcWithAuthRole,
   mergeTcWithInferredFeaturePath,
 } from "./assertTcReadyForE2eGen";
 export {
   buildE2eRouteCatalog,
   matchFeaturePathFromCatalog,
+  MIN_MATCH_SCORE,
+  STRONG_CATALOG_SCORE,
 } from "./e2eRouteCatalog";
 export type { E2eRouteCatalog, RouteMatchResult } from "./e2eRouteCatalog";
 export {

@@ -28,12 +28,26 @@ def test_classify_e2e_standard():
         classify_e2e_standard("BusinessAssertionFailed: missing assert")
         == "BusinessAssertionFailed"
     )
+    assert classify_e2e_standard("login wall password still visible") == "AuthRequired"
+    assert (
+        classify_e2e_standard(
+            "Timeout 30000ms exceeded waiting for locator still on the login"
+        )
+        == "AuthRequired"
+    )
 
 
 def test_map_desktop_category():
-    assert map_desktop_e2e_category("auth") == "PreconditionFailed"
+    assert map_desktop_e2e_category("auth") == "AuthRequired"
     assert map_desktop_e2e_category("locator") == "LocatorNotFound"
     assert map_desktop_e2e_category("assert") == "BusinessAssertionFailed"
+    assert map_desktop_e2e_category("execution_gate") == "PreconditionFailed"
+
+
+def test_auth_required_heal_hint():
+    block = format_e2e_heal_taxonomy_block("AuthRequired")
+    assert "AuthRequired" in block
+    assert "storageState" in block or "Auth" in block
 
 
 def test_slim_related_for_repair():

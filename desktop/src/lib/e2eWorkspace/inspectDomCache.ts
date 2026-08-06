@@ -83,7 +83,10 @@ export function createInspectDomCache(ttlMs = DEFAULT_TTL_MS) {
           loginWall:
             raw.loginWall ?? isLikelyLoginWallDom(raw.domSnapshot || ""),
         };
-        entries.set(key, entry);
+        // S3.2 — never cache login-wall DOM (poisons same-route feature TCs)
+        if (!entry.loginWall) {
+          entries.set(key, entry);
+        }
         return entry;
       })().finally(() => {
         inflight.delete(key);

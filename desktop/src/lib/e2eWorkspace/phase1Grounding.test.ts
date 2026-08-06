@@ -55,6 +55,16 @@ describe("deriveFeaturePathFromTc", () => {
     });
     assert.equal(p, "/admin/evidence");
   });
+
+  it("does not invent featurePath from unmatched FE folder alone", () => {
+    const p = deriveFeaturePathFromTc({
+      title: "Tao moi vat chung de trong ten",
+      feFilePaths: [
+        "src/app/admin/case-person/update/case-person-update.component.ts",
+      ],
+    });
+    assert.equal(p, undefined);
+  });
 });
 
 describe("extractAbsolutePaths", () => {

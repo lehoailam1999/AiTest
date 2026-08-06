@@ -25,6 +25,7 @@ import {
   assertTcReadyForE2eGen,
   hasPathMarker,
   isUsableFeaturePath,
+  mergeTcWithAuthRole,
   mergeTcWithInferredFeaturePath,
 } from "./assertTcReadyForE2eGen";
 import {
@@ -472,6 +473,10 @@ export async function generateE2eForTestCase(opts: {
   skipAuthSeed?: boolean;
   /** Shared batch route catalog (routing files scanned once) */
   routeCatalog?: E2eRouteCatalog;
+  /** Auth Discover / project default role when TC has no authRole */
+  defaultAuthRole?: string;
+  /** Analysis WHO actors — fallback after TC markers */
+  analysisActors?: string[];
   onLog?: (line: string) => void;
 }): Promise<{
   runId: string;
@@ -493,7 +498,15 @@ export async function generateE2eForTestCase(opts: {
     opts.requirementTitle?.trim() || opts.module?.trim() || undefined;
   const moduleName = requirementTitle || tc.module || undefined;
   const log = (line: string) => opts.onLog?.(line);
-  const authCtx = deriveAuthContextFromTestCase(tc);
+  let authCtx = deriveAuthContextFromTestCase(tc, {
+    fallbackRole: opts.defaultAuthRole,
+    analysisActors: opts.analysisActors,
+  });
+  if (authCtx.role && authCtx.roleSource && authCtx.roleSource !== "tc") {
+    log(
+      `  authRole enrich: ${authCtx.role} (from ${authCtx.roleSource})\n`
+    );
+  }
   let sourceFileName: string | undefined;
   let sourceCode: string | undefined;
   let relatedSources: { path: string; content: string }[] | undefined;
@@ -541,6 +554,9 @@ export async function generateE2eForTestCase(opts: {
           `  fe-context(index): unsuitable primary=${built.e2eFe.sourceFileName} — fallback legacy FE resolve\n`
         );
       } else {
+        for (const n of built.retrieve?.notes || []) {
+          log(`  fe-context(index): ${n}\n`);
+        }
         log("  fe-context(index): empty — fallback legacy FE resolve\n");
       }
     }
@@ -621,7 +637,10 @@ export async function generateE2eForTestCase(opts: {
   }
   let catalogMatched = false;
   if (!featurePath && opts.routeCatalog?.routes.length) {
-    const match = matchFeaturePathFromCatalog(tc, opts.routeCatalog);
+    const hasFePrimary = Boolean(sourceFileName && sourceCode);
+    const match = matchFeaturePathFromCatalog(tc, opts.routeCatalog, {
+      hasFePrimary,
+    });
     if (match.ambiguous) {
       const optsList = match.candidates
         .map((c) => `${c.path} (score=${c.score})`)
@@ -636,6 +655,12 @@ export async function generateE2eForTestCase(opts: {
       catalogMatched = true;
       log(
         `  featurePath(from route-catalog score=${match.score})=${featurePath}\n`
+      );
+    } else if (match.score > 0) {
+      log(
+        `  route-catalog: skip weak match score=${match.score}` +
+          `${hasFePrimary ? " (FE primary present)" : ""}` +
+          `${match.candidates[0] ? ` best=${match.candidates[0].path}` : ""}\n`
       );
     }
   }
@@ -660,11 +685,24 @@ export async function generateE2eForTestCase(opts: {
       `  testData enrich: featurePath=${featurePath} (from ${inferredPathSource})\n`
     );
   }
-  const tcForGate = mergeTcWithInferredFeaturePath(
+  let tcForGate = mergeTcWithInferredFeaturePath(
     tc,
     featurePath,
     inferredPathSource || "FE source"
   );
+  // WHO enrich into testData so API auth_hints see authRole even when DB TC lacks it
+  if (authCtx.role && authCtx.roleSource && authCtx.roleSource !== "tc") {
+    tcForGate = mergeTcWithAuthRole(
+      tcForGate,
+      authCtx.role,
+      authCtx.roleSource
+    );
+  }
+  // Re-derive after enrich so executionContext matches what we send
+  authCtx = deriveAuthContextFromTestCase(tcForGate, {
+    fallbackRole: opts.defaultAuthRole,
+    analysisActors: opts.analysisActors,
+  });
   assertTcReadyForE2eGen(tcForGate, {
     inferredFeaturePath: featurePath,
     // Path inferred from FE/index/catalog is enough — do not require testData marker first.
@@ -859,6 +897,8 @@ export async function generateE2eForTestCase(opts: {
     seedCommand: env.seedCommand,
     teardownCommand: env.teardownCommand,
     existingFiles: opts.existingFiles,
+    // Enriched in-memory (path/authRole) — API prefers body over DB when set
+    testData: tcForGate.testData || undefined,
     executionContext: authCtx.executionContext || undefined,
     featurePath: featurePath || undefined,
     locatorContract,
@@ -946,6 +986,10 @@ export async function generateE2eBatch(opts: {
   usePlaywrightInspect?: boolean;
   /** Skip API auth-seed when Desktop already has storage/artifact */
   skipAuthSeed?: boolean;
+  /** Auth Discover / project default role when TC has no authRole */
+  defaultAuthRole?: string;
+  /** Analysis WHO actors — fallback after TC markers */
+  analysisActors?: string[];
   onLog?: (line: string) => void;
   onProgress?: (p: E2eBatchProgress) => void;
   /** Called under merge lock after each TC — flush rows/files to UI immediately. */
@@ -969,7 +1013,11 @@ export async function generateE2eBatch(opts: {
     roleCredentials: opts.roleCredentials,
     seedCommand: opts.seedCommand,
     teardownCommand: opts.teardownCommand,
-    role: deriveAuthContextFromTestCase(cases[0] || {}).role,
+    role:
+      deriveAuthContextFromTestCase(cases[0] || {}, {
+        fallbackRole: opts.defaultAuthRole,
+        analysisActors: opts.analysisActors,
+      }).role || opts.defaultAuthRole,
     featurePath: opts.featurePath,
   });
 
@@ -1064,6 +1112,8 @@ export async function generateE2eBatch(opts: {
           feListCache,
           skipAuthSeed: opts.skipAuthSeed,
           routeCatalog,
+          defaultAuthRole: opts.defaultAuthRole,
+          analysisActors: opts.analysisActors,
           onLog: log,
         });
         // Paths đã resolve theo Requirement/TC trên BE; giữ đúng file của request này.
@@ -1161,12 +1211,14 @@ type VerifyOpts = {
   genItems: E2eGenItem[];
   domSnapshot?: string;
   useStorageState?: boolean;
-  /** Project-relative storageState for Inspect heal re-inspect */
+  /** Project-relative storageState for Inspect heal re-inspect + Verify env */
   storageStateRel?: string;
   username?: string;
   password?: string;
   /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
   roleCredentials?: Record<string, { username: string; password: string }>;
+  /** Auth Discover / project default when genItems lack authRole */
+  defaultAuthRole?: string;
   seedCommand?: string;
   teardownCommand?: string;
   showBrowser?: boolean;
@@ -1247,6 +1299,36 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     log(`  domSnapshot: (empty — will re-inspect before heal if needed)\n`);
   }
 
+  // R9 — syntax/brace + ban fake BR asserts before Playwright
+  {
+    const { checkE2eArtifactsSyntax, formatE2eSyntaxGateError } = await import(
+      "./e2eSyntaxGate"
+    );
+    const syntaxIssues = checkE2eArtifactsSyntax(opts.files);
+    if (syntaxIssues.length) {
+      const msg = formatE2eSyntaxGateError(syntaxIssues);
+      log(`  ✗ ${msg}\n`);
+      const rows: E2eBatchItemResult[] = generatedOk.map((g) => ({
+        testCaseId: g.testCaseId,
+        title: g.title,
+        status: "fail" as const,
+        error: msg,
+        runId: g.runId,
+        files: g.files.length,
+        failCategory: classifyE2eFailure(msg),
+      }));
+      // prior rows without gen stay as-is if any
+      const metrics = aggregateE2eMetrics(rows);
+      return {
+        rows,
+        okCount: 0,
+        files: opts.files,
+        moduleStatus: "FAILED",
+        metrics,
+      };
+    }
+  }
+
   // Before Heal: re-inspect feature DOM when Gen cleared login-wall / empty snapshot
   if (healFailures) {
     for (const g of generatedOk) {
@@ -1301,7 +1383,9 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
   const env = buildE2EEnvConfig({
     targetUrl: opts.targetUrl,
     module: opts.module,
-    useStorageState: opts.useStorageState,
+    useStorageState:
+      opts.useStorageState || Boolean(opts.storageStateRel?.trim()),
+    storageStateRel: opts.storageStateRel,
     username: opts.username,
     password: opts.password,
     roleCredentials: opts.roleCredentials,
@@ -1309,9 +1393,18 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     teardownCommand: opts.teardownCommand,
     role:
       generatedOk[0]?.authRole ||
-      opts.genItems.find((g) => g.authRole)?.authRole,
+      opts.genItems.find((g) => g.authRole)?.authRole ||
+      opts.defaultAuthRole,
     featurePath: sharedFeaturePath,
   });
+  if (env.storageStateRel) {
+    log(`  verify env: E2E_STORAGE_STATE=${env.storageStateRel}\n`);
+  } else {
+    log(
+      "  verify env: no storageState — feature Specs may hit login wall (Auth Discover / credentials)\n"
+    );
+  }
+  if (env.role) log(`  verify env: E2E_ROLE=${env.role}\n`);
   const total = Math.max(generatedOk.length, opts.priorRows?.length || 0, 1);
   const rows: E2eBatchItemResult[] = (opts.priorRows || []).map((r) => ({ ...r }));
   for (const g of generatedOk) {
@@ -1622,10 +1715,14 @@ export async function verifyE2eForTestCase(opts: {
   domSnapshot?: string;
   module?: string;
   useStorageState?: boolean;
+  /** Project-relative / discovered storageState for Verify env */
+  storageStateRel?: string;
   username?: string;
   password?: string;
   /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
   roleCredentials?: Record<string, { username: string; password: string }>;
+  /** Auth Discover / project default when TC has no authRole */
+  defaultAuthRole?: string;
   seedCommand?: string;
   teardownCommand?: string;
   showBrowser?: boolean;
@@ -1658,18 +1755,27 @@ export async function verifyE2eForTestCase(opts: {
       testData: tc.testData,
       steps: tc.steps,
     });
+  const authCtx = deriveAuthContextFromTestCase(tc, {
+    fallbackRole: opts.defaultAuthRole,
+  });
   const env = buildE2EEnvConfig({
     targetUrl: opts.targetUrl,
     module: moduleName,
-    useStorageState: opts.useStorageState,
+    useStorageState:
+      opts.useStorageState || Boolean(opts.storageStateRel?.trim()),
+    storageStateRel: opts.storageStateRel,
     username: opts.username,
     password: opts.password,
     roleCredentials: opts.roleCredentials,
     seedCommand: opts.seedCommand,
     teardownCommand: opts.teardownCommand,
-    role: deriveAuthContextFromTestCase(tc).role,
+    role: authCtx.role,
     featurePath,
   });
+  if (env.storageStateRel) {
+    log(`  verify env: E2E_STORAGE_STATE=${env.storageStateRel}\n`);
+  }
+  if (env.role) log(`  verify env: E2E_ROLE=${env.role}\n`);
 
   log(
     healFailures

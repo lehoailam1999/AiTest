@@ -12,7 +12,13 @@
 import type { TestCase } from "../../api/types";
 import { buildProjectIndex } from "../projectIntelligence/projectIndex";
 import { resolveSeedFromTestCaseWithAlternatives } from "../projectIntelligence/tcSeedResolver";
+import {
+  extractDomainTokens,
+  isExcludedFromE2eRetrieve,
+  modulePathTokenBonus,
+} from "../retrieval/rankScore";
 import { isTauri, listSourceFiles, readTextFile } from "../../tauri/bridge";
+import { normalizeFeaturePath } from "./assertTcReadyForE2eGen";
 
 /** FE-facing extensions — prefer templates/components over pure backend. */
 const E2E_FE_EXTS = [
@@ -81,15 +87,16 @@ export function createFeSourceListCache(ttlMs = DEFAULT_LIST_TTL_MS) {
 export type FeSourceListCache = ReturnType<typeof createFeSourceListCache>;
 
 function isLikelyFePath(pathRel: string): boolean {
+  if (isExcludedFromE2eRetrieve(pathRel)) return false;
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
   if (
-    p.includes("/aitest/") ||
     p.includes("/node_modules/") ||
     p.includes("/dist/") ||
     p.includes("/bin/") ||
     p.includes("/obj/") ||
     p.includes(".spec.") ||
-    p.includes(".test.")
+    p.includes(".test.") ||
+    p.includes(".fixture.")
   ) {
     return false;
   }
@@ -118,6 +125,7 @@ function isLikelyFePath(pathRel: string): boolean {
 
 /** Bonus for FE-like paths when re-ranking Unit seeds for E2E. */
 export function e2eFeRankBonus(pathRel: string): number {
+  if (isExcludedFromE2eRetrieve(pathRel)) return -100;
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
   let bonus = 0;
   if (/\.(html|htm|cshtml|razor|vue)$/.test(p)) bonus += 40;
@@ -129,6 +137,7 @@ export function e2eFeRankBonus(pathRel: string): number {
   if (/\/list\//.test(p) || /\.list\./.test(p)) bonus -= 8;
   if (p.includes("/controllers/") || p.includes("/services/") || p.includes("/api/"))
     bonus -= 30;
+  if (/\.service\.(ts|js)$/.test(p) && !p.includes("/components/")) bonus -= 45;
   return bonus;
 }
 
@@ -158,9 +167,10 @@ function pathHintFromTestCase(tc: TestCase): string | undefined {
     .join("\n");
   const m = PATH_MARKER_RE.exec(blob);
   if (!m?.[1]) return undefined;
-  const p = normalizePath(m[1].replace(/^["'`]|["'`]$/g, ""));
-  if (!p || p === "/") return undefined;
-  return p;
+  // Reject placeholders e.g. path: [Thiếu Context]
+  const usable = normalizeFeaturePath(m[1]);
+  if (!usable) return undefined;
+  return normalizePath(usable);
 }
 
 function pathTokens(pathHint: string | undefined): string[] {
@@ -354,7 +364,14 @@ export async function resolveE2eFeSources(opts: {
   const notes: string[] = [];
   const hint = pathHintFromTestCase(opts.testCase);
   const hintTokens = pathTokens(hint);
+  const domainTokens = extractDomainTokens(
+    opts.testCase.module,
+    hint,
+    opts.testCase.title,
+    opts.testCase.testData
+  );
   if (hint) notes.push(`path hint=${hint}`);
+  if (domainTokens.length) notes.push(`domainTokens=${domainTokens.slice(0, 8).join(",")}`);
   let paths: string[] = [];
   try {
     if (opts.listCache) {
@@ -370,7 +387,7 @@ export async function resolveE2eFeSources(opts: {
   }
 
   const fePaths = paths.filter(isLikelyFePath);
-  const usePaths = fePaths.length ? fePaths : paths;
+  const usePaths = fePaths.length ? fePaths : paths.filter((p) => !isExcludedFromE2eRetrieve(p));
   if (!usePaths.length) {
     notes.push("No FE source files found under project root");
     return null;
@@ -390,34 +407,84 @@ export async function resolveE2eFeSources(opts: {
   const ranked = rerankForE2e([
     { pathRel: best.pathRel, score: best.score },
     ...candidates.map((c) => ({ pathRel: c.pathRel, score: c.score })),
-  ]).map((it) => ({
-    ...it,
-    score: it.score + pathHintBonus(it.pathRel, hintTokens),
-  }))
+  ])
+    .map((it) => ({
+      ...it,
+      score:
+        it.score +
+        pathHintBonus(it.pathRel, hintTokens) +
+        modulePathTokenBonus(it.pathRel, domainTokens),
+    }))
+    .filter((it) => !isExcludedFromE2eRetrieve(it.pathRel))
     .sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
-  const primary = ranked[0];
-  if (!primary) {
-    notes.push("No seed after E2E re-rank");
-    return null;
-  }
 
+  const actionHint = [opts.testCase.title, opts.testCase.module, opts.testCase.steps]
+    .filter(Boolean)
+    .join("\n");
+
+  // FE quality gate: prefer primary with hooks (or attachable sibling/form surface)
+  let primary: { pathRel: string; score: number } | undefined;
   let sourceCode = "";
-  try {
-    sourceCode = await readTextFile(opts.projectRoot, primary.pathRel);
-  } catch (e) {
-    notes.push(`read primary failed: ${primary.pathRel} (${String(e)})`);
-    return null;
+  let relatedSources: { path: string; content: string }[] = [];
+  for (const cand of ranked.slice(0, 8)) {
+    let code = "";
+    try {
+      code = await readTextFile(opts.projectRoot, cand.pathRel);
+    } catch {
+      continue;
+    }
+    if (!code.trim()) continue;
+    const probe = await attachSiblingFeTemplates({
+      projectRoot: opts.projectRoot,
+      sourceFileName: cand.pathRel,
+      relatedSources: [],
+      actionHint,
+      maxExtra: 4,
+    });
+    if (!hasFeGroundingHooks(code, probe.relatedSources)) {
+      notes.push(`FE quality skip=${cand.pathRel} (no hooks)`);
+      continue;
+    }
+    primary = cand;
+    sourceCode = code;
+    relatedSources = probe.relatedSources;
+    notes.push(...probe.notes);
+    break;
   }
-  if (!sourceCode.trim()) {
-    notes.push(`Empty primary: ${primary.pathRel}`);
-    return null;
+  if (!primary) {
+    // Fallback: best ranked even without hooks (Gen may still use TC-only)
+    primary = ranked[0];
+    if (!primary) {
+      notes.push("No seed after E2E re-rank");
+      return null;
+    }
+    try {
+      sourceCode = await readTextFile(opts.projectRoot, primary.pathRel);
+    } catch (e) {
+      notes.push(`read primary failed: ${primary.pathRel} (${String(e)})`);
+      return null;
+    }
+    if (!sourceCode.trim()) {
+      notes.push(`Empty primary: ${primary.pathRel}`);
+      return null;
+    }
+    const withTpl = await attachSiblingFeTemplates({
+      projectRoot: opts.projectRoot,
+      sourceFileName: primary.pathRel,
+      relatedSources: [],
+      actionHint,
+    });
+    relatedSources = withTpl.relatedSources;
+    notes.push(...withTpl.notes);
+    notes.push("FE quality: no hooked primary — using best ranked seed");
   }
 
-  const relatedSources: { path: string; content: string }[] = [];
   let budget = MAX_CHARS - sourceCode.length;
   for (const c of ranked) {
     if (relatedSources.length >= MAX_RELATED) break;
     if (c.pathRel === primary.pathRel) continue;
+    if (relatedSources.some((r) => r.path.replace(/\\/g, "/") === c.pathRel.replace(/\\/g, "/")))
+      continue;
     if (budget < 500) break;
     try {
       const raw = await readTextFile(opts.projectRoot, c.pathRel);
@@ -431,21 +498,14 @@ export async function resolveE2eFeSources(opts: {
   }
 
   notes.push(
-    `FE seed=${primary.pathRel} score=${primary.score} related=${relatedSources.length} (E2E re-rank + path-hint)`
+    `FE seed=${primary.pathRel} score=${primary.score} related=${relatedSources.length} (E2E re-rank + path-hint + domain)`
   );
-
-  const withTpl = await attachSiblingFeTemplates({
-    projectRoot: opts.projectRoot,
-    sourceFileName: primary.pathRel,
-    relatedSources,
-  });
-  notes.push(...withTpl.notes);
 
   return {
     sourceFileName: primary.pathRel,
     sourceCode:
       sourceCode.length > MAX_CHARS ? sourceCode.slice(0, MAX_CHARS) : sourceCode,
-    relatedSources: withTpl.relatedSources,
+    relatedSources,
     notes,
   };
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -107,6 +108,21 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         parse_project_meta(getattr(project, "meta", None)),
         language=lang or project.language,
     )
+    # Desktop may send enriched testData (path/authRole) — prefer over DB when non-empty
+    td_override = str(body.get("testData") or body.get("test_data") or "").strip()
+    test_data = td_override if td_override else (tc.test_data or "")
+    exec_ctx = str(
+        body.get("executionContext") or body.get("execution_context") or ""
+    ).strip()
+    # Explicit authRole body field → fold into executionContext when missing
+    auth_role_body = str(
+        body.get("authRole") or body.get("auth_role") or ""
+    ).strip()
+    if auth_role_body and not re.search(
+        r"(?i)\b(?:authRole|auth_role|actor|role)\s*=", exec_ctx
+    ):
+        prefix = f"actor={auth_role_body}; authRole={auth_role_body}"
+        exec_ctx = f"{prefix}; {exec_ctx}".strip("; ").strip()
     return E2ERequest(
         test_case_title=tc.title,
         test_case_type=tc.type or "E2E",
@@ -114,7 +130,7 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         steps=tc.steps or "",
         expected_result=tc.expected_result or "",
         precondition=tc.precondition or "",
-        test_data=tc.test_data or "",
+        test_data=test_data,
         target_url=str(body.get("targetUrl") or body.get("target_url") or "").strip(),
         dom_snapshot=str(body.get("domSnapshot") or body.get("dom_snapshot") or "").strip(),
         source_file_name=primary_name,
@@ -136,9 +152,7 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         existing_files=existing,
         project_rules=proj_rules,
         user_rules=usr_rules,
-        execution_context=str(
-            body.get("executionContext") or body.get("execution_context") or ""
-        ).strip(),
+        execution_context=exec_ctx,
         feature_path=feature_path,
         locator_contract=str(
             body.get("locatorContract")

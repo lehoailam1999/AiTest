@@ -1,6 +1,8 @@
 /**
  * Shared rankScore for Unit / E2E retrieve (Phase 3).
  * Higher = more relevant to plan keywords + path shape.
+ *
+ * Portable: exclude / boost by path shape + token overlap — never product names.
  */
 
 export function normalizeKeywords(keywords: string[]): string[] {
@@ -57,42 +59,44 @@ export function unitPathBonus(pathRel: string): number {
 
 /**
  * Hard-exclude from Unit retrieve — E2E/POM/spec/generated noise.
- * Fixes Forensic-style false hits (evidence.page.ts scoring above real SUT).
  */
 export function isExcludedFromUnitRetrieve(pathRel: string): boolean {
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
   if (p.includes("/aitest/") || p.includes("/.ai-test/")) return true;
   if (p.includes("/e2e/") || p.includes(".e2e/") || p.includes("e2e\\") || p.includes("/e2e\\"))
     return true;
-  if (/\.e2e\./.test(p) || p.includes("forensic.e2e") || p.includes("/playwright")) return true;
+  if (/\.e2e\./.test(p) || p.includes("/playwright")) return true;
   if (/\.page\.(ts|tsx|js|jsx)$/.test(p)) return true;
   if (p.includes("/support/pages/") || p.includes("/support/fixtures/")) return true;
   if (/\.(spec|test)\.(ts|tsx|js|jsx)$/.test(p)) return true;
   if (p.includes("/node_modules/") || p.includes("/dist/") || p.includes("/coverage/")) return true;
-  // Pure UI shells — not unit SUT
   if (/\.(component)\.(html|css|scss)$/.test(p)) return true;
   return false;
 }
 
 /**
- * Hard-exclude from E2E FE retrieve — generated POM/spec must not ground codegen.
- * Without this, re-gen picks AItest/E2ETest pages (*.page.ts) as "FE source".
+ * Hard-exclude from E2E FE retrieve — generated POM / Playwright test trees / fixtures.
+ * Portable path shapes only (no product folder names).
  */
 export function isExcludedFromE2eRetrieve(pathRel: string): boolean {
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
   if (p.includes("/aitest/") || p.includes("/.ai-test/")) return true;
   if (p.includes("/e2etest/") || p.includes("/e2e-test/")) return true;
+  // Vendor / suite Playwright trees (e.g. *.E2E/, /.e2e/, /playwright/)
+  if (/\.e2e(\/|$|\.)/.test(p) || p.includes("/playwright/") || p.includes("playwright.config"))
+    return true;
+  if (p.includes("/support/fixtures/") || p.includes("/support/pages/")) return true;
+  if (/\.fixture\.(ts|tsx|js|jsx)$/.test(p)) return true;
   if (/\.page\.(ts|tsx|js|jsx)$/.test(p) && (p.includes("/pages/") || p.includes("/_shared/")))
     return true;
   if (/\.(spec|test)\.(ts|tsx|js|jsx)$/.test(p)) return true;
   if (p.includes("/node_modules/") || p.includes("/dist/") || p.includes("/coverage/")) return true;
-  if (p.includes("playwright.config") || p.includes("/fixtures/storage")) return true;
+  if (p.includes("/fixtures/storage")) return true;
   return false;
 }
 
 /**
  * True when index primary is unsafe as Unit SUT (E2E page / pure UI).
- * Callers should fall back to legacy scope.
  */
 export function isUnsuitableUnitPrimary(pathRel: string): boolean {
   return isExcludedFromUnitRetrieve(pathRel) || unitPathBonus(pathRel) < 0;
@@ -107,24 +111,23 @@ export function isUnsuitableE2ePrimary(pathRel: string): boolean {
 
 /**
  * Prefer FE / page paths for E2E (aligned with e2eFeRankBonus).
- * Exported for E2eRetriever + tests.
  */
 export function e2ePathBonus(pathRel: string): number {
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
-  // Generated / test noise — never boost
   if (isExcludedFromE2eRetrieve(pathRel)) return -100;
   let bonus = 0;
   if (/\.(html|htm|cshtml|razor|vue)$/.test(p)) bonus += 40;
   if (/\.component\.(ts|html|tsx)$/.test(p)) bonus += 35;
   if (/\.(tsx|jsx)$/.test(p)) bonus += 25;
   if (/\/(pages?|views?|components?|routes?|screens?|features?)\//.test(p)) bonus += 20;
-  // Form surfaces beat list shells for TC Act grounding
   if (/\/(create|update|edit|form|modal|dialog)\//.test(p)) bonus += 28;
   if (/\.(create|update|edit|form|modal)\./.test(p)) bonus += 22;
   if (/\/list\//.test(p) || /\.list\./.test(p)) bonus -= 8;
   if (/\/(services?|controllers?|repositories?|api\/)\//.test(p)) bonus -= 25;
-  if (/\.(service|controller|repository|entity)\./.test(p)) bonus -= 30;
-  if (/\.(spec|test)\./.test(p)) bonus -= 40;
+  // Bare *.service.ts rarely holds locators — strong penalty unless under components/
+  if (/\.service\.(ts|js)$/.test(p) && !p.includes("/components/")) bonus -= 45;
+  if (/\.(controller|repository|entity)\./.test(p)) bonus -= 30;
+  if (/\.(spec|test|fixture)\./.test(p)) bonus -= 40;
   if (p.includes("vite.config") || p.includes("main.tsx") || p.endsWith("main.ts")) bonus -= 20;
   return bonus;
 }
@@ -146,6 +149,107 @@ export function featurePathTokenBonus(pathRel: string, featurePath?: string | nu
   }
   if (score > 0 && /routes?|router|navigation|pages?/.test(p)) score += 10;
   return score;
+}
+
+const STOP_TOKENS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "test",
+  "case",
+  "e2e",
+  "unit",
+  "step",
+  "steps",
+  "path",
+  "module",
+  "admin",
+  "app",
+  "src",
+  "new",
+  "create",
+  "update",
+  "edit",
+  "list",
+  "view",
+  "detail",
+  "form",
+  "modal",
+  "dialog",
+  "page",
+  "component",
+  "service",
+  "true",
+  "false",
+  "http",
+  "https",
+  "localhost",
+]);
+
+/**
+ * Extract domain tokens from free text (module / path / latin slugs in testData).
+ * Keeps latin & digit-kebab tokens ≥3 chars; skips stop words.
+ */
+export function extractDomainTokens(...parts: Array<string | null | undefined>): string[] {
+  const blob = parts
+    .map((p) => (p || "").trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!blob) return [];
+  const raw = blob
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}/._-]+/gu, " ")
+    .split(/[\s/._-]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && !/^\d+$/.test(t) && !STOP_TOKENS.has(t));
+  return normalizeKeywords(raw).slice(0, 24);
+}
+
+/** True when ≥ half of tokens are ASCII slug-like (can match English FE folders). */
+export function domainTokensArePathMatchable(tokens: string[]): boolean {
+  if (!tokens.length) return false;
+  const latin = tokens.filter((t) => /^[a-z0-9][a-z0-9-]*$/i.test(t));
+  return latin.length >= Math.max(1, Math.ceil(tokens.length * 0.4));
+}
+
+/**
+ * Boost when path shares domain tokens; mild penalty when matchable tokens miss entirely.
+ */
+export function modulePathTokenBonus(pathRel: string, domainTokens: string[]): number {
+  if (!domainTokens.length) return 0;
+  const p = pathRel.replace(/\\/g, "/").toLowerCase();
+  const base = p.split("/").pop() || p;
+  let hits = 0;
+  for (const t of domainTokens) {
+    if (
+      p.includes(`/${t}/`) ||
+      p.includes(`.${t}.`) ||
+      p.includes(`/${t}.`) ||
+      base.includes(t) ||
+      p.endsWith(`/${t}`)
+    ) {
+      hits += 1;
+    }
+  }
+  if (hits > 0) return hits * 32;
+  if (domainTokensArePathMatchable(domainTokens)) return -40;
+  return 0;
+}
+
+/**
+ * True when hit scored on TC/plan tokens (not only FE path shape).
+ * Shape-only ties sort alphabetically (e.g. case-* before evidence) and mis-seed Gen.
+ */
+export function hasSemanticE2eReasons(reasons: string[]): boolean {
+  return reasons.some(
+    (r) =>
+      r.startsWith("pathKeywords") ||
+      r.startsWith("symbols") ||
+      r.startsWith("featurePath") ||
+      /^domainTokens\+\d/.test(r)
+  );
 }
 
 export function clampTopK(topK?: number): number {

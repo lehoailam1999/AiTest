@@ -168,10 +168,10 @@ function composeRouteFromFe(opts: {
       fileDerived.push(candidate);
     }
   }
-  // FE primary already chosen by retriever for this TC — unique admin/* path is usable.
+  // Only keep file-derived routes that share tokens with the TC (never trust a lone
+  // /admin/<folder> from a mis-ranked FE primary — e.g. case-person for "vật chứng").
   const uniqFile = [...new Set(fileDerived)];
-  if (uniqFile.length === 1) return uniqFile[0];
-  if (uniqFile.length > 1) {
+  if (uniqFile.length) {
     const scored = uniqFile
       .map((route) => ({ route, score: scoreRoute(route, opts.tokens) }))
       .sort((a, b) => b.score - a.score);
@@ -230,8 +230,8 @@ function scoreRoute(route: string, tokens: string[]): number {
   for (const t of tokens) {
     if (low.includes(t)) score += 1;
   }
-  // mild boost for multi-segment app routes
-  if ((route.match(/\//g) || []).length >= 2) score += 0.5;
+  // Multi-segment boost only when there is already a token hit (never invent from path shape).
+  if (score > 0 && (route.match(/\//g) || []).length >= 2) score += 0.5;
   return score;
 }
 

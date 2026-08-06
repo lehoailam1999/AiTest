@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   assertTcReadyForE2eGen,
+  enrichTestDataWithAuthRole,
   enrichTestDataWithFeaturePath,
   hasActionableStep,
+  hasAuthRoleMarker,
   hasPathMarker,
   hasTestDataSeed,
   isLoginOrPublicTc,
   isUsableFeaturePath,
+  mergeTcWithAuthRole,
   mergeTcWithInferredFeaturePath,
 } from "./assertTcReadyForE2eGen.js";
 
@@ -180,6 +183,39 @@ describe("assertTcReadyForE2eGen", () => {
       )
     );
   });
+
+  it("enrichTestDataWithAuthRole appends when missing", () => {
+    assert.equal(hasAuthRoleMarker({ testData: "path: /rooms" }), false);
+    const enriched = enrichTestDataWithAuthRole(
+      "path: /rooms",
+      "admin",
+      "project-default"
+    );
+    assert.match(enriched, /authRole: admin/);
+    assert.match(enriched, /auto-enriched role from project-default/);
+    assert.equal(hasAuthRoleMarker({ testData: enriched }), true);
+    const merged = mergeTcWithAuthRole(
+      { testData: "path: /rooms" },
+      "Staff",
+      "analysis"
+    );
+    assert.match(merged.testData || "", /authRole: Staff/);
+    const unchanged = mergeTcWithAuthRole(
+      { testData: "authRole: admin\npath: /x" },
+      "Staff"
+    );
+    assert.match(unchanged.testData || "", /authRole: admin/);
+    assert.doesNotMatch(unchanged.testData || "", /Staff/);
+  });
+
+  it("mergeTcWithInferredFeaturePath strips placeholder even when path already marked unusable", () => {
+    const merged = mergeTcWithInferredFeaturePath(
+      { testData: "path: [Thiếu Context]\nauthRole: admin" },
+      undefined
+    );
+    assert.doesNotMatch(merged.testData || "", /Thiếu Context/);
+    assert.match(merged.testData || "", /authRole: admin/);
+  });
 });
 
 describe("enforceExecutionGateFailure", () => {
@@ -191,5 +227,13 @@ describe("enforceExecutionGateFailure", () => {
     assert.ok(
       enforceExecutionGateFailure("timeout waiting").includes("ExecutionGateFailed")
     );
+  });
+
+  it("does not wrap No tests found / Unexpected token (syntax crash)", async () => {
+    const { enforceExecutionGateFailure } = await import("./executionGate.js");
+    const noTests = "Error: No tests found.\nMake sure that arguments are regular expressions";
+    assert.equal(enforceExecutionGateFailure(noTests), noTests);
+    const syntax = "Error: Unexpected token (61:2)";
+    assert.equal(enforceExecutionGateFailure(syntax), syntax);
   });
 });

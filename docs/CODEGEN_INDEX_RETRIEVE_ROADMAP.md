@@ -287,6 +287,9 @@ Test: `pytest tests/test_failure_taxonomy.py` · `npm run test:phase6-metrics`
 
 Lưu dưới `.ai-test/cache/` (gitignore). KPI warm generate: tiến tới **2–5s** (phụ thuộc model/CLI).
 
+> **Chi tiết triển khai tiếp theo (Job Builder + Context Snapshot + Worker Pool):**  
+> [`CODEGEN_PERF_BATCH_SNAPSHOT_WORKER_PLAN.md`](CODEGEN_PERF_BATCH_SNAPSHOT_WORKER_PLAN.md)
+
 ---
 
 ## Roadmap sprint (thứ tự PR)

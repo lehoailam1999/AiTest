@@ -18,15 +18,19 @@ export type {
 export {
   clampTopK,
   e2ePathBonus,
+  extractDomainTokens,
   featurePathTokenBonus,
+  hasSemanticE2eReasons,
   isExcludedFromUnitRetrieve,
   isExcludedFromE2eRetrieve,
   isUnsuitableUnitPrimary,
   isUnsuitableE2ePrimary,
+  modulePathTokenBonus,
   normalizeKeywords,
   pathKeywordScore,
   symbolKeywordScore,
   unitPathBonus,
+  domainTokensArePathMatchable,
 } from "./rankScore";
 export { retrieveUnitSources } from "./unitRetriever";
 export { retrieveE2eSources } from "./e2eRetriever";

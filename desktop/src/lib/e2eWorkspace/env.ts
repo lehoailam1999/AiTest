@@ -40,21 +40,30 @@ function roleEnvSlug(role: string): string {
   return s || "DEFAULT";
 }
 
-export function buildE2EEnvConfig(input: BuildE2EEnvInput): E2EEnvConfig {
-  const explicit = input.storageStateRel?.trim();
-  // Prefer explicit only when already TC-relative (./fixtures/... or fixtures/...).
-  // Module-level AItest/... paths from older Desktop builds nest under TC cwd — ignore.
+/**
+ * Normalize storageState for Playwright TC cwd.
+ * Discovered AItest/... paths must not nest under TC folder — map to ./fixtures/...
+ * (API resolve_storage_state_abs still finds the real artifact).
+ */
+export function normalizeE2eStorageStateRel(
+  storageStateRel: string | null | undefined,
+  useStorageState?: boolean
+): string | undefined {
+  const explicit = (storageStateRel || "").trim().replace(/\\/g, "/");
   const looksModuleNested =
     !!explicit &&
-    /(?:^|\/)AItest\//i.test(explicit.replace(/\\/g, "/")) &&
-    !explicit.replace(/\\/g, "/").startsWith("./fixtures/");
+    /(?:^|\/)AItest\//i.test(explicit) &&
+    !explicit.startsWith("./fixtures/");
+  if (explicit && !looksModuleNested) return explicit;
+  if (useStorageState || looksModuleNested) return E2E_STORAGE_STATE_REL;
+  return undefined;
+}
 
-  const storage =
-    explicit && !looksModuleNested
-      ? explicit
-      : input.useStorageState
-        ? E2E_STORAGE_STATE_REL
-        : undefined;
+export function buildE2EEnvConfig(input: BuildE2EEnvInput): E2EEnvConfig {
+  const storage = normalizeE2eStorageStateRel(
+    input.storageStateRel,
+    input.useStorageState
+  );
 
   return defaultE2EEnv({
     targetUrl: input.targetUrl,

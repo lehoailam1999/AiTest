@@ -109,10 +109,55 @@ export function mergeTcWithInferredFeaturePath(
   sourceNote = "FE source"
 ): TcReadyInput {
   const path = normalizeFeaturePath(featurePath);
-  if (!path || hasPathMarker(tc)) return tc;
+  if (!path || hasPathMarker(tc)) {
+    // Still strip unusable path: placeholders so Gen/API never see them
+    if (!path) {
+      const cleaned = stripUnusablePathMarkers(tc.testData || "");
+      if (cleaned === (tc.testData || "")) return tc;
+      return { ...tc, testData: cleaned };
+    }
+    return tc;
+  }
   return {
     ...tc,
     testData: enrichTestDataWithFeaturePath(tc.testData, path, sourceNote),
+  };
+}
+
+const AUTH_ROLE_MARKER_RE =
+  /(?:^|\n)\s*(?:authRole|auth_role|role)\s*[:=]\s*([^\n;,|]+)/i;
+
+export function hasAuthRoleMarker(tc: TcReadyInput): boolean {
+  const m = AUTH_ROLE_MARKER_RE.exec(tcTextBlob(tc));
+  const role = m?.[1]?.trim().replace(/^["']|["']$/g, "") || "";
+  return Boolean(role) && !/thi[eế]u\s*context|tbd|n\/a|todo/i.test(role);
+}
+
+/** Append authRole to testData when TC has no role marker (in-memory enrich for Gen). */
+export function enrichTestDataWithAuthRole(
+  testData: string | null | undefined,
+  authRole: string,
+  sourceNote = "project default"
+): string {
+  const role = (authRole || "").trim().replace(/^["']|["']$/g, "");
+  if (!role) return (testData || "").trim();
+  if (hasAuthRoleMarker({ testData })) return (testData || "").trim();
+  const line = `authRole: ${role}`;
+  const note = `# auto-enriched role from ${sourceNote}`;
+  const td = (testData || "").trim();
+  return td ? `${td}\n${line}\n${note}` : `${line}\n${note}`;
+}
+
+export function mergeTcWithAuthRole(
+  tc: TcReadyInput,
+  authRole: string | undefined,
+  sourceNote = "project default"
+): TcReadyInput {
+  const role = (authRole || "").trim();
+  if (!role || hasAuthRoleMarker(tc)) return tc;
+  return {
+    ...tc,
+    testData: enrichTestDataWithAuthRole(tc.testData, role, sourceNote),
   };
 }
 

@@ -13,6 +13,14 @@ describe("classifyE2eFailure", () => {
       "auth"
     );
   });
+  it("prefers auth over locator when timeout on login wall (S3.3)", () => {
+    assert.equal(
+      classifyE2eFailure(
+        "Timeout 30000ms exceeded waiting for locator — still on the login page password"
+      ),
+      "auth"
+    );
+  });
   it("detects feature entry", () => {
     assert.equal(
       classifyE2eFailure("Feature entry: E2E_FEATURE_PATH empty and still on login"),
@@ -71,7 +79,7 @@ describe("aggregateE2eMetrics", () => {
     assert.equal(m.failSharePct.auth, 33.3);
     assert.match(formatE2eMetricsReport(m), /Phase 6 e2e metrics/);
     assert.match(formatE2eMetricsReport(m), /Auth \/ login/);
-    assert.equal(m.failByStandardTaxonomy.PreconditionFailed, 1);
+    assert.equal(m.failByStandardTaxonomy.AuthRequired, 1);
     assert.equal(m.failByStandardTaxonomy.LocatorNotFound, 2);
   });
 });
@@ -79,7 +87,7 @@ describe("aggregateE2eMetrics", () => {
 describe("toStandardTaxonomy", () => {
   it("maps desktop categories to AI_TEST_RULES names", async () => {
     const { toStandardTaxonomy } = await import("./e2eFailureMetrics.js");
-    assert.equal(toStandardTaxonomy("auth"), "PreconditionFailed");
+    assert.equal(toStandardTaxonomy("auth"), "AuthRequired");
     assert.equal(toStandardTaxonomy("locator"), "LocatorNotFound");
     assert.equal(toStandardTaxonomy("assert"), "BusinessAssertionFailed");
     assert.equal(toStandardTaxonomy("feature_entry"), "ContextMissing");
