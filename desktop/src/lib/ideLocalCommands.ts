@@ -272,6 +272,9 @@ export type IdeLocalGenerateBody = {
   contextFiles?: { path: string; content: string }[];
   /** Phase 5 — code index schema when index-backed */
   indexVersion?: string;
+  /** Sprint 3 — unit conventions from .ai-test */
+  projectRules?: string;
+  projectRulesSource?: "unit-conventions" | "none";
 };
 
 export function buildIdeLocalGenerateBody(input: {
@@ -296,6 +299,8 @@ export function buildIdeLocalGenerateBody(input: {
   projectRoot?: string | null;
   planner?: import("./testPlanner/types").TestPlan | null;
   indexVersion?: string | null;
+  projectRules?: string | null;
+  projectRulesSource?: "unit-conventions" | "none" | null;
 }): IdeLocalGenerateBody {
   const primary = primaryFile(input.packet);
   const contextFiles = (input.packet.files || [])
@@ -324,5 +329,16 @@ export function buildIdeLocalGenerateBody(input: {
     ...(input.planner ? { planner: input.planner } : {}),
     ...(contextFiles.length ? { contextFiles } : {}),
     ...(input.indexVersion ? { indexVersion: input.indexVersion } : {}),
+    ...(input.projectRules != null ? { projectRules: input.projectRules } : {}),
+    ...(input.projectRulesSource ? { projectRulesSource: input.projectRulesSource } : {}),
   };
+}
+
+export async function loadUnitProjectRules(projectRoot: string, maxChars = 2000): Promise<string> {
+  const rel = ".ai-test/unit-conventions.md";
+  const raw = await ideReadFile(projectRoot, rel).catch(() => "");
+  const text = raw.trim();
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars) + "\n…[truncated]";
 }

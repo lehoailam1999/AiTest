@@ -234,6 +234,9 @@ export const generateUnit = {
     contextFiles?: { path: string; content: string }[];
     /** Phase 5 — code index schema stamp */
     indexVersion?: string;
+    /** Sprint 3 — conventions from .ai-test/unit-conventions.md */
+    projectRules?: string;
+    projectRulesSource?: "unit-conventions" | "none";
   }) => authFetch<UnitResult>("/generate-unit", { method: "POST", body: JSON.stringify(body) }),
   /** Step 2 — inspect stack without generating */
   inspect: (body: {
@@ -289,6 +292,9 @@ export const generateApiTest = {
     relatedSources?: { path: string; content: string; role?: string }[];
     contextPacket?: Record<string, unknown>;
     repairContext?: string;
+    /** Sprint 3 alignment — conventions payload from Desktop */
+    projectRules?: string;
+    projectRulesSource?: "unit-conventions" | "e2e-conventions" | "none";
   }) =>
     authFetch<UnitResult>("/generate-api-test", { method: "POST", body: JSON.stringify(body) }),
 };
@@ -408,6 +414,10 @@ export const generateE2e = {
     locatorContract?: string;
     /** Deterministic Page Object scaffold (method contract) */
     pomScaffold?: string;
+    /** Sprint 2 — excerpt from .ai-test/e2e-conventions.md */
+    projectRules?: string;
+    /** Sprint 2.4 — telemetry source for rule resolution */
+    projectRulesSource?: "e2e-conventions" | "none";
     /** Skip ensure_auth_seed_roles after LLM when Desktop already has artifact */
     skipAuthSeed?: boolean;
     /** Desktop already inspected — do not API auto-inspect */

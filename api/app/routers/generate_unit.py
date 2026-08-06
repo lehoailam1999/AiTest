@@ -82,6 +82,14 @@ router = APIRouter(
 )
 
 log = logging.getLogger("aitest.generate")
+_PROJECT_RULES_CAP = 2000
+
+
+def _cap_project_rules(text: str) -> str:
+    s = (text or "").strip()
+    if len(s) <= _PROJECT_RULES_CAP:
+        return s
+    return s[:_PROJECT_RULES_CAP] + "\n…[truncated]"
 
 
 def _uuid(value: str) -> uuid.UUID | None:
@@ -329,11 +337,23 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
             req_title = req_obj.title or ""
             req_desc = req_obj.description or ""
 
-    from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+    from app.llm.ai_rules import build_user_rules_text, parse_project_meta
 
-    proj_rules, usr_rules = rules_pair_from_meta(
-        parse_project_meta(getattr(project, "meta", None)),
-        language=language or project.language,
+    project_meta = parse_project_meta(getattr(project, "meta", None))
+    usr_rules = build_user_rules_text(project_meta)
+    raw_project_rules = (
+        body.get("projectRules")
+        if "projectRules" in body
+        else body.get("project_rules")
+    )
+    proj_rules = _cap_project_rules(str(raw_project_rules or ""))
+    src = str(
+        body.get("projectRulesSource") or body.get("project_rules_source") or "none"
+    ).strip()
+    log.info(
+        "unit project_rules source=%s authoritative=true chars=%s",
+        src or "none",
+        len(proj_rules),
     )
 
     # Phase 5 extras — optional; ignored when absent (legacy clients unchanged)
@@ -498,12 +518,24 @@ async def unit_sandbox_repair_route(request: Request, db: Annotated[Session, Dep
                 module=module,
                 package_prefix=package_prefix,
             )
-        from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+        from app.llm.ai_rules import build_user_rules_text, parse_project_meta
 
         lang = str(body.get("language") or orch.stack.language or project.language or "")
-        proj_rules, usr_rules = rules_pair_from_meta(
-            parse_project_meta(getattr(project, "meta", None)),
-            language=lang or project.language,
+        project_meta = parse_project_meta(getattr(project, "meta", None))
+        usr_rules = build_user_rules_text(project_meta)
+        raw_project_rules = (
+            body.get("projectRules")
+            if "projectRules" in body
+            else body.get("project_rules")
+        )
+        proj_rules = _cap_project_rules(str(raw_project_rules or ""))
+        src = str(
+            body.get("projectRulesSource") or body.get("project_rules_source") or "none"
+        ).strip()
+        log.info(
+            "unit sandbox project_rules source=%s authoritative=true chars=%s",
+            src or "none",
+            len(proj_rules),
         )
         req = UnitRequest(
             test_case_title=tc.title,

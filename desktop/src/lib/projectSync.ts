@@ -1,67 +1,14 @@
 import type { Project, ProjectMeta } from "../api/types";
 import type { ProjectScan } from "../tauri/bridge";
 
-/** Mirror BE synthesize_project_auto_rules — keep short & stack-focused. */
-export function synthesizeProjectAutoRules(
-  meta: ProjectMeta,
-  language?: string | null
-): string {
-  const lines: string[] = ["QUY TẮC DỰ ÁN (auto — từ stack scan):"];
-  const lang = (language || meta.scanLanguage || "").trim();
-  const frameworks = meta.frameworks ?? [];
-  const testFws = meta.testFrameworks ?? [];
-  const stacks = meta.stacks ?? [];
-  const modules = meta.modules ?? [];
-
-  if (lang) lines.push(`- Ngôn ngữ chính (scan): ${lang}.`);
-  if (frameworks.length) {
-    lines.push(`- Framework ứng dụng: ${frameworks.filter(Boolean).slice(0, 8).join(", ")}.`);
-  }
-  if (testFws.length) {
-    lines.push(
-      `- Test framework phát hiện: ${testFws.filter(Boolean).slice(0, 8).join(", ")}. Ưu tiên khi sinh / verify code test.`
-    );
-  }
-  if (stacks.length) {
-    lines.push(`- Stack markers: ${stacks.filter(Boolean).slice(0, 10).join(", ")}.`);
-  }
-  const moduleNames = modules
-    .map((m) => (typeof m === "string" ? m : m?.name))
-    .filter((n): n is string => Boolean(n && String(n).trim()))
-    .slice(0, 12);
-  if (moduleNames.length) {
-    lines.push(`- Module/package gợi ý: ${moduleNames.join(", ")}.`);
-  }
-  const e2e = meta.e2e;
-  if (e2e?.targetUrl) {
-    lines.push(`- E2E targetUrl mặc định: ${e2e.targetUrl}.`);
-  }
-  if (e2e?.useStorageState === true) {
-    lines.push("- E2E: ưu tiên storageState (không lặp login UI trên feature Spec).");
-  } else if (e2e?.useStorageState === false) {
-    lines.push("- E2E: không dùng storageState — auth qua ensureAuthenticated / UI khi cần.");
-  }
-  lines.push(
-    "- Layout artifact: Unit → AItest/UnitTest/{Requirement}/{TC}/ ; E2E → AItest/E2ETest/{Requirement}/{TC}/pages|specs/."
-  );
-  lines.push("- Chỉ bám tài liệu job (TC) hoặc source/DOM (codegen) — không copy domain mẫu.");
-
-  if (lines.length <= 3 && !lang && !frameworks.length && !testFws.length) {
-    return "";
-  }
-  return lines.join("\n");
-}
-
 function seedAiRules(
   meta: ProjectMeta,
-  language?: string | null
+  projectAutoSeed?: string | null
 ): NonNullable<ProjectMeta["aiRules"]> {
   const prev = meta.aiRules ?? {};
   const locked = Boolean(prev.lockProjectAuto);
-  const auto = synthesizeProjectAutoRules(
-    { ...meta, scanLanguage: language || meta.scanLanguage },
-    language
-  );
+  const seeded = (projectAutoSeed || "").trim();
+  const auto = seeded;
   const next = { ...prev };
   if (auto && (!locked || !String(prev.projectAuto || "").trim())) {
     next.projectAuto = auto;
@@ -69,10 +16,24 @@ function seedAiRules(
   return next;
 }
 
+export function buildProjectAutoFromProfileConventions(input: {
+  e2eConventions?: string | null;
+  unitConventions?: string | null;
+}): string {
+  const e2e = (input.e2eConventions || "").trim();
+  const unit = (input.unitConventions || "").trim();
+  const blocks: string[] = [];
+  if (e2e) blocks.push(`## E2E profile conventions\n${e2e}`);
+  if (unit) blocks.push(`## Unit profile conventions\n${unit}`);
+  if (!blocks.length) return "";
+  return `QUY TẮC DỰ ÁN (auto — project profile)\n\n${blocks.join("\n\n")}`;
+}
+
 export function buildProjectMetaFromScan(
   scan: ProjectScan,
   existingMeta?: ProjectMeta | null,
-  languageOverride?: string | null
+  languageOverride?: string | null,
+  options?: { projectAutoSeed?: string | null }
 ): ProjectMeta {
   const frameworks = scan.frameworks ?? [];
   const syncedAt = new Date().toISOString();
@@ -104,7 +65,7 @@ export function buildProjectMetaFromScan(
 
   return {
     ...base,
-    aiRules: seedAiRules(base, language),
+    aiRules: seedAiRules(base, options?.projectAutoSeed),
   };
 }
 

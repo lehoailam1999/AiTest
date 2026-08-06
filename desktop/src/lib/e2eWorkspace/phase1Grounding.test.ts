@@ -6,6 +6,24 @@ import {
 } from "./deriveFeaturePathFromTc.js";
 import { e2eFeRankBonus } from "./resolveE2eFeSources.js";
 import { buildE2EEnvConfig, playwrightEnvFromConfig } from "./env.js";
+import {
+  buildGenerateE2eRunBody,
+  loadGenerateGroundingProfile,
+  resolveFeaturePathSeed,
+} from "./generateGrounding.js";
+import type { ProfileIo } from "../projectProfile/types.js";
+
+function memoryIo(files: Record<string, string>): ProfileIo {
+  return {
+    listFiles: async () => Object.keys(files),
+    readFile: async (_r, p) => files[p.replace(/\\/g, "/")],
+    writeFile: async (_r, p, c) => {
+      files[p.replace(/\\/g, "/")] = c;
+    },
+    readFileOptional: async (_r, p) => files[p.replace(/\\/g, "/")] ?? null,
+    fileExists: async (_r, p) => p.replace(/\\/g, "/") in files,
+  };
+}
 
 describe("deriveFeaturePathFromTc", () => {
   it("reads path marker from testData", () => {
@@ -137,5 +155,115 @@ describe("E2E_FEATURE_PATH env", () => {
     assert.equal(pe.E2E_ADMIN_PASSWORD, "admin");
     assert.equal(pe.E2E_USER_USERNAME, "user");
     assert.equal(pe.E2E_USER_PASSWORD, "user");
+  });
+});
+
+describe("Sprint 2.1 featurePath seed priority", () => {
+  it("prefers TC marker over moduleMap", () => {
+    const p = resolveFeaturePathSeed({
+      testCase: {
+        module: "Evidence",
+        testData: "path: /tc-path\nauthRole: admin",
+      },
+      moduleMap: { Evidence: "/module-map-path" },
+      phase5FeaturePathHint: "/hint-path",
+    });
+    assert.equal(p, "/tc-path");
+  });
+
+  it("uses moduleMap when TC has no path marker", () => {
+    const p = resolveFeaturePathSeed({
+      testCase: {
+        module: "Evidence",
+        testData: "authRole: admin",
+      },
+      moduleMap: { Evidence: "/module-map-path" },
+      phase5FeaturePathHint: "/hint-path",
+    });
+    assert.equal(p, "/module-map-path");
+  });
+
+  it("fuzzy-matches module tokens to moduleMap path segments", () => {
+    const p = resolveFeaturePathSeed({
+      testCase: {
+        module: "Evidence upload",
+        testData: "authRole: admin",
+      },
+      moduleMap: { rooms: "/admin/rooms", evidence: "/admin/evidence" },
+    });
+    assert.equal(p, "/admin/evidence");
+  });
+});
+
+describe("Sprint 2.1 projectRules payload", () => {
+  it("includes projectRules in run body", () => {
+    const body = buildGenerateE2eRunBody({
+      projectId: "p1",
+      testCaseId: "tc1",
+      targetUrl: "http://localhost:4200",
+      projectRoot: "D:/sut",
+      locatorContract: "data-testid: save-btn",
+      projectRules: "# E2E conventions from profile",
+    });
+    assert.equal(
+      (body.projectRules as string) || "",
+      "# E2E conventions from profile"
+    );
+    assert.equal(body.projectRulesSource, "e2e-conventions");
+    assert.equal(body.skipAutoInspect, true);
+  });
+
+  it("keeps explicit empty projectRules (no meta fallback intent)", () => {
+    const body = buildGenerateE2eRunBody({
+      projectId: "p1",
+      testCaseId: "tc1",
+      targetUrl: "http://localhost:4200",
+      projectRoot: "D:/sut",
+      locatorContract: "data-testid: save-btn",
+      projectRules: "",
+    });
+    assert.equal(body.projectRules, "");
+    assert.equal(body.projectRulesSource, "none");
+  });
+});
+
+describe("Sprint 2.2 load generate grounding profile", () => {
+  it("loads profile + conventions excerpt from .ai-test", async () => {
+    const io = memoryIo({
+      ".ai-test/project.profile.json": JSON.stringify({
+        schema: "aitest-project-profile-v1",
+        runner: "playwright",
+        testRoot: "AItest/E2ETest",
+        auth: { strategy: "storageState", storageDir: ".ai-test/auth", roles: [] },
+        locatorPolicy: ["testid", "role", "label"],
+        moduleMap: { Evidence: "/admin/evidence" },
+        reuseRoots: [],
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+      ".ai-test/e2e-conventions.md":
+        "# E2E conventions\n- Use stable data-cy selectors\n- Avoid fake asserts",
+    });
+    const loaded = await loadGenerateGroundingProfile("/proj", io);
+    assert.equal(loaded.projectProfile?.runner, "playwright");
+    assert.equal(
+      loaded.projectProfile?.moduleMap?.Evidence,
+      "/admin/evidence"
+    );
+    assert.match(loaded.projectRules, /Use stable data-cy selectors/);
+    assert.equal(loaded.meta.profileSource, "project-profile");
+    assert.equal(loaded.meta.rulesSource, "e2e-conventions");
+    assert.equal(loaded.meta.moduleMapCount, 1);
+    assert.ok(loaded.meta.projectRulesChars > 0);
+  });
+
+  it("returns null/empty when profile files are absent", async () => {
+    const io = memoryIo({});
+    const loaded = await loadGenerateGroundingProfile("/proj", io);
+    assert.equal(loaded.projectProfile, null);
+    assert.equal(loaded.projectRules, "");
+    assert.equal(loaded.meta.profileSource, "none");
+    assert.equal(loaded.meta.rulesSource, "none");
+    assert.equal(loaded.meta.moduleMapCount, 0);
+    assert.equal(loaded.meta.projectRulesChars, 0);
   });
 });

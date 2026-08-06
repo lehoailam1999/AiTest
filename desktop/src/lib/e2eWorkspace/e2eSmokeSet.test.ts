@@ -134,6 +134,7 @@ describe("evaluateSmokeGates", () => {
     );
     assert.match(report.reportText, /E2E Smoke S5/);
     assert.match(report.reportText, /G5/);
+    assert.match(report.reportText, /G1 sample:/);
     assert.equal(report.taxonomy.genOk, 1);
   });
 });

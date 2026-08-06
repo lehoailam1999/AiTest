@@ -30,6 +30,14 @@ from app.services.generate_source_resolve import (
 )
 
 log = logging.getLogger("aitest.generate")
+_PROJECT_RULES_CAP = 2000
+
+
+def _cap_project_rules(text: str) -> str:
+    s = (text or "").strip()
+    if len(s) <= _PROJECT_RULES_CAP:
+        return s
+    return s[:_PROJECT_RULES_CAP] + "\n…[truncated]"
 
 router = APIRouter(
     prefix="/api", tags=["generate-api-test"], dependencies=[Depends(get_current_user)]
@@ -168,11 +176,23 @@ async def generate_api_test_route(request: Request, db: Annotated[Session, Depen
     else:
         framework = testing_fw or body_fw
 
-    from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+    from app.llm.ai_rules import build_user_rules_text, parse_project_meta
 
-    proj_rules, usr_rules = rules_pair_from_meta(
-        parse_project_meta(getattr(project, "meta", None)),
-        language=language or project.language,
+    project_meta = parse_project_meta(getattr(project, "meta", None))
+    usr_rules = build_user_rules_text(project_meta)
+    raw_project_rules = (
+        body.get("projectRules")
+        if "projectRules" in body
+        else body.get("project_rules")
+    )
+    proj_rules = _cap_project_rules(str(raw_project_rules or ""))
+    src = str(
+        body.get("projectRulesSource") or body.get("project_rules_source") or "none"
+    ).strip()
+    log.info(
+        "api-test project_rules source=%s authoritative=true chars=%s",
+        src or "none",
+        len(proj_rules),
     )
 
     req = UnitRequest(

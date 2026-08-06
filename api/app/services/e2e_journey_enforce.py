@@ -96,43 +96,43 @@ def _iter_test_step_spans(text: str) -> list[tuple[int, int, str]]:
 
 def _phase_positions(content: str, *, mode: str) -> dict[str, int | None]:
     text = _code_without_comments(content)
-    auth_m = re.search(r"ensureAuthenticated\s*\(\s*page\s*\)", text) or _AUTH_STEP_RE.search(
-        text
-    )
-    entry_pos: int | None = None
-    entry_m = _FEATURE_ENTRY_STEP_RE.search(text)
-    if entry_m:
-        entry_pos = entry_m.start()
-    else:
-        # test.step whose body calls gotoFeature/openFeature counts as Feature entry
-        for start, end, _title in _iter_test_step_spans(text):
-            if _GOTO_FEATURE_RE.search(text[start:end]):
-                entry_pos = start
-                break
-        if entry_pos is None:
-            gf = _GOTO_FEATURE_RE.search(text)
-            entry_pos = gf.start() if gf else None
-        if entry_pos is None:
-            pg = _PAGE_GOTO_RE.search(text)
-            entry_pos = pg.start() if pg else None
+    auth_call_m = re.search(r"ensureAuthenticated\s*\(\s*page\s*\)", text)
+    auth_step_m = _AUTH_STEP_RE.search(text)
+    auth_pos_candidates = [
+        m.start()
+        for m in (auth_call_m, auth_step_m)
+        if m is not None
+    ]
+    auth_pos = min(auth_pos_candidates) if auth_pos_candidates else None
+    # Brace-safe top-level step detection (prevents false order on nested test.step).
+    entry_span = _find_feature_entry_step_span(text)
+    entry_pos: int | None = entry_span.start() if entry_span is not None else None
 
-    act_pos: int | None = None
-    for start, end, title in _iter_test_step_spans(text):
-        if _META_STEP_TITLE_RE.search(title):
-            continue
-        # Navigation-only step (gotoFeature) is Feature entry, not Act.
-        if entry_pos is not None and start == entry_pos:
-            continue
-        if _GOTO_FEATURE_RE.search(text[start:end]) and not re.search(
-            r"\.fill\s*\(|\.click\s*\(|\.setInputFiles\s*\(|await\s+expect\s*\(",
-            text[start:end],
-        ):
-            continue
-        act_pos = start
-        break
+    act_span = _first_act_step_span(text)
+    act_pos: int | None = act_span.start() if act_span is not None else None
+
+    # If first non-meta step is the detected feature-entry, skip to the next real Act.
+    if act_span is not None and entry_span is not None and act_span.start() == entry_span.start():
+        for span in _top_level_step_spans(text):
+            if span.start() <= entry_span.start():
+                continue
+            title = span.title
+            body = span.group(0)
+            if _is_auth_step_title(title) or _is_feature_entry_step_title(title):
+                continue
+            if _META_STEP_TITLE_RE.search(title):
+                continue
+            if _GOTO_FEATURE_RE.search(body) and not re.search(
+                r"\.fill\s*\(|\.click\s*\(|\.setInputFiles\s*\(|await\s+expect\s*\(",
+                body,
+            ):
+                continue
+            act_pos = span.start()
+            break
+
     if act_pos is None:
         search_from = (entry_pos + 1) if entry_pos is not None else (
-            auth_m.end() if auth_m else 0
+            (auth_call_m.end() if auth_call_m is not None else 0)
         )
         while True:
             act_m = _ACT_SIGNAL_RE.search(text, search_from)
@@ -147,7 +147,7 @@ def _phase_positions(content: str, *, mode: str) -> dict[str, int | None]:
             act_pos = act_m.start()
             break
     return {
-        "auth": 0 if mode in ("storage", "public") else (auth_m.start() if auth_m else None),
+        "auth": 0 if mode in ("storage", "public") else auth_pos,
         "entry": entry_pos,
         "act": act_pos,
     }

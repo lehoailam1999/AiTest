@@ -16,12 +16,3 @@ export function dependencyFiles(packet: AITestContextPacket): ContextPacketFile[
 export function testSampleFiles(packet: AITestContextPacket): ContextPacketFile[] {
   return packet.files.filter((f) => f.role === "test-sample");
 }
-
-export function legacyRelatedSources(packet: AITestContextPacket) {
-  return dependencyFiles(packet).map((f) => ({
-    path: f.pathRel,
-    content: f.content,
-    role: f.role,
-    why: f.why,
-  }));
-}

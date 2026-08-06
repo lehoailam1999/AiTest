@@ -96,6 +96,7 @@ import {
   buildGenerateContext,
   buildIdeLocalGenerateBody,
   ideListSourceFiles,
+  loadUnitProjectRules,
   ideReadFile,
   type IdeLocalGenerateBody,
 } from "../lib/ideLocalCommands";
@@ -959,6 +960,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       ctx.packet.sourceUnderTest?.symbol ||
       "";
     const packagePrefix = await resolvePackagePrefix(localPath, relName);
+    const unitProjectRules = await loadUnitProjectRules(localPath).catch(() => "");
     const genBody = buildIdeLocalGenerateBody({
       projectId: project.id,
       testCaseId: tc.id,
@@ -975,6 +977,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       planner: ctx.planner,
       indexVersion: ctx.indexVersion,
       contextSource: ctx.contextSource,
+      projectRules: unitProjectRules,
+      projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
     });
     const res = isApiKind
       ? await generateApiTest.run(genBody)
@@ -1671,7 +1675,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
       const prepared = genBody;
       const packagePrefix = await resolvePackagePrefix(localPath, outName);
-      const body = { ...prepared, packagePrefix };
+      const unitProjectRules = await loadUnitProjectRules(localPath).catch(() => "");
+      const body = {
+        ...prepared,
+        packagePrefix,
+        projectRules: unitProjectRules,
+        projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
+      };
 
       const res = isApiKind
         ? await generateApiTest.run(body)
@@ -1859,6 +1869,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
     setRepairing(true);
     try {
+      const unitProjectRules = await loadUnitProjectRules(localPath).catch(() => "");
       const repairBody = {
         projectId: project.id,
         testCaseId,
@@ -1883,6 +1894,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           })),
         ],
         repairContext: `${repairContext}\n\n(failClass=${failClass})`,
+        projectRules: unitProjectRules,
+        projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
         ...(isApiKind ? { openApiSpec: openApiSpec || undefined } : {}),
       };
       const res = isApiKind

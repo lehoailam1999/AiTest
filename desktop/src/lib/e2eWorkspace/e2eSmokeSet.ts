@@ -360,6 +360,20 @@ export function formatSmokeReport(report: Omit<SmokeJobReport, "reportText">): s
     const mark = !g.measured ? "—" : g.pass ? "PASS" : "FAIL";
     lines.push(`  ${g.id} ${mark}: ${g.label} — ${g.detail}`);
   }
+  const g1Sample = report.outcomes.find(
+    (o) =>
+      Boolean((o.sourceFileName || "").trim()) &&
+      Boolean((o.module || "").trim()) &&
+      !isLikelyLoginTestCase({ title: o.title })
+  );
+  if (g1Sample) {
+    lines.push(
+      "G1 sample: " +
+        `module=${g1Sample.module} ` +
+        `featurePath=${g1Sample.featurePath || "(none)"} ` +
+        `primary=${g1Sample.sourceFileName}`
+    );
+  }
   lines.push(
     report.readyForPerfPlan
       ? "→ G1–G6 PASS — có thể mở CODEGEN_PERF plan"

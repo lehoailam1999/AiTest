@@ -9,6 +9,7 @@ import { assertApiReadyForSync } from "../../api/health";
 import type { Project } from "../../api/types";
 import {
   assertProjectSynced,
+  buildProjectAutoFromProfileConventions,
   buildProjectMetaFromScan,
   normalizeProjectMeta,
 } from "../projectSync";
@@ -43,6 +44,7 @@ export type BindSourceRootResult = {
 export type SyncSourceMetaInput = {
   projectId: string;
   scan: ProjectScan;
+  projectRoot?: string;
 };
 
 /**
@@ -52,7 +54,28 @@ export async function syncSourceMeta(input: SyncSourceMetaInput): Promise<Projec
   await assertApiReadyForSync();
   const current = await projects.get(input.projectId);
   const existing = normalizeProjectMeta(current.meta);
-  const meta = buildProjectMetaFromScan(input.scan, existing, input.scan.language);
+  let projectAutoSeed = "";
+  if (input.projectRoot) {
+    try {
+      const { CONVENTION_PATHS, createTauriProfileIo, readConventionExcerpt } = await import(
+        "../projectProfile"
+      );
+      const io = createTauriProfileIo();
+      const [e2eConventions, unitConventions] = await Promise.all([
+        readConventionExcerpt(input.projectRoot, CONVENTION_PATHS.e2eConventions, io, 1200),
+        readConventionExcerpt(input.projectRoot, CONVENTION_PATHS.unitConventions, io, 1200),
+      ]);
+      projectAutoSeed = buildProjectAutoFromProfileConventions({
+        e2eConventions,
+        unitConventions,
+      });
+    } catch {
+      projectAutoSeed = "";
+    }
+  }
+  const meta = buildProjectMetaFromScan(input.scan, existing, input.scan.language, {
+    projectAutoSeed,
+  });
   await projects.update(input.projectId, {
     language: input.scan.language ?? null,
     framework: (input.scan.frameworks ?? [])[0] ?? null,
@@ -99,6 +122,16 @@ export async function bindSourceRoot(
     /* optional module */
   }
 
+  // Sprint 0 — project profile on SUT (.ai-test/project.profile.json)
+  try {
+    const { discoverAndPersistProjectProfile } = await import("../projectProfile");
+    void discoverAndPersistProjectProfile(rootPath).catch(() => {
+      /* best-effort — bind still succeeds */
+    });
+  } catch {
+    /* optional module */
+  }
+
   let workspaceId: string | null = null;
   let indexStatus: string | null = null;
   let fileCount: number | null = null;
@@ -135,6 +168,7 @@ export async function bindSourceRoot(
       syncedProject = await syncSourceMeta({
         projectId: input.projectId,
         scan,
+        projectRoot: rootPath,
       });
     } catch (e) {
       syncError = e instanceof Error ? e.message : "Đồng bộ stack thất bại";

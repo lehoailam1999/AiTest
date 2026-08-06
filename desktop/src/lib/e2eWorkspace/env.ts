@@ -7,6 +7,7 @@
  */
 
 import { defaultE2EEnv, type E2EEnvConfig } from "./types";
+import type { ProjectProfile } from "../projectProfile/types.js";
 
 /** Canonical path relative to playwright.config.ts / TC work_cwd. */
 export const E2E_STORAGE_STATE_REL = "./fixtures/storageState.json";
@@ -30,6 +31,8 @@ export type BuildE2EEnvInput = {
   featurePath?: string;
   /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
   roleCredentials?: Record<string, RoleCredential>;
+  /** From project profile playwrightRun.testIdAttribute */
+  testIdAttribute?: string;
 };
 
 function roleEnvSlug(role: string): string {
@@ -75,6 +78,42 @@ export function buildE2EEnvConfig(input: BuildE2EEnvInput): E2EEnvConfig {
     role: input.role,
     featurePath: input.featurePath,
     roleCredentials: input.roleCredentials,
+    testIdAttribute: input.testIdAttribute,
+  });
+}
+
+/**
+ * Merge project profile (Sprint 1) with UI/TC inputs — profile fills gaps only.
+ */
+export function buildE2EEnvWithProfile(
+  profile: ProjectProfile | null | undefined,
+  input: BuildE2EEnvInput
+): E2EEnvConfig {
+  const pw = profile?.playwrightRun;
+  const authStrategy = profile?.auth?.strategy;
+  const useStorage =
+    input.useStorageState === true ||
+    (input.useStorageState !== false && authStrategy === "storageState") ||
+    Boolean(input.storageStateRel?.trim());
+
+  const targetUrl =
+    (input.targetUrl || "").trim() ||
+    pw?.defaultBaseURL ||
+    undefined;
+
+  const storageStateRel =
+    input.storageStateRel?.trim() ||
+    pw?.storageState?.canonicalRel ||
+    undefined;
+
+  return buildE2EEnvConfig({
+    ...input,
+    targetUrl,
+    useStorageState: useStorage,
+    storageStateRel,
+    seedCommand: input.seedCommand || pw?.seed?.seedCommand || undefined,
+    teardownCommand: input.teardownCommand || pw?.seed?.teardownCommand || undefined,
+    testIdAttribute: pw?.testIdAttribute || input.testIdAttribute,
   });
 }
 
@@ -87,6 +126,7 @@ export function playwrightEnvFromConfig(env: E2EEnvConfig): Record<string, strin
   if (env.password) out.E2E_PASSWORD = env.password;
   if (env.role) out.E2E_ROLE = env.role;
   if (env.featurePath) out.E2E_FEATURE_PATH = env.featurePath;
+  if (env.testIdAttribute) out.E2E_TEST_ID_ATTRIBUTE = env.testIdAttribute;
   const roles = env.roleCredentials || {};
   for (const [role, cred] of Object.entries(roles)) {
     const u = (cred?.username || "").trim();

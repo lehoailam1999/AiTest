@@ -72,6 +72,25 @@ export type TcReadyAssertOptions = {
   allowInferredPath?: boolean;
 };
 
+export type E2EProfileGateInput = {
+  runner?: string | null;
+  authStrategy?: string | null;
+};
+
+/** Sprint 3 gate hints — warning only, does not block generation. */
+export function profileGateWarningsForE2eGen(input: E2EProfileGateInput): string[] {
+  const warns: string[] = [];
+  const runner = (input.runner || "").trim().toLowerCase();
+  const authStrategy = (input.authStrategy || "").trim().toLowerCase();
+  if (!runner || runner === "unknown") {
+    warns.push("profile runner missing/unknown");
+  }
+  if (!authStrategy) {
+    warns.push("profile auth.strategy missing");
+  }
+  return warns;
+}
+
 /** Append featurePath to testData when TC has no usable path marker (in-memory enrich for Gen). */
 export function enrichTestDataWithFeaturePath(
   testData: string | null | undefined,

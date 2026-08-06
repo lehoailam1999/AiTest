@@ -201,6 +201,12 @@ Chỉ khi G1–G6 đạt mới mở Performance plan.
 
 **Cách chạy:** E2E Job → chọn Requirement (hoặc dùng pool Approved) → **S5 Smoke**. Xem gate tags + Log. Live G1–G7 phụ thuộc Auth + Target URL + SUT của project gắn.
 
+**G1 sample (để trace FE-domain):** report in thêm dòng:
+
+`G1 sample: module=<tc.module> featurePath=<resolved path> primary=<sourceFileName>`
+
+Dùng dòng này để đối chiếu nhanh “TC module ↔ FE primary path” khi triage lệch domain.
+
 **Exit:** G1–G6 PASS trên smoke set project → mới làm [`CODEGEN_PERF_BATCH_SNAPSHOT_WORKER_PLAN.md`](CODEGEN_PERF_BATCH_SNAPSHOT_WORKER_PLAN.md).
 ---
 

@@ -2882,8 +2882,9 @@ def _validate_required_context(
         missing.append("featurePath")
     if not _ROLE_SIGNAL_RE.search(auth_hints or ""):
         missing.append("role/authRef")
-    # Soft landmark: FE contract + featurePath already prove a screen exists
-    has_grounding = bool((feature_path or "").strip() and (locator_contract or "").strip())
+    # Soft landmark: a usable featurePath already names the screen; landmark prose optional.
+    # FE locator contract further grounds the surface but is not required once path exists.
+    has_grounding = bool((feature_path or "").strip())
     if not has_grounding and not _LANDMARK_SIGNAL_RE.search(auth_hints or ""):
         missing.append("landmark")
     if not _has_expected_outcome(auth_hints or ""):
@@ -3052,7 +3053,9 @@ def _rewrite_or_assert_e2e_env_usage(files: list, *, test_data: str = "") -> Non
                     rf"\(process\.env\s+as\s+any\)\.{key}\b",
                 ]
                 for pat in patterns:
-                    new_text = re.sub(pat, lit, new_text)
+                    # Use function replacement so JSON escapes (e.g. "\uXXXX", backslashes)
+                    # are emitted literally and never parsed as re.sub replacement escapes.
+                    new_text = re.sub(pat, lambda _m, s=lit: s, new_text)
                 continue
             invented.append(f"{getattr(f, 'path', '')}: {key}")
         if new_text != text:

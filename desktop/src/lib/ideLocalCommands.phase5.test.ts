@@ -73,4 +73,19 @@ describe("buildIdeLocalGenerateBody Phase 5", () => {
     assert.equal(body.indexVersion, "aitest-code-index-v1");
     assert.equal(body.contextSource, "code-index");
   });
+
+  it("attaches explicit projectRules payload for unit conventions", () => {
+    const body = buildIdeLocalGenerateBody({
+      projectId: "p1",
+      testCaseId: "t1",
+      packet: samplePacket(),
+      sourceFileName: "src/math.ts",
+      framework: "jest",
+      language: "TypeScript",
+      projectRules: "# Unit conventions\nUse AAA.",
+      projectRulesSource: "unit-conventions",
+    });
+    assert.equal(body.projectRulesSource, "unit-conventions");
+    assert.match(body.projectRules || "", /Unit conventions/);
+  });
 });

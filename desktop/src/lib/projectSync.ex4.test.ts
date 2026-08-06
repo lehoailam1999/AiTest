@@ -3,7 +3,10 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildProjectMetaFromScan } from "./projectSync";
+import {
+  buildProjectAutoFromProfileConventions,
+  buildProjectMetaFromScan,
+} from "./projectSync";
 import type { ProjectMeta } from "../api/types";
 import type { ProjectScan } from "../tauri/bridge";
 
@@ -35,7 +38,7 @@ describe("buildProjectMetaFromScan EX4.3", () => {
     assert.deepEqual(next.codeAliases, { login: ["SignIn"] });
     assert.equal(next.aiRules?.user, "keep-me");
     assert.equal(next.aiRules?.projectExtra, "extra");
-    assert.ok(next.aiRules?.projectAuto);
+    assert.equal(next.aiRules?.projectAuto, undefined);
     assert.ok(next.syncedAt);
   });
 
@@ -50,5 +53,18 @@ describe("buildProjectMetaFromScan EX4.3", () => {
     const next = buildProjectMetaFromScan(scanStub, prev);
     assert.equal(next.aiRules?.projectAuto, "LOCKED_AUTO");
     assert.equal(next.aiRules?.user, "u");
+  });
+
+  it("uses profile conventions excerpt as projectAuto seed", () => {
+    const seed = buildProjectAutoFromProfileConventions({
+      e2eConventions: "# E2E conventions\nUse data-cy",
+      unitConventions: "# Unit conventions\nPrefer AAA",
+    });
+    const next = buildProjectMetaFromScan(scanStub, null, "TypeScript", {
+      projectAutoSeed: seed,
+    });
+    assert.match(next.aiRules?.projectAuto || "", /project profile/i);
+    assert.match(next.aiRules?.projectAuto || "", /E2E conventions/);
+    assert.match(next.aiRules?.projectAuto || "", /Unit conventions/);
   });
 });

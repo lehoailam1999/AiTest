@@ -6,7 +6,12 @@ import { generateE2e, type E2EFileDto } from "../../api";
 import type { TestCase } from "../../api/types";
 import { createAsyncMutex, runPool } from "../runPool";
 import { isTauri, readTextFile } from "../../tauri/bridge";
-import { buildE2EEnvConfig, playwrightEnvFromConfig } from "./env";
+import { buildE2EEnvConfig, buildE2EEnvWithProfile, playwrightEnvFromConfig } from "./env";
+import { prepareVerifySession } from "./verifyProfilePrep";
+import type { ProjectProfile } from "../projectProfile/types.js";
+import {
+  createTauriProfileIo,
+} from "../projectProfile";
 import {
   resolveE2eFeSources,
   createFeSourceListCache,
@@ -20,6 +25,13 @@ import {
 } from "./e2eSpecPathMatch";
 import { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
 import { deriveFeaturePathFromTc } from "./deriveFeaturePathFromTc";
+import {
+  buildGenerateE2eRunBody,
+  type GenerateGroundingLoadMeta,
+  loadGenerateGroundingProfile,
+  resolveFeaturePathSeed,
+  lookupModuleMapPath,
+} from "./generateGrounding";
 import { derivePomScaffoldFromTc } from "./derivePomScaffoldFromTc";
 import {
   assertTcReadyForE2eGen,
@@ -27,6 +39,7 @@ import {
   isUsableFeaturePath,
   mergeTcWithAuthRole,
   mergeTcWithInferredFeaturePath,
+  profileGateWarningsForE2eGen,
 } from "./assertTcReadyForE2eGen";
 import {
   buildE2eRouteCatalog,
@@ -244,6 +257,7 @@ export type E2eGenItem = {
   sourceCode?: string;
   relatedSources?: { path: string; content: string }[];
   locatorContract?: string;
+  groundingMeta?: GenerateGroundingLoadMeta;
 };
 
 /** Fired as soon as one TC finishes generate (success or fail) — enables live UI + pause→verify. */
@@ -396,19 +410,33 @@ export async function inspectE2eDom(opts: {
   const log = (line: string) => opts.onLog?.(line);
   const post =
     opts.featurePath || opts.storageStateRel || (opts.username && opts.password);
+  let targetUrl = opts.targetUrl;
+  let storageStateRel = opts.storageStateRel;
+  try {
+    const { loadProjectProfile } = await import("../projectProfile");
+    const { createTauriProfileIo } = await import("../projectProfile/tauriIo");
+    const profile = await loadProjectProfile(opts.projectRoot, createTauriProfileIo());
+    const pw = profile?.playwrightRun;
+    if (!targetUrl?.trim() && pw?.defaultBaseURL) targetUrl = pw.defaultBaseURL;
+    if (!storageStateRel?.trim() && pw?.storageState?.canonicalRel) {
+      storageStateRel = pw.storageState.canonicalRel;
+    }
+  } catch {
+    /* optional profile */
+  }
   log(
     post
       ? `→ Inspect Target URL + FE${opts.featurePath ? ` → ${opts.featurePath}` : ""} (post-auth)…\n`
       : "→ Inspect Target URL + FE…\n"
   );
   const inspected = await generateE2e.inspect({
-    targetUrl: opts.targetUrl,
+    targetUrl,
     projectRoot: opts.projectRoot,
     usePlaywright: opts.usePlaywrightInspect,
     sourceCode: opts.sourceCode,
     sourcePaths: opts.sourcePaths,
     featurePath: opts.featurePath,
-    storageStateRel: opts.storageStateRel,
+    storageStateRel,
     username: opts.username,
     password: opts.password,
     module: opts.module,
@@ -475,6 +503,12 @@ export async function generateE2eForTestCase(opts: {
   routeCatalog?: E2eRouteCatalog;
   /** Auth Discover / project default role when TC has no authRole */
   defaultAuthRole?: string;
+  /** Sprint 2 — loaded once per batch */
+  projectProfile?: ProjectProfile | null;
+  /** Sprint 2 — excerpt from .ai-test/e2e-conventions.md */
+  projectRules?: string;
+  /** Sprint 2.4 — telemetry for audit/log */
+  groundingMeta?: GenerateGroundingLoadMeta;
   /** Analysis WHO actors — fallback after TC markers */
   analysisActors?: string[];
   onLog?: (line: string) => void;
@@ -490,6 +524,7 @@ export async function generateE2eForTestCase(opts: {
   sourceCode?: string;
   relatedSources?: { path: string; content: string }[];
   locatorContract?: string;
+  groundingMeta?: GenerateGroundingLoadMeta;
 }> {
   const tc = opts.testCase;
   const runId = newE2eRunId(tc.id);
@@ -603,43 +638,37 @@ export async function generateE2eForTestCase(opts: {
     sourceFileName || "",
     ...(relatedSources || []).map((r) => r.path),
   ].filter(Boolean);
-  let featurePath =
-    (isUsableFeaturePath(opts.featurePath) ? opts.featurePath!.trim() : undefined) ||
-    phase5FeaturePathHint ||
+  const profile = opts.projectProfile || null;
+  const moduleMap = profile?.moduleMap || {};
+  const moduleKey = (tc.module || "").trim();
+  const moduleMapPath = lookupModuleMapPath(moduleKey, moduleMap) || "";
+  const tcMarkerPath =
     deriveFeaturePathFromTc({
       title: tc.title,
       precondition: tc.precondition,
       testData: tc.testData,
       steps: tc.steps,
-      feSource: [sourceCode || "", ...(relatedSources || []).map((r) => r.content)].join(
-        "\n"
-      ),
-      feFilePaths: fePaths,
-    }) ||
-    undefined;
+    }) || undefined;
+  let featurePath = resolveFeaturePathSeed({
+    explicitFeaturePath: opts.featurePath,
+    testCase: tc,
+    moduleMap,
+    phase5FeaturePathHint,
+  });
+  if (moduleMapPath && isUsableFeaturePath(moduleMapPath) && !tcMarkerPath) {
+    log(`  featurePath(from moduleMap[${moduleKey}])=${moduleMapPath}\n`);
+  }
   if (featurePath && !isUsableFeaturePath(featurePath)) {
     log(`  featurePath ignored (placeholder/invalid)=${featurePath}\n`);
     featurePath = undefined;
   }
-  // Soft path: single routerLink from FE when TC forgot path:
-  if (!featurePath && sourceCode) {
-    const links = [
-      ..._collectAll(/routerLink\s*=\s*["'`]([^"'`]+)["'`]/gi, sourceCode),
-      ..._collectAll(/path:\s*['"`]([^'"`]+)['"`]/gi, sourceCode),
-    ]
-      .map((v) => (v.startsWith("/") ? v : `/${v}`).replace(/\/{2,}/g, "/"))
-      .filter((v) => v.length > 1 && !/^\/(login|signin|auth|register)$/i.test(v));
-    const uniqLinks = [...new Set(links)];
-    if (uniqLinks.length === 1) {
-      featurePath = uniqLinks[0];
-      log(`  featurePath(from FE routerLink)=${featurePath}\n`);
-    }
-  }
+  // Catalog before FE route snippets — avoid FE path-shape overfitting.
   let catalogMatched = false;
   if (!featurePath && opts.routeCatalog?.routes.length) {
-    const hasFePrimary = Boolean(sourceFileName && sourceCode);
     const match = matchFeaturePathFromCatalog(tc, opts.routeCatalog, {
-      hasFePrimary,
+      // Catalog only fills empty path — do not raise bar just because an FE file was picked
+      // (FE primary may be wrong/unrelated; weak-but-usable route beats inventing nothing).
+      hasFePrimary: false,
     });
     if (match.ambiguous) {
       const optsList = match.candidates
@@ -659,9 +688,22 @@ export async function generateE2eForTestCase(opts: {
     } else if (match.score > 0) {
       log(
         `  route-catalog: skip weak match score=${match.score}` +
-          `${hasFePrimary ? " (FE primary present)" : ""}` +
           `${match.candidates[0] ? ` best=${match.candidates[0].path}` : ""}\n`
       );
+    }
+  }
+  // Soft path from FE snippets only after TC/moduleMap/catalog.
+  if (!featurePath && sourceCode) {
+    const links = [
+      ..._collectAll(/routerLink\s*=\s*["'`]([^"'`]+)["'`]/gi, sourceCode),
+      ..._collectAll(/path:\s*['"`]([^'"`]+)['"`]/gi, sourceCode),
+    ]
+      .map((v) => (v.startsWith("/") ? v : `/${v}`).replace(/\/{2,}/g, "/"))
+      .filter((v) => v.length > 1 && !/^\/(login|signin|auth|register)$/i.test(v));
+    const uniqLinks = [...new Set(links)];
+    if (uniqLinks.length === 1) {
+      featurePath = uniqLinks[0];
+      log(`  featurePath(from FE routerLink)=${featurePath}\n`);
     }
   }
   if (featurePath) log(`  featurePath=${featurePath}\n`);
@@ -675,11 +717,16 @@ export async function generateE2eForTestCase(opts: {
     ? "code-index"
     : catalogMatched
       ? "route-catalog"
+      : moduleMapPath
+        ? "moduleMap"
       : featurePath
         ? "fe-source"
         : opts.featurePath?.trim()
           ? "override"
           : undefined;
+  if (featurePath && inferredPathSource) {
+    log(`  featurePath source=${inferredPathSource} value=${featurePath}\n`);
+  }
   if (featurePath && !hasPathMarker(tc) && inferredPathSource) {
     log(
       `  testData enrich: featurePath=${featurePath} (from ${inferredPathSource})\n`
@@ -716,14 +763,13 @@ export async function generateE2eForTestCase(opts: {
         "Hãy thêm `path: /...` vào testData hoặc mở đúng projectRoot để auto-map file."
     );
   }
-  if (!featurePath && !hasFeHooks && !loginTc && !publicTc) {
+  const inspectPerTc = opts.inspectPerTc !== false;
+  if (!featurePath && !hasFeHooks && !loginTc && !publicTc && !inspectPerTc) {
     throw new Error(
       "E2E_GROUNDING: skip codegen — thiếu featurePath và FE hook (data-cy/testid/route). " +
         "Bổ sung `path: /...` hoặc tăng quality FE seed trước khi Generate."
     );
   }
-
-  const inspectPerTc = opts.inspectPerTc !== false;
   let domSnapshot = inspectPerTc ? "" : opts.domSnapshot || "";
 
   if (inspectPerTc) {
@@ -882,33 +928,32 @@ export async function generateE2eForTestCase(opts: {
 
   log(`→ Generate: ${tc.title}\n`);
 
-  const gen = await generateE2e.run({
+  const runBody = buildGenerateE2eRunBody({
     projectId: opts.projectId,
     testCaseId: tc.id,
     targetUrl: env.targetUrl,
-    domSnapshot: domSnapshot || undefined,
+    domSnapshot,
     sourceFileName,
     sourceCode,
     relatedSources,
     module: moduleName,
-    requirementTitle: requirementTitle || undefined,
+    requirementTitle,
     projectRoot: opts.projectRoot,
     storageStateRel: env.storageStateRel,
     seedCommand: env.seedCommand,
     teardownCommand: env.teardownCommand,
     existingFiles: opts.existingFiles,
-    // Enriched in-memory (path/authRole) — API prefers body over DB when set
     testData: tcForGate.testData || undefined,
     executionContext: authCtx.executionContext || undefined,
     featurePath: featurePath || undefined,
     locatorContract,
     pomScaffold: pomScaffold || undefined,
+    projectRules: opts.projectRules,
     skipAuthSeed: opts.skipAuthSeed,
-    // Desktop already inspected (may have cleared login-wall) — API must not refill
-    skipAutoInspect: true,
-    ...(phase5Planner ? { planner: phase5Planner } : {}),
-    ...(phase5IndexVersion ? { indexVersion: phase5IndexVersion } : {}),
+    planner: phase5Planner,
+    indexVersion: phase5IndexVersion,
   });
+  const gen = await generateE2e.run(runBody);
   const files = gen.files || [];
   const primarySpecPath =
     gen.primarySpecPath ||
@@ -956,6 +1001,7 @@ export async function generateE2eForTestCase(opts: {
     sourceCode,
     relatedSources,
     locatorContract,
+    groundingMeta: opts.groundingMeta,
   };
 }
 
@@ -1004,7 +1050,48 @@ export async function generateE2eBatch(opts: {
   const total = cases.length;
   const log = (line: string) => opts.onLog?.(line);
   const progress = (p: E2eBatchProgress) => opts.onProgress?.(p);
-  const env = buildE2EEnvConfig({
+  const rows: E2eBatchItemResult[] = cases.map((t) => ({
+    testCaseId: t.id,
+    title: t.title,
+    status: "pending",
+  }));
+  let allFiles: E2EFileDto[] = [];
+  const genItemsSlot: (E2eGenItem | null)[] = cases.map(() => null);
+  const mergeLock = createAsyncMutex();
+  let done = 0;
+  const inspectPerTc = opts.inspectPerTc !== false;
+  const inspectCache = createInspectDomCache();
+  const feListCache = createFeSourceListCache();
+  const profileIo = createTauriProfileIo();
+  const { projectProfile, projectRules, meta: groundingMeta } = await loadGenerateGroundingProfile(
+    opts.projectRoot,
+    profileIo
+  );
+  if (projectProfile) {
+    log(`  profile loaded: runner=${projectProfile.runner} testRoot=${projectProfile.testRoot}\n`);
+    const gateWarnings = profileGateWarningsForE2eGen({
+      runner: projectProfile.runner,
+      authStrategy: projectProfile.auth?.strategy,
+    });
+    for (const warn of gateWarnings) {
+      log(`  gate warn: ${warn}\n`);
+    }
+  } else {
+    log("  profile loaded: (none)\n");
+    for (const warn of profileGateWarningsForE2eGen({ runner: "unknown", authStrategy: "" })) {
+      log(`  gate warn: ${warn}\n`);
+    }
+  }
+  if (projectRules.trim()) {
+    log(`  projectRules: e2e-conventions ${projectRules.length} chars\n`);
+  } else {
+    log("  projectRules: (empty)\n");
+  }
+  log(
+    `  grounding: profile=${groundingMeta.profileSource} rules=${groundingMeta.rulesSource} ` +
+      `moduleMap=${groundingMeta.moduleMapCount} rulesChars=${groundingMeta.projectRulesChars}\n`
+  );
+  const env = buildE2EEnvWithProfile(projectProfile, {
     targetUrl: opts.targetUrl,
     module: opts.module,
     useStorageState: opts.useStorageState,
@@ -1019,20 +1106,8 @@ export async function generateE2eBatch(opts: {
         analysisActors: opts.analysisActors,
       }).role || opts.defaultAuthRole,
     featurePath: opts.featurePath,
+    testIdAttribute: projectProfile?.playwrightRun?.testIdAttribute,
   });
-
-  const rows: E2eBatchItemResult[] = cases.map((t) => ({
-    testCaseId: t.id,
-    title: t.title,
-    status: "pending",
-  }));
-  let allFiles: E2EFileDto[] = [];
-  const genItemsSlot: (E2eGenItem | null)[] = cases.map(() => null);
-  const mergeLock = createAsyncMutex();
-  let done = 0;
-  const inspectPerTc = opts.inspectPerTc !== false;
-  const inspectCache = createInspectDomCache();
-  const feListCache = createFeSourceListCache();
   // Pause control is cooperative between items. To keep semantics predictable
   // ("current TC finishes, next TC waits"), force sequential mode when a
   // pause gate is provided by UI.
@@ -1113,6 +1188,9 @@ export async function generateE2eBatch(opts: {
           skipAuthSeed: opts.skipAuthSeed,
           routeCatalog,
           defaultAuthRole: opts.defaultAuthRole,
+          projectProfile,
+          projectRules,
+          groundingMeta,
           analysisActors: opts.analysisActors,
           onLog: log,
         });
@@ -1133,6 +1211,7 @@ export async function generateE2eBatch(opts: {
             sourceCode: gen.sourceCode,
             relatedSources: gen.relatedSources,
             locatorContract: gen.locatorContract,
+            groundingMeta: gen.groundingMeta,
           };
           genItemsSlot[i] = genItem;
           rows[i] = {
@@ -1380,7 +1459,9 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     }
   }
 
-  const env = buildE2EEnvConfig({
+  const verifyPrep = await prepareVerifySession({
+    projectRoot: opts.projectRoot,
+    files: opts.files,
     targetUrl: opts.targetUrl,
     module: opts.module,
     useStorageState:
@@ -1397,6 +1478,33 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
       opts.defaultAuthRole,
     featurePath: sharedFeaturePath,
   });
+  log(`  verify profile: ${verifyPrep.profileLog}\n`);
+  if (verifyPrep.preflightError) {
+    log(`  ✗ ${verifyPrep.preflightError}\n`);
+    const failMsg = verifyPrep.preflightError;
+    const failRows: E2eBatchItemResult[] = generatedOk.map((g) => ({
+      testCaseId: g.testCaseId,
+      title: g.title,
+      status: "fail" as const,
+      error: failMsg,
+      runId: g.runId,
+      files: g.files.length,
+      failCategory: classifyE2eFailure(failMsg),
+    }));
+    const priorRows = (opts.priorRows || []).map((r) => ({ ...r }));
+    const outRows = [...priorRows, ...failRows];
+    const metrics = aggregateE2eMetrics(outRows);
+    return {
+      rows: outRows,
+      okCount: 0,
+      files: verifyPrep.files,
+      moduleStatus: "FAILED",
+      metrics,
+    };
+  }
+
+  const env = verifyPrep.env;
+  const verifyFiles = verifyPrep.files;
   if (env.storageStateRel) {
     log(`  verify env: E2E_STORAGE_STATE=${env.storageStateRel}\n`);
   } else {
@@ -1405,6 +1513,9 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     );
   }
   if (env.role) log(`  verify env: E2E_ROLE=${env.role}\n`);
+  if (env.testIdAttribute) {
+    log(`  verify env: E2E_TEST_ID_ATTRIBUTE=${env.testIdAttribute}\n`);
+  }
   const total = Math.max(generatedOk.length, opts.priorRows?.length || 0, 1);
   const rows: E2eBatchItemResult[] = (opts.priorRows || []).map((r) => ({ ...r }));
   for (const g of generatedOk) {
@@ -1420,7 +1531,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     else rows.push(base);
   }
 
-  if (generatedOk.length === 0 || opts.files.length === 0) {
+  if (generatedOk.length === 0 || verifyFiles.length === 0) {
     const emptyRows = rows.map((r) =>
       r.status === "running" || r.status === "generated" || r.status === "pending"
         ? { ...r, status: "fail" as const, error: "Chưa có file Generate" }
@@ -1430,7 +1541,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     return {
       rows: emptyRows,
       okCount: 0,
-      files: opts.files,
+      files: verifyFiles,
       moduleStatus: "FAILED",
       metrics,
     };
@@ -1459,7 +1570,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         : `→ Verify module (${generatedOk.length} TC) — tuần tự ×1 worker…\n`
   );
 
-  let allFiles = [...opts.files];
+  let allFiles = [...verifyFiles];
   let moduleStatus = "FAILED";
 
   try {
@@ -1630,6 +1741,16 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         module: opts.module,
         overallPass: passed,
         stages,
+        artifactMeta: g.groundingMeta
+          ? {
+              grounding: {
+                profileSource: g.groundingMeta.profileSource,
+                rulesSource: g.groundingMeta.rulesSource,
+                moduleMapCount: g.groundingMeta.moduleMapCount,
+                projectRulesChars: g.groundingMeta.projectRulesChars,
+              },
+            }
+          : undefined,
       });
       syncE2eWorkspaceRun({
         projectId: opts.projectId,
@@ -1758,7 +1879,9 @@ export async function verifyE2eForTestCase(opts: {
   const authCtx = deriveAuthContextFromTestCase(tc, {
     fallbackRole: opts.defaultAuthRole,
   });
-  const env = buildE2EEnvConfig({
+  const verifyPrep = await prepareVerifySession({
+    projectRoot: opts.projectRoot,
+    files: opts.files,
     targetUrl: opts.targetUrl,
     module: moduleName,
     useStorageState:
@@ -1772,10 +1895,26 @@ export async function verifyE2eForTestCase(opts: {
     role: authCtx.role,
     featurePath,
   });
+  log(`  verify profile: ${verifyPrep.profileLog}\n`);
+  if (verifyPrep.preflightError) {
+    log(`  ✗ ${verifyPrep.preflightError}\n`);
+    return {
+      passed: false,
+      files: verifyPrep.files,
+      error: verifyPrep.preflightError,
+      primarySpecPath: opts.primarySpecPath,
+      attempts: 0,
+    };
+  }
+  const env = verifyPrep.env;
+  const verifyFiles = verifyPrep.files;
   if (env.storageStateRel) {
     log(`  verify env: E2E_STORAGE_STATE=${env.storageStateRel}\n`);
   }
   if (env.role) log(`  verify env: E2E_ROLE=${env.role}\n`);
+  if (env.testIdAttribute) {
+    log(`  verify env: E2E_TEST_ID_ATTRIBUTE=${env.testIdAttribute}\n`);
+  }
 
   log(
     healFailures
@@ -1789,7 +1928,7 @@ export async function verifyE2eForTestCase(opts: {
     projectId: opts.projectId,
     testCaseId: tc.id,
     projectRoot: opts.projectRoot,
-    files: opts.files,
+    files: verifyFiles,
     primarySpecPath: opts.primarySpecPath,
     targetUrl: env.targetUrl,
     domSnapshot: opts.domSnapshot || undefined,

@@ -59,6 +59,14 @@ router = APIRouter(
 )
 
 log = logging.getLogger("aitest.generate.e2e")
+_PROJECT_RULES_CAP = 2000
+
+
+def _cap_project_rules(text: str) -> str:
+    s = (text or "").strip()
+    if len(s) <= _PROJECT_RULES_CAP:
+        return s
+    return s[:_PROJECT_RULES_CAP] + "\n…[truncated]"
 
 
 def _uuid(value: str) -> uuid.UUID | None:
@@ -73,7 +81,10 @@ def _e2e_files_dto(files: list[E2EFile]) -> list[dict]:
 
 
 def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
-    from app.llm.ai_rules import parse_project_meta, rules_pair_from_meta
+    from app.llm.ai_rules import (
+        build_user_rules_text,
+        parse_project_meta,
+    )
 
     pkg = body.get("packagePrefix", body.get("package_prefix"))
     package_prefix = None if pkg is None else str(pkg)
@@ -104,9 +115,23 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         hints = planner.get("hints") if isinstance(planner.get("hints"), dict) else {}
         feature_path = str((hints or {}).get("featurePath") or "").strip()
     lang = str(body.get("language") or project.language or "TypeScript")
-    proj_rules, usr_rules = rules_pair_from_meta(
-        parse_project_meta(getattr(project, "meta", None)),
-        language=lang or project.language,
+    project_meta = parse_project_meta(getattr(project, "meta", None))
+    usr_rules = build_user_rules_text(project_meta)
+    # Sprint 2.x strict flow: project rules must come from Desktop profile payload.
+    # Missing key is treated as explicit empty to avoid legacy meta fallback.
+    raw_project_rules = (
+        body.get("projectRules")
+        if "projectRules" in body
+        else body.get("project_rules")
+    )
+    proj_rules = _cap_project_rules(str(raw_project_rules or ""))
+    src = str(
+        body.get("projectRulesSource") or body.get("project_rules_source") or "none"
+    ).strip()
+    log.info(
+        "e2e project_rules source=%s authoritative=true chars=%s",
+        src or "none",
+        len(proj_rules),
     )
     # Desktop may send enriched testData (path/authRole) — prefer over DB when non-empty
     td_override = str(body.get("testData") or body.get("test_data") or "").strip()
