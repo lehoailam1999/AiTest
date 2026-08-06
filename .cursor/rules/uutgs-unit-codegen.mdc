@@ -19,6 +19,7 @@ alwaysApply: false
 4. **Deterministic + isolated** — không flake, không phụ thuộc thứ tự.
 5. **Convention + stack detected** — match project samples.
 6. **Cấm bootstrap entrypoint** — test pipe/service/handler, không `import main`.
+7. **Portable mọi dự án** — không giả định Nest/Angular/Forensic; import chỉ từ SUT trong packet; layout `AItest/UnitTest/{Module}/` (UUTGS §10).
 
 ## Phân tầng
 

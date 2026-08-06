@@ -25,7 +25,6 @@ type Props = {
 
 export function buildRequirementJourney(opts: {
   fileCount: number;
-  chunkCount: number;
   knowledgeStatus?: string | null;
   hasSnapshot?: boolean;
   pendingReviewCount?: number;
@@ -34,7 +33,7 @@ export function buildRequirementJourney(opts: {
 }): JourneyStage[] {
   const knowledgeReady = opts.knowledgeStatus === "ready";
   const knowledgeStale = opts.knowledgeStatus === "stale";
-  const docsDone = opts.fileCount > 0 && opts.chunkCount > 0;
+  const docsDone = opts.fileCount > 0;
   const analysisOk = knowledgeReady || knowledgeStale;
 
   let knowledgeState: JourneyStageState = "todo";
@@ -60,7 +59,7 @@ export function buildRequirementJourney(opts: {
     {
       id: "docs",
       label: "Tài liệu",
-      hint: opts.fileCount ? `${opts.fileCount} file · ${opts.chunkCount} đoạn` : "Upload",
+      hint: opts.fileCount ? `${opts.fileCount} file` : "Upload",
       state: docsState,
     },
     {
@@ -72,7 +71,7 @@ export function buildRequirementJourney(opts: {
           ? "Sẵn sàng"
           : docsDone
             ? "Phân tích"
-            : "Sau khi có đoạn",
+            : "Sau khi có tài liệu",
       state: knowledgeState,
     },
     {

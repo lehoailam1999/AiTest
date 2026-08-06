@@ -227,6 +227,10 @@ def _ensure_node_classes(text: str) -> str:
 def steps_to_linear_mermaid(steps: str | None, *, name: str = "") -> str:
     """Build a clean happy-path flowchart from numbered / bullet steps."""
     labels = _dedupe_action_labels(_step_labels(steps), name=name)
+    if len(labels) == 1:
+        # Pad second node so Knowledge UI always has a diagram for a real UC
+        only = labels[0]
+        labels = [only, "Hoàn tất trên giao diện"]
     if len(labels) < 2:
         return ""
     lines = [
@@ -404,10 +408,24 @@ def _step_labels(steps: str | None) -> list[str]:
     text = (steps or "").strip()
     if not text:
         return []
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    # Split inline «1. a 2. b» when no newlines
+    if "\n" not in text and re.search(r"\d+[.)]\s+\S", text):
+        text = "\n".join(
+            p.strip() for p in re.split(r"(?=\d+[.)]\s+)", text) if p.strip()
+        )
     found = [m.group(1).strip() for m in _NUMBERED_STEP_RE.finditer(text)]
     if found:
-        return [x for x in found if x][:20]
-    return [ln.strip() for ln in text.splitlines() if ln.strip()][:20]
+        # Drop markdown table chrome mistaken as steps
+        cleaned = []
+        for x in found:
+            if not x or x.startswith("|") or re.match(r"^:?-+:?$", x):
+                continue
+            if re.match(r"(?i)^(mục|nội\s*dung)\b", x):
+                continue
+            cleaned.append(x)
+        return cleaned[:20]
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("|")][:20]
 
 
 def _escape_node_label(label: str) -> str:

@@ -35,7 +35,7 @@ Số TC = số tín hiệu Output cần cover. Siết: trùng `trace:`, cùng fl
 ## Rule tóm tắt (ISTQB-aligned)
 
 0 Completeness · 1 SoT · 2 Trace (1 tín hiệu/TC, unique) · 3 Workflow · 4 Permission ·  
-5 EP/BVA · 6 BR · 7 Scenario · 8 Steps · 9 Expected · 10 Coverage gate · **11 Anti-bloat** · 12 Lock · **13 AUTH WHO** · **14 FEATURE PATH** (`path:`/`featurePath:` post-login)
+5 EP/BVA · 6 BR · 7 Scenario · 8 Steps (`[Hành động]→[Element]→[Data]`, cấm step chỉ «kiểm tra») · 9 Expected · 10 Coverage gate · **11 Anti-bloat** · 12 Lock · **13 AUTH WHO** · **14 FEATURE PATH** (`path:`/`featurePath:` post-login; thiếu → `[Thiếu Context]`)
 
 ## Khi sửa
 

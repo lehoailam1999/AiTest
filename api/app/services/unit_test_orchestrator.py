@@ -18,12 +18,21 @@ from typing import Awaitable, Callable, Sequence
 from app.llm.base import UnitRequest, UnitResult, strip_code_fences
 from app.models.domain import AiBackendConnection
 from app.services.ai_service import generate_unit_for_connection
+from app.services.failure_taxonomy import (
+    ERROR_LOG_TAIL,
+    UNIT_TOP_K_RELATED,
+    classify_unit_failure,
+    format_unit_repair_taxonomy_block,
+    slim_related_for_repair,
+    truncate_sut_for_repair,
+)
 from app.services.project_inspector import ProjectInspector, StackInspect
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RETRIES = 3
-LOG_TAIL = 2500
+MAX_RETRIES_CAP = 5
+LOG_TAIL = ERROR_LOG_TAIL
 
 RunCommandFn = Callable[[Sequence[str], str], Awaitable[tuple[int, str]]]
 FixCodeFn = Callable[[UnitRequest, str], Awaitable[str]]
@@ -46,6 +55,8 @@ class SandboxRepairResult:
     error_log: str | None = None
     history: list[SandboxAttempt] = field(default_factory=list)
     stack: dict | None = None
+    # Phase 6 — last failure class (None when PASSED)
+    failure_class: str | None = None
 
 
 def extract_code_block(text: str) -> str:
@@ -63,14 +74,17 @@ def build_repair_prompt_context(
     error_log: str,
     attempt: int,
     max_retries: int,
+    failure_class: str = "Other",
 ) -> str:
     cmd = " ".join(run_command)
+    tax = format_unit_repair_taxonomy_block(failure_class)  # type: ignore[arg-type]
     return (
         f"Sandbox Auto-Repair attempt {attempt}/{max_retries}\n"
         f"Target file: {test_file_rel}\n"
         f"Command: {cmd}\n\n"
+        f"{tax}\n"
         f"Log lỗi (đuôi):\n```\n{error_log[-LOG_TAIL:]}\n```\n\n"
-        "Hãy sửa lại toàn bộ file Unit Test để lệnh trên pass. "
+        "Phase 6: sửa CHỈ file Unit Test ở trên (context đã hẹp: error + test + Top-K). "
         "Ưu tiên sửa lỗi import/module path (file nằm dưới AItest/, không cùng folder production). "
         "Chỉ trả về mã nguồn đã sửa trong fence ```."
     )
@@ -121,6 +135,8 @@ async def _default_fix_via_connection(
         unit_strategy_summary=req.unit_strategy_summary,
         test_samples=list(req.test_samples),
         context_gaps=list(req.context_gaps),
+        planner_hint=getattr(req, "planner_hint", "") or "",
+        index_version=getattr(req, "index_version", "") or "",
     )
     result, _meta = await generate_unit_for_connection(conn, fixed_req)
     return result.code
@@ -181,12 +197,15 @@ class UnitTestOrchestrator:
     ) -> SandboxRepairResult:
         """
         Ghi test_file_rel → chạy run_command → fail thì AI sửa → lặp tối đa max_retries.
+        Phase 6: bounded retries; repair packet = error + test file + Top-K related.
         """
+        max_retries = max(1, min(int(max_retries), MAX_RETRIES_CAP))
         cmd = list(run_command or self.stack.run_command or [])
         runner = run_fn or _default_run_command
         history: list[SandboxAttempt] = []
         code = initial_code
         last_log = ""
+        last_fail_class: str | None = None
         abs_path = Path(self.project_root) / test_file_rel.replace("\\", "/")
 
         if write_file:
@@ -221,8 +240,11 @@ class UnitTestOrchestrator:
                     error_log=None,
                     history=history,
                     stack=self.stack.to_dict(),
+                    failure_class=None,
                 )
 
+            fail_class = classify_unit_failure(log)
+            last_fail_class = fail_class
             if attempt >= max_retries:
                 break
 
@@ -232,8 +254,15 @@ class UnitTestOrchestrator:
                 error_log=log,
                 attempt=attempt,
                 max_retries=max_retries,
+                failure_class=fail_class,
             )
-            # Put broken code into source_code slot for model context when repairing
+            # Phase 6 slim packet: truncated SUT + failing test + Top-K deps
+            slim_related = slim_related_for_repair(
+                list(req.related_sources),
+                test_file_rel=test_file_rel,
+                test_code=code,
+                top_k=UNIT_TOP_K_RELATED,
+            )
             repair_req = UnitRequest(
                 test_case_title=req.test_case_title,
                 test_case_type=req.test_case_type,
@@ -243,12 +272,12 @@ class UnitTestOrchestrator:
                 precondition=req.precondition,
                 test_data=req.test_data,
                 source_file_name=req.source_file_name or test_file_rel,
-                source_code=req.source_code or code,
+                source_code=truncate_sut_for_repair(req.source_code or ""),
                 class_name=req.class_name,
                 method_name=req.method_name,
                 framework=req.framework or self.stack.framework,
                 language=req.language or self.stack.language,
-                related_sources=[(test_file_rel, code), *list(req.related_sources)],
+                related_sources=slim_related,
                 repair_context=repair_ctx,
                 module=req.module,
                 package_prefix=req.package_prefix,
@@ -257,8 +286,10 @@ class UnitTestOrchestrator:
                 assertion_library=req.assertion_library,
                 source_under_test_summary=req.source_under_test_summary,
                 unit_strategy_summary=req.unit_strategy_summary,
-                test_samples=list(req.test_samples),
-                context_gaps=list(req.context_gaps),
+                test_samples=[],  # Phase 6: omit style samples on repair
+                context_gaps=list(req.context_gaps)[:5],
+                planner_hint=getattr(req, "planner_hint", "") or "",
+                index_version=getattr(req, "index_version", "") or "",
             )
 
             if fix_fn is not None:
@@ -288,6 +319,7 @@ class UnitTestOrchestrator:
             error_log=last_log[-LOG_TAIL:] if last_log else None,
             history=history,
             stack=self.stack.to_dict(),
+            failure_class=last_fail_class,
         )
 
 

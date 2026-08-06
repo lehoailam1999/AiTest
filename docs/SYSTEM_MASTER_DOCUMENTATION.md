@@ -5,7 +5,7 @@
 |---|---|
 | **Sản phẩm** | **AITest Platform** (AITest Desktop App & Backend Service) |
 | **Mô hình Kiến trúc** | **Hybrid Architecture** (Desktop App + Local FS Bridge + Python REST Backend + PostgreSQL + AI CLI Service) |
-| **Stack Sản phẩm** | **Frontend:** React 19 (Vite, TypeScript) + **Tauri v1** (Rust Native Bridge)<br>**Backend:** Python 3.12 (FastAPI, Uvicorn, Pydantic v2, SQLAlchemy 2.0, Alembic)<br>**Database:** PostgreSQL 16 (Port host **5433**)<br>**AI Engine:** AI CLI Adapters (Cursor / Gemini / Claude / Ollama CLI) |
+| **Stack Sản phẩm** | **Frontend:** React 19 (Vite, TypeScript) + **Tauri v1** (Rust Native Bridge)<br>**Backend:** Python 3.12 (FastAPI, Uvicorn, Pydantic v2, SQLAlchemy 2.0, Alembic)<br>**Database:** PostgreSQL 16 (Port host **5433**)<br>**AI Engine:** AI CLI Adapters (Cursor / Gemini / Antigravity / Claude / Ollama CLI) |
 | **Stack Dự án Người dùng** | **Không ràng buộc (Stack-Agnostic)** — C# (.NET), TypeScript/JavaScript (React/Vue/Angular), Python, Go, Java, v.v. |
 | **Trạng thái Document** | **Single Source of Truth (SoT)** — đồng bộ với `api/` + `desktop/` (cập nhật theo layout E2E `_shared`, Verify tuần tự, Generate parallel) |
 
@@ -76,8 +76,8 @@
  ┌───────────────────────┐ ┌──────────────────┐ │ Local Project (cùng máy)   │
  │ PostgreSQL 16 (SoT)   │ │ AI CLI Runtimes  │ │ projectRoot (SUT source)  │
  │ host :5433 → :5432    │ │ Cursor · Gemini  │ │ .ai-test/staging/         │
- │ User·Project·WS·TC·   │ │ Claude · Ollama  │ │ .ai-test/auth/            │
- │ Jobs·Exec·Audit meta  │ │ · Custom script  │ │ AItest/UnitTest|E2ETest|  │
+ │ User·Project·WS·TC·   │ │ Claude · Agy ·   │ │ .ai-test/auth/            │
+ │ Jobs·Exec·Audit meta  │ │ Ollama · Custom  │ │ AItest/UnitTest|E2ETest|  │
  └───────────────────────┘ └──────────────────┘ │         APITest/          │
                                                 └─────────────────────────────┘
 ```
@@ -91,7 +91,7 @@
 | **Python Backend** | FastAPI, SQLAlchemy | Auth, Project, Studio, Generate, Jobs, Audit, Reports; đọc/ghi `projectRoot` khi **cùng máy** (`/api/workspace`, E2E Inspect/Auth-seed/Heal) | Không phải remote FS agent cho máy khác |
 | **Local Project** | FS trên host | SUT source · `.ai-test/staging|auth` · `AItest/{UnitTest\|E2ETest\|APITest}` | Không phải SoT nghiệp vụ (metadata vẫn ở Postgres) |
 | **PostgreSQL** | PostgreSQL 16 (:5433) | SoT User/Project/Workspace/TC/Jobs/Reports metadata | Không lưu full source hay binary artifact |
-| **AI LLM Layer** | CLI adapters (Cursor/Gemini/Claude/Ollama/Custom) | Sinh TC, Unit/E2E/API code, Knowledge theo prompt SoT | Không giữ state dài hạn của Platform |
+| **AI LLM Layer** | CLI adapters (Cursor/Gemini/Antigravity/Claude/Ollama/Custom) | Sinh TC, Unit/E2E/API code, Knowledge theo prompt SoT | Không giữ state dài hạn của Platform |
 
 ---
 
@@ -110,7 +110,7 @@
 ```
 
 ### 2.1 Phase 1: Design (Requirement Studio)
-1. **Upload Tài liệu:** `.md`, `.docx`, `.pdf`, `.txt` → `document_chunks`.
+1. **Upload Tài liệu:** `.md`, `.docx`, `.pdf`, `.txt` → parse `extracted_text` (SRS).
 2. **Phân tích (Knowledge):** LLM hoặc Heuristic → nhiều loại bản ghi (FEATURES, ACTORS, FLOWS, BR, FR, EXECUTION_CONTEXT, …).
 3. **Sinh & Duyệt Test Case:** `Draft` → Review → `Approved` (Coverage Board / Review Queue: Duyệt tất cả).
 
@@ -214,6 +214,9 @@ Playwright **TypeScript** + POM. Desktop gọi từng bước độc lập (khô
 **Prompt AI (Generate/Heal):** System = E2ECG + journey (Phase C) + grounding pointer + project/user rules; User = TC + featurePath + DOM + FE. **Verify Playwright không gửi prompt** (trừ Heal).
 
 **Guards sau LLM:** inject Auth → Feature entry → Act; Phase 2 order; Phase 3 fail-closed stubs; không invent route/role/credential.
+
+> Rule van hanh chuan cho AI E2E: **single SoT** tai `api/app/llm/e2e_codegen_rules.py` (E2ECG Rules 1-27).  
+> `docs/AI_TEST_RULES.md` chi la pointer/tai lieu team, khong la noi dinh nghia rule runtime.
 
 ### 5.2 Layout E2E (SoT)
 

@@ -45,6 +45,13 @@ from app.services.e2e_orchestrator import (
     ensure_playwright_config,
     exc_detail,
 )
+from app.services.phase5_gen_input import (
+    format_e2e_planner_hint,
+    merge_related_from_context_files,
+    parse_context_files,
+    parse_index_version,
+    parse_planner,
+)
 
 router = APIRouter(
     prefix="/api", tags=["generate-e2e"], dependencies=[Depends(get_current_user)]
@@ -77,6 +84,24 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
     for item in body.get("files") or body.get("existingFiles") or []:
         if isinstance(item, dict) and item.get("path") and item.get("content") is not None:
             existing.append((str(item["path"]), str(item["content"])))
+    # Phase 5 — optional contextFiles only fill related when relatedSources empty
+    context_files = parse_context_files(body.get("contextFiles") or body.get("context_files"))
+    primary_name = str(body.get("sourceFileName") or "").strip()
+    related = merge_related_from_context_files(
+        related, context_files, primary_path=primary_name
+    )
+    planner = parse_planner(body.get("planner"))
+    index_version = parse_index_version(body.get("indexVersion") or body.get("index_version"))
+    # Prefer explicit featurePath; else planner.hints.featurePath (additive)
+    feature_path = str(
+        body.get("featurePath")
+        or body.get("feature_path")
+        or body.get("E2E_FEATURE_PATH")
+        or ""
+    ).strip()
+    if not feature_path and planner:
+        hints = planner.get("hints") if isinstance(planner.get("hints"), dict) else {}
+        feature_path = str((hints or {}).get("featurePath") or "").strip()
     lang = str(body.get("language") or project.language or "TypeScript")
     proj_rules, usr_rules = rules_pair_from_meta(
         parse_project_meta(getattr(project, "meta", None)),
@@ -92,7 +117,7 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         test_data=tc.test_data or "",
         target_url=str(body.get("targetUrl") or body.get("target_url") or "").strip(),
         dom_snapshot=str(body.get("domSnapshot") or body.get("dom_snapshot") or "").strip(),
-        source_file_name=str(body.get("sourceFileName") or "").strip(),
+        source_file_name=primary_name,
         source_code=str(body.get("sourceCode") or "").strip(),
         module=str(body.get("module") or tc.module or "").strip(),
         requirement_title=str(body.get("requirementTitle") or body.get("requirement_title") or "").strip(),
@@ -114,12 +139,19 @@ def _build_e2e_req(tc: TestCase, body: dict, *, project: Project) -> E2ERequest:
         execution_context=str(
             body.get("executionContext") or body.get("execution_context") or ""
         ).strip(),
-        feature_path=str(
-            body.get("featurePath")
-            or body.get("feature_path")
-            or body.get("E2E_FEATURE_PATH")
+        feature_path=feature_path,
+        locator_contract=str(
+            body.get("locatorContract")
+            or body.get("locator_contract")
             or ""
         ).strip(),
+        pom_scaffold=str(
+            body.get("pomScaffold")
+            or body.get("pom_scaffold")
+            or ""
+        ).strip(),
+        planner_hint=format_e2e_planner_hint(planner),
+        index_version=index_version,
     )
 
 
@@ -213,11 +245,19 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
         except Exception as exc:  # noqa: BLE001
             log.warning("e2e workspace resolve skipped: %s", exc)
 
-    # Optional inspect to enrich DOM snapshot
+    # Optional inspect to enrich DOM snapshot.
+    # Desktop already inspects (and may clear login-wall DOM) — do NOT refill.
     target_url = str(body.get("targetUrl") or "").strip()
     inspect_warning: str | None = None
-    if not str(body.get("domSnapshot") or "").strip() and (
-        target_url or str(body.get("sourceCode") or "").strip()
+    skip_auto_inspect = bool(
+        body.get("skipAutoInspect")
+        or body.get("skip_auto_inspect")
+        or body.get("desktopInspected")
+    )
+    if (
+        not skip_auto_inspect
+        and not str(body.get("domSnapshot") or "").strip()
+        and (target_url or str(body.get("sourceCode") or "").strip())
     ):
         try:
             from app.services.e2e_dom_inspector import inspect_target
@@ -228,11 +268,22 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
                 or body.get("storageStateRel")
             )
             project_root = str(body.get("projectRoot") or "").strip()
+            feature_path_inspect = str(
+                body.get("featurePath")
+                or body.get("feature_path")
+                or body.get("E2E_FEATURE_PATH")
+                or ""
+            ).strip()
+            storage_rel = str(
+                body.get("storageStateRel") or body.get("storage_state_rel") or ""
+            ).strip()
             inspected = await inspect_target(
                 target_url=target_url,
                 source_code=str(body.get("sourceCode") or ""),
                 use_playwright=use_pw,
                 project_root=project_root,
+                feature_path=feature_path_inspect or None,
+                storage_state_path=storage_rel or None,
             )
             if inspected.elements or inspected.routes:
                 body = {**body, "domSnapshot": inspected.to_prompt_json()}
@@ -243,6 +294,26 @@ async def generate_e2e_route(request: Request, db: Annotated[Session, Depends(ge
                     f"source={inspected.source or 'empty'}"
                 )
                 log.warning("e2e inspect empty: %s", inspect_warning)
+        except TypeError:
+            # Older inspect_target without feature_path kwargs
+            try:
+                from app.services.e2e_dom_inspector import inspect_target
+
+                inspected = await inspect_target(
+                    target_url=target_url,
+                    source_code=str(body.get("sourceCode") or ""),
+                    use_playwright=bool(
+                        body.get("usePlaywrightInspect")
+                        or body.get("usePlaywright")
+                        or body.get("storageStateRel")
+                    ),
+                    project_root=str(body.get("projectRoot") or "").strip(),
+                )
+                if inspected.elements or inspected.routes:
+                    body = {**body, "domSnapshot": inspected.to_prompt_json()}
+            except Exception as exc:  # noqa: BLE001
+                inspect_warning = f"DOM inspect failed: {exc}"
+                log.warning("e2e inspect skipped: %s", exc)
         except Exception as exc:  # noqa: BLE001
             inspect_warning = f"DOM inspect failed: {exc}"
             log.warning("e2e inspect skipped: %s", exc)
@@ -909,10 +980,11 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
                 }
             )
 
-        # Map primarySpecPath → testCaseId (+ optional per-TC Inspect DOM) from healItems
+        # Map primarySpecPath → testCaseId (+ optional per-TC Inspect DOM / FE grounding)
         items = body.get("healItems") or body.get("items") or []
         spec_to_tc: dict[str, str] = {}
         spec_to_dom: dict[str, str] = {}
+        spec_to_ground: dict[str, dict] = {}
         if isinstance(items, list):
             for it in items:
                 if not isinstance(it, dict):
@@ -928,6 +1000,25 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
                 if sp and dom:
                     spec_to_dom[sp] = dom
                     spec_to_dom[sp.split("/")[-1]] = dom
+                if sp:
+                    ground = {
+                        "featurePath": str(it.get("featurePath") or it.get("feature_path") or "").strip(),
+                        "sourceFileName": str(it.get("sourceFileName") or "").strip(),
+                        "sourceCode": str(it.get("sourceCode") or ""),
+                        "locatorContract": str(
+                            it.get("locatorContract") or it.get("locator_contract") or ""
+                        ).strip(),
+                        "relatedSources": it.get("relatedSources") or it.get("related_sources") or [],
+                    }
+                    if any(
+                        [
+                            ground["featurePath"],
+                            ground["sourceCode"],
+                            ground["locatorContract"],
+                        ]
+                    ):
+                        spec_to_ground[sp] = ground
+                        spec_to_ground[sp.split("/")[-1]] = ground
 
         max_retries = int(body.get("maxRetries") or DEFAULT_MAX_RETRIES)
         max_retries = max(1, min(max_retries, 5))
@@ -964,11 +1055,26 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
                     }
                 )
                 continue
-            # Prefer per-TC Inspect from Generate over shared warm-up body DOM
+            # Prefer per-TC Inspect + FE grounding from Generate over shared warm-up body
             heal_body = body
             per_dom = spec_to_dom.get(sp) or spec_to_dom.get(sp.split("/")[-1]) or ""
-            if per_dom:
-                heal_body = {**body, "domSnapshot": per_dom}
+            ground = spec_to_ground.get(sp) or spec_to_ground.get(sp.split("/")[-1]) or {}
+            if per_dom or ground:
+                heal_body = {**body}
+                if per_dom:
+                    heal_body["domSnapshot"] = per_dom
+                if ground.get("featurePath"):
+                    heal_body["featurePath"] = ground["featurePath"]
+                if ground.get("sourceFileName"):
+                    heal_body["sourceFileName"] = ground["sourceFileName"]
+                if ground.get("sourceCode"):
+                    heal_body["sourceCode"] = ground["sourceCode"]
+                if ground.get("locatorContract"):
+                    heal_body["locatorContract"] = ground["locatorContract"]
+                if ground.get("relatedSources"):
+                    heal_body["relatedSources"] = ground["relatedSources"]
+                # Heal must not re-inspect and wipe per-TC grounding
+                heal_body["skipAutoInspect"] = True
             req = _build_e2e_req(tc, heal_body, project=project)
             try:
                 env_extra, work_auth, _disc = merge_discovered_auth(

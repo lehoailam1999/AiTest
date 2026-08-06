@@ -5,14 +5,33 @@
 import { generateE2e, type E2EFileDto } from "../../api";
 import type { TestCase } from "../../api/types";
 import { createAsyncMutex, runPool } from "../runPool";
+import { isTauri, readTextFile } from "../../tauri/bridge";
 import { buildE2EEnvConfig, playwrightEnvFromConfig } from "./env";
-import { resolveE2eFeSources, createFeSourceListCache, type FeSourceListCache } from "./resolveE2eFeSources";
+import {
+  resolveE2eFeSources,
+  createFeSourceListCache,
+  hasFeGroundingHooks,
+  attachSiblingFeTemplates,
+  type FeSourceListCache,
+} from "./resolveE2eFeSources";
 import {
   e2eSpecPathsMatch,
   findSpecReportForPrimary,
 } from "./e2eSpecPathMatch";
 import { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
 import { deriveFeaturePathFromTc } from "./deriveFeaturePathFromTc";
+import { derivePomScaffoldFromTc } from "./derivePomScaffoldFromTc";
+import {
+  assertTcReadyForE2eGen,
+  hasPathMarker,
+  isUsableFeaturePath,
+  mergeTcWithInferredFeaturePath,
+} from "./assertTcReadyForE2eGen";
+import {
+  buildE2eRouteCatalog,
+  matchFeaturePathFromCatalog,
+  type E2eRouteCatalog,
+} from "./e2eRouteCatalog";
 import {
   createInspectDomCache,
   inspectCacheKey,
@@ -33,6 +52,7 @@ import {
   syncE2eWorkspaceRun,
 } from "./auditSync";
 import { newE2eRunId } from "./stagingApply";
+import { enforceExecutionGateFailure } from "./executionGate";
 
 /** Parallel oneshot / TC — default pool 3 (was 4) to cut Cursor/API wall-clock contention. */
 const E2E_GEN_CONCURRENCY = 3;
@@ -45,15 +65,144 @@ function e2eGenConcurrency(provider?: string | null): number {
   return E2E_GEN_CONCURRENCY;
 }
 
-/** FE templates with real hooks — enough to codegen without feature DOM. */
-function feSourceHasHooks(
-  sourceCode?: string,
-  related?: { path: string; content: string }[]
-): boolean {
-  const blob = [sourceCode || "", ...(related || []).map((r) => r.content)].join("\n");
-  return /data-cy\s*=|data-testid\s*=|formControlName|routerLink|path:\s*['"`][^'"`]+['"`]/.test(
+function isLikelyPublicTestCase(tc: {
+  title?: string | null;
+  precondition?: string | null;
+  steps?: string | null;
+  testData?: string | null;
+}): boolean {
+  const blob = `${tc.title || ""}\n${tc.precondition || ""}\n${tc.steps || ""}\n${tc.testData || ""}`;
+  return /public|guest|anonymous|không cần đăng nhập|không đăng nhập|without auth|no auth/i.test(
     blob
   );
+}
+
+function _collectAll(re: RegExp, text: string): string[] {
+  const out: string[] = [];
+  const local = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  let m: RegExpExecArray | null;
+  while ((m = local.exec(text)) !== null) {
+    const v = (m[1] || "").trim();
+    if (v) out.push(v);
+  }
+  return out;
+}
+
+function buildLocatorContract(opts: {
+  sourceCode?: string;
+  relatedSources?: { path: string; content: string }[];
+  domSnapshot?: string;
+  featurePath?: string;
+  testCaseTitle?: string;
+}): string {
+  const feBlob = [opts.sourceCode || "", ...(opts.relatedSources || []).map((r) => r.content)].join(
+    "\n"
+  );
+  const dataCy = _collectAll(/data-cy\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob);
+  const dataTid = _collectAll(/data-testid\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob);
+  const ids = _collectAll(/\sid\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob);
+  const names = _collectAll(/\sname\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob);
+  const formControls = [
+    ..._collectAll(/formControlName\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob),
+    ..._collectAll(/\[formControl(?:Name)?\]\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob),
+    ..._collectAll(/formControlName\s*:\s*["'`]([^"'`]+)["'`]/gi, feBlob),
+  ];
+  const placeholders = _collectAll(/placeholder\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob);
+  const matLabels = _collectAll(/<mat-label[^>]*>([^<]{1,80})<\/mat-label>/gi, feBlob);
+  const routerLinks = [
+    ..._collectAll(/routerLink\s*=\s*["'`]([^"'`]+)["'`]/gi, feBlob),
+    // Angular: [routerLink]="['/admin/x']" or [routerLink]="['/admin/x', id, 'view']"
+    ..._collectAll(/\[routerLink\]\s*=\s*\[["']([^"']+)["']/gi, feBlob),
+  ].map((v) => (v.startsWith("/") ? v : `/${v}`));
+
+  const domSelectors: string[] = [];
+  const domNames: string[] = [];
+  const domRoles: string[] = [];
+  const domLabels: string[] = [];
+  const domPlaceholders: string[] = [];
+  try {
+    const parsed = JSON.parse((opts.domSnapshot || "").trim() || "{}") as {
+      elements?: Array<{
+        name?: string;
+        role?: string;
+        label?: string;
+        placeholder?: string;
+        selector_candidates?: string[];
+        test_id?: string;
+        testId?: string;
+        "data-cy"?: string;
+        dataCy?: string;
+      }>;
+    };
+    for (const el of parsed.elements || []) {
+      if (typeof el.name === "string" && el.name.trim()) domNames.push(el.name.trim());
+      if (typeof el.role === "string" && el.role.trim()) domRoles.push(el.role.trim());
+      if (typeof el.label === "string" && el.label.trim()) domLabels.push(el.label.trim());
+      if (typeof el.placeholder === "string" && el.placeholder.trim()) {
+        domPlaceholders.push(el.placeholder.trim());
+      }
+      const tid = (el.test_id || el.testId || "").trim();
+      if (tid) dataTid.push(tid);
+      const cy = (el["data-cy"] || el.dataCy || "").trim();
+      if (cy) dataCy.push(cy);
+      for (const c of el.selector_candidates || []) {
+        if (typeof c !== "string" || !c.trim()) continue;
+        const s = c.trim();
+        domSelectors.push(s);
+        const cyM = s.match(/\[data-cy=["']([^"']+)["']\]/i);
+        if (cyM?.[1]) dataCy.push(cyM[1]);
+        const tidM = s.match(/\[data-testid=["']([^"']+)["']\]/i);
+        if (tidM?.[1]) dataTid.push(tidM[1]);
+        // Promote #id / formControlName from DOM candidates into hard allowlist buckets
+        // (guard only validates those keys — not domCandidates lines).
+        for (const idM of s.matchAll(/#([A-Za-z_][\w-]*)/g)) {
+          if (idM[1]) ids.push(idM[1]);
+        }
+        const fcnM =
+          s.match(/\[formControlName=["']([^"']+)["']\]/i) ||
+          s.match(/formControlName=["']([^"']+)["']/i) ||
+          s.match(/\[formControlName=([A-Za-z_][\w-]*)\]/i);
+        if (fcnM?.[1]) formControls.push(fcnM[1]);
+      }
+    }
+  } catch {
+    // keep FE-only contract
+  }
+
+  const uniq = (arr: string[], limit: number) =>
+    [...new Set(arr.map((s) => s.trim()).filter(Boolean))].slice(0, limit);
+
+  const lines: string[] = [];
+  if (opts.testCaseTitle) lines.push(`# TC: ${opts.testCaseTitle}`);
+  if (opts.featurePath) lines.push(`featurePath: ${opts.featurePath}`);
+  lines.push(`routes: ${uniq(routerLinks, 20).join(", ") || "(none)"}`);
+  lines.push(`data-cy: ${uniq(dataCy, 40).join(", ") || "(none)"}`);
+  lines.push(`data-testid: ${uniq(dataTid, 40).join(", ") || "(none)"}`);
+  lines.push(`id: ${uniq(ids, 40).join(", ") || "(none)"}`);
+  lines.push(`name: ${uniq(names, 30).join(", ") || "(none)"}`);
+  lines.push(`formControlName: ${uniq(formControls, 30).join(", ") || "(none)"}`);
+  lines.push(`placeholders: ${uniq(placeholders, 20).join(", ") || "(none)"}`);
+  lines.push(`matLabels: ${uniq(matLabels, 20).join(", ") || "(none)"}`);
+  lines.push(`domCandidates: ${uniq(domSelectors, 40).join(" | ") || "(none)"}`);
+  lines.push(`domNames: ${uniq(domNames, 25).join(", ") || "(none)"}`);
+  lines.push(`domRoles: ${uniq(domRoles, 20).join(", ") || "(none)"}`);
+  lines.push(`domLabels: ${uniq(domLabels, 25).join(", ") || "(none)"}`);
+  lines.push(`domPlaceholders: ${uniq(domPlaceholders, 20).join(", ") || "(none)"}`);
+  return lines.join("\n");
+}
+
+/** True when contract has usable FE hooks or live DOM candidates (not all-none). */
+export function locatorContractHasGrounding(contract: string): boolean {
+  const text = contract || "";
+  if (/data-(?:cy|testid):\s*(?!\(none\))\S/i.test(text)) return true;
+  if (/formControlName:\s*(?!\(none\))\S/i.test(text)) return true;
+  if (/^(?:id|name|placeholders|matLabels):\s*(?!\(none\))\S/im.test(text)) return true;
+  if (/domCandidates:\s*(?!\(none\))\S/i.test(text)) return true;
+  if (/domNames:\s*(?!\(none\))\S/i.test(text)) return true;
+  if (/domLabels:\s*(?!\(none\))\S/i.test(text)) return true;
+  if (/domPlaceholders:\s*(?!\(none\))\S/i.test(text)) return true;
+  if (/routes:\s*(?!\(none\))\/\S/i.test(text)) return true;
+  return false;
 }
 
 export type E2eBatchItemResult = {
@@ -89,6 +238,11 @@ export type E2eGenItem = {
   featurePath?: string;
   /** Inspect DOM used at Generate — prefer over warm-up cache on Verify/Heal */
   domSnapshot?: string;
+  /** Phase 6 heal grounding — FE seed used at Generate */
+  sourceFileName?: string;
+  sourceCode?: string;
+  relatedSources?: { path: string; content: string }[];
+  locatorContract?: string;
 };
 
 /** Fired as soon as one TC finishes generate (success or fail) — enables live UI + pause→verify. */
@@ -290,6 +444,8 @@ export async function generateE2eForTestCase(opts: {
   useStorageState?: boolean;
   username?: string;
   password?: string;
+  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
+  roleCredentials?: Record<string, { username: string; password: string }>;
   seedCommand?: string;
   teardownCommand?: string;
   existingFiles?: E2EFileDto[];
@@ -314,6 +470,8 @@ export async function generateE2eForTestCase(opts: {
    * Skip post-LLM ensure_auth_seed_roles on API when storage/artifact already ready.
    */
   skipAuthSeed?: boolean;
+  /** Shared batch route catalog (routing files scanned once) */
+  routeCatalog?: E2eRouteCatalog;
   onLog?: (line: string) => void;
 }): Promise<{
   runId: string;
@@ -323,6 +481,10 @@ export async function generateE2eForTestCase(opts: {
   authRole?: string;
   featurePath?: string;
   domSnapshot?: string;
+  sourceFileName?: string;
+  sourceCode?: string;
+  relatedSources?: { path: string; content: string }[];
+  locatorContract?: string;
 }> {
   const tc = opts.testCase;
   const runId = newE2eRunId(tc.id);
@@ -335,30 +497,99 @@ export async function generateE2eForTestCase(opts: {
   let sourceFileName: string | undefined;
   let sourceCode: string | undefined;
   let relatedSources: { path: string; content: string }[] | undefined;
+  let phase5Planner: Record<string, unknown> | undefined;
+  let phase5IndexVersion: string | undefined;
+  let phase5FeaturePathHint: string | undefined;
+  // Phase 4: prefer Code Index → Retrieve → budgeted FE context
   try {
-    const fe = await resolveE2eFeSources({
-      projectRoot: opts.projectRoot,
-      testCase: tc,
-      listCache: opts.feListCache,
-    });
-    if (fe) {
-      sourceFileName = fe.sourceFileName;
-      sourceCode = fe.sourceCode;
-      relatedSources = fe.relatedSources;
-      for (const n of fe.notes) log(`  fe-context: ${n}\n`);
-    } else {
-      log("  fe-context: (none — DOM/TC only)\n");
+    if (isTauri()) {
+      const { createTauriCodeIndexIo } = await import("../codeIndex/tauriIo");
+      const { buildIndexBackedContext } = await import("../contextBuilder");
+      const { isUnsuitableE2ePrimary } = await import("../retrieval/rankScore");
+      const built = await buildIndexBackedContext({
+        projectRoot: opts.projectRoot,
+        testCase: tc,
+        io: createTauriCodeIndexIo(),
+        // Sync index when missing so Gen maps TC→FE without manual Index step
+        syncIfMissing: true,
+        forceTestType: "E2E",
+      });
+      phase5Planner = built.plan as unknown as Record<string, unknown>;
+      phase5IndexVersion = built.snapshot.meta.schema;
+      phase5FeaturePathHint = isUsableFeaturePath(built.plan.hints.featurePath)
+        ? built.plan.hints.featurePath!.trim()
+        : undefined;
+      if (built.plan.hints.featurePath && !phase5FeaturePathHint) {
+        log(
+          `  fe-context(index): ignore unusable plan.featurePath=${built.plan.hints.featurePath}\n`
+        );
+      }
+      const primaryOk =
+        built.e2eFe?.sourceFileName &&
+        built.e2eFe?.sourceCode &&
+        !isUnsuitableE2ePrimary(built.e2eFe.sourceFileName);
+      if (primaryOk && built.e2eFe) {
+        sourceFileName = built.e2eFe.sourceFileName;
+        sourceCode = built.e2eFe.sourceCode;
+        relatedSources = built.e2eFe.relatedSources;
+        for (const n of built.e2eFe.notes) log(`  fe-context(index): ${n}\n`);
+        if (built.plan.hints.featurePath) {
+          log(`  plan.featurePath=${built.plan.hints.featurePath}\n`);
+        }
+      } else if (built.e2eFe?.sourceFileName) {
+        log(
+          `  fe-context(index): unsuitable primary=${built.e2eFe.sourceFileName} — fallback legacy FE resolve\n`
+        );
+      } else {
+        log("  fe-context(index): empty — fallback legacy FE resolve\n");
+      }
     }
   } catch (e) {
-    log(`  fe-context warn: ${String(e)}\n`);
+    log(`  fe-context(index) warn: ${String(e)}\n`);
+  }
+  if (!sourceCode) {
+    try {
+      const fe = await resolveE2eFeSources({
+        projectRoot: opts.projectRoot,
+        testCase: tc,
+        listCache: opts.feListCache,
+      });
+      if (fe) {
+        sourceFileName = fe.sourceFileName;
+        sourceCode = fe.sourceCode;
+        relatedSources = fe.relatedSources;
+        for (const n of fe.notes) log(`  fe-context: ${n}\n`);
+      } else {
+        log("  fe-context: (none — DOM/TC only)\n");
+      }
+    } catch (e) {
+      log(`  fe-context warn: ${String(e)}\n`);
+    }
+  }
+
+  // Angular: locators live in .component.html — attach sibling when primary is .ts
+  if (sourceFileName && isTauri()) {
+    try {
+      const withTpl = await attachSiblingFeTemplates({
+        projectRoot: opts.projectRoot,
+        sourceFileName,
+        relatedSources: relatedSources || [],
+        actionHint: [tc.title, tc.module, tc.steps, tc.testData].filter(Boolean).join("\n"),
+      });
+      relatedSources = withTpl.relatedSources;
+      for (const n of withTpl.notes) log(`  ${n}\n`);
+    } catch (e) {
+      log(`  fe-template sibling warn: ${String(e)}\n`);
+    }
   }
 
   const fePaths = [
     sourceFileName || "",
     ...(relatedSources || []).map((r) => r.path),
   ].filter(Boolean);
-  const featurePath =
-    opts.featurePath?.trim() ||
+  let featurePath =
+    (isUsableFeaturePath(opts.featurePath) ? opts.featurePath!.trim() : undefined) ||
+    phase5FeaturePathHint ||
     deriveFeaturePathFromTc({
       title: tc.title,
       precondition: tc.precondition,
@@ -368,9 +599,91 @@ export async function generateE2eForTestCase(opts: {
         "\n"
       ),
       feFilePaths: fePaths,
-    });
+    }) ||
+    undefined;
+  if (featurePath && !isUsableFeaturePath(featurePath)) {
+    log(`  featurePath ignored (placeholder/invalid)=${featurePath}\n`);
+    featurePath = undefined;
+  }
+  // Soft path: single routerLink from FE when TC forgot path:
+  if (!featurePath && sourceCode) {
+    const links = [
+      ..._collectAll(/routerLink\s*=\s*["'`]([^"'`]+)["'`]/gi, sourceCode),
+      ..._collectAll(/path:\s*['"`]([^'"`]+)['"`]/gi, sourceCode),
+    ]
+      .map((v) => (v.startsWith("/") ? v : `/${v}`).replace(/\/{2,}/g, "/"))
+      .filter((v) => v.length > 1 && !/^\/(login|signin|auth|register)$/i.test(v));
+    const uniqLinks = [...new Set(links)];
+    if (uniqLinks.length === 1) {
+      featurePath = uniqLinks[0];
+      log(`  featurePath(from FE routerLink)=${featurePath}\n`);
+    }
+  }
+  let catalogMatched = false;
+  if (!featurePath && opts.routeCatalog?.routes.length) {
+    const match = matchFeaturePathFromCatalog(tc, opts.routeCatalog);
+    if (match.ambiguous) {
+      const optsList = match.candidates
+        .map((c) => `${c.path} (score=${c.score})`)
+        .join(", ");
+      throw new Error(
+        "E2E_GROUNDING: ambiguous featurePath — chọn 1 route trong testData `path:`: " +
+          optsList
+      );
+    }
+    if (match.path) {
+      featurePath = match.path;
+      catalogMatched = true;
+      log(
+        `  featurePath(from route-catalog score=${match.score})=${featurePath}\n`
+      );
+    }
+  }
   if (featurePath) log(`  featurePath=${featurePath}\n`);
   else log(`  featurePath=(none yet — guard may bake from Spec comments)\n`);
+  const loginTc = isLikelyLoginTestCase(tc);
+  const publicTc = isLikelyPublicTestCase(tc);
+  const hasFeHooks = hasFeGroundingHooks(sourceCode, relatedSources);
+
+  // DoR after source resolve: any usable featurePath satisfies path requirement.
+  const inferredPathSource = phase5FeaturePathHint
+    ? "code-index"
+    : catalogMatched
+      ? "route-catalog"
+      : featurePath
+        ? "fe-source"
+        : opts.featurePath?.trim()
+          ? "override"
+          : undefined;
+  if (featurePath && !hasPathMarker(tc) && inferredPathSource) {
+    log(
+      `  testData enrich: featurePath=${featurePath} (from ${inferredPathSource})\n`
+    );
+  }
+  const tcForGate = mergeTcWithInferredFeaturePath(
+    tc,
+    featurePath,
+    inferredPathSource || "FE source"
+  );
+  assertTcReadyForE2eGen(tcForGate, {
+    inferredFeaturePath: featurePath,
+    // Path inferred from FE/index/catalog is enough — do not require testData marker first.
+    allowInferredPath: Boolean(featurePath),
+  });
+
+  // Step-1 gate: avoid blind codegen from TC text only.
+  if (!sourceCode && !loginTc && !publicTc) {
+    throw new Error(
+      "E2E_GROUNDING: skip codegen — không resolve được FE source từ TC/path. " +
+        "Hãy thêm `path: /...` vào testData hoặc mở đúng projectRoot để auto-map file."
+    );
+  }
+  if (!featurePath && !hasFeHooks && !loginTc && !publicTc) {
+    throw new Error(
+      "E2E_GROUNDING: skip codegen — thiếu featurePath và FE hook (data-cy/testid/route). " +
+        "Bổ sung `path: /...` hoặc tăng quality FE seed trước khi Generate."
+    );
+  }
 
   const inspectPerTc = opts.inspectPerTc !== false;
   let domSnapshot = inspectPerTc ? "" : opts.domSnapshot || "";
@@ -424,21 +737,41 @@ export async function generateE2eForTestCase(opts: {
       if (
         entry.loginWall &&
         featurePath &&
-        !isLikelyLoginTestCase(tc)
+        !loginTc &&
+        !publicTc
       ) {
         log(
           `  inspect warn: DOM still looks like login wall for feature TC «${tc.title}» ` +
-            `(path=${featurePath}) — auth/storage may be wrong; FE source still sent\n`
+            `(path=${featurePath}) — auth/storage may be wrong\n`
         );
         // Do not ship login-wall as grounding for feature controls
         domSnapshot = "";
+        const hasAuth =
+          Boolean(opts.storageStateRel?.trim()) ||
+          Boolean((opts.username || "").trim() && (opts.password || "").trim()) ||
+          Boolean(opts.useStorageState);
+        // Gen may proceed from FE hooks alone (data-cy / formControl / routerLink).
+        // Auth is required for Inspect DOM + Verify — not a hard block on Generate.
+        if (!hasFeHooks) {
+          throw new Error(
+            "E2E_GROUNDING: Inspect vẫn là màn login và FE không có data-cy/testid/route. " +
+              (hasAuth
+                ? "Sửa storageState/role hoặc thêm hooks trên FE — không Gen mù."
+                : "Chạy Auth Discover / nhập E2E_USERNAME+PASSWORD, hoặc đảm bảo FE seed có data-cy (sibling .html).")
+          );
+        }
+        log(
+          hasAuth
+            ? "  inspect: Gen chỉ dựa FE hooks (DOM cleared) — Verify cần auth đúng để pass\n"
+            : "  inspect: chưa auth — Gen FE-only (DOM cleared). Verify sẽ cần Auth Discover / credentials\n"
+        );
       }
       // E2E_GROUNDING: login wall + no path + thin FE → fail early (no blind Spec).
       if (
         entry.loginWall &&
-        !isLikelyLoginTestCase(tc) &&
+        !loginTc &&
         !featurePath &&
-        !feSourceHasHooks(sourceCode, relatedSources)
+        !hasFeHooks
       ) {
         throw new Error(
           "E2E_GROUNDING: skip codegen — Inspect hit login wall, no featurePath, " +
@@ -460,11 +793,45 @@ export async function generateE2eForTestCase(opts: {
     useStorageState: opts.useStorageState,
     username: opts.username,
     password: opts.password,
+    roleCredentials: opts.roleCredentials,
     seedCommand: opts.seedCommand,
     teardownCommand: opts.teardownCommand,
     role: authCtx.role,
     featurePath,
   });
+  const locatorContract = buildLocatorContract({
+    sourceCode,
+    relatedSources,
+    domSnapshot,
+    featurePath,
+    testCaseTitle: tc.title,
+  });
+  if (
+    !loginTc &&
+    !publicTc &&
+    !locatorContractHasGrounding(locatorContract)
+  ) {
+    throw new Error(
+      "E2E_GROUNDING: locator contract trống (không testid/data-cy/DOM candidates). " +
+        "Thêm data-testid trên FE, hoặc sửa auth để Inspect lấy được DOM feature, " +
+        "hoặc bổ sung `path: /…` + FE có routerLink."
+    );
+  }
+  // Soft scaffold only when FE hooks exist — avoid inventing verbs from TC prose alone
+  const pomScaffold = hasFeHooks
+    ? derivePomScaffoldFromTc({
+        testCase: tc,
+        featurePath,
+      })
+    : "";
+  log(
+    `  locator-contract: hooks=${hasFeHooks ? "yes" : "no"} ` +
+      `grounded=${locatorContractHasGrounding(locatorContract) ? "yes" : "no"} ` +
+      `chars=${locatorContract.length}\n`
+  );
+  log(
+    `  pom-scaffold: ${pomScaffold ? `chars=${pomScaffold.length}` : "skipped (no FE hooks)"}\n`
+  );
 
   syncE2eWorkspaceRun({
     projectId: opts.projectId,
@@ -494,7 +861,13 @@ export async function generateE2eForTestCase(opts: {
     existingFiles: opts.existingFiles,
     executionContext: authCtx.executionContext || undefined,
     featurePath: featurePath || undefined,
+    locatorContract,
+    pomScaffold: pomScaffold || undefined,
     skipAuthSeed: opts.skipAuthSeed,
+    // Desktop already inspected (may have cleared login-wall) — API must not refill
+    skipAutoInspect: true,
+    ...(phase5Planner ? { planner: phase5Planner } : {}),
+    ...(phase5IndexVersion ? { indexVersion: phase5IndexVersion } : {}),
   });
   const files = gen.files || [];
   const primarySpecPath =
@@ -539,6 +912,10 @@ export async function generateE2eForTestCase(opts: {
     authRole: authCtx.role,
     featurePath: resolvedFeaturePath || undefined,
     domSnapshot: domSnapshot || undefined,
+    sourceFileName,
+    sourceCode,
+    relatedSources,
+    locatorContract,
   };
 }
 
@@ -555,6 +932,8 @@ export async function generateE2eBatch(opts: {
   useStorageState?: boolean;
   username?: string;
   password?: string;
+  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
+  roleCredentials?: Record<string, { username: string; password: string }>;
   seedCommand?: string;
   teardownCommand?: string;
   provider?: string | null;
@@ -587,6 +966,7 @@ export async function generateE2eBatch(opts: {
     useStorageState: opts.useStorageState,
     username: opts.username,
     password: opts.password,
+    roleCredentials: opts.roleCredentials,
     seedCommand: opts.seedCommand,
     teardownCommand: opts.teardownCommand,
     role: deriveAuthContextFromTestCase(cases[0] || {}).role,
@@ -605,15 +985,36 @@ export async function generateE2eBatch(opts: {
   const inspectPerTc = opts.inspectPerTc !== false;
   const inspectCache = createInspectDomCache();
   const feListCache = createFeSourceListCache();
-  const concurrency = e2eGenConcurrency(opts.provider);
+  // Pause control is cooperative between items. To keep semantics predictable
+  // ("current TC finishes, next TC waits"), force sequential mode when a
+  // pause gate is provided by UI.
+  const concurrency = opts.waitIfPaused ? 1 : e2eGenConcurrency(opts.provider);
 
   // Parallel codegen: auth seed is serialized server-side (per-role locks).
   // Each TC still gets its own chat/request; POM API snapshot is merge-locked below.
   log(
     inspectPerTc
-      ? `→ Generate batch parallel ×${Math.min(concurrency, total)} · ${total} TC · Inspect per route/FE (cache shared)\n`
-      : `→ Generate batch parallel ×${Math.min(concurrency, total)} · ${total} TC (shared DOM)\n`
+      ? `→ Generate batch parallel ×${Math.min(concurrency, total)} · ${total} TC · Inspect per route/FE (cache shared)` +
+        `${opts.waitIfPaused ? " · pause-safe sequential gate" : ""}\n`
+      : `→ Generate batch parallel ×${Math.min(concurrency, total)} · ${total} TC (shared DOM)` +
+        `${opts.waitIfPaused ? " · pause-safe sequential gate" : ""}\n`
   );
+
+  let routeCatalog: E2eRouteCatalog | undefined;
+  try {
+    const { paths, fromCache } = await feListCache.getPaths(opts.projectRoot);
+    routeCatalog = await buildE2eRouteCatalog({
+      paths,
+      readFile: async (pathRel) =>
+        readTextFile(opts.projectRoot, pathRel.replace(/\\/g, "/")),
+    });
+    log(
+      `  route-catalog: ${routeCatalog.routes.length} routes from ${routeCatalog.sources.length} files` +
+        `${fromCache ? " (path list cache)" : ""}\n`
+    );
+  } catch (e) {
+    log(`  route-catalog warn: ${String(e)}\n`);
+  }
 
   await runPool(
     cases,
@@ -662,6 +1063,7 @@ export async function generateE2eBatch(opts: {
           inspectCache,
           feListCache,
           skipAuthSeed: opts.skipAuthSeed,
+          routeCatalog,
           onLog: log,
         });
         // Paths đã resolve theo Requirement/TC trên BE; giữ đúng file của request này.
@@ -677,6 +1079,10 @@ export async function generateE2eBatch(opts: {
             authRole: gen.authRole,
             featurePath: gen.featurePath,
             domSnapshot: gen.domSnapshot,
+            sourceFileName: gen.sourceFileName,
+            sourceCode: gen.sourceCode,
+            relatedSources: gen.relatedSources,
+            locatorContract: gen.locatorContract,
           };
           genItemsSlot[i] = genItem;
           rows[i] = {
@@ -755,8 +1161,12 @@ type VerifyOpts = {
   genItems: E2eGenItem[];
   domSnapshot?: string;
   useStorageState?: boolean;
+  /** Project-relative storageState for Inspect heal re-inspect */
+  storageStateRel?: string;
   username?: string;
   password?: string;
+  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
+  roleCredentials?: Record<string, { username: string; password: string }>;
   seedCommand?: string;
   teardownCommand?: string;
   showBrowser?: boolean;
@@ -834,14 +1244,67 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         : `  domSnapshot: warm-up/shared cache (${domSnapshot.length} chars)\n`
     );
   } else {
-    log(`  domSnapshot: (empty — heal may lack grounding)\n`);
+    log(`  domSnapshot: (empty — will re-inspect before heal if needed)\n`);
   }
+
+  // Before Heal: re-inspect feature DOM when Gen cleared login-wall / empty snapshot
+  if (healFailures) {
+    for (const g of generatedOk) {
+      if ((g.domSnapshot || "").trim()) continue;
+      const fp = (g.featurePath || sharedFeaturePath || "").trim();
+      if (!fp && !g.sourceCode) continue;
+      try {
+        log(`  heal re-inspect: ${g.title} path=${fp || "(none)"}\n`);
+        const inspected = await inspectE2eDom({
+          targetUrl: opts.targetUrl,
+          projectRoot: opts.projectRoot,
+          usePlaywrightInspect: true,
+          sourceCode: g.sourceCode,
+          sourcePaths: g.sourceCode
+            ? [
+                { path: g.sourceFileName || "fe", content: g.sourceCode },
+                ...(g.relatedSources || []),
+              ]
+            : undefined,
+          featurePath: fp || undefined,
+          username: opts.username,
+          password: opts.password,
+          storageStateRel:
+            opts.storageStateRel?.trim() ||
+            (opts.useStorageState ? "./fixtures/storageState.json" : undefined),
+          module: opts.module,
+          role: g.authRole,
+          onLog: log,
+        });
+        if (
+          inspected.domSnapshot &&
+          !isLikelyLoginWallDom(inspected.domSnapshot)
+        ) {
+          g.domSnapshot = inspected.domSnapshot;
+          g.locatorContract = buildLocatorContract({
+            sourceCode: g.sourceCode,
+            relatedSources: g.relatedSources,
+            domSnapshot: g.domSnapshot,
+            featurePath: fp,
+            testCaseTitle: g.title,
+          });
+          log(`  heal re-inspect OK elements≈DOM grounded\n`);
+        } else {
+          log(`  heal re-inspect: still login-wall or empty — keep FE-only grounding\n`);
+        }
+      } catch (e) {
+        log(`  heal re-inspect warn: ${String(e)}\n`);
+      }
+    }
+  }
+
   const env = buildE2EEnvConfig({
     targetUrl: opts.targetUrl,
     module: opts.module,
     useStorageState: opts.useStorageState,
     username: opts.username,
     password: opts.password,
+    roleCredentials: opts.roleCredentials,
     seedCommand: opts.seedCommand,
     teardownCommand: opts.teardownCommand,
     role:
@@ -928,6 +1391,11 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         testCaseId: g.testCaseId,
         primarySpecPath: g.primarySpecPath,
         domSnapshot: g.domSnapshot,
+        featurePath: g.featurePath,
+        sourceFileName: g.sourceFileName,
+        sourceCode: g.sourceCode,
+        relatedSources: g.relatedSources,
+        locatorContract: g.locatorContract,
       })),
     });
     moduleStatus = mod.status;
@@ -1014,6 +1482,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
             )?.errorLog?.slice(0, 1200) ||
             _cleanVerifyErrorExcerpt(mod.log || "") ||
             "FAIL";
+        if (!passed) err = enforceExecutionGateFailure(err);
       } else {
         // Unmapped: if exactly one failing report exists, surface its excerpt.
         const fails = (mod.specs || []).filter((s) => !s.success);
@@ -1025,6 +1494,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         err =
           fallbackExcerpt ||
           "FAIL — không map được spec trong báo cáo Verify batch";
+        err = enforceExecutionGateFailure(err);
         if (fallbackExcerpt) {
           log(
             `  map warn: unmapped primary — using sole failing excerpt\n`
@@ -1086,8 +1556,8 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         rows[idx] = {
           ...rows[idx],
           status: "fail",
-          error: msg,
-          failCategory: classifyE2eFailure(msg),
+          error: enforceExecutionGateFailure(msg),
+          failCategory: classifyE2eFailure(enforceExecutionGateFailure(msg)),
         };
       }
       syncE2eWorkspaceRun({
@@ -1107,8 +1577,8 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
       rows[i] = {
         ...rows[i],
         status: "fail",
-        error: err,
-        failCategory: classifyE2eFailure(err),
+        error: enforceExecutionGateFailure(err),
+        failCategory: classifyE2eFailure(enforceExecutionGateFailure(err)),
       };
     }
   }
@@ -1154,6 +1624,8 @@ export async function verifyE2eForTestCase(opts: {
   useStorageState?: boolean;
   username?: string;
   password?: string;
+  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
+  roleCredentials?: Record<string, { username: string; password: string }>;
   seedCommand?: string;
   teardownCommand?: string;
   showBrowser?: boolean;
@@ -1192,6 +1664,7 @@ export async function verifyE2eForTestCase(opts: {
     useStorageState: opts.useStorageState,
     username: opts.username,
     password: opts.password,
+    roleCredentials: opts.roleCredentials,
     seedCommand: opts.seedCommand,
     teardownCommand: opts.teardownCommand,
     role: deriveAuthContextFromTestCase(tc).role,
@@ -1295,6 +1768,8 @@ export async function runE2eJobForTestCase(opts: {
   useStorageState?: boolean;
   username?: string;
   password?: string;
+  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
+  roleCredentials?: Record<string, { username: string; password: string }>;
   seedCommand?: string;
   teardownCommand?: string;
   usePlaywrightInspect?: boolean;
@@ -1419,6 +1894,8 @@ export async function runE2eModuleBatch(opts: {
   useStorageState?: boolean;
   username?: string;
   password?: string;
+  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
+  roleCredentials?: Record<string, { username: string; password: string }>;
   seedCommand?: string;
   teardownCommand?: string;
   usePlaywrightInspect?: boolean;

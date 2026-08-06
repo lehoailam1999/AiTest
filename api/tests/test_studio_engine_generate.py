@@ -83,6 +83,17 @@ def test_compact_rules_when_engine_locked():
     assert len(compact_unit) < len(full)
 
 
+def test_tc_gen_selective_mode_uses_registry_profiles(monkeypatch):
+    from app.llm.tc_generation_rules import get_tc_generation_rules
+
+    monkeypatch.setenv("AITEST_RULE_RETRIEVE_MODE", "selective")
+    monkeypatch.setenv("AITEST_RULE_RETRIEVE_TCGEN", "1")
+    unit = get_tc_generation_rules(preferred_engine="unit", speed="fast")
+    e2e = get_tc_generation_rules(preferred_engine="e2e", speed="fast")
+    assert "QUY TẮC CHUNG (SPEED)" in unit
+    assert "QUY TẮC CHUNG E2E (SPEED" in e2e
+
+
 def test_tc_matches_preferred_engine():
     assert _tc_matches_preferred_engine("E2E", "e2e")
     assert not _tc_matches_preferred_engine("Unit", "e2e")

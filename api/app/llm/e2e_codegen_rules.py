@@ -15,10 +15,19 @@ Injected once via ``e2e_system_prompt`` — do NOT restate in user prompt essays
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 
+from app.rules import (
+    get_rule_text,
+    render_rules_for_profile_with_meta,
+)
+
+logger = logging.getLogger(__name__)
+
 # Compact Spec — fits with slim journey under ~9k system budget.
-E2E_CODEGEN_SPEC = """\
+_LEGACY_E2E_CODEGEN_SPEC = """\
 # E2ECG — E2E Code Generation (multi-project)
 
 ## Split of duties
@@ -53,8 +62,8 @@ E2E_CODEGEN_SPEC = """\
 8. UI REVERSE: Routes/menus/forms from FE source (routerLink, Routes, templates) —
    never invent `/admin/...`.
 9. ELEMENT DISCOVERY: Fields/buttons from DOM snapshot + FE attrs only.
-10. LOCATOR RESOLUTION: priority data-cy|data-testid → #id → name|formControlName →
-    getByLabel/Placeholder → getByRole+visible name → getByText last.
+10. LOCATOR RESOLUTION: priority `data-testid|data-cy` → label → role → #id|name|formControlName →
+    getByPlaceholder → getByText last (same order as Rules 21/32 — one SoT).
 11. LOCATOR VALIDATION: Sync getters `get*|find*|locate*` return Locator (not Promise);
     `readonly foo: Locator` init in constructor; scope duplicates;
     native `<select>` → selectOption({label|value: string}) — NEVER RegExp label.
@@ -73,7 +82,8 @@ E2E_CODEGEN_SPEC = """\
     "[object Promise]" · String(object) → "[object Object]" (unpack string fields; skip
     fixture paths). toBeVisible only on real Locators.
 15. CONVENTION: AItest/E2ETest/{Req}/{TC}/specs + config; POM/auth/shim under
-    AItest/E2ETest/_shared/; reuse existing _shared/pages/*.page.ts when present.
+    AItest/E2ETest/_shared/; reuse existing _shared/pages/*.page.ts, fixtures and helpers
+    first. Only create new helper/page when reuse is impossible with explicit reason.
 16. SELF-CHECK: no invented route/role/credential · DOM/FE locators · no empty POM stubs ·
     no expect(await expect*) · Rules 18–19.
 17. NO DUPLICATE: one path per page/spec/config; overwrite same path — no hash twins.
@@ -87,11 +97,58 @@ E2E_CODEGEN_SPEC = """\
     Missing DOM/FE hook → Phase-3 ungrounded (E2E_GROUNDING fail-closed) — never
     invent `button.first()` / Save-regex click.
 
+## III. Definition of Ready (hard gate before writing/running tests)
+20. REQUIRED CONTEXT: must have `featurePath`, `role/authRef`, landmark (screen/dialog),
+    and expected outcome. Missing any item → fail fast with `ContextMissing` and explicit
+    `[Thiếu Context] ... cần bổ sung ...`; do NOT continue.
+    Do NOT hardcode `authRef===ui_helper` or fixed localhost baseURL as context truth.
+21. LOCATOR CONTRACT: priority `data-testid|data-cy` → label → role → stable css.
+    Prefer one stable hook from FE/DOM. If fallback needed use Playwright `.or(...)`,
+    NOT CSS comma-OR (`#id, [formControlName=…]`) — that confuses grounding checks.
+    Never use brittle `nth-child` for business-critical actions.
+22. BUSINESS PRECONDITION: before Act, assert correct route/feature + landmark + role.
+    If not in expected screen/state → stop with `PreconditionFailed` (no blind continue).
+23. TEST DATA READY: use TC `testData` / steps for entity names (room, asset, …). Prefer
+    inline constants from TC over inventing `process.env.E2E_STORAGE_*` / similar.
+    If TC has no seed value and UI needs lookup: `[Thiếu Context]` once — do NOT invent
+    new env vars the runner never injects. Existence check/lookup only when FE hooks exist.
+24. ASSERT STYLE: after each major action, assert business behavior immediately (not only
+    final UI visible). For BR checks, assert all required entities remain/changed as rule says.
+    Guard auto-heals missing Act asserts (landmark + expected-text) before BusinessAssertionFailed.
+25. WAIT/RETRY: use Playwright auto-wait + expect assertions, avoid `waitForTimeout` unless
+    justified. Use unified timeout from config (default 15s).
+26. STANDARD ERRORS: normalize failures as one of:
+    `ContextMissing` | `PreconditionFailed` | `LocatorNotFound` | `BusinessAssertionFailed`.
+    Error text must say what FE hook/context is needed (e.g. required data-testid).
+27. DONE CRITERIA: considered complete only when local run passes at least once, no ambiguous
+    locator remains, fail logs include step + locator tried + endpoint wait signal +
+    trace/snapshot, and mapping Step -> Action -> Assertion -> BR ID is explicit in
+    Spec comments/steps.
+28. EXECUTION GATE (STRICT): before marked done, run module-scoped verify command:
+    `npm run e2e:module -- <moduleId> --grep <TestID>` (or project-equivalent wrapper).
+    If command fails or artifact/log contract missing, fail with `ExecutionGateFailed`.
+
+## IV. Portable across ANY project (hard)
+29. PROJECT-AGNOSTIC: NEVER hardcode product names, routes, testids, or credentials from a
+    previous app (e.g. Forensic/Todo). Only TC `path:` + FE source + DOM + env `E2E_*`.
+30. LAYOUT: Playwright POM under `AItest/E2ETest/{Req}/{TC}/` + `_shared/` — same contract
+    for every repo; reuse existing `_shared` pages/fixtures before creating new ones.
+31. FAIL CLOSED: missing featurePath / FE seed / landmark → `ContextMissing` — NEVER invent
+    `button.first()`, Save-regex, or guessed `/admin/...` routes.
+32. STACK: Playwright TypeScript only for E2E emit; locators priority identical on all
+    projects (testid → label → role → stable css). Auth via auth_mode overlay + E2E_* env —
+    never embed passwords in Spec/POM.
+33. RUNNABLE: Spec+POM compile; `new Page(page)`; sync locator getters; await POM expects;
+    no production source edits.
+
 ## Forbidden
 Hardcode accounts · invent PUBLIC/routes/testids · skip Feature entry · modify app source ·
 duplicate/static POM · expect(await pom.expect*) · Promise/String(object) into getByText ·
-invent locators when Inspect empty · input.first() fill · missing storage JSON.
+invent locators when Inspect empty · input.first() fill · missing storage JSON ·
+copy-paste routes/locators from another product.
 """
+
+E2E_CODEGEN_SPEC = get_rule_text("E2ECG-FULL", fallback=_LEGACY_E2E_CODEGEN_SPEC)
 
 
 _ROLE_HINT_RE = re.compile(
@@ -109,6 +166,31 @@ _EXEC_LINE_RE = re.compile(
 def e2ecg_system_block() -> str:
     from app.llm.e2e_grounding_rules import e2e_grounding_system_pointer
 
+    mode = (os.environ.get("AITEST_RULE_RETRIEVE_MODE") or "full").strip().lower()
+    # Phase 4 default: when mode=selective, E2E profile is ON by default.
+    # AITEST_RULE_RETRIEVE_E2E can explicitly disable with 0/false/no/off.
+    gate = (os.environ.get("AITEST_RULE_RETRIEVE_E2E") or "").strip().lower()
+    selective_e2e = mode == "selective" and gate not in ("0", "false", "no", "off")
+    if selective_e2e:
+        selected, rule_ids, chars = render_rules_for_profile_with_meta(
+            "PROFILE-E2E-CODEGEN"
+        )
+        if selected:
+            logger.info(
+                "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+                "PROFILE-E2E-CODEGEN",
+                "selective",
+                ",".join(rule_ids),
+                chars,
+            )
+            return selected.strip() + "\n" + e2e_grounding_system_pointer()
+    logger.info(
+        "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+        "PROFILE-E2E-CODEGEN",
+        "full",
+        "E2ECG-FULL",
+        len(E2E_CODEGEN_SPEC.strip()),
+    )
     return E2E_CODEGEN_SPEC.strip() + "\n" + e2e_grounding_system_pointer()
 
 

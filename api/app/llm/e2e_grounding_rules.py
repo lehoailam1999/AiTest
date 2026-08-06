@@ -23,6 +23,7 @@ E2E_GROUNDING_RULES = """\
    Menu only if path unknown. `gotoFeature` ≠ auto-Create.
 3. AUTH: prefer per-role storageState; feature Specs no UI login. Login-wall Inspect ≠ feature locators.
 4. LOCATORS: data-cy|data-testid → #id|formControlName → name → role+name → visible text last.
+   Prefer a single hook. Fallback via Playwright `.or(...)`, not CSS comma-OR lists.
    Never invent testids.
 5. CREATE/EDIT: list Create control + modal visible BEFORE fill (openCreateModal pattern).
 6. POM VERBS: gotoFeature / openCreate* / fill* / save* / expect* — Spec `test.step` calls verbs.

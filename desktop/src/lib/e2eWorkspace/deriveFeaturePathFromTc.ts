@@ -51,7 +51,8 @@ export function deriveFeaturePathFromTc(opts: {
   const marked = PATH_MARKER_RE.exec(blob);
   if (marked?.[1]) {
     const raw = marked[1].trim().replace(/^["']|["']$/g, "");
-    if (raw) return normalizePath(raw);
+    const n = raw ? normalizePath(raw) : "";
+    if (n && isUsableRoutePath(n)) return n;
   }
 
   const fromProse = extractAbsolutePaths(blob);
@@ -148,7 +149,8 @@ function composeRouteFromFe(opts: {
   if (!unique.length && !opts.feFilePaths.length) return undefined;
 
   // File path hint: …/admin/evidence/list/… → /admin/evidence
-  // Do NOT treat Angular `src/app/` as route parent (too noisy).
+  // Prefer TC-token match; if FE was already retrieved for this TC, trust unique admin/module path.
+  const fileDerived: string[] = [];
   for (const fp of opts.feFilePaths) {
     const norm = fp.replace(/\\/g, "/").toLowerCase();
     const hit = norm.match(
@@ -159,14 +161,21 @@ function composeRouteFromFe(opts: {
       const leaf = hit[2];
       if (
         scoreRoute(candidate, opts.tokens) > 0 ||
-        opts.tokens.some((t) => leaf.includes(t) || t.includes(leaf)) ||
-        /evidence|case|person|device|file|user|role|org/i.test(leaf)
+        opts.tokens.some((t) => leaf.includes(t) || t.includes(leaf))
       ) {
         return candidate;
       }
-      // Still prefer admin/<leaf> when file path is clear even if TC is Vietnamese-only
-      if (hit[1].toLowerCase() === "admin") return candidate;
+      fileDerived.push(candidate);
     }
+  }
+  // FE primary already chosen by retriever for this TC — unique admin/* path is usable.
+  const uniqFile = [...new Set(fileDerived)];
+  if (uniqFile.length === 1) return uniqFile[0];
+  if (uniqFile.length > 1) {
+    const scored = uniqFile
+      .map((route) => ({ route, score: scoreRoute(route, opts.tokens) }))
+      .sort((a, b) => b.score - a.score);
+    if (scored[0].score > 0) return scored[0].route;
   }
 
   // Score path segments against TC tokens / file names
@@ -188,14 +197,19 @@ function composeRouteFromFe(opts: {
   if (!ranked.length) return undefined;
   const leaf = ranked[0].seg;
 
-  // Parent prefix from FE (path: 'admin' + leaf evidence → /admin/evidence)
+  // Parent prefix from FE only when TC tokens already selected this leaf (never invent /admin)
   const parents = unique.filter((s) =>
     /^(admin|app|portal|dashboard|console)$/i.test(s)
   );
   if (parents.length === 1 && parents[0].toLowerCase() !== leaf.toLowerCase()) {
     return normalizePath(`/${parents[0]}/${leaf}`);
   }
-  if (fileBlob.includes("/admin/") || /\bpath\s*:\s*['"`]admin['"`]/.test(opts.feSource)) {
+  // Compose /admin/leaf only when FE file tree contains /admin/ AND leaf matched TC tokens
+  if (
+    (fileBlob.includes("/admin/") ||
+      /\bpath\s*:\s*['"`]admin['"`]/.test(opts.feSource)) &&
+    opts.tokens.some((t) => leaf.toLowerCase().includes(t) || t.includes(leaf.toLowerCase()))
+  ) {
     return normalizePath(`/admin/${leaf}`);
   }
   return normalizePath(`/${leaf}`);
@@ -239,4 +253,12 @@ function normalizePath(raw: string): string {
 
 function isAuthRoute(path: string): boolean {
   return /\/(login|signin|sign-in|signup|sign-up|register|auth)(\/|$)/i.test(path);
+}
+
+function isUsableRoutePath(path: string): boolean {
+  const p = (path || "").trim();
+  if (!p || p === "/") return false;
+  if (/thi[eế]u\s*context|missing\s*context|[\[\]]/i.test(p)) return false;
+  if (!/^\/[A-Za-z][\w\-./]*$/.test(p)) return false;
+  return !isAuthRoute(p);
 }

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from app.features.requirement_studio import application as app_svc
+from app.features.requirement_studio.analysis_records import ANALYSIS_RECORD_TYPES
 from app.features.requirement_studio.chat_orchestrator import chat_system_prompt
 from app.features.requirement_studio.knowledge_builder import (
     ANALYSIS_CRITERIA_GUIDE,
-    build_knowledge_user_prompt,
-    knowledge_system_prompt,
+    ANALYSIS_FIDELITY_RULES,
+    build_enrich_oneshot_prompt,
+    knowledge_enrich_oneshot_system_prompt,
 )
 from app.llm.analysis_rules import (
     ANALYSIS_ALLOWED_JSON_KEYS,
@@ -21,7 +22,7 @@ from app.llm.analysis_rules import (
 def test_allowed_json_keys_match_criteria_guide_and_record_types():
     guide_keys = {c["json_key"] for c in ANALYSIS_CRITERIA_GUIDE}
     assert set(ANALYSIS_ALLOWED_JSON_KEYS) == guide_keys
-    assert len(app_svc.ANALYSIS_RECORD_TYPES) == 12
+    assert len(ANALYSIS_RECORD_TYPES) == 12
     assert len(ANALYSIS_ALLOWED_JSON_KEYS) == 12
 
 
@@ -65,26 +66,17 @@ def test_append_helpers_are_idempotent():
     assert ANALYSIS_CHAT_DIFF_RULES.strip() in once_chat
 
 
-def test_knowledge_prompts_include_tc_checklist():
-    full = knowledge_system_prompt(pass1=False)
-    slim = knowledge_system_prompt(pass1=True)
-    marker = "TC-readiness checklist"
-    assert marker in full
-    assert marker in slim
-    assert "CẤM OUTPUT CHUNG CHUNG" in full or "QUY TẮC CHUNG PHÂN TÍCH" in full
-
-    user_full = build_knowledge_user_prompt(
+def test_enrich_oneshot_prompts_include_fidelity_and_keys():
+    sys = knowledge_enrich_oneshot_system_prompt()
+    user = build_enrich_oneshot_prompt(
         [("Feature: Login", "User phải đăng nhập bằng email/password.")],
         file_names=["SRS_Login.md"],
-        pass1=False,
     )
-    user_slim = build_knowledge_user_prompt(
-        [("Feature: Login", "User phải đăng nhập bằng email/password.")],
-        file_names=["SRS_Login.md"],
-        pass1=True,
-    )
-    assert marker in user_full
-    assert marker in user_slim
+    assert "QUY TẮC CHUNG PHÂN TÍCH" in sys or "features" in sys
+    assert "executionContexts" in sys
+    assert "CẤM OUTPUT CHUNG CHUNG" in ANALYSIS_FIDELITY_RULES
+    assert "DOCUMENT EXCERPTS" in user
+    assert "Login" in user
 
 
 def test_chat_system_prompt_includes_diff_rules():
@@ -93,3 +85,17 @@ def test_chat_system_prompt_includes_diff_rules():
     assert ANALYSIS_CHAT_DIFF_RULES.strip()[:40] in prompt
     for key in ("features", "actors", "gaps", "acceptanceCriteria"):
         assert key in prompt
+
+
+def test_analysis_selective_mode_uses_profile_blocks(monkeypatch):
+    from app.llm.analysis_rules import (
+        append_analysis_chat_diff_rules,
+        append_analysis_tc_checklist,
+    )
+
+    monkeypatch.setenv("AITEST_RULE_RETRIEVE_MODE", "selective")
+    monkeypatch.setenv("AITEST_RULE_RETRIEVE_ANALYSIS", "1")
+    t = append_analysis_tc_checklist("base")
+    assert "TC-readiness checklist" in t
+    c = append_analysis_chat_diff_rules("chat-base")
+    assert "knowledgeDiff" in c

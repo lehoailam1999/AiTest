@@ -1,4 +1,4 @@
-"""Requirement Studio API — R1 Upload + R2 Chunking."""
+"""Requirement Studio API — upload + Phân tích (Knowledge)."""
 
 from __future__ import annotations
 
@@ -90,8 +90,7 @@ def get_workspace(
     if ws is None:
         return errors(404, "workspace not found")
     files = app_svc.list_files(db, wid)
-    chunk_total = sum(int(f.get("chunkCount") or 0) for f in files)
-    return ok(workspace_dto(ws, file_count=len(files), chunk_count=chunk_total))
+    return ok(workspace_dto(ws, file_count=len(files)))
 
 
 @router.delete("/requirement-workspaces/{workspace_id}")
@@ -164,19 +163,6 @@ async def upload_files(
     return ok({"items": refs}, status_code=201)
 
 
-@router.post("/requirement-workspaces/{workspace_id}/rechunk")
-def rechunk_workspace(
-    workspace_id: str,
-    db: Annotated[Session, Depends(get_db)],
-):
-    wid = _uuid(workspace_id)
-    if wid is None:
-        return errors(400, "invalid workspace id")
-    if app_svc.get_workspace(db, wid) is None:
-        return errors(404, "workspace not found")
-    return ok(app_svc.rechunk_workspace(db, wid))
-
-
 @router.get("/requirement-files/{file_id}")
 def get_file(
     file_id: str,
@@ -189,33 +175,6 @@ def get_file(
     if detail is None:
         return errors(404, "file not found")
     return ok(detail)
-
-
-@router.get("/requirement-files/{file_id}/chunks")
-def list_chunks(
-    file_id: str,
-    db: Annotated[Session, Depends(get_db)],
-):
-    fid = _uuid(file_id)
-    if fid is None:
-        return errors(400, "invalid file id")
-    if app_svc.get_file(db, fid) is None:
-        return errors(404, "file not found")
-    return ok({"items": app_svc.list_chunks(db, fid)})
-
-
-@router.post("/requirement-files/{file_id}/rechunk")
-def rechunk_file(
-    file_id: str,
-    db: Annotated[Session, Depends(get_db)],
-):
-    fid = _uuid(file_id)
-    if fid is None:
-        return errors(400, "invalid file id")
-    result = app_svc.rechunk_file(db, fid)
-    if result is None:
-        return errors(404, "file not found")
-    return ok(result)
 
 
 @router.delete("/requirement-files/{file_id}")
@@ -431,8 +390,8 @@ class GenerateFromSnapshotBody(BaseModel):
     targetUrl: str | None = Field(default=None, max_length=500)
     authHint: str | None = Field(default=None, max_length=1000)
     focusModules: str | None = Field(default=None, max_length=500)
-    # fast | full — E2E mặc định fast trên BE nếu bỏ trống
-    speed: str | None = Field(default=None, max_length=20)
+    # fast | full — mặc định fast nếu bỏ trống để tối ưu tốc độ
+    speed: str | None = Field(default="fast", max_length=20)
     maxPerModule: int | None = Field(default=None, ge=2, le=30)
 
 
@@ -444,7 +403,7 @@ class FreezeAndGenerateBody(BaseModel):
     targetUrl: str | None = Field(default=None, max_length=500)
     authHint: str | None = Field(default=None, max_length=1000)
     focusModules: str | None = Field(default=None, max_length=500)
-    speed: str | None = Field(default=None, max_length=20)
+    speed: str | None = Field(default="fast", max_length=20)
     maxPerModule: int | None = Field(default=None, ge=2, le=30)
 
 

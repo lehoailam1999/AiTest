@@ -13,8 +13,8 @@ def test_uutgs_is_specification_not_checklist_dump():
     assert "Single Source of Truth" in text
     assert "Analyze Before Generate" in text
     assert "Forbidden" in text
-    # Compact enough for system prompt budget
-    assert len(text) < 4000
+    # Compact enough for system prompt budget (Phase 1 registry-aligned spec).
+    assert len(text) < 7000
 
 
 def test_unit_system_prompt_embeds_uutgs_once():

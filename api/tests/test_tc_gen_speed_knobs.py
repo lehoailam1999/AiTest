@@ -38,27 +38,27 @@ def test_cursor_oneshot_timeout_default_360():
         assert timeout == 360
 
 
-def test_fanout_batch_size_default_2():
+def test_e2e_speed_env_default_fast():
+    from app.llm.tc_speed import resolve_tc_speed_mode
+
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AITEST_TC_E2E_SPEED", None)
+        assert resolve_tc_speed_mode("e2e") == "fast"
+        os.environ["AITEST_TC_E2E_SPEED"] = "full"
+        assert resolve_tc_speed_mode("e2e") == "full"
+
+
+def test_fanout_batch_size_default_3():
     from app.llm.tc_speed import resolve_fanout_batch_size
 
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_FANOUT_BATCH_MODULES", None)
         os.environ.pop("AITEST_TC_FANOUT_BATCH_MODULES_CURSOR", None)
-        assert resolve_fanout_batch_size(is_cursor=True) == 2
+        assert resolve_fanout_batch_size(is_cursor=True) == 3
 
 
-def test_e2e_speed_env_default_full():
-    from app.llm.tc_speed import resolve_tc_speed_mode
-
-    with mock.patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("AITEST_TC_E2E_SPEED", None)
-        assert resolve_tc_speed_mode("e2e") == "full"
-        os.environ["AITEST_TC_E2E_SPEED"] = "fast"
-        assert resolve_tc_speed_mode("e2e") == "fast"
-
-
-def test_cursor_fanout_concurrency_default_3():
-    """Cursor parallel oneshot — default 3, cap 4."""
+def test_cursor_fanout_concurrency_default_4():
+    """Cursor parallel oneshot — default 4, cap 4."""
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_FANOUT_CONCURRENCY_CURSOR", None)
         try:
@@ -66,12 +66,12 @@ def test_cursor_fanout_concurrency_default_3():
                 1,
                 min(
                     4,
-                    int(os.environ.get("AITEST_TC_FANOUT_CONCURRENCY_CURSOR", "3")),
+                    int(os.environ.get("AITEST_TC_FANOUT_CONCURRENCY_CURSOR", "4")),
                 ),
             )
         except ValueError:
-            concurrency = 3
-        assert concurrency == 3
+            concurrency = 4
+        assert concurrency == 4
 
 
 def test_cursor_forces_oneshot_even_when_prefer_false():

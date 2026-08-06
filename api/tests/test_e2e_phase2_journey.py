@@ -17,6 +17,87 @@ from app.services.e2e_journey_enforce import (
 )
 
 
+def test_heal_feature_before_auth_step_order():
+    from app.services.e2e_journey_enforce import heal_feature_journey_order
+
+    messed = """\
+import { test } from '@playwright/test';
+test('t', async ({ page }) => {
+  await test.step('0. Feature entry', async () => {
+    await page.goto('/admin/case-record');
+  });
+  await test.step('1. Auth — ensureAuthenticated', async () => {
+    await ensureAuthenticated(page);
+  });
+  await test.step('2. Search', async () => {
+    await pom.search();
+  });
+});
+"""
+    fixed = heal_feature_journey_order(messed)
+    assert fixed.index("ensureAuthenticated") < fixed.lower().index("feature entry")
+    assert validate_feature_journey_order(fixed, mode="ui_helper") == []
+
+
+def test_heal_early_page_goto_before_auth():
+    from app.services.e2e_journey_enforce import heal_feature_journey_order
+
+    messed = """\
+import { test } from '@playwright/test';
+test('t', async ({ page }) => {
+  await page.goto('/admin/case-record');
+  await ensureAuthenticated(page);
+  await pom.search();
+});
+"""
+    fixed = heal_feature_journey_order(messed)
+    assert fixed.index("ensureAuthenticated") < fixed.index("page.goto")
+    # page.goto still counts as feature entry after auth
+    assert validate_feature_journey_order(fixed, mode="ui_helper") == []
+
+
+def test_guards_heal_feature_before_auth_and_pass():
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Mod/specs/search.spec.ts",
+            content="""\
+import { test } from '@playwright/test';
+import { ensureAuthenticated } from '../fixtures/auth.helper';
+import { CasePage } from '../pages/case.page';
+test('search', async ({ page }) => {
+  await test.step('0. Feature entry', async () => {
+    await page.goto('/admin/case-record');
+  });
+  await test.step('1. Auth — ensureAuthenticated', async () => {
+    await ensureAuthenticated(page);
+  });
+  await test.step('2. Search', async () => {
+    const pom = new CasePage(page);
+    await pom.search();
+    await pom.expectRowVisible();
+  });
+});
+""",
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Mod/pages/case.page.ts",
+            content="export class CasePage { async search() {} async expectRowVisible() {} }",
+            kind="page",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(
+        files,
+        test_case_title="Tìm kiếm hồ sơ",
+        feature_path="/admin/case-record",
+        enforce_journey=True,
+    )
+    spec = next(f for f in out if f.kind == "spec")
+    assert spec.content.index("ensureAuthenticated") < spec.content.lower().index(
+        "feature entry"
+    )
+
+
 def test_auth_step_re_does_not_match_bare_zero_feature_entry():
     """Regression: ``0. Feature entry`` must not count as Auth phase position."""
     spec = """\
@@ -260,3 +341,99 @@ test('upload', async ({ page }) => {
     spec = next(f for f in out if f.kind == "spec")
     assert "Feature entry" in spec.content
     assert spec.content.index("Feature entry") < spec.content.index("clickUpload")
+
+
+def test_pom_expect_counts_as_business_assertion():
+    from app.services.e2e_journey_enforce import validate_feature_journey_order
+
+    spec = """\
+test('x', async ({ page }) => {
+  await test.step('0. Đăng nhập / authenticate', async () => {
+    await ensureAuthenticated(page);
+  });
+  await test.step('1. Feature entry', async () => {
+    await page.goto('/evidence');
+  });
+  await test.step('2. Upload', async () => {
+    await pom.selectFile();
+    await pom.expectRowVisible();
+  });
+});
+"""
+    assert (
+        validate_feature_journey_order(
+            spec, mode="ui_helper", enforce_business_assertions=True
+        )
+        == []
+    )
+
+
+def test_heal_injects_assert_into_act_without_expect():
+    from app.services.e2e_journey_enforce import (
+        heal_missing_business_assertions,
+        validate_feature_journey_order,
+    )
+
+    spec = """\
+import { expect, test } from '@playwright/test';
+test('x', async ({ page }) => {
+  await test.step('0. Đăng nhập / authenticate', async () => {
+    await ensureAuthenticated(page);
+  });
+  await test.step('1. Feature entry', async () => {
+    await page.goto('/evidence');
+  });
+  await test.step('2. Upload', async () => {
+    await page.getByRole('button', { name: 'Upload' }).click();
+  });
+});
+"""
+    healed = heal_missing_business_assertions(
+        spec, expected_hint="expected: file uploaded successfully"
+    )
+    assert "Business assertion (auto-healed" in healed
+    assert "toBeVisible" in healed
+    assert "file uploaded successfully" in healed or "file uploaded" in healed.lower() or "RegExp" in healed
+    assert (
+        validate_feature_journey_order(
+            healed, mode="ui_helper", enforce_business_assertions=True
+        )
+        == []
+    )
+
+
+def test_strict_gate_heals_before_business_assert_enforce():
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Mod/specs/upload.spec.ts",
+            content="""\
+import { expect, test } from '@playwright/test';
+import { ensureAuthenticated } from '../fixtures/auth.helper';
+import { EvidencePage } from '../pages/evidence.page';
+test('upload', async ({ page }) => {
+  await ensureAuthenticated(page);
+  const pom = new EvidencePage(page);
+  await test.step('2. Upload', async () => {
+    await pom.clickUpload();
+  });
+});
+""",
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Mod/pages/evidence.page.ts",
+            content="export class EvidencePage { async clickUpload() {} }",
+            kind="page",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(
+        files,
+        test_case_title="Upload evidence",
+        feature_path="/evidence",
+        auth_hints="role: Investigator\nlandmark: evidence page\nexpected: upload done",
+        strict_gate=True,
+        enforce_journey=True,
+    )
+    spec = next(f for f in out if f.kind == "spec").content
+    assert "Business assertion (auto-healed" in spec
+    assert "toBeVisible" in spec

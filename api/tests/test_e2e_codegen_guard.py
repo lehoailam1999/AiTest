@@ -123,6 +123,207 @@ def test_apply_e2e_codegen_guards_integration():
     assert "async gotoLogin()" in page.content
 
 
+def test_guards_enforce_locator_contract_reject_unknown_hook():
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Auth/pages/login.page.ts",
+            content=(
+                "export class LoginPage {\n"
+                "  constructor(public page: any) {}\n"
+                "  async submit() { await this.page.locator('[data-testid=\"wrong-id\"]').click(); }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Auth/specs/login.spec.ts",
+            content="import { test } from '@playwright/test';\ntest('x', async () => {});",
+            kind="spec",
+        ),
+    ]
+    contract = "\n".join(
+        [
+            "data-cy: submit-btn",
+            "data-testid: login-submit, username",
+            "id: (none)",
+            "name: (none)",
+            "formControlName: (none)",
+            "routes: /login",
+        ]
+    )
+    try:
+        apply_e2e_codegen_guards(files, locator_contract=contract)
+        assert False, "expected locator-contract grounding failure"
+    except ValueError as e:
+        assert "E2E_GROUNDING" in str(e)
+        assert "data-testid=wrong-id" in str(e)
+
+
+def test_guards_enforce_locator_contract_accepts_allowed_hook():
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Auth/pages/login.page.ts",
+            content=(
+                "export class LoginPage {\n"
+                "  constructor(public page: any) {}\n"
+                "  async submit() { await this.page.locator('[data-testid=\"login-submit\"]').click(); }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Auth/specs/login.spec.ts",
+            content="import { test } from '@playwright/test';\ntest('x', async () => {});",
+            kind="spec",
+        ),
+    ]
+    contract = "\n".join(
+        [
+            "data-cy: submit-btn",
+            "data-testid: login-submit, username",
+            "id: (none)",
+            "name: (none)",
+            "formControlName: (none)",
+            "routes: /login",
+        ]
+    )
+    out = apply_e2e_codegen_guards(files, locator_contract=contract)
+    assert any(f.kind == "page" for f in out)
+
+
+def test_guards_accept_css_or_id_with_nested_form_control():
+    """User fail: locator('#field_x, [formControlName=\"x\"]') must not false-positive."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/_shared/pages/create.page.ts",
+            content=(
+                "export class P {\n"
+                "  constructor(public page: any) {}\n"
+                "  async pick() {\n"
+                "    await this.page.locator("
+                "'#field_caseRecords, [formControlName=\"caseRecords\"]').click();\n"
+                "  }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Vật-chứng/TC/specs/create.spec.ts",
+            content=(
+                "import { test } from '@playwright/test';\n"
+                "test('x', async ({ page }) => {\n"
+                "  await page.locator("
+                "'#field_caseRecords, [formControlName=\"caseRecords\"]').click();\n"
+                "});\n"
+            ),
+            kind="spec",
+        ),
+    ]
+    contract = "\n".join(
+        [
+            "data-cy: entityCreateButton",
+            "data-testid: (none)",
+            "id: field_caseRecords",
+            "name: (none)",
+            "formControlName: caseRecords",
+            "routes: /admin/evidence",
+        ]
+    )
+    out = apply_e2e_codegen_guards(
+        files, locator_contract=contract, enforce_journey=False, enforce_stubs=False
+    )
+    assert any(f.kind == "page" for f in out)
+
+
+def test_guards_accept_field_id_via_form_control_bridge():
+    """#field_X allowed when only formControlName X is in contract (Angular convention)."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/M/pages/x.page.ts",
+            content=(
+                "export class P {\n"
+                "  constructor(public page: any) {}\n"
+                "  async pick() { await this.page.locator('#field_caseRecords').click(); }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/M/specs/x.spec.ts",
+            content="import { test } from '@playwright/test';\ntest('x', async () => {});",
+            kind="spec",
+        ),
+    ]
+    contract = "formControlName: caseRecords\nid: (none)\ndata-cy: (none)\n"
+    out = apply_e2e_codegen_guards(
+        files, locator_contract=contract, enforce_journey=False, enforce_stubs=False
+    )
+    assert any(f.kind == "page" for f in out)
+
+
+def test_guards_accept_compound_css_under_allowed_id():
+    """Descendant under allow-listed id remains grounded (#id .child)."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Vật-chứng/TC/specs/create.spec.ts",
+            content=(
+                "import { test } from '@playwright/test';\n"
+                "test('x', async ({ page }) => {\n"
+                "  await page.locator('#field_caseRecords .stitch-select-tag').click();\n"
+                "  await page.locator('#field_caseRecords .stitch-select-tag-more').click();\n"
+                "});\n"
+            ),
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Vật-chứng/TC/pages/create.page.ts",
+            content=(
+                "export class P {\n"
+                "  constructor(public page: any) {}\n"
+                "  async pick() { await this.page.locator('#field_caseRecords').click(); }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+    ]
+    contract = "\n".join(
+        [
+            "data-cy: entityCreateButton",
+            "data-testid: (none)",
+            "id: field_caseRecords, jh-create-entity",
+            "name: (none)",
+            "formControlName: caseRecords",
+            "routes: /admin/evidence",
+        ]
+    )
+    out = apply_e2e_codegen_guards(
+        files, locator_contract=contract, enforce_journey=False, enforce_stubs=False
+    )
+    assert any("/specs/" in (f.path or "").replace("\\", "/") for f in out)
+
+
+def test_guards_reject_unknown_root_id_even_if_compound():
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/M/specs/x.spec.ts",
+            content=(
+                "test('x', async ({ page }) => {\n"
+                "  await page.locator('#field_unknown .stitch-select-tag').click();\n"
+                "});\n"
+            ),
+            kind="spec",
+        ),
+    ]
+    contract = "id: field_caseRecords\ndata-cy: (none)\n"
+    try:
+        apply_e2e_codegen_guards(
+            files, locator_contract=contract, enforce_journey=False, enforce_stubs=False
+        )
+        assert False, "expected violation"
+    except ValueError as e:
+        assert "field_unknown" in str(e) or "E2E_GROUNDING" in str(e)
+
+
 def test_guards_drop_empty_storage_state_and_bogus_spec():
     cfg = """\
 import { defineConfig } from '@playwright/test';
@@ -1196,6 +1397,146 @@ test.describe('[E2E-Validation] Feature form', () => {
     assert "storageState" not in cfg.content
 
 
+def test_journey_failsafe_injects_auth_before_enforce():
+    """Regression: even if earlier passes miss auth, journey preflight must self-heal."""
+    feature_spec = """\
+import { test } from '@playwright/test';
+import { EvidencePage } from '../pages/evidence.page';
+
+test('Hoàn tất tạo vật chứng', async ({ page }) => {
+  const pom = new EvidencePage(page);
+  await test.step('1. Feature entry', async () => {
+    await pom.gotoFeature();
+  });
+  await test.step('2. Act', async () => {
+    await pom.submitForm();
+  });
+});
+"""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/specs/e2e-businessrules-hoan-tat.spec.ts",
+            content=feature_spec,
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/pages/evidence.page.ts",
+            content=(
+                "export class EvidencePage {\n"
+                "  constructor(public page: any) {}\n"
+                "  async gotoFeature() { await this.page.goto('/admin/evidence'); }\n"
+                "  async submitForm() {}\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(
+        files,
+        enforce_journey=True,
+        enforce_stubs=False,
+        test_case_title="Hoàn tất tạo vật chứng",
+    )
+    spec = next(f for f in out if f.kind == "spec")
+    assert "ensureAuthenticated(page)" in (spec.content or "")
+    assert "0. Đăng nhập / authenticate" in (spec.content or "")
+
+
+def test_import_only_ensure_authenticated_still_injects_call():
+    spec = """\
+import { test } from '@playwright/test';
+import { ensureAuthenticated } from '../fixtures/auth.helper';
+import { EvidencePage } from '../pages/evidence.page';
+
+test('x', async ({ page }) => {
+  const pom = new EvidencePage(page);
+  await test.step('1. Feature entry', async () => {
+    await pom.gotoFeature();
+  });
+  await test.step('2. Act', async () => {
+    await pom.submitForm();
+  });
+});
+"""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/specs/import-only.spec.ts",
+            content=spec,
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/pages/evidence.page.ts",
+            content=(
+                "export class EvidencePage {\n"
+                "  constructor(public page: any) {}\n"
+                "  async gotoFeature() { await this.page.goto('/admin/evidence'); }\n"
+                "  async submitForm() {}\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(
+        files,
+        enforce_journey=True,
+        enforce_stubs=False,
+        test_case_title="Hoàn tất tạo vật chứng",
+    )
+    spec_out = next(f for f in out if f.kind == "spec")
+    assert "await ensureAuthenticated(page);" in (spec_out.content or "")
+
+
+def test_reorder_feature_entry_before_act_when_misplaced():
+    spec = """\
+import { test } from '@playwright/test';
+import { ensureAuthenticated } from '../fixtures/auth.helper';
+import { EvidencePage } from '../pages/evidence.page';
+
+test('x', async ({ page }) => {
+  const pom = new EvidencePage(page);
+  await test.step('0. Đăng nhập / authenticate', async () => {
+    await ensureAuthenticated(page);
+  });
+  await test.step('2. Act', async () => {
+    await pom.submitForm();
+  });
+  await test.step('1. Feature entry', async () => {
+    await pom.gotoFeature();
+  });
+});
+"""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/specs/reorder-entry.spec.ts",
+            content=spec,
+            kind="spec",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/Vat-chung/pages/evidence.page.ts",
+            content=(
+                "export class EvidencePage {\n"
+                "  constructor(public page: any) {}\n"
+                "  async gotoFeature() { await this.page.goto('/admin/evidence'); }\n"
+                "  async submitForm() {}\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+    ]
+    out = apply_e2e_codegen_guards(
+        files,
+        enforce_journey=True,
+        enforce_stubs=False,
+        test_case_title="Hoàn tất tạo vật chứng",
+    )
+    spec_out = next(f for f in out if f.kind == "spec")
+    body = spec_out.content or ""
+    pos_feature = body.find("Feature entry")
+    pos_act = body.find("Act")
+    assert pos_feature >= 0 and pos_act >= 0
+    assert pos_feature < pos_act
+
+
 def test_guards_restore_stripped_spec_and_page_suffix():
     """Prior shorten left specs/foo-hash.ts — Playwright would report No tests found."""
     files = [
@@ -1468,12 +1809,12 @@ def test_arrange_and_select_field_not_phase3_throw():
     assert not _is_select_field_method("selectEvidenceMenu")
 
     fill = _render_field_fill_stub("arrangeRequiredName")
-    assert "ungrounded" not in fill.lower()
     assert "getByLabel" in fill
+    assert "pass fill value" in fill.lower() or "fail-closed" in fill.lower()
 
     sel = _render_select_field_stub("selectStatus")
     assert "combobox" in sel
-    assert "ungrounded" not in sel.lower()
+    assert "pass option label" in sel.lower() or "fail-closed" in sel.lower()
 
     page = """\
 export class P {
@@ -1486,9 +1827,10 @@ export class P {
 }
 """
     out = _rewrite_ungrounded_nav_stubs(page, feature_path="/admin/evidence")
-    assert "ungrounded" not in out.lower()
     assert "arrangeRequiredName" in out
     assert "selectStatus" in out
+    assert "getByLabel" in out or "combobox" in out
+    assert "_args" in out
 
 def test_complete_step_wizard_not_phase3_throw():
     from app.services.e2e_codegen_guard import (
@@ -1499,8 +1841,8 @@ def test_complete_step_wizard_not_phase3_throw():
 
     assert _is_wizard_next_method("completeStep1ToReachStep2")
     stub = _render_smart_method_stub("completeStep1ToReachStep2")
-    assert "ungrounded" not in stub.lower()
-    assert "next" in stub.lower() or "tiếp" in stub.lower()
+    # P1: wizard soft regex removed — needs Spec label or DOM
+    assert "ungrounded" in stub.lower() or "fail-closed" in stub.lower()
 
     page = """\
 export class P {
@@ -1510,7 +1852,6 @@ export class P {
 }
 """
     out = _rewrite_ungrounded_nav_stubs(page)
-    assert "ungrounded" not in out.lower()
     assert "completeStep1ToReachStep2" in out
 
 
@@ -1523,8 +1864,8 @@ def test_open_combobox_search_not_phase3_throw():
 
     assert _is_select_field_method("openCaseRecordComboboxSearch")
     stub = _render_smart_method_stub("openCaseRecordComboboxSearch")
-    assert "ungrounded" not in stub.lower()
     assert "combobox" in stub
+    assert "pass option label" in stub.lower() or "fail-closed" in stub.lower()
 
     page = """\
 export class P {
@@ -1534,8 +1875,8 @@ export class P {
 }
 """
     out = _rewrite_ungrounded_nav_stubs(page)
-    assert "ungrounded" not in out.lower()
     assert "openCaseRecordComboboxSearch" in out
+    assert "combobox" in out
 
 
 def test_parse_import_entries_handles_type_modifier_and_orphan():

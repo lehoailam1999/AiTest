@@ -114,7 +114,7 @@ export default function FreezePanel({
   const [engine, setEngine] = useState<PreferredEngine>("unit");
   const [targetUrl, setTargetUrl] = useState("");
   /** E2E: mặc định full cover theo tín hiệu Output (không trần số TC). Bỏ tick = prompt gọn. */
-  const [e2eFullCoverage, setE2eFullCoverage] = useState(true);
+  const [e2eFullCoverage, setE2eFullCoverage] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [savedCount, setSavedCount] = useState(0);
@@ -272,7 +272,13 @@ export default function FreezePanel({
         preferredEngine: engine,
         targetUrl: engine === "e2e" ? targetUrl.trim() || undefined : undefined,
         speed:
-          engine === "e2e" ? (e2eFullCoverage ? "full" : "fast") : undefined,
+          engine === "e2e"
+            ? e2eFullCoverage
+              ? "full"
+              : "fast"
+            : "fast",
+        maxPerModule:
+          engine === "e2e" && !e2eFullCoverage ? 10 : undefined,
       });
       setLastWarnings(res.warnings ?? []);
       setSnapshots((prev) => [res.snapshot, ...prev]);
@@ -409,11 +415,6 @@ export default function FreezePanel({
             }}
             disabled={running || paused}
           />
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {engine === "e2e"
-              ? "Luồng E2E: sinh TC journey UI (type=E2E). Không cần nhập login — vượt auth bằng storageState / E2E_USERNAME·E2E_PASSWORD khi chạy code. Target URL tuỳ chọn khi Freeze; bắt buộc trên trang E2E Test."
-              : "Luồng Unit: sinh test case logic/service (type=Unit). Cùng pipeline fan-out + nhật ký AI CLI như E2E."}
-          </Typography.Text>
         </div>
 
         {engine === "e2e" ? (
@@ -430,7 +431,7 @@ export default function FreezePanel({
               onChange={(e) => setE2eFullCoverage(e.target.checked)}
               disabled={running || paused}
             >
-              Cover đủ tín hiệu Output (mặc định) — bỏ tick = prompt gọn; vẫn cấm cắt lớp / pad TC
+              Cover đủ tín hiệu Output (chậm hơn) — mặc định tắt = speed fast + trần ~10 TC/module
             </Checkbox>
           </>
         ) : null}

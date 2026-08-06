@@ -1,4 +1,4 @@
-"""AI Service — AI_CLI only (Cursor / Claude / Gemini / Ollama / custom)."""
+"""AI Service — AI_CLI only (Cursor / Claude / Gemini / Antigravity / Ollama / custom)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 
 from app.llm.base import GenerateContext, TestCaseDraft, UnitRequest, UnitResult
 from app.llm.base_adapter import BaseLLMAdapter
+from app.llm.cli.adapters.antigravity_cli import AntigravityCLIAdapter
 from app.llm.cli.adapters.base_cli import BaseCLIAdapter
 from app.llm.cli.adapters.claude_cli import ClaudeCLIAdapter
 from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
@@ -74,6 +75,10 @@ def build_cli_adapter(conn: AiBackendConnection) -> BaseLLMAdapter:
         return CustomScriptCLIAdapter(
             pid, cli_path=cli_path, cli_args=cli_args, model_name=model
         )
+    if cli_type in ("antigravity", "antigravity-cli", "agy"):
+        return AntigravityCLIAdapter(
+            pid, cli_path=cli_path or "agy", cli_args=cli_args, model_name=model
+        )
     return GeminiCLIAdapter(
         pid, cli_path=cli_path or "gemini", cli_args=cli_args, model_name=model
     )
@@ -129,6 +134,19 @@ async def generate_test_cases_for_connection(
             meta["cursorChatId"] = chat_id.strip()
         elif resume_chat_id:
             meta["cursorChatId"] = resume_chat_id
+    # Soft DoR: flag thin E2E TCs with [Thiếu Context] before Desktop Gen
+    try:
+        engine = (getattr(ctx, "preferred_engine", None) or "").strip().lower()
+        if engine in ("e2e", "ui", "") or not engine:
+            from app.services.e2e_tc_dor_annotate import annotate_e2e_tc_drafts
+
+            # Only annotate when engine is e2e (skip pure unit jobs)
+            if engine == "e2e" or any(
+                (d.type or "").strip().upper() in ("E2E", "E2E_UI") for d in drafts
+            ):
+                drafts = annotate_e2e_tc_drafts(drafts)
+    except Exception:  # noqa: BLE001
+        pass
     return drafts, meta
 
 

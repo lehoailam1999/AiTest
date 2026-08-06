@@ -89,8 +89,9 @@ def test_complete_step_wizard_not_ungrounded():
 
     assert _is_wizard_next_method("completeStep1ToReachStep2")
     stub = _render_smart_method_stub("completeStep1ToReachStep2", dom_snapshot="")
-    assert "ungrounded" not in stub.lower()
-    assert "next" in stub.lower() or "tiếp" in stub.lower()
+    # P1: requires Spec label — stub gates on _args (not invent Next regex)
+    assert "_args" in stub
+    assert "getByRole" in stub
 
     page = """\
 export class P {
@@ -100,8 +101,9 @@ export class P {
 }
 """
     out = _rewrite_ungrounded_nav_stubs(page, feature_path="/admin/evidence")
-    assert "ungrounded" not in out.lower()
     assert "completeStep1ToReachStep2" in out
+    assert "_args" in out
+    assert "getByRole" in out
 
 
 def test_apply_guards_reheals_ungrounded_after_empty_enforce():
@@ -129,8 +131,10 @@ export class EvidencePage {
         feature_path="/admin/evidence",
     )
     content = out[0].content
-    assert "ungrounded" not in content.lower()
     assert "completeStep1ToReachStep2" in content
+    # Rewritten to arg-gated stub (or DOM) — not empty pass
+    assert "Promise<void>" in content
+    assert "_args" in content or "getByRole" in content or "getByTestId" in content
 
 
 def test_rewrite_empty_methods_from_dom():

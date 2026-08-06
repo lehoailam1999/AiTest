@@ -209,7 +209,7 @@ class CursorCLIAdapter(BaseCLIAdapter):
         create_chat: bool = False,
     ) -> str:
         """Knowledge/chat via oneshot ask; optional hidden conversation via --resume."""
-        prompt = f"{system}\n\n---\n\n{user}"
+        prompt = f"{system}\n\n---\n\n{user}" if (system or "").strip() else user
         topic_key = "knowledge-chat"
         self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
         chat_id = resume_chat_id

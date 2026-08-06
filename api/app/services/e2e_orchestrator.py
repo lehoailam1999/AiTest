@@ -462,7 +462,14 @@ def build_e2e_heal_prompt_context(
     max_retries: int,
     dom_snapshot: str = "",
 ) -> str:
+    from app.services.failure_taxonomy import (
+        classify_e2e_standard,
+        format_e2e_heal_taxonomy_block,
+    )
+
     cmd = " ".join(run_command)
+    taxonomy = classify_e2e_standard(error_log)
+    tax_block = format_e2e_heal_taxonomy_block(taxonomy)
     dom_part = ""
     if dom_snapshot.strip():
         dom_part = (
@@ -497,8 +504,10 @@ def build_e2e_heal_prompt_context(
         f"E2E Auto-Heal attempt {attempt}/{max_retries}\n"
         f"Primary spec: {primary_spec_path}\n"
         f"Command: {cmd}\n\n"
+        f"{tax_block}\n"
         f"Log lỗi (đuôi):\n```\n{error_log[-LOG_TAIL:]}\n```\n"
         f"{dom_part}\n"
+        "Phase 6: heal bounded — chỉ sửa file liên quan lỗi; không viết lại toàn bộ suite. "
         "Phân tích nếu do gãy Selector / element not found / TimeoutError. "
         "Sửa Page Object (ưu tiên) hoặc Spec; trả về các FILE đã sửa theo format ### FILE:."
         f"{extra_hint}"
@@ -1145,7 +1154,7 @@ def _remap_e2e_files_short_paths(
     return out, new_prim
 
 def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> None:
-    """Fill E2E_USERNAME/PASSWORD from .ai-test/auth when Verify forgot to inject."""
+    """Fill E2E_USERNAME/PASSWORD + E2E_<ROLE>_* from .ai-test/auth when Verify forgot to inject."""
     from app.services.e2e_auth_seed import is_invented_auth_username
 
     # Drop stale invented usernames so they never reach Playwright login.
@@ -1174,6 +1183,36 @@ def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> Non
                         env["E2E_PASSWORD"] = p
         except Exception:  # noqa: BLE001
             pass
+
+    # Multi-role: export E2E_<ROLE>_USERNAME|PASSWORD for every auth artifact on disk
+    try:
+        from pathlib import Path as _P
+
+        from app.services.e2e_auth_seed import load_auth_artifact
+
+        auth_dir = _P(project_root) / ".ai-test" / "auth"
+        if auth_dir.is_dir():
+            for path in auth_dir.glob("*.json"):
+                role_name = path.stem.strip()
+                if not role_name or role_name.startswith("."):
+                    continue
+                art = load_auth_artifact(project_root, role_name)
+                if not art:
+                    continue
+                u = str(art.get("username") or art.get("email") or "").strip()
+                p = str(art.get("password") or "").strip()
+                if not u or not p or is_invented_auth_username(u):
+                    continue
+                slug = re.sub(r"[^a-zA-Z0-9]+", "_", role_name).upper() or "DEFAULT"
+                uk = f"E2E_{slug}_USERNAME"
+                pk = f"E2E_{slug}_PASSWORD"
+                if uk not in env:
+                    env[uk] = u
+                if pk not in env:
+                    env[pk] = p
+    except Exception:  # noqa: BLE001
+        pass
+
     if not (env.get("E2E_LOGIN_PATH") or "").strip():
         try:
             from app.services.e2e_auth_bootstrap import discover_login_path
@@ -2124,6 +2163,7 @@ class E2EOrchestrator:
             test_case_title=req.test_case_title,
             auth_hints=auth_hints,
             headed=headed,
+            test_data=getattr(req, "test_data", None) or auth_hints or "",
         )
         primary_spec_path = _align_primary_spec_path(work_files, primary_spec_path)
         # Shorten oversized title folders before cwd/spec resolution (Windows MAX_PATH).
@@ -2315,6 +2355,14 @@ class E2EOrchestrator:
                     repair_context=heal_ctx,
                     related_sources=list(req.related_sources),
                     existing_files=[(f.path, f.content) for f in work_files],
+                    project_rules=req.project_rules,
+                    user_rules=req.user_rules,
+                    execution_context=req.execution_context,
+                    feature_path=req.feature_path,
+                    locator_contract=req.locator_contract,
+                    pom_scaffold=req.pom_scaffold,
+                    planner_hint=getattr(req, "planner_hint", "") or "",
+                    index_version=getattr(req, "index_version", "") or "",
                 )
 
                 if fix_fn is not None:

@@ -22,6 +22,15 @@ class E2ECodegenJourneyError(ValueError):
     """Phase 2 — generated Spec missing Auth → Feature entry → Act (or wrong order)."""
 
 
+class E2EStrictGateError(ValueError):
+    """Strict gate violation with normalized category."""
+
+    def __init__(self, category: str, detail: str):
+        self.category = (category or "ExecutionGateFailed").strip()
+        self.detail = (detail or "").strip()
+        super().__init__(f"{self.category}: {self.detail}")
+
+
 # Re-export Phase 3 error for callers importing from this module.
 from app.services.e2e_stub_grounding import E2ECodegenStubError  # noqa: E402
 
@@ -1240,13 +1249,6 @@ def infer_feature_path_from_text(
         for t in tok:
             if t in leaf or leaf in t or t in p.lower():
                 score += 4
-        # Common UI nouns in path help when TC is Vietnamese-only
-        if re.search(
-            r"/(evidence|case-record|person|device|file|user|role|menu|docs)(/|$)",
-            p,
-            re.I,
-        ):
-            score += 1
         scored.append((score, p))
 
     for m in re.finditer(
@@ -1470,10 +1472,8 @@ def _bake_feature_paths_per_tc(files: list, *, hint: str = "") -> list:
                 page_content=pc,
                 hint=hint,
             )
-            # Only force-fix when filename clearly names the feature
-            if path and re.search(
-                r"evidence|case-record|person|device|digital-file", leaf, re.I
-            ):
+            # Only force-fix when filename tokens align with inferred path (no domain noun list)
+            if path and leaf and leaf.replace(".page.ts", "").replace("-", ""):
                 # Prefer leaf-aligned path
                 leaf_tok = re.sub(r"[^a-z0-9]+", "-", leaf.replace(".page.ts", ""))
                 aligned = infer_feature_path_from_text(
@@ -1482,7 +1482,9 @@ def _bake_feature_paths_per_tc(files: list, *, hint: str = "") -> list:
                     tokens=_tokens_from_blob(leaf_tok, hint),
                 )
                 use = aligned or path
-                if use:
+                # Require leaf token appears in path — avoid baking unrelated suite noise
+                leaf_core = re.sub(r"[^a-z0-9]+", "", leaf_tok)
+                if use and leaf_core and leaf_core in use.lower().replace("-", "").replace("/", ""):
                     page_f.content = bake_feature_path_into_content(pc, use, force=True)
 
     return files
@@ -1676,18 +1678,18 @@ def _is_create_open_method(method: str) -> bool:
 
 
 def _render_create_open_stub(method: str) -> str:
-    """Click visible Create/Add/New — role names only (any language UI via Spec arg)."""
+    """Click Create/Add when Spec passes a label — else fail-closed (no invent regex)."""
     name = method or "clickCreateNew"
     return (
         f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
         "    const raw = _args.length ? _args[0] : undefined;\n"
+        "    if (!(raw instanceof RegExp) && !(typeof raw === 'string' && raw.trim())) {\n"
+        f"      throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+        "pass Create button label from Spec or DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
+        "    }\n"
         "    const loc = raw instanceof RegExp\n"
         "      ? this.page.getByRole('button', { name: raw }).first()\n"
-        "      : typeof raw === 'string' && raw.trim()\n"
-        "        ? this.page.getByRole('button', { name: raw }).first()\n"
-        "        : this.page.getByRole('button', {\n"
-        "            name: /tạo mới|thêm mới|create|add(?! to)|new|\\+/i,\n"
-        "          }).first();\n"
+        "      : this.page.getByRole('button', { name: raw }).first();\n"
         "    await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
         "    await loc.click();\n"
         "  }\n"
@@ -1794,11 +1796,12 @@ def _is_field_fill_method(method: str) -> bool:
 def _render_field_fill_stub(method: str) -> str:
     """
     Fill by label/placeholder derived from method tokens + Spec args.
-    Portable: getByLabel / getByPlaceholder — no app-specific selectors.
+    Fail-closed when no Spec value or no matching field (Rule 19 / P1).
     """
     name = method or "fillField"
     hint = _field_hint_from_method(name)
     hint_js = json.dumps(hint)
+    name_js = json.dumps(name)
     return f"""
   async {name}(..._args: unknown[]): Promise<void> {{
     const raw = _args.length ? _args[0] : undefined;
@@ -1818,7 +1821,10 @@ def _render_field_fill_stub(method: str) -> str:
         }}
       }}
     }}
-    if (!q) q = `E2E ${{Date.now()}}`;
+    if (!q) {{
+      throw new Error('Phase 3: ungrounded POM stub `' + {name_js} + '` — '
+        + 'pass fill value from Spec testData (E2E_GROUNDING fail-closed)');
+    }}
     const hint = new RegExp({hint_js}.replace(/\\s+/g, '\\\\s*'), 'i');
     const field = this.page.getByLabel(hint)
       .or(this.page.getByPlaceholder(hint))
@@ -1828,32 +1834,28 @@ def _render_field_fill_stub(method: str) -> str:
       await field.fill(q);
       return;
     }}
-    // Required textboxes often expose "*" in accessible name (any language)
-    const requiredBox = this.page.getByRole('textbox', {{ name: /\\*/ }}).first();
-    if (await requiredBox.isVisible().catch(() => false)) {{
-      await requiredBox.fill(q);
-      return;
-    }}
-    const box = this.page.locator(
-      'input[type="text"], input:not([type]), textarea, [role="textbox"]'
-    ).first();
-    await box.waitFor({{ state: 'visible', timeout: 15000 }});
-    await box.fill(q);
+    throw new Error('Phase 3: ungrounded POM stub `' + {name_js} + '` — '
+      + 'no matching label/placeholder for field hint (E2E_GROUNDING fail-closed)');
   }}
 """
 
 
 def _render_select_field_stub(method: str) -> str:
-    """Combobox/select by method token + optional Spec option label."""
+    """Combobox/select by method token + Spec option label — no invent first option."""
     name = method or "selectField"
     hint = _field_hint_from_method(name)
     hint_js = json.dumps(hint)
+    name_js = json.dumps(name)
     return f"""
   async {name}(..._args: unknown[]): Promise<void> {{
     const raw = _args.length ? _args[0] : undefined;
     const optLabel = typeof raw === 'string' ? raw.trim()
       : raw instanceof RegExp ? raw
       : '';
+    if (!optLabel) {{
+      throw new Error('Phase 3: ungrounded POM stub `' + {name_js} + '` — '
+        + 'pass option label from Spec (E2E_GROUNDING fail-closed)');
+    }}
     const hint = new RegExp({hint_js}.replace(/\\s+/g, '\\\\s*'), 'i');
     const field = this.page.getByRole('combobox', {{ name: hint }})
       .or(this.page.getByLabel(hint))
@@ -1864,34 +1866,26 @@ def _render_select_field_stub(method: str) -> str:
     await field.waitFor({{ state: 'visible', timeout: 15000 }});
     const tag = await field.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
     if (tag === 'select') {{
-      if (typeof optLabel === 'string' && optLabel) {{
-        await field.selectOption({{ label: optLabel }}).catch(async () => {{
-          await field.selectOption({{ index: 1 }});
-        }});
-      }} else {{
-        await field.selectOption({{ index: 1 }});
+      if (typeof optLabel === 'string') {{
+        await field.selectOption({{ label: optLabel }});
       }}
       return;
     }}
     await field.click();
-    // Searchable combobox: type query when Spec passed a string
     if (typeof optLabel === 'string' && optLabel) {{
       await field.fill(optLabel).catch(() => undefined);
     }}
     if (optLabel instanceof RegExp) {{
       const opt = this.page.getByRole('option', {{ name: optLabel }}).first();
-      if (await opt.isVisible().catch(() => false)) {{ await opt.click(); return; }}
-    }} else if (optLabel) {{
-      const opt = this.page.getByRole('option', {{ name: optLabel }})
-        .or(this.page.getByText(optLabel, {{ exact: false }}))
-        .first();
-      if (await opt.isVisible().catch(() => false)) {{ await opt.click(); return; }}
+      await opt.waitFor({{ state: 'visible', timeout: 15000 }});
+      await opt.click();
+      return;
     }}
-    // open*Search / open*Combobox with no arg — leave dropdown open (Act continues)
-    if (/open|expand|toggle|search/i.test({json.dumps(name)})) return;
-    const firstOpt = this.page.getByRole('option').nth(1)
-      .or(this.page.getByRole('option').first());
-    if (await firstOpt.isVisible().catch(() => false)) await firstOpt.click();
+    const opt = this.page.getByRole('option', {{ name: optLabel }})
+      .or(this.page.getByText(optLabel, {{ exact: false }}))
+      .first();
+    await opt.waitFor({{ state: 'visible', timeout: 15000 }});
+    await opt.click();
   }}
 """
 
@@ -1947,23 +1941,20 @@ def _is_wizard_next_method(method: str) -> bool:
 
 
 def _render_wizard_next_stub(method: str) -> str:
-    """Click Next/Continue — Spec label or portable Next regex; soft if missing."""
+    """Click Next/Continue when Spec passes a label — else fail-closed."""
     name = method or "goNext"
     return (
         f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
         "    const raw = _args.length ? _args[0] : undefined;\n"
+        "    if (!(raw instanceof RegExp) && !(typeof raw === 'string' && raw.trim())) {\n"
+        f"      throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+        "pass Next button label from Spec or DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
+        "    }\n"
         "    const nextBtn = raw instanceof RegExp\n"
         "      ? this.page.getByRole('button', { name: raw }).first()\n"
-        "      : typeof raw === 'string' && raw.trim()\n"
-        "        ? this.page.getByRole('button', { name: raw }).first()\n"
-        "        : this.page.getByRole('button', {\n"
-        "            name: /tiếp|next|continue|tiếp theo|xong|done|finish|lưu và tiếp/i,\n"
-        "          }).first();\n"
-        "    if (await nextBtn.isVisible().catch(() => false)) {\n"
-        "      await nextBtn.click();\n"
-        "      return;\n"
-        "    }\n"
-        "    // No Next yet — soft skip (wrong screen / Inspect should ground next Generate)\n"
+        "      : this.page.getByRole('button', { name: raw }).first();\n"
+        "    await nextBtn.waitFor({ state: 'visible', timeout: 15000 });\n"
+        "    await nextBtn.click();\n"
         "  }\n"
     )
 
@@ -2042,6 +2033,14 @@ def _render_smart_method_stub(
         return _render_feature_nav_stub(name, feature_path=feature_path)
     if _is_menu_nav_method(name):
         return _render_menu_nav_stub(name, feature_path=feature_path)
+
+    # Prefer Inspect DOM before soft Act stubs (P1 fail-closed without invent)
+    el = best_element_for_method(name, parse_dom_elements(dom_snapshot))
+    if el:
+        grounded = render_dom_grounded_stub(name, el)
+        if grounded:
+            return grounded
+
     if _is_create_open_method(name):
         return _render_create_open_stub(name)
     if _is_wizard_next_method(name):
@@ -2052,13 +2051,6 @@ def _render_smart_method_stub(
         return _render_field_fill_stub(name)
     if _is_form_action_method(name):
         return _render_form_action_stub(name)
-
-    # This project's Inspect DOM (selector_candidates / testId / role+name)
-    el = best_element_for_method(name, parse_dom_elements(dom_snapshot))
-    if el:
-        grounded = render_dom_grounded_stub(name, el)
-        if grounded:
-            return grounded
 
     if norm in ("clicklogout", "logout", "signout", "clicksignout"):
         return (
@@ -2444,7 +2436,10 @@ def _rewrite_ungrounded_nav_stubs(
         stub = _render_smart_method_stub(
             name, feature_path=feature_path, dom_snapshot=dom_snapshot
         )
-        if "ungrounded" in (stub or "").lower():
+        # Keep original only for pure fail stubs (no Spec-arg gate).
+        # Arg-gated stubs may mention "ungrounded"/"fail-closed" in throw text but accept Spec labels.
+        low = (stub or "").lower()
+        if "ungrounded" in low and "_args" not in (stub or ""):
             return m.group(0)
         return stub.strip()
 
@@ -2599,6 +2594,424 @@ def restore_playwright_file_suffixes(files: list) -> list:
     return out
 
 
+def _parse_locator_contract(contract: str) -> dict[str, set[str]]:
+    allowed: dict[str, set[str]] = {
+        "data-cy": set(),
+        "data-testid": set(),
+        "id": set(),
+        "name": set(),
+        "formControlName": set(),
+        "routes": set(),
+    }
+    for raw in (contract or "").splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        if key not in allowed:
+            continue
+        blob = val.strip()
+        if not blob or blob == "(none)":
+            continue
+        items = [x.strip().strip("\"'`") for x in blob.split(",")]
+        allowed[key].update(x for x in items if x)
+    return allowed
+
+
+def _id_root_token(value: str) -> str:
+    """
+    Extract grounding id from Playwright CSS compounds / OR lists.
+
+    Contract lists bare ids from FE. Models often emit:
+    - ``#field_x .child`` (descendant)
+    - ``#field_x, [formControlName="x"]`` (CSS OR; nested quotes truncate capture)
+
+    Still grounded when the first simple id root is allow-listed.
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.startswith("#"):
+        v = v[1:]
+    # CSS OR list before descendant/class — take left-most simple selector
+    if "," in v:
+        v = v.split(",", 1)[0].strip()
+    # Stop at descendant/combinator/class/attr/pseudo
+    for sep in (" ", ">", "+", "~", ".", "[", ":"):
+        if sep in v:
+            v = v.split(sep, 1)[0]
+            break
+    return v.strip(" \t\r\n,\"'`")
+
+
+def _field_id_to_form_control(root: str) -> str:
+    """Angular/JHipster convention: id=\"field_{formControlName}\"."""
+    r = (root or "").strip()
+    if r.startswith("field_") and len(r) > 6:
+        return r[6:]
+    return ""
+
+
+def _value_allowed(key: str, value: str, allowed: dict[str, set[str]]) -> bool:
+    if not value:
+        return True
+    bucket = allowed.get(key) or set()
+    if value in bucket:
+        return True
+    if key in ("data-cy", "data-testid"):
+        alt = "data-testid" if key == "data-cy" else "data-cy"
+        if value in (allowed.get(alt) or set()):
+            return True
+    if key == "id":
+        root = _id_root_token(value)
+        if root and root in bucket:
+            return True
+        if value.lstrip("#") in bucket:
+            return True
+        # Bridge: #field_X allowed when formControlName X is in contract
+        fcn = _field_id_to_form_control(root)
+        if fcn and fcn in (allowed.get("formControlName") or set()):
+            return True
+        return False
+    if key == "formControlName":
+        # Bridge reverse: control name allowed when id field_{name} is listed
+        if f"field_{value}" in (allowed.get("id") or set()):
+            return True
+    return False
+
+
+# Match full locator('…') / ("…") / (`…`) bodies so nested quotes in CSS OR survive.
+_LOCATOR_STR_RES = (
+    re.compile(r"""locator\s*\(\s*'([^']*)'"""),
+    re.compile(r'''locator\s*\(\s*"([^"]*)"'''),
+    re.compile(r"""locator\s*\(\s*`([^`]*)`"""),
+)
+_HASH_ID_IN_CSS_RE = re.compile(r"""#([A-Za-z_][\w-]*)""")
+_LOCATOR_ATTR_FCN_RE = re.compile(
+    r"""formControlName\s*=\s*["']([^"']+)["']""",
+    re.IGNORECASE,
+)
+_LOCATOR_ATTR_FCN_BARE_RE = re.compile(
+    r"""\[\s*formControlName\s*=\s*([A-Za-z_][\w-]*)\s*\]""",
+    re.IGNORECASE,
+)
+
+
+def _bucket_active(key: str, allowed: dict[str, set[str]]) -> bool:
+    if allowed.get(key):
+        return True
+    # id ↔ formControlName bridge (Angular field_* convention)
+    if key == "id" and allowed.get("formControlName"):
+        return True
+    if key == "formControlName" and allowed.get("id"):
+        return True
+    return False
+
+
+def _assert_locator_contract(files: list, locator_contract: str) -> None:
+    allowed = _parse_locator_contract(locator_contract)
+    if not any(allowed.values()):
+        return
+
+    patterns: dict[str, re.Pattern[str]] = {
+        "data-cy": re.compile(
+            r"""(?:data-cy\s*=\s*["'`]([^"'`]+)["'`]|getByTestId\s*\(\s*["'`]([^"'`]+)["'`]"""
+            r"""|locator\s*\(\s*["'`]\[data-cy=["']([^"']+)["']\]["'`])"""
+        ),
+        "data-testid": re.compile(
+            r"""(?:data-testid\s*=\s*["'`]([^"'`]+)["'`]|getByTestId\s*\(\s*["'`]([^"'`]+)["'`]"""
+            r"""|locator\s*\(\s*["'`]\[data-testid=["']([^"']+)["']\]["'`])"""
+        ),
+        # Bare HTML id= only — locator('#…') via _LOCATOR_STR_RES below
+        "id": re.compile(r"""\bid\s*=\s*["'`]([^"'`]+)["'`]"""),
+        "name": re.compile(r"""name\s*=\s*["'`]([^"'`]+)["'`]"""),
+        "formControlName": re.compile(r"""formControlName\s*=\s*["'`]([^"'`]+)["'`]"""),
+        "routes": re.compile(r"""routerLink\s*=\s*["'`](/[^"'`]+)["'`]"""),
+    }
+    violations: list[str] = []
+    for f in files:
+        path = (getattr(f, "path", "") or "").replace("\\", "/").lower()
+        if "/pages/" not in f"/{path}/" and "/specs/" not in f"/{path}/":
+            continue
+        content = getattr(f, "content", "") or ""
+        for key, pat in patterns.items():
+            if not _bucket_active(key, allowed):
+                continue
+            for m in pat.finditer(content):
+                value = next((g for g in m.groups() if g), "")
+                value = (value or "").strip()
+                if value and not _value_allowed(key, value, allowed):
+                    violations.append(f"{f.path}: {key}={value}")
+        # locator("…") bodies: validate #id roots + formControlName attrs (CSS OR safe)
+        if _bucket_active("id", allowed) or _bucket_active("formControlName", allowed):
+            for str_pat in _LOCATOR_STR_RES:
+                for m in str_pat.finditer(content):
+                    body = m.group(1) or ""
+                    if _bucket_active("id", allowed):
+                        for id_m in _HASH_ID_IN_CSS_RE.finditer(body):
+                            raw = (id_m.group(1) or "").strip()
+                            if raw and not _value_allowed("id", raw, allowed):
+                                violations.append(f"{f.path}: id={raw}")
+                    if _bucket_active("formControlName", allowed):
+                        for fcn_m in _LOCATOR_ATTR_FCN_RE.finditer(body):
+                            fcn = (fcn_m.group(1) or "").strip()
+                            if fcn and not _value_allowed(
+                                "formControlName", fcn, allowed
+                            ):
+                                violations.append(f"{f.path}: formControlName={fcn}")
+                        for fcn_m in _LOCATOR_ATTR_FCN_BARE_RE.finditer(body):
+                            fcn = (fcn_m.group(1) or "").strip()
+                            if fcn and not _value_allowed(
+                                "formControlName", fcn, allowed
+                            ):
+                                violations.append(f"{f.path}: formControlName={fcn}")
+    if violations:
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for v in violations:
+            if v in seen:
+                continue
+            seen.add(v)
+            uniq.append(v)
+        short = "; ".join(uniq[:5])
+        raise E2EStrictGateError(
+            "LocatorNotFound",
+            "E2E_GROUNDING: generated selectors violate locator contract "
+            f"(first: {short})",
+        )
+
+
+_ROLE_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:role|actor|authRole|auth_role|E2E_ROLE|vai\s*trò|quyền)\b"
+)
+_LANDMARK_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:feature\s*entry|landmark|popup|dialog|modal|screen|màn|form|tab)\b"
+)
+# Keywords OR labeled expectedOutcome: <prose> (Approved TC often has VN text without "assert")
+_EXPECTED_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:expected|kỳ\s*vọng|must|phải|assert|thành\s*công|hiển\s*thị|"
+    r"visible|success|redirect|contain|thấy|đúng|pass(?:ed)?|verify|kiểm\s*tra)\b"
+)
+_EXPECTED_LABELED_RE = re.compile(
+    r"(?im)^\s*expected(?:Outcome|Result|_result)?\s*:\s*(.+)$"
+)
+_EMPTY_OUTCOME = frozenset(
+    {"", "(none)", "-", "n/a", "na", "null", "none", "tbd", "todo"}
+)
+
+
+def _has_expected_outcome(auth_hints: str) -> bool:
+    """True when TC carries a real expected outcome (field or keyword), not just empty."""
+    text = auth_hints or ""
+    for m in _EXPECTED_LABELED_RE.finditer(text):
+        val = (m.group(1) or "").strip().strip("\"'`")
+        if val.lower() not in _EMPTY_OUTCOME and len(val) >= 2:
+            return True
+    if _EXPECTED_SIGNAL_RE.search(text):
+        return True
+    # Non-trivial expected prose after "Expected result:" style dumps (no label)
+    return False
+
+
+def _validate_required_context(
+    *,
+    feature_path: str,
+    auth_hints: str,
+    mode: str,
+    locator_contract: str = "",
+) -> None:
+    if mode in ("none", "public"):
+        return
+    missing: list[str] = []
+    if not (feature_path or "").strip():
+        missing.append("featurePath")
+    if not _ROLE_SIGNAL_RE.search(auth_hints or ""):
+        missing.append("role/authRef")
+    # Soft landmark: FE contract + featurePath already prove a screen exists
+    has_grounding = bool((feature_path or "").strip() and (locator_contract or "").strip())
+    if not has_grounding and not _LANDMARK_SIGNAL_RE.search(auth_hints or ""):
+        missing.append("landmark")
+    if not _has_expected_outcome(auth_hints or ""):
+        missing.append("expectedOutcome")
+    if missing:
+        need = ", ".join(missing)
+        raise E2EStrictGateError(
+            "ContextMissing",
+            f"[Thiếu Context] thiếu {need}. Vui lòng bổ sung context trước khi Generate E2E.",
+        )
+
+
+def _assert_no_brittle_locators(files: list) -> None:
+    violations: list[str] = []
+    for f in files:
+        p = (getattr(f, "path", "") or "").replace("\\", "/").lower()
+        if "/pages/" not in f"/{p}/" and "/specs/" not in f"/{p}/":
+            continue
+        text = getattr(f, "content", "") or ""
+        if re.search(r"nth-child\s*\(", text):
+            violations.append(f"{getattr(f, 'path', '')}: nth-child")
+        if re.search(r"locator\(\s*['\"][^'\"]*>\s*[^'\"]*['\"]\s*\)\.first\(", text):
+            violations.append(f"{getattr(f, 'path', '')}: brittle locator().first()")
+    if violations:
+        raise E2EStrictGateError(
+            "LocatorNotFound",
+            "Brittle selector detected. Use data-testid/data-cy/role-based locators. "
+            + "; ".join(violations[:4]),
+        )
+
+
+# Env keys Desktop / orchestrator actually inject (Rule 23).
+_ALLOWED_E2E_ENV_EXACT = frozenset(
+    {
+        "E2E_BASE_URL",
+        "E2E_USERNAME",
+        "E2E_PASSWORD",
+        "E2E_STORAGE_STATE",
+        "E2E_LOGIN_PATH",
+        "E2E_ROLE",
+        "E2E_AUTH_ROLE",
+        "E2E_FEATURE_PATH",
+        "E2E_AUTH_MODE",
+    }
+)
+_ALLOWED_E2E_ENV_ROLE_RE = re.compile(
+    r"^E2E_[A-Z0-9_]+_(?:USERNAME|PASSWORD)$"
+)
+_PROCESS_ENV_E2E_RE = re.compile(
+    r"""process\.env(?:\.|\[['\"])(E2E_[A-Z0-9_]+)(?:['"]\])?"""
+)
+# Also catch: (process.env as any).E2E_FOO / process.env['E2E_FOO']
+_PROCESS_ENV_E2E_BRACKET_RE = re.compile(
+    r"""process\.env\s*(?:as\s+any)?\s*\.\s*(E2E_[A-Z0-9_]+)"""
+    r"""|process\.env\s*\[\s*['"](E2E_[A-Z0-9_]+)['"]\s*\]""",
+    re.I,
+)
+
+
+def _is_allowed_e2e_env_key(key: str) -> bool:
+    k = (key or "").strip().upper()
+    if not k.startswith("E2E_"):
+        return False
+    if k in _ALLOWED_E2E_ENV_EXACT:
+        return True
+    return bool(_ALLOWED_E2E_ENV_ROLE_RE.match(k))
+
+
+def _parse_testdata_seeds(test_data: str) -> dict[str, str]:
+    """key=value from TC testData — exclude path/auth meta."""
+    meta = {
+        "path",
+        "route",
+        "url",
+        "featurepath",
+        "feature_path",
+        "authrole",
+        "auth_role",
+        "role",
+        "roles",
+        "authrequired",
+        "auth_required",
+        "landmark",
+        "multirole",
+        "trace",
+    }
+    out: dict[str, str] = {}
+    for line in (test_data or "").splitlines():
+        m = re.match(r"^\s*([A-Za-z_][\w-]*)\s*[:=]\s*(.+)$", line)
+        if not m:
+            continue
+        key = m.group(1).strip()
+        val = m.group(2).strip().strip("\"'")
+        if not val or key.lower() in meta:
+            continue
+        out[key] = val
+        # Also index UPPER_SNAKE for env-name matching
+        out[re.sub(r"[^A-Za-z0-9]+", "_", key).upper()] = val
+    return out
+
+
+def _env_key_to_seed_candidates(env_key: str) -> list[str]:
+    """E2E_STORAGE_ROOM_NAME → STORAGE_ROOM_NAME, ROOM_NAME, roomName…"""
+    k = (env_key or "").upper()
+    if k.startswith("E2E_"):
+        k = k[4:]
+    parts = [p for p in k.split("_") if p]
+    cands = [k, "_".join(parts)]
+    if len(parts) >= 2:
+        cands.append("_".join(parts[1:]))  # drop STORAGE prefix guess
+        cands.append(parts[-1])
+        cands.append(parts[-2] + "_" + parts[-1] if len(parts) >= 2 else parts[-1])
+    # camelCase last two
+    if len(parts) >= 2:
+        camel = parts[-2].lower() + "".join(p.title() for p in parts[-1:])
+        cands.append(camel)
+    return [c for c in cands if c]
+
+
+def _rewrite_or_assert_e2e_env_usage(files: list, *, test_data: str = "") -> None:
+    """
+    Rule 23: ban invented process.env.E2E_* outside Desktop/orchestrator inject set.
+    If TC testData has a matching seed → rewrite to string literal; else ContextMissing.
+    """
+    seeds = _parse_testdata_seeds(test_data)
+    invented: list[str] = []
+    for f in files:
+        p = (getattr(f, "path", "") or "").replace("\\", "/").lower()
+        if "/pages/" not in f"/{p}/" and "/specs/" not in f"/{p}/":
+            continue
+        # Skip shared auth helper (legitimately reads E2E_USERNAME etc.)
+        if p.endswith("ensureauthenticated.ts") or "/_shared/" in f"/{p}/":
+            # Still scan shared for invented keys beyond allowlist
+            pass
+        text = getattr(f, "content", "") or ""
+        keys: set[str] = set()
+        for m in _PROCESS_ENV_E2E_RE.finditer(text):
+            keys.add(m.group(1).upper())
+        for m in _PROCESS_ENV_E2E_BRACKET_RE.finditer(text):
+            keys.add((m.group(1) or m.group(2) or "").upper())
+        new_text = text
+        for key in sorted(keys):
+            if _is_allowed_e2e_env_key(key):
+                continue
+            seed_val = None
+            for cand in _env_key_to_seed_candidates(key):
+                if cand in seeds:
+                    seed_val = seeds[cand]
+                    break
+                # case-insensitive seed keys
+                for sk, sv in seeds.items():
+                    if sk.upper() == cand.upper():
+                        seed_val = sv
+                        break
+                if seed_val:
+                    break
+            if seed_val is not None:
+                lit = json.dumps(seed_val)
+                # Replace common access patterns with literal
+                patterns = [
+                    rf"process\.env\.{key}\b",
+                    rf"process\.env\[['\"]{key}['\"]\]",
+                    rf"\(process\.env\s+as\s+any\)\.{key}\b",
+                ]
+                for pat in patterns:
+                    new_text = re.sub(pat, lit, new_text)
+                continue
+            invented.append(f"{getattr(f, 'path', '')}: {key}")
+        if new_text != text:
+            f.content = new_text
+    if invented:
+        raise E2EStrictGateError(
+            "ContextMissing",
+            "[Thiếu Context] invented process.env."
+            + invented[0].split(": ")[-1]
+            + " (Rule 23) — runner không inject key này. "
+            "Dùng TC testData seed hoặc allowlist E2E_* (BASE_URL/USERNAME/PASSWORD/"
+            "STORAGE_STATE/LOGIN_PATH/ROLE/FEATURE_PATH/E2E_<ROLE>_USERNAME|PASSWORD). "
+            + "; ".join(invented[:4]),
+        )
+
+
 def apply_e2e_codegen_guards(
     files: list,
     *,
@@ -2609,8 +3022,11 @@ def apply_e2e_codegen_guards(
     auth_hints: str = "",
     headed: bool = False,
     feature_path: str = "",
+    locator_contract: str = "",
+    strict_gate: bool = False,
     enforce_journey: bool = True,
     enforce_stubs: bool = True,
+    test_data: str = "",
 ) -> list:
     """Run deterministic guards across generated E2E files.
 
@@ -2779,6 +3195,13 @@ def apply_e2e_codegen_guards(
         and not is_login_or_auth_tc(test_case_title, path_blob)
     ):
         mode = "ui_helper"
+    if strict_gate:
+        _validate_required_context(
+            feature_path=feature_path,
+            auth_hints=auth_hints,
+            mode=mode,
+            locator_contract=locator_contract or "",
+        )
     prefer_storage = wants_storage_state(mode)
     for f in normalized:
         p = f.path.replace("\\", "/").lower()
@@ -2915,12 +3338,84 @@ def apply_e2e_codegen_guards(
         f.content = normalize_collapsed_imports(f.content or "")
 
     if enforce_journey:
-        from app.services.e2e_journey_enforce import assert_feature_journey_ok
+        # Final fail-safe for ui_helper mode: ensure Auth step exists before
+        # strict journey validation. Some model outputs keep unusual Spec shapes
+        # that may bypass earlier inject pass.
+        if mode == "ui_helper":
+            helper_path = _module_prefix_for_fixtures(normalized) + "/fixtures/auth.helper.ts"
+            for f in normalized:
+                p = (getattr(f, "path", "") or "").replace("\\", "/")
+                is_spec = (
+                    getattr(f, "kind", "") == "spec"
+                    or "/specs/" in f"/{p}/"
+                    or p.endswith(".spec.ts")
+                )
+                if not is_spec:
+                    continue
+                if _is_login_or_auth_spec(p, getattr(f, "content", "") or ""):
+                    continue
+                if not _spec_has_ensure_authenticated_call(f.content or ""):
+                    fixed = inject_ensure_authenticated(
+                        f.content or "",
+                        spec_path=getattr(f, "path", "") or "",
+                        helper_path=helper_path,
+                    )
+                    fixed = inject_feature_entry_step(
+                        fixed,
+                        feature_path=stub_feature_path,
+                        require_auth_call=True,
+                    )
+                    f.content = _reorder_feature_entry_before_act(
+                        _reorder_feature_entry_after_auth(
+                            normalize_collapsed_imports(fixed)
+                        )
+                    )
+        from app.services.e2e_journey_enforce import (
+            assert_feature_journey_ok,
+            heal_feature_journey_order,
+            heal_missing_business_assertions,
+        )
+
+        # Always heal Auth→Feature order before strict enforce (LLM often navigates first).
+        for f in normalized:
+            p = (getattr(f, "path", "") or "").replace("\\", "/")
+            is_spec = (
+                getattr(f, "kind", "") == "spec"
+                or "/specs/" in f"/{p}/"
+                or p.endswith(".spec.ts")
+            )
+            if not is_spec:
+                continue
+            if _is_login_or_auth_spec(p, getattr(f, "content", "") or ""):
+                continue
+            f.content = heal_feature_journey_order(
+                _reorder_feature_entry_before_act(
+                    _reorder_feature_entry_after_auth(f.content or "")
+                )
+            )
+
+        if strict_gate:
+            for f in normalized:
+                p = (getattr(f, "path", "") or "").replace("\\", "/")
+                is_spec = (
+                    getattr(f, "kind", "") == "spec"
+                    or "/specs/" in f"/{p}/"
+                    or p.endswith(".spec.ts")
+                )
+                if not is_spec:
+                    continue
+                if _is_login_or_auth_spec(p, getattr(f, "content", "") or ""):
+                    continue
+                f.content = heal_missing_business_assertions(
+                    f.content or "",
+                    expected_hint=auth_hints or "",
+                )
 
         assert_feature_journey_ok(
             normalized,
             mode=mode,
             test_case_title=test_case_title,
+            enforce_business_assertions=strict_gate,
         )
 
     if enforce_stubs:
@@ -2940,6 +3435,14 @@ def apply_e2e_codegen_guards(
 
     # Per-TC deep-link bake (force) — fixes suite noise like /admin/case-record on Evidence TCs
     _bake_feature_paths_per_tc(normalized, hint=feature_path)
+    _assert_locator_contract(normalized, locator_contract)
+    # Rule 23: ban invented E2E_* env (always — not only strict_gate)
+    _rewrite_or_assert_e2e_env_usage(
+        normalized,
+        test_data=test_data or auth_hints or "",
+    )
+    if strict_gate:
+        _assert_no_brittle_locators(normalized)
 
     return normalized
 
@@ -2990,6 +3493,14 @@ def _spec_calls_ensure_authenticated(content: str) -> bool:
             text,
         )
     )
+
+
+def _spec_has_ensure_authenticated_call(content: str) -> bool:
+    """True only when Spec actually calls ensureAuthenticated(page)."""
+    text = content or ""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    text = re.sub(r"//.*?$", " ", text, flags=re.MULTILINE)
+    return bool(re.search(r"""\bensureAuthenticated\s*\(\s*page\b""", text))
 
 
 def spec_calls_ensure_authenticated(content: str) -> bool:
@@ -3170,7 +3681,7 @@ def ensure_auth_helper_files(
         has_feature_spec = True
         feature_specs.append(f)
         content = getattr(f, "content", "") or ""
-        if not _spec_calls_ensure_authenticated(content):
+        if not _spec_has_ensure_authenticated_call(content):
             feature_need_auth.append(f)
 
     shared_prefix = _module_prefix_for_fixtures(out)
@@ -3240,7 +3751,9 @@ def ensure_feature_entry_on_feature_specs(
             feature_path=feature_path,
             require_auth_call=require_auth_call,
         )
-        f.content = _reorder_feature_entry_after_auth(f.content or "")
+        f.content = _reorder_feature_entry_before_act(
+            _reorder_feature_entry_after_auth(f.content or "")
+        )
     return files
 
 
@@ -3257,12 +3770,17 @@ def inject_feature_entry_step(
     Skip only when Phase-2 ``spec_has_feature_entry`` already passes.
     Always insert AFTER ``ensureAuthenticated`` when present — never before Auth.
     """
-    from app.services.e2e_journey_enforce import spec_has_feature_entry
-
     text = spec_content or ""
-    if spec_has_feature_entry(text):
+    has_explicit_entry = bool(
+        re.search(r"test\.step\s*\(\s*['\"][^'\"]*feature\s*entry", text, re.IGNORECASE)
+        or re.search(r"\b(?:gotoFeature|openFeature)\s*\(", text)
+        or (re.search(r"E2E_FEATURE_PATH", text) and re.search(r"page\.goto\s*\(", text))
+    )
+    if has_explicit_entry:
         # Repair: injected Feature entry sometimes landed before Auth.
-        return _reorder_feature_entry_after_auth(text)
+        return _reorder_feature_entry_before_act(
+            _reorder_feature_entry_after_auth(text)
+        )
     if require_auth_call and not re.search(r"ensureAuthenticated\s*\(\s*page\s*\)", text):
         return text
 
@@ -3297,11 +3815,17 @@ def inject_feature_entry_step(
         re.DOTALL | re.IGNORECASE,
     )
     if auth_step:
-        return _reorder_feature_entry_after_auth(text[: auth_step.end()] + step + text[auth_step.end() :])
+        return _reorder_feature_entry_before_act(
+            _reorder_feature_entry_after_auth(
+                text[: auth_step.end()] + step + text[auth_step.end() :]
+            )
+        )
     # Bare ensureAuthenticated — semicolon optional
     m = re.search(r"await\s+ensureAuthenticated\s*\(\s*page\s*\)\s*;?", text)
     if m:
-        return _reorder_feature_entry_after_auth(text[: m.end()] + step + text[m.end() :])
+        return _reorder_feature_entry_before_act(
+            _reorder_feature_entry_after_auth(text[: m.end()] + step + text[m.end() :])
+        )
     # Do NOT prepend at test() open when Auth exists only as import — wait for call.
     if re.search(r"ensureAuthenticated", text):
         return text
@@ -3319,14 +3843,39 @@ def inject_feature_entry_step(
         return m.group(0) + step
 
     new_text, n = pattern.subn(repl, text, count=1)
-    return new_text if n else text
+    return (
+        _reorder_feature_entry_before_act(_reorder_feature_entry_after_auth(new_text))
+        if n
+        else text
+    )
 
 
 _FEATURE_ENTRY_BLOCK_RE = re.compile(
-    r"\n?\s*await\s+test\.step\s*\(\s*['\"][^'\"]*Feature entry[^'\"]*['\"]\s*,\s*"
+    r"\n?\s*await\s+test\.step\s*\(\s*['\"][^'\"]*"
+    r"(?:Feature\s*entry|Vào\s*chức\s*năng|feature\s*entry|mở\s*màn)"
+    r"[^'\"]*['\"]\s*,\s*"
     r"async\s*\(\s*\)\s*=>\s*\{.*?\}\s*\)\s*;",
     re.DOTALL | re.IGNORECASE,
 )
+
+
+_TEST_STEP_BLOCK_RE = re.compile(
+    r"\n?\s*await\s+test\.step\s*\(\s*['\"](?P<title>[^'\"]+)['\"]\s*,\s*"
+    r"async\s*\(\s*\)\s*=>\s*\{.*?\}\s*\)\s*;",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _is_meta_step_title(title: str) -> bool:
+    t = (title or "").strip()
+    return bool(
+        re.search(r"(?:feature\s*entry|vào\s*chức\s*năng|mở\s*màn)", t, re.IGNORECASE)
+        or re.search(
+            r"(?:đăng\s*nhập|login|authenticat|^\d+\.\s*auth\b)",
+            t,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _reorder_feature_entry_after_auth(spec_content: str) -> str:
@@ -3344,6 +3893,37 @@ def _reorder_feature_entry_after_auth(spec_content: str) -> str:
     if not auth2:
         return text
     return without[: auth2.end()] + block + without[auth2.end() :]
+
+
+def _reorder_feature_entry_before_act(spec_content: str) -> str:
+    """Move Feature entry test.step before the first Act test.step when misplaced."""
+    text = spec_content or ""
+    entry = _FEATURE_ENTRY_BLOCK_RE.search(text)
+    if not entry:
+        return text
+    first_act: re.Match[str] | None = None
+    for m in _TEST_STEP_BLOCK_RE.finditer(text):
+        title = (m.group("title") or "").strip()
+        if _is_meta_step_title(title):
+            continue
+        first_act = m
+        break
+    if not first_act:
+        return text
+    if entry.start() < first_act.start():
+        return text
+    block = entry.group(0)
+    without = text[: entry.start()] + text[entry.end() :]
+    act2 = None
+    for m in _TEST_STEP_BLOCK_RE.finditer(without):
+        title = (m.group("title") or "").strip()
+        if _is_meta_step_title(title):
+            continue
+        act2 = m
+        break
+    if not act2:
+        return text
+    return without[: act2.start()] + block + without[act2.start() :]
 
 
 def inject_ensure_authenticated(

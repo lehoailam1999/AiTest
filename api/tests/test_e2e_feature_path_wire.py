@@ -82,3 +82,12 @@ def test_e2e_request_accepts_feature_path_field():
         feature_path="/evidence",
     )
     assert req.feature_path == "/evidence"
+
+
+def test_usable_feature_path_rejects_thieu_context_placeholder():
+    from app.llm.base import _is_usable_e2e_feature_path
+
+    assert _is_usable_e2e_feature_path("/admin/evidence") is True
+    assert _is_usable_e2e_feature_path("[Thiếu Context]") is False
+    assert _is_usable_e2e_feature_path("/[Thiếu Context]") is False
+    assert _is_usable_e2e_feature_path("") is False

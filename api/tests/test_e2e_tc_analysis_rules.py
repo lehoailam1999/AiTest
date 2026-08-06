@@ -42,6 +42,13 @@ def test_e2e_analysis_rules_feature_path_contract():
     assert "featurePath:" in text
 
 
+def test_e2e_analysis_rules_step_expansion_actionable():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "Hành động" in text
+    assert "Thiếu Context" in text or "[Thiếu Context]" in text
+    assert "kiểm tra" in text.lower()
+
+
 def test_e2e_fast_rules_keep_mandatory_classes():
     fast = E2E_TC_FROM_ANALYSIS_RULES_FAST
     assert "Cover đủ" in fast or "cover" in fast.lower()
@@ -112,7 +119,8 @@ def test_engine_e2e_overlay_does_not_restate_sot_steps_expected():
     assert full.count("OUTPUT COMPLETENESS") == 1
     assert full.count("Step Expansion") == 1
     assert full.count("Expected Binding") == 1
-    assert full.count("[Hành động]->[Element]") == 1
+    assert full.count("[Hành động]") == 1
+    assert "Element" in full
     assert "EP" in full or "BVA" in full or "biên" in full
     # Overlay must not restate the action→element essay a second time.
     assert "element từ FLOWS" not in full

@@ -1,6 +1,11 @@
 /**
- * IDE-local interactive commands for Generate Unit / API.
- * Desktop owns filesystem read; Backend only receives ephemeral contextPacket.
+ * Desktop-local context for Generate Unit / API (not an IDE plugin).
+ *
+ * Flow (AI CLI unchanged):
+ *   Desktop đọc FS / Code Index → contextPacket
+ *   → POST /generate-unit → Backend gọi AI CLI (Cursor/agy) sinh code
+ *
+ * Backend chỉ nhận packet ephemeral; không thay runner AI CLI.
  */
 import type { TestCase } from "../api/types";
 import type { AITestContextPacket } from "./contextPacket/types";
@@ -93,6 +98,13 @@ export type BuildGenerateContextInput = {
   codeAliases?: Record<string, string[]> | null;
   broadLocalContext?: boolean;
   purpose?: "generate-unit" | "generate-tc";
+  /**
+   * Prefer Phase 4 index→retrieve→packet when `.ai-test/index.db` exists (or sync).
+   * Default true on Tauri Desktop. Legacy projectIntelligence is fallback only.
+   */
+  preferIndexContext?: boolean;
+  /** Sync code index if missing (default true when preferIndexContext) */
+  syncIndexIfMissing?: boolean;
 };
 
 export type BuildGenerateContextResult = {
@@ -103,15 +115,98 @@ export type BuildGenerateContextResult = {
   packetForApi: AITestContextPacket;
   primaryPath: string;
   primaryContent: string;
+  /** Phase 5 — TestPlan for AAA hint (optional; legacy callers ignore) */
+  planner?: import("./testPlanner/types").TestPlan;
+  /** Phase 5 — code index schema stamp when index-backed */
+  indexVersion?: string;
+  /** How primary was resolved */
+  contextSource?: string;
 };
 
 /**
- * buildUnitContext — IDE-local closure + testing hints → contextPacket.
+ * buildUnitContext — prefer Phase 4 index-backed packet; fallback IDE closure.
  * Does not call Backend; does not persist source.
  */
 export async function buildGenerateContext(
   input: BuildGenerateContextInput
 ): Promise<BuildGenerateContextResult> {
+  const preferIndex = input.preferIndexContext !== false && isTauri();
+  const langLower = (input.language || "").toLowerCase();
+  // Phase 1 index = TS/JS only. Skip for CLR/JVM/Python/Go Unit (use legacy scope).
+  const skipIndexForLang =
+    /c#|csharp|dotnet|\.net|f#|vb|java|kotlin|python|go\b|php|ruby|swift/.test(langLower);
+  // Only prefer index for explicit JS/TS — empty language must NOT use TS index
+  // (Forensic often has C# + ClientApp; empty lang + index → wrong Angular SUT).
+  const preferJsTsIndex =
+    !skipIndexForLang &&
+    /typescript|javascript|tsx|jsx|\bts\b|\bjs\b|node/.test(langLower);
+
+  if (preferIndex && preferJsTsIndex) {
+    try {
+      const { createTauriCodeIndexIo } = await import("./codeIndex/tauriIo");
+      const { buildIndexBackedContext } = await import("./contextBuilder");
+      const { isUnsuitableUnitPrimary } = await import("./retrieval/rankScore");
+      const built = await buildIndexBackedContext({
+        projectRoot: input.projectRoot,
+        testCase: input.testCase,
+        io: createTauriCodeIndexIo(),
+        language: input.language,
+        framework: input.framework,
+        syncIfMissing: input.syncIndexIfMissing !== false,
+        forceTestType: "Unit",
+      });
+      const primaryPath = built.packet.files[0]?.pathRel || "";
+      if (
+        built.packet.files.length &&
+        built.packet.files[0]?.content &&
+        primaryPath &&
+        !isUnsuitableUnitPrimary(primaryPath)
+      ) {
+        let packet: AITestContextPacket = {
+          ...built.packet,
+          purpose: input.purpose ?? "generate-unit",
+          meta: {
+            ...built.packet.meta,
+            projectId: input.projectId,
+            language: input.language || built.packet.meta.language,
+            framework: input.framework || built.packet.meta.framework,
+          },
+        };
+        // Optional user/heuristic override: promote manual primary if present in packet or readable
+        const manual = (input.manualPrimaryPath || "").replace(/\\/g, "/");
+        if (manual && packet.files[0]?.pathRel !== manual) {
+          const hit = packet.files.find((f) => f.pathRel === manual);
+          if (hit && !isUnsuitableUnitPrimary(hit.pathRel)) {
+            packet = {
+              ...packet,
+              files: [
+                { ...hit, role: "primary" },
+                ...packet.files.filter((f) => f.pathRel !== manual).map((f) => ({
+                  ...f,
+                  role: f.role === "primary" ? "dependency" : f.role,
+                })),
+              ],
+            };
+          }
+        }
+        const primary = primaryFile(packet);
+        const view = toUnitContextView(packet);
+        return {
+          packet,
+          view,
+          packetForApi: packetForApi(packet),
+          primaryPath: primary?.pathRel ?? view.primaryPath ?? "",
+          primaryContent: primary?.content ?? view.primaryContent ?? "",
+          planner: built.plan,
+          indexVersion: built.snapshot.meta.schema,
+          contextSource: "code-index",
+        };
+      }
+    } catch {
+      // fall through to legacy IDE context builder
+    }
+  }
+
   const policy = input.broadLocalContext ? BROAD_CONTEXT_POLICY : DEFAULT_CONTEXT_POLICY;
   const packet = await buildContextPacket({
     purpose: input.purpose ?? "generate-unit",
@@ -129,12 +224,21 @@ export async function buildGenerateContext(
 
   const primary = primaryFile(packet);
   const view = toUnitContextView(packet);
+  let planner: import("./testPlanner/types").TestPlan | undefined;
+  try {
+    const { planFromTestCase } = await import("./testPlanner/planFromTestCase");
+    planner = planFromTestCase({ testCaseId: input.testCase.id });
+  } catch {
+    planner = undefined;
+  }
   return {
     packet,
     view,
     packetForApi: packetForApi(packet),
     primaryPath: primary?.pathRel ?? view.primaryPath ?? "",
     primaryContent: primary?.content ?? view.primaryContent ?? "",
+    planner,
+    contextSource: "project-intelligence",
   };
 }
 
@@ -162,6 +266,12 @@ export type IdeLocalGenerateBody = {
   contextSource?: string;
   /** Absolute local root — BE ProjectInspector (Step 2) */
   projectRoot?: string;
+  /** Phase 5 — optional TestPlan (AAA hint); legacy API ignores if absent */
+  planner?: import("./testPlanner/types").TestPlan;
+  /** Phase 5 — mirror of packet files for clients that read contextFiles */
+  contextFiles?: { path: string; content: string }[];
+  /** Phase 5 — code index schema when index-backed */
+  indexVersion?: string;
 };
 
 export function buildIdeLocalGenerateBody(input: {
@@ -184,8 +294,13 @@ export function buildIdeLocalGenerateBody(input: {
   contextSource?: string;
   /** Absolute project root for stack inspect */
   projectRoot?: string | null;
+  planner?: import("./testPlanner/types").TestPlan | null;
+  indexVersion?: string | null;
 }): IdeLocalGenerateBody {
   const primary = primaryFile(input.packet);
+  const contextFiles = (input.packet.files || [])
+    .filter((f) => f.pathRel && f.content != null)
+    .map((f) => ({ path: f.pathRel, content: f.content }));
   return {
     projectId: input.projectId,
     testCaseId: input.testCaseId,
@@ -206,5 +321,8 @@ export function buildIdeLocalGenerateBody(input: {
     ...(input.agentOverride != null ? { agentOverride: input.agentOverride } : {}),
     ...(input.contextSource ? { contextSource: input.contextSource } : {}),
     ...(input.projectRoot ? { projectRoot: input.projectRoot } : {}),
+    ...(input.planner ? { planner: input.planner } : {}),
+    ...(contextFiles.length ? { contextFiles } : {}),
+    ...(input.indexVersion ? { indexVersion: input.indexVersion } : {}),
   };
 }

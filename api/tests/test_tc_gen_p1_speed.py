@@ -1,4 +1,4 @@
-"""P1 TC gen speed: E2E full-by-default, no numeric ceiling, slim rules."""
+"""P1 TC gen speed: E2E fast-by-default, soft ceiling on fast, slim rules."""
 
 from __future__ import annotations
 
@@ -19,12 +19,13 @@ from app.llm.tc_speed import (
 )
 
 
-def test_e2e_speed_defaults_full_no_ceiling():
+def test_e2e_speed_defaults_fast_with_soft_ceiling():
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_E2E_SPEED", None)
         os.environ.pop("AITEST_TC_E2E_MAX_PER_MODULE", None)
-        assert resolve_tc_speed_mode("e2e", {}) == "full"
-        assert resolve_max_tc_per_module("e2e", "fast", {}) is None
+        os.environ.pop("AITEST_TC_E2E_FAST_MAX_PER_MODULE", None)
+        assert resolve_tc_speed_mode("e2e", {}) == "fast"
+        assert resolve_max_tc_per_module("e2e", "fast", {}) == 10
         assert resolve_max_tc_per_module("e2e", "full", {}) is None
 
 
@@ -34,6 +35,10 @@ def test_engine_hint_speed_and_max_override():
     assert resolve_max_tc_per_module("e2e", "fast", {"maxPerModule": 4}) == 4
     with mock.patch.dict(os.environ, {"AITEST_TC_E2E_MAX_PER_MODULE": "10"}, clear=False):
         assert resolve_max_tc_per_module("e2e", "full", {}) == 10
+    with mock.patch.dict(
+        os.environ, {"AITEST_TC_E2E_FAST_MAX_PER_MODULE": "0"}, clear=False
+    ):
+        assert resolve_max_tc_per_module("e2e", "fast", {}) is None
 
 
 def test_knowledge_enough_skip_source_scan():

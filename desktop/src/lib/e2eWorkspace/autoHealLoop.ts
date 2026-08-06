@@ -5,6 +5,7 @@
 import type { E2EFileEntry, E2EWorkspaceManifest } from "./types";
 
 export const E2E_AUTO_HEAL_MAX_ATTEMPTS = 3;
+export const E2E_AUTO_HEAL_MAX_CAP = 5;
 
 export type AutoHealProgress = {
   attempt: number;
@@ -47,7 +48,10 @@ export type AutoHealLoopResult = {
 export async function runE2EWithAutoHeal(
   input: RunE2EWithAutoHealInput
 ): Promise<AutoHealLoopResult> {
-  const maxAttempts = Math.max(1, input.maxAttempts ?? E2E_AUTO_HEAL_MAX_ATTEMPTS);
+  const maxAttempts = Math.min(
+    E2E_AUTO_HEAL_MAX_CAP,
+    Math.max(1, input.maxAttempts ?? E2E_AUTO_HEAL_MAX_ATTEMPTS)
+  );
   let manifest = input.manifest;
   let healed = false;
   let attempts = 0;

@@ -4,6 +4,7 @@ const CLI_LABELS: Record<string, string> = {
   "cursor-cli": "Cursor CLI",
   "gemini-cli": "Gemini CLI",
   "claude-cli": "Claude CLI",
+  "antigravity-cli": "Antigravity CLI",
   ollama: "Ollama",
   "custom-script": "Custom script",
 };

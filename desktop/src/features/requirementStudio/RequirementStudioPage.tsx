@@ -22,7 +22,6 @@ import {
   FileTextOutlined,
   InboxOutlined,
   ReloadOutlined,
-  SplitCellsOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
@@ -45,7 +44,6 @@ export type StudioFocus = "docs" | "knowledge" | "freeze";
 
 export type StudioStatusSnapshot = {
   fileCount: number;
-  chunkCount: number;
   knowledgeStatus: string;
   hasSnapshot?: boolean;
 };
@@ -93,7 +91,6 @@ export default function RequirementStudioPage({
   const [listLoading, setListLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [rechunking, setRechunking] = useState(false);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -110,11 +107,10 @@ export default function RequirementStudioPage({
 
   const readyCount = files.filter((f) => f.parseStatus === "ready").length;
   const errorCount = files.filter((f) => f.parseStatus === "error").length;
-  const chunkTotal = files.reduce((n, f) => n + (f.chunkCount ?? 0), 0);
-  const needsRechunk = files.some(
-    (f) => f.parseStatus === "ready" && (f.chunkCount ?? 0) === 0
+  // Phân tích dựa SRS extracted_text.
+  const canBuildKnowledge = files.some(
+    (f) => f.parseStatus === "ready" && (f.charCount ?? 0) > 0
   );
-  const canBuildKnowledge = chunkTotal > 0;
 
   const emitStatus = useCallback(
     (
@@ -124,7 +120,6 @@ export default function RequirementStudioPage({
     ) => {
       onStatusChange?.({
         fileCount: nextFiles.length,
-        chunkCount: nextFiles.reduce((sum, f) => sum + (f.chunkCount ?? 0), 0),
         knowledgeStatus: kw?.status ?? "empty",
         hasSnapshot: snapFlag ?? hasSnapshot,
       });
@@ -229,9 +224,10 @@ export default function RequirementStudioPage({
       const ok = res.items.filter((f) => f.parseStatus === "ready").length;
       const bad = res.items.length - ok;
       if (bad === 0) {
+        const one = res.items[0];
         message.success(
           res.items.length === 1
-            ? `Đã thêm «${res.items[0].fileName}» · ${res.items[0].chunkCount ?? 0} đoạn`
+            ? `Đã thêm «${one.fileName}» · ${(one.charCount ?? 0).toLocaleString()} ký tự`
             : `Đã thêm ${res.items.length} tài liệu`
         );
       } else {
@@ -253,35 +249,6 @@ export default function RequirementStudioPage({
       await loadFiles(workspace.id, id === selectedId ? null : selectedId);
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const rechunkAll = async () => {
-    if (!workspace) return;
-    setRechunking(true);
-    try {
-      const res = await requirementStudio.rechunkWorkspace(workspace.id);
-      message.success(`Đã tách lại ${res.filesUpdated} file · ${res.chunkCount} đoạn`);
-      await loadFiles(workspace.id, selectedId);
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRechunking(false);
-    }
-  };
-
-  const rechunkOne = async () => {
-    if (!selectedId || !workspace) return;
-    setRechunking(true);
-    try {
-      const updated = await requirementStudio.rechunkFile(selectedId);
-      message.success(`Đã tách lại · ${updated.chunkCount ?? 0} đoạn`);
-      await loadFiles(workspace.id, selectedId);
-      setDetail(updated);
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRechunking(false);
     }
   };
 
@@ -326,6 +293,9 @@ export default function RequirementStudioPage({
   // Progressive enrich: poll until Cursor/LLM merge finishes (không hiện heuristic giữa chừng)
   useEffect(() => {
     if (!workspace?.id || !knowledge?.enrichPending) return;
+    const ENRICH_POLL_MS = 1500;
+    const ENRICH_POLL_INITIAL_MS = 1500;
+    const ENRICH_POLL_ERROR_MS = 3000;
     let cancelled = false;
     const wid = workspace.id;
     const started = Date.now();
@@ -354,23 +324,32 @@ export default function RequirementStudioPage({
         }
         if (Date.now() - started > maxMs) {
           setBuilding(false);
-          message.warning("Phân tích AI quá lâu — bạn có thể Phân tích lại sau.");
+          // Unstick UI: stop treating enrich as pending so heuristic payload can show.
+          setKnowledge({
+            ...kw,
+            enrichPending: false,
+            enrichError:
+              kw.enrichError ||
+              "Phân tích AI quá lâu — đang hiện bản dự phòng. Bấm Phân tích lại nếu cần.",
+            status: kw.status === "building" ? "ready" : kw.status,
+          });
+          message.warning("Phân tích AI quá lâu — hiện bản dự phòng. Có thể Phân tích lại.");
           return;
         }
         window.setTimeout(() => {
           void tick();
-        }, 2500);
+        }, ENRICH_POLL_MS);
       } catch {
         if (!cancelled) {
           window.setTimeout(() => {
             void tick();
-          }, 4000);
+          }, ENRICH_POLL_ERROR_MS);
         }
       }
     };
     const t = window.setTimeout(() => {
       void tick();
-    }, 2000);
+    }, ENRICH_POLL_INITIAL_MS);
     return () => {
       cancelled = true;
       window.clearTimeout(t);
@@ -404,7 +383,7 @@ export default function RequirementStudioPage({
           }
         : {
             title: "Tài liệu",
-            lead: "Tải lên và tách đoạn tài liệu, sau đó tiến hành phân tích.",
+            lead: "Tải lên tài liệu SRS (parse xong) rồi Phân tích.",
           };
 
   return (
@@ -481,24 +460,6 @@ export default function RequirementStudioPage({
         />
       ) : (
         <>
-          {needsRechunk ? (
-            <Alert
-              type="warning"
-              showIcon
-              title="Có tài liệu đã đọc nhưng chưa tách đoạn"
-              action={
-                <Button
-                  size="small"
-                  type="primary"
-                  loading={rechunking}
-                  onClick={() => void rechunkAll()}
-                >
-                  Tách ngay
-                </Button>
-              }
-            />
-          ) : null}
-
           {knowledge?.status === "stale" ? (
             <Alert
               type="info"
@@ -519,7 +480,7 @@ export default function RequirementStudioPage({
                 {hasFiles ? (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {readyCount} ổn
-                    {errorCount ? ` · ${errorCount} lỗi` : ""} · {chunkTotal} đoạn
+                    {errorCount ? ` · ${errorCount} lỗi` : ""}
                   </Typography.Text>
                 ) : null}
               </div>
@@ -548,7 +509,7 @@ export default function RequirementStudioPage({
 
               {uploading ? (
                 <Typography.Text type="secondary" style={{ padding: "0 12px 8px", fontSize: 12 }}>
-                  Đang tải lên & tách đoạn…
+                  Đang tải lên…
                 </Typography.Text>
               ) : null}
 
@@ -587,9 +548,7 @@ export default function RequirementStudioPage({
                               <Tag color={st.color} style={{ marginInlineEnd: 4 }}>
                                 {st.text}
                               </Tag>
-                              {(f.chunkCount ?? 0) > 0
-                                ? `${f.chunkCount} đoạn`
-                                : formatSize(f.byteSize)}
+                              {formatSize(f.byteSize)}
                             </span>
                           </span>
                         </button>
@@ -602,7 +561,7 @@ export default function RequirementStudioPage({
 
             <section className="studio-detail" aria-label="Chi tiết tài liệu">
               {!selected ? (
-                <Empty description="Chọn một tài liệu để xem nội dung và các đoạn đã tách" />
+                <Empty description="Chọn một tài liệu để xem nội dung" />
               ) : (
                 <Spin spinning={detailLoading}>
                   <div className="studio-detail-head">
@@ -623,19 +582,9 @@ export default function RequirementStudioPage({
                       </Typography.Text>
                     </div>
                     <Space>
-                      {selected.parseStatus === "ready" ? (
-                        <Button
-                          size="small"
-                          icon={<SplitCellsOutlined />}
-                          loading={rechunking}
-                          onClick={() => void rechunkOne()}
-                        >
-                          Tách lại
-                        </Button>
-                      ) : null}
                       <Popconfirm
                         title="Gỡ tài liệu này?"
-                        description="Các đoạn gắn với file cũng sẽ bị gỡ."
+                        description="Nội dung đã đọc của file cũng sẽ bị gỡ."
                         okText="Gỡ"
                         cancelText="Huỷ"
                         okButtonProps={{ danger: true }}

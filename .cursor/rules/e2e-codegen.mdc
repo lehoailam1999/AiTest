@@ -1,45 +1,21 @@
 ---
-description: E2ECG — sinh code Playwright E2E đa dự án (SoT mirror cho Cursor)
+description: E2ECG pointer — single runtime SoT
 globs: api/app/llm/e2e_codegen_rules.py,api/app/llm/base.py,api/app/routers/generate_e2e.py,api/app/services/e2e_*.py,desktop/src/lib/e2eWorkspace/**/*,desktop/src/features/e2e-test/**
 alwaysApply: false
 ---
 
-# E2ECG — Generate E2E Test Code
+# E2ECG — Single Source Pointer
 
-## Chỗ nào là SoT? (tránh sửa loạn / lặp)
+Runtime rule SoT (duy nhat):
+- `api/app/llm/e2e_codegen_rules.py` (E2ECG Rules 1-27)
 
-| Việc | File SoT | Mirror Cursor |
-|------|----------|---------------|
-| Rules 1–19 inject Generate | `api/app/llm/e2e_codegen_rules.py` | **file này** |
-| Phase C Feature entry only | `api/app/llm/e2e_journey_rules.py` | `e2e-feature-journey.mdc` |
-| Grounding portable (path/fail-closed) | `api/app/llm/e2e_grounding_rules.py` | `e2e-grounding.mdc` |
-| Sinh TC từ Phân tích | `e2e_tc_analysis_rules.py` | `e2e-tc-from-analysis.mdc` |
-| Heal stub runtime | `e2e_codegen_guard.py` | không viết rule app vào đây |
+Compatibility/adapter:
+- `api/app/llm/e2e_journey_rules.py` (thin layer only)
 
-**Sửa contract → `.py` + `.mdc` cùng lúc.** Guard chỉ heal — không thay SoT.
+Runtime enforcement (khong phai rule authoring):
+- `api/app/services/e2e_codegen_guard.py`
+- `api/app/services/e2e_journey_enforce.py`
 
-## Portable (mọi dự án)
-
-- Deep-link `E2E_FEATURE_PATH` / FE route · locator từ DOM/FE label của **dự án đó**
-- Cấm hardcode app/Forensic · cấm `Phase 3: ungrounded` trên menu/arrange/fill/select/`open*Combobox|Search`/create/wizard (`completeStep*|goNext*`)
-- Spec truyền value/label · unpack object assert · không `String(object)` / `input.first()` chung
-- Inspect DOM + FE source → Generate; giữ `domSnapshot` per-TC cho Verify/Heal
-- Feature path: auto từ TC/Spec/FE/Inspect — bake `gotoFeature`; cấm bắt user set tay khi đã có tín hiệu
-- Layout: `{Req}/{TC}/specs` + config · `_shared/{pages|fixtures|types}` (không copy auth/POM mỗi TC)
-- Import: mỗi `import` một dòng; `ensureAuthenticated` chỉ từ `_shared/fixtures/auth.helper` (guard heal mash/`from 'x'import`)
-- `test.step` indexes liên tục `0..N` (guard renumber sau Auth/Feature inject)
-- Cấm orphan `import { Foo, type }` — dùng `import { Foo, type Bar }` / `import type { Bar }`
-
-## Rule 19 (tóm tắt)
-
-Feature deep-link · menu no-op nếu shell mở · Create/fill/select/open-combobox từ getByRole|Label ·
-wizard Next từ Spec/DOM · Spec args · Guard = safety net (không thay Inspect).
-
-Chi tiết Rules 1–18: xem `e2e_codegen_rules.py` (inject system prompt).
-
-## Khi sửa
-
-1. Contract codegen → `e2e_codegen_rules.py` + file này  
-2. Feature entry → `e2e_journey_rules.py` + `e2e-feature-journey.mdc`  
-3. Không nhét selector cụ thể app vào rule
-4. Step renumber / type-import heal → `e2e_codegen_guard.py` (`renumber_spec_test_steps`, `_parse_import_entries`)
+Guideline:
+- Khong duplicate rule text o file `.mdc` nay.
+- Khi doi rule, sua duy nhat `e2e_codegen_rules.py`.

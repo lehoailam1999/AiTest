@@ -1,5 +1,6 @@
 """CLI adapter package."""
 
+from app.llm.cli.adapters.antigravity_cli import AntigravityCLIAdapter
 from app.llm.cli.adapters.base_cli import BaseCLIAdapter
 from app.llm.cli.adapters.claude_cli import ClaudeCLIAdapter
 from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
@@ -14,4 +15,5 @@ __all__ = [
     "CursorCLIAdapter",
     "OllamaCLIAdapter",
     "CustomScriptCLIAdapter",
+    "AntigravityCLIAdapter",
 ]

@@ -33,6 +33,8 @@ export type E2EEnvConfig = {
   role?: string;
   /** Injected as E2E_FEATURE_PATH — Feature entry after auth (Phase 1) */
   featurePath?: string;
+  /** Injected as E2E_<ROLE>_USERNAME|PASSWORD for multi-actor Specs */
+  roleCredentials?: Record<string, { username: string; password: string }>;
 };
 
 export type E2EWorkspaceManifest = {
@@ -66,5 +68,6 @@ export function defaultE2EEnv(partial?: Partial<E2EEnvConfig>): E2EEnvConfig {
     password: partial?.password?.trim() || undefined,
     role: partial?.role?.trim() || undefined,
     featurePath: partial?.featurePath?.trim() || undefined,
+    roleCredentials: partial?.roleCredentials,
   };
 }

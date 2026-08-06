@@ -51,7 +51,7 @@ export const connection = {
     projectId: string,
     body: {
       provider: string;
-      modelName?: string;
+      modelName?: string | null;
       baseUrl?: string;
       apiKey?: string;
       runnerMode?: string;
@@ -228,6 +228,12 @@ export const generateUnit = {
     projectRoot?: string;
     packagePrefix?: string | null;
     module?: string;
+    /** Phase 5 — optional TestPlan (Mock→Arrange→Act→Assert hint) */
+    planner?: Record<string, unknown>;
+    /** Phase 5 — optional file list; packet still preferred when present */
+    contextFiles?: { path: string; content: string }[];
+    /** Phase 5 — code index schema stamp */
+    indexVersion?: string;
   }) => authFetch<UnitResult>("/generate-unit", { method: "POST", body: JSON.stringify(body) }),
   /** Step 2 — inspect stack without generating */
   inspect: (body: {
@@ -393,8 +399,20 @@ export const generateE2e = {
     executionContext?: string;
     /** Feature entry path — baked into Spec at Generate (Phase wire) */
     featurePath?: string;
+    /** Grounding allow-list built from FE/DOM hooks */
+    locatorContract?: string;
+    /** Deterministic Page Object scaffold (method contract) */
+    pomScaffold?: string;
     /** Skip ensure_auth_seed_roles after LLM when Desktop already has artifact */
     skipAuthSeed?: boolean;
+    /** Desktop already inspected — do not API auto-inspect */
+    skipAutoInspect?: boolean;
+    /** Phase 5 — optional TestPlan (Fixture→Locator→Action→Assertion→Cleanup) */
+    planner?: Record<string, unknown>;
+    /** Phase 5 — optional file list when relatedSources empty */
+    contextFiles?: { path: string; content: string }[];
+    /** Phase 5 — code index schema stamp */
+    indexVersion?: string;
   }) =>
     authFetch<E2EGenerateResult>("/generate-e2e", {
       method: "POST",
@@ -542,7 +560,18 @@ export const generateE2e = {
     maxRetries?: number;
     writeFile?: boolean;
     healFailures?: boolean;
-    healItems?: { testCaseId: string; primarySpecPath: string; domSnapshot?: string }[];
+    healItems?: {
+      testCaseId: string;
+      primarySpecPath: string;
+      domSnapshot?: string;
+      featurePath?: string;
+      sourceFileName?: string;
+      sourceCode?: string;
+      relatedSources?: { path: string; content: string }[];
+      locatorContract?: string;
+    }[];
+    /** Desktop already inspected — API must not auto-refill login-wall DOM */
+    skipAutoInspect?: boolean;
     testCaseId?: string;
     runCommand?: string[];
     headed?: boolean;
@@ -923,7 +952,7 @@ export const reporting = {
     }),
 };
 
-/** R1–R2 — Requirement Studio: upload FileRef + DocumentChunk */
+/** Requirement Studio: upload FileRef + Knowledge */
 export const requirementStudio = {
   listWorkspaces: (projectId: string) =>
     authFetch<{ items: import("./types").RequirementStudioWorkspace[] }>(
@@ -952,7 +981,6 @@ export const requirementStudio = {
       deletedSnapshots: number;
       deletedChatMessages: number;
       deletedChatSessions: number;
-      deletedChunks: number;
       deletedFiles: number;
       deletedKnowledge: number;
     }>(`/requirement-workspaces/${workspaceId}`, { method: "DELETE" }),
@@ -968,22 +996,8 @@ export const requirementStudio = {
       form
     );
   },
-  rechunkWorkspace: (workspaceId: string) =>
-    authFetch<{ filesUpdated: number; chunkCount: number }>(
-      `/requirement-workspaces/${workspaceId}/rechunk`,
-      { method: "POST", body: "{}" }
-    ),
   getFile: (fileId: string) =>
     authFetch<import("./types").RequirementFileRef>(`/requirement-files/${fileId}`),
-  listChunks: (fileId: string) =>
-    authFetch<{ items: import("./types").DocumentChunk[] }>(
-      `/requirement-files/${fileId}/chunks`
-    ),
-  rechunkFile: (fileId: string) =>
-    authFetch<import("./types").RequirementFileRef>(`/requirement-files/${fileId}/rechunk`, {
-      method: "POST",
-      body: "{}",
-    }),
   deleteFile: (fileId: string) =>
     authFetch<{ status: string; id: string }>(`/requirement-files/${fileId}`, {
       method: "DELETE",

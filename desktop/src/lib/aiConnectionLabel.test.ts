@@ -26,4 +26,16 @@ describe("aiConnectionDisplayLabel", () => {
       "AI CLI"
     );
   });
+
+  it("shows Antigravity CLI when cliType is antigravity-cli", () => {
+    assert.equal(
+      aiConnectionDisplayLabel({
+        provider: "antigravity",
+        backendType: "antigravity",
+        runnerMode: "AI_CLI",
+        cliType: "antigravity-cli",
+      }),
+      "Antigravity CLI"
+    );
+  });
 });

@@ -29,6 +29,18 @@ services:
       JWT_AUDIENCE: "AITest.Client"
       JWT_ACCESS_HOURS: "8"
       CORS_ORIGINS: "http://localhost:5173,http://localhost:4200"
+      # Rule retrieval rollout flags (Phase 3)
+      AITEST_RULE_RETRIEVE_MODE: "selective" # full | selective
+      AITEST_RULE_RETRIEVE_E2E: "1" # phase4 default: selective ON (set 0 to disable only E2E)
+      AITEST_RULE_RETRIEVE_ANALYSIS: "1" # phase4 default: selective ON (set 0 to disable only Analysis)
+      AITEST_RULE_RETRIEVE_TCGEN: "1" # phase4 default: selective ON (set 0 to disable only TC-gen)
+      # TC gen wall-clock (Cursor oneshot × modules)
+      AITEST_TC_E2E_SPEED: "fast"
+      AITEST_TC_UNIT_SPEED: "fast"
+      AITEST_TC_E2E_FAST_MAX_PER_MODULE: "10"
+      AITEST_TC_FANOUT_BATCH_MODULES_CURSOR: "3"
+      AITEST_TC_FANOUT_CONCURRENCY_CURSOR: "4"
+      AITEST_TC_CURSOR_HIDDEN_CHAT: "0"
     ports:
       - "5100:8080"
     depends_on:

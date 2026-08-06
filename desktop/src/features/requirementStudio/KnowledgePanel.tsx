@@ -92,7 +92,7 @@ export default function KnowledgePanel({
 }: KnowledgePanelProps) {
   const status = knowledge?.status ?? "empty";
   const enrichPending = Boolean(knowledge?.enrichPending);
-  const payload = enrichPending ? null : knowledge?.payload;
+  const payload = knowledge?.payload ?? null;
   const [active, setActive] = useState<SectionKey>("summary");
 
   const nav = useMemo(() => {
@@ -109,9 +109,8 @@ export default function KnowledgePanel({
     if (prefer && sectionCount(payload, "summary") === 0) setActive(prefer.key);
   }, [knowledge?.version]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Only block UI while enrich is actually in flight. Do not key off status=building
-  // alone — a failed enrich used to leave building forever and hide payload/errors.
-  if ((enrichPending || building) && !knowledge?.enrichError) {
+  // If still building and no heuristic yet, show spinner only.
+  if (enrichPending && building && !payload && !knowledge?.enrichError) {
     return (
       <div className="knowledge-panel">
         <Empty
@@ -121,7 +120,7 @@ export default function KnowledgePanel({
               Đang phân tích bằng AI…
               <br />
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Cursor oneshot có thể mất vài phút — kết quả hiện khi xong (không dùng bản tạm).
+                Oneshoot CLI thường ~2–6 phút (SRS lớn có thể lâu hơn) — kết quả cập nhật khi xong.
               </Typography.Text>
             </span>
           }
@@ -158,7 +157,7 @@ export default function KnowledgePanel({
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={
             <span>
-              Chưa có bản Phân tích. Sau khi tài liệu đã tách đoạn, bấm{" "}
+              Chưa có bản Phân tích. Sau khi SRS parse xong, bấm{" "}
               <strong>Phân tích</strong>.
             </span>
           }
@@ -178,7 +177,7 @@ export default function KnowledgePanel({
             style={{ marginTop: 12 }}
             type="info"
             showIcon
-            title="Cần ít nhất một tài liệu đã tách đoạn"
+            title="Cần ít nhất một tài liệu SRS đã parse (có nội dung)"
           />
         ) : null}
       </div>
@@ -192,12 +191,21 @@ export default function KnowledgePanel({
 
   return (
     <div className={`knowledge-panel knowledge-panel--split${loading ? " is-loading" : ""}`}>
+      {enrichPending ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="info"
+          showIcon
+          title="Đang chạy AI enrich…"
+          description="Đang hiển thị bản heuristic tạm. Khi AI xong sẽ merge và cập nhật (builder → llm-cli)."
+        />
+      ) : null}
       {knowledge?.enrichError ? (
         <Alert
           style={{ marginBottom: 12 }}
           type="warning"
           showIcon
-          title="Phân tích AI không hoàn tất"
+          title="Phân tích AI không hoàn tất — đang dùng bản heuristic"
           description={knowledge.enrichError}
         />
       ) : null}
@@ -213,8 +221,8 @@ export default function KnowledgePanel({
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             v{knowledge?.version ?? 0}
             {knowledge?.builder ? ` · ${knowledge.builder}` : ""}
-            {knowledge?.sourceChunkCount
-              ? ` · ${knowledge.sourceFileCount} file / ${knowledge.sourceChunkCount} đoạn`
+            {knowledge?.sourceFileCount
+              ? ` · ${knowledge.sourceFileCount} file`
               : ""}
             {timingLine ? ` · ${timingLine}` : ""}
           </Typography.Text>

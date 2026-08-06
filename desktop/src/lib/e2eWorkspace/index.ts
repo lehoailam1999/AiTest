@@ -26,6 +26,20 @@ export type {
 } from "./e2eJobRunner";
 export { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
 export {
+  assertTcReadyForE2eGen,
+  enrichTestDataWithFeaturePath,
+  hasPathMarker,
+  hasTestDataSeed,
+  hasActionableStep,
+  isUsableFeaturePath,
+  mergeTcWithInferredFeaturePath,
+} from "./assertTcReadyForE2eGen";
+export {
+  buildE2eRouteCatalog,
+  matchFeaturePathFromCatalog,
+} from "./e2eRouteCatalog";
+export type { E2eRouteCatalog, RouteMatchResult } from "./e2eRouteCatalog";
+export {
   createInspectDomCache,
   inspectCacheKey,
   isLikelyLoginWallDom,
@@ -39,9 +53,15 @@ export {
   classifyE2eFailure,
   aggregateE2eMetrics,
   formatE2eMetricsReport,
+  toStandardTaxonomy,
   E2E_FAIL_CATEGORY_LABELS,
 } from "./e2eFailureMetrics";
-export type { E2eFailCategory, E2eRunMetrics, E2eMetricRow } from "./e2eFailureMetrics";
+export type {
+  E2eFailCategory,
+  E2eStandardTaxonomy,
+  E2eMetricRow,
+  E2eRunMetrics,
+} from "./e2eFailureMetrics";
 export {
   e2eSpecPathsMatch,
   findSpecReportForPrimary,

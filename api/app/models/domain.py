@@ -326,26 +326,10 @@ class RequirementFile(TimestampMixin, Base):
     preview_html: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_kind: Mapped[str] = mapped_column(String(20), default="inline")
     content_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    chunk_status: Mapped[str] = mapped_column(String(40), default="none", index=True)
-
-
-class DocumentChunk(TimestampMixin, Base):
-    """R2 — ChunkStore: ordinal text slices from a RequirementFile."""
-
-    __tablename__ = "document_chunks"
-
-    id: Mapped[uuid.UUID] = _pk()
-    file_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
-    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
-    ordinal: Mapped[int] = mapped_column(Integer, default=0)
-    text: Mapped[str] = mapped_column(Text)
-    char_count: Mapped[int] = mapped_column(Integer, default=0)
-    heading: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    meta_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class KnowledgeWorkspace(TimestampMixin, Base):
-    """R3 — structured Knowledge built from ChunkStore (SoT Phase 1)."""
+    """R3 — structured Knowledge built from parsed SRS (extracted_text)."""
 
     __tablename__ = "knowledge_workspaces"
 

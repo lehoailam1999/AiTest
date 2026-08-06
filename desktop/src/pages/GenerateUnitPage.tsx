@@ -875,40 +875,81 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         : await ideListSourceFiles(localPath, sourceExtensionsForLanguage(language));
     const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
       ?.codeAliases;
-    const ranked = await resolveTcSourcePrimaryCached({
-      projectId: project.id,
-      workspaceId: wsId,
-      testCase: tc,
-      allSourcePaths: paths.map((p) => displayRel(localPath, p)),
-      useAi: useAiScope && aiReady !== false,
-      codeAliases: aliases,
-      preferredFramework: framework === "auto" ? testFwResolution?.framework : framework,
-    });
-    const primaryRel = (ranked.primary || "").replace(/\\/g, "/");
-    const relatedRels = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
-    if (!primaryRel && !(isApiKind && openApiSpec.trim())) {
-      throw new Error(
-        isApiKind
-          ? `Không tìm handler/OpenAPI cho «${tc.title}». Thêm openapi.yaml hoặc chọn file thủ công.`
-          : `Không tìm được mã nguồn cho «${tc.title}» (module=${tc.module || "—"}). ` +
-              `Gợi ý: chọn file thủ công, hoặc thêm «code: ClassName» / «path: src/...» vào TestData, ` +
-              `hoặc cấu hình codeAliases trên project.`
-      );
+
+    const langLower = (language || "").toLowerCase();
+    const useJsTsIndex =
+      !/c#|csharp|dotnet|\.net|f#|vb|java|kotlin|python|go\b|php|ruby|swift/.test(langLower) &&
+      (!!langLower || /typescript|javascript|tsx|jsx|\bts\b|\bjs\b|node/.test(langLower));
+
+    // Phase 4: JS/TS → index-first. C#/other → legacy rank first (index has no .cs yet).
+    // See docs/CODEGEN_LEGACY_CLEANUP.md
+    let ctx;
+    let primaryRel = "";
+    let relatedRels: string[] = [];
+
+    if (useJsTsIndex) {
+      ctx = await buildGenerateContext({
+        projectRoot: localPath,
+        projectId: project.id,
+        language: language || "",
+        framework: framework === "auto" ? "" : framework || "",
+        testCase: tc,
+        allSourcePaths: paths,
+        manualPrimaryPath: null,
+        forcedRelatedPaths: null,
+        broadLocalContext,
+        codeAliases: aliases,
+        preferIndexContext: true,
+        syncIndexIfMissing: true,
+      });
+      primaryRel = (ctx.primaryPath || "").replace(/\\/g, "/");
+      relatedRels = (ctx.packet.files || [])
+        .filter((f) => f.role !== "primary")
+        .map((f) => f.pathRel);
     }
+
+    if (!primaryRel && !(isApiKind && openApiSpec.trim())) {
+      const ranked = await resolveTcSourcePrimaryCached({
+        projectId: project.id,
+        workspaceId: wsId,
+        testCase: tc,
+        allSourcePaths: paths.map((p) => displayRel(localPath, p)),
+        useAi: useAiScope && aiReady !== false,
+        codeAliases: aliases,
+        preferredFramework: framework === "auto" ? testFwResolution?.framework : framework,
+      });
+      primaryRel = (ranked.primary || "").replace(/\\/g, "/");
+      relatedRels = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
+      if (!primaryRel && !(isApiKind && openApiSpec.trim())) {
+        throw new Error(
+          isApiKind
+            ? `Không tìm handler/OpenAPI cho «${tc.title}». Thêm openapi.yaml hoặc chọn file thủ công.`
+            : `Không tìm được mã nguồn cho «${tc.title}» (module=${tc.module || "—"}). ` +
+                `Gợi ý: chọn file thủ công, hoặc thêm «code: ClassName» / «path: src/...» vào TestData.`
+        );
+      }
+      ctx = await buildGenerateContext({
+        projectRoot: localPath,
+        projectId: project.id,
+        language: language || "",
+        framework: framework === "auto" ? "" : framework || "",
+        testCase: tc,
+        allSourcePaths: paths,
+        manualPrimaryPath: primaryRel || null,
+        forcedRelatedPaths: relatedRels,
+        broadLocalContext,
+        codeAliases: aliases,
+        preferIndexContext: false,
+      });
+      primaryRel = (ctx.primaryPath || primaryRel).replace(/\\/g, "/");
+    }
+
+    if (!ctx) {
+      throw new Error("Không tạo được context packet cho Unit gen.");
+    }
+
     const relName = primaryRel || (isApiKind ? "openapi.yaml" : "snippet.txt");
     // Context packet + API body luôn khóa theo tc.id — không dùng shared UI selection.
-    const ctx = await buildGenerateContext({
-      projectRoot: localPath,
-      projectId: project.id,
-      language: language || "",
-      framework: framework === "auto" ? "" : framework || "",
-      testCase: tc,
-      allSourcePaths: paths,
-      manualPrimaryPath: primaryRel || null,
-      forcedRelatedPaths: relatedRels,
-      broadLocalContext,
-      codeAliases: aliases,
-    });
     if (!batch) {
       setContextPacket(ctx.view);
       setUnitPacketV1(ctx.packet);
@@ -931,6 +972,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       openApiSpec: isApiKind ? openApiSpec || undefined : undefined,
       workspaceId: wsId,
       projectRoot: localPath,
+      planner: ctx.planner,
+      indexVersion: ctx.indexVersion,
+      contextSource: ctx.contextSource,
     });
     const res = isApiKind
       ? await generateApiTest.run(genBody)
@@ -1613,6 +1657,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             openApiSpec: isApiKind ? openApiSpec || undefined : undefined,
             workspaceId: wsId,
             projectRoot: localPath,
+            planner: ctx.planner,
+            indexVersion: ctx.indexVersion,
+            contextSource: ctx.contextSource,
           });
         }
       }
@@ -1774,37 +1821,68 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       return null;
     }
     const failedStages = current.verify?.stages.filter((s) => !s.success) ?? [];
-    const repairContext = [
-      `Agent Staging run: ${current.runId}`,
-      `Target file: ${selected.entry.targetRel}`,
-      `Sandbox Auto-Repair (Step 3)`,
-      ...(failedStages.length
-        ? failedStages.map(
-            (s) =>
-              `[${s.stage}] command=${s.command} exit=${s.exitCode}\n${(s.logExcerpt || "").slice(-2500)}`
-          )
-        : ["Verify failed (no stage logs)."]),
-    ].join("\n\n");
+    const errorLog = failedStages
+      .map(
+        (s) =>
+          `[${s.stage}] command=${s.command} exit=${s.exitCode}\n${(s.logExcerpt || "").slice(-2500)}`
+      )
+      .join("\n\n");
+    const { buildUnitRepairContext, UNIT_REPAIR_TOP_K } = await import(
+      "../lib/unitWorkspace/unitFailureMetrics"
+    );
+    const { repairContext, failClass } = buildUnitRepairContext({
+      runId: current.runId,
+      targetRel: selected.entry.targetRel,
+      errorLog: errorLog || "Verify failed (no stage logs).",
+      attempt: (current.repairAttempts ?? 0) + 1,
+      maxAttempts: 3,
+    });
+
+    // Phase 6 slim repair: SUT + failing test + Top-K deps (no full packet re-expand)
+    const primary =
+      unitPacketV1?.files?.find((f) => f.role === "primary") ||
+      (contextPacket?.primaryPath
+        ? {
+            pathRel: contextPacket.primaryPath,
+            content: contextPacket.primaryContent || "",
+          }
+        : null);
+    const deps =
+      unitPacketV1?.files
+        ?.filter((f) => f.role === "dependency")
+        .slice(0, UNIT_REPAIR_TOP_K) ??
+      contextPacket?.related
+        ?.filter((r) => r.role === "dependency")
+        .slice(0, UNIT_REPAIR_TOP_K)
+        .map((r) => ({ pathRel: r.pathRel, content: r.content })) ??
+      [];
 
     setRepairing(true);
     try {
       const repairBody = {
         projectId: project.id,
         testCaseId,
-        sourceFileName: current.sourceFileName || selected.entry.targetRel,
-        sourceCode: selected.content,
+        sourceFileName:
+          primary?.pathRel || current.sourceFileName || selected.entry.targetRel,
+        sourceCode: primary?.content || selected.content,
         framework: framework === "auto" ? "" : framework || "",
         language: language ?? undefined,
-        className: guessClassFromCode(selected.content, selected.entry.targetRel),
+        className: guessClassFromCode(
+          primary?.content || selected.content,
+          primary?.pathRel || selected.entry.targetRel
+        ),
         module: selectedTc?.module || undefined,
         packagePrefix: current.packagePrefix,
         projectRoot: localPath,
-        relatedSources:
-          contextPacket?.related
-            .filter((r) => r.role === "dependency")
-            .map((r) => ({ path: r.pathRel, content: r.content, role: r.role })) ?? [],
-        contextPacket: unitPacketV1 ?? undefined,
-        repairContext,
+        relatedSources: [
+          { path: selected.entry.targetRel, content: selected.content, role: "test" },
+          ...deps.map((d) => ({
+            path: d.pathRel,
+            content: d.content,
+            role: "dependency",
+          })),
+        ],
+        repairContext: `${repairContext}\n\n(failClass=${failClass})`,
         ...(isApiKind ? { openApiSpec: openApiSpec || undefined } : {}),
       };
       const res = isApiKind

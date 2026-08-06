@@ -1,0 +1,63 @@
+---
+description: Rule Index — map chức năng → tags/profile; governance khi sửa rule LLM
+globs: api/app/llm/**/*,api/app/rules/**/*,api/app/features/requirement_studio/**/*,api/app/services/e2e_*.py,api/app/services/test_planner.py,desktop/src/lib/retrieval/**/*,desktop/src/lib/ruleIndex/**/*,desktop/src/lib/e2eWorkspace/**/*
+alwaysApply: false
+---
+
+# Rule Index (governance)
+
+> **Cursor/agent đọc file này** khi sửa rule, prompt inject, hoặc retrieval.  
+> Chi tiết audit Phase 0: [`docs/RULE_INDEX_PLAN.md`](../../docs/RULE_INDEX_PLAN.md) · inventory: [`docs/rule_inventory.csv`](../../docs/rule_inventory.csv)
+
+## Phân tầng SoT (đích)
+
+| Lớp | Vị trí | Ghi chú |
+|-----|--------|---------|
+| **Registry (Phase 1–2)** | `api/app/rules/` | `rule_registry.yaml` + loader (UUTGS/E2ECG/analysis/tc_gen wired) |
+| **Runtime inject (hiện tại)** | `api/app/llm/*_rules.py`, `knowledge_builder.py` | Đang full-block inject |
+| **Cursor pointer** | `.cursor/rules/*.mdc` | Không copy full UUTGS/E2ECG — chỉ map + link |
+| **Docs** | `docs/AI_TEST_RULES.md`, `docs/rule_*.csv` | Team + audit |
+
+**Không** duplicate essay rule trong `.mdc`. Sửa nội dung rule → registry (Phase 1) hoặc file Python SoT tương ứng + **cập nhật `docs/rule_inventory.csv`**.
+
+## Chức năng → profile (selective retrieve — Phase 2+)
+
+| Chức năng | Profile | Tags bắt buộc (retrieve) |
+|------------|---------|--------------------------|
+| Phân tích enrich | `PROFILE-ANALYSIS-ENRICH` | fidelity, features, flows, validation, schema |
+| Chat Knowledge | `PROFILE-ANALYSIS-CHAT` | knowledge-diff, chat |
+| Sinh TC Unit | `PROFILE-TC-UNIT` | traceability, features, validation, br, format |
+| Sinh TC E2E | `PROFILE-TC-E2E` | traceability, flows, path, auth-who, coverage |
+| Sinh Unit code | `PROFILE-UNIT-CODEGEN` | unit, mock, assertion, isolation, sut-safety, portable, naming |
+| Sinh E2E code | `PROFILE-E2E-CODEGEN` | playwright, auth, locator, journey, dor, portable, grounding |
+
+**Hiện tại:** UUTGS đã đọc từ registry; Unit hỗ trợ profile retrieve qua `AITEST_RULE_RETRIEVE_MODE=selective` (MVP).  
+E2E selective bật thêm `AITEST_RULE_RETRIEVE_E2E=1`.  
+Phase 3: Analysis selective (`AITEST_RULE_RETRIEVE_ANALYSIS=1`) + TC-gen selective (`AITEST_RULE_RETRIEVE_TCGEN=1`).
+Phase 3 observability: runtime inject logs `RuleProfile apply profile=<...> mode=<...> ids=<rule_ids> chars=<n>`.
+Phase 4: `.mdc` pointer-only; `mode=selective` mặc định ON profile cho Analysis/TC-gen/E2E (gate env dùng để tắt cục bộ).
+
+Globs `api/app/rules/**` và `desktop/src/lib/ruleIndex/**` đã có scaffold — không báo đỏ khi mở rule này.
+
+## Pointer rule theo domain (sửa nội dung ở file runtime)
+
+| Domain | Cursor rule | Runtime SoT |
+|--------|-------------|-------------|
+| Phân tích | [`requirement-analysis.mdc`](requirement-analysis.mdc) | `knowledge_builder.py`, `analysis_rules.py` |
+| Sinh TC Unit | [`unit-tc-from-analysis.mdc`](unit-tc-from-analysis.mdc) | `unit_tc_analysis_rules.py`, `tc_generation_rules.py` |
+| Sinh TC E2E | [`e2e-tc-from-analysis.mdc`](e2e-tc-from-analysis.mdc) | `e2e_tc_analysis_rules.py`, `tc_generation_rules.py` |
+| Unit codegen | [`uutgs-unit-codegen.mdc`](uutgs-unit-codegen.mdc) | `uutgs_rules.py` |
+| E2E codegen | [`e2e-codegen.mdc`](e2e-codegen.mdc) | `e2e_codegen_rules.py` |
+| E2E grounding | [`e2e-grounding.mdc`](e2e-grounding.mdc) | `e2e_grounding_rules.py` |
+| E2E journey | [`e2e-feature-journey.mdc`](e2e-feature-journey.mdc) | `e2e_journey_rules.py` (thin) |
+
+Runtime guard (không LLM prompt): `e2e_codegen_guard.py`, `failure_taxonomy.py`, `desktop/.../assertTcReadyForE2eGen.ts`.
+
+## Checklist khi thêm/sửa rule
+
+1. Gắn `domain` + `tags` (xem taxonomy trong `RULE_INDEX_PLAN.md` §3).
+2. Cập nhật hàng tương ứng trong `docs/rule_inventory.csv`.
+3. Nếu đổi inject path → cập nhật `docs/rule_flow_matrix.csv`.
+4. Chạy test liên quan (`test_uutgs_rules`, `test_e2e_codegen_rules`, `test_analysis_rules`, …).
+5. Phase 1+: mirror vào `api/app/rules/rule_registry.yaml` trước khi xóa text khỏi `*_rules.py`.
+6. Khi bật selective, kiểm tra log `ids`/`chars` theo từng job để xác nhận profile đúng domain.

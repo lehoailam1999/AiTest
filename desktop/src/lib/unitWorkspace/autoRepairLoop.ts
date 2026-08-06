@@ -1,9 +1,13 @@
 /**
- * Step 3 — Verify + Auto-Repair loop trên Agent Staging (max 3).
+ * Step 3 / Phase 6 — Verify + Auto-Repair loop trên Agent Staging (max 3, cap 5).
  * Mỗi lần fail: gọi repair (AI CLI/API) → cập nhật staging → Verify lại.
  */
 import { runWorkspaceVerify } from "./verifyEngine";
 import type { UnitWorkspaceManifest, VerifyReport } from "./types";
+import {
+  classifyUnitFailure,
+  UNIT_AUTO_REPAIR_MAX_CAP,
+} from "./unitFailureMetrics";
 
 export const AUTO_REPAIR_MAX_ATTEMPTS = 3;
 
@@ -12,6 +16,7 @@ export type AutoRepairProgress = {
   maxAttempts: number;
   phase: "verify" | "repair" | "done";
   message: string;
+  failClass?: string;
 };
 
 export type RunVerifyWithAutoRepairInput = {
@@ -32,16 +37,21 @@ export type AutoRepairLoopResult = {
   attempts: number;
   passed: boolean;
   repaired: boolean;
+  failClass?: string;
 };
 
 export async function runVerifyWithAutoRepair(
   input: RunVerifyWithAutoRepairInput
 ): Promise<AutoRepairLoopResult> {
-  const maxAttempts = Math.max(1, input.maxAttempts ?? AUTO_REPAIR_MAX_ATTEMPTS);
+  const maxAttempts = Math.min(
+    UNIT_AUTO_REPAIR_MAX_CAP,
+    Math.max(1, input.maxAttempts ?? AUTO_REPAIR_MAX_ATTEMPTS)
+  );
   let manifest = input.manifest;
   let report: VerifyReport | undefined = manifest.verify;
   let repaired = false;
   let attempts = 0;
+  let lastFailClass: string | undefined;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attempts = attempt;
@@ -69,8 +79,22 @@ export async function runVerifyWithAutoRepair(
         phase: "done",
         message: attempt === 1 ? "Verify PASS" : `Verify PASS sau ${attempt - 1} lần repair`,
       });
-      return { manifest, report, attempts, passed: true, repaired };
+      return {
+        manifest,
+        report,
+        attempts,
+        passed: true,
+        repaired,
+        failClass: lastFailClass,
+      };
     }
+
+    const errLog =
+      verified.report.stages
+        ?.filter((s) => !s.success)
+        .map((s) => s.logExcerpt || "")
+        .join("\n") || "";
+    lastFailClass = classifyUnitFailure(errLog);
 
     if (attempt >= maxAttempts) {
       break;
@@ -80,7 +104,8 @@ export async function runVerifyWithAutoRepair(
       attempt,
       maxAttempts,
       phase: "repair",
-      message: `Verify FAIL — AI Auto-Repair ${attempt}/${maxAttempts - 1}…`,
+      failClass: lastFailClass,
+      message: `Verify FAIL (${lastFailClass}) — AI Auto-Repair ${attempt}/${maxAttempts - 1}…`,
     });
 
     manifest = await input.repair(manifest);
@@ -91,8 +116,16 @@ export async function runVerifyWithAutoRepair(
     attempt: attempts,
     maxAttempts,
     phase: "done",
-    message: `Vẫn FAIL sau ${attempts} lần Verify (đã repair ${Math.max(0, attempts - 1)} lần)`,
+    failClass: lastFailClass,
+    message: `Vẫn FAIL (${lastFailClass || "Other"}) sau ${attempts} lần Verify (đã repair ${Math.max(0, attempts - 1)} lần)`,
   });
 
-  return { manifest, report, attempts, passed: false, repaired };
+  return {
+    manifest,
+    report,
+    attempts,
+    passed: false,
+    repaired,
+    failClass: lastFailClass,
+  };
 }

@@ -9,8 +9,18 @@ Injected once via ``unit_system_prompt`` — do NOT restate in user prompt.
 
 from __future__ import annotations
 
+import logging
+import os
+
+from app.rules import (
+    get_rule_text,
+    render_rules_for_profile_with_meta,
+)
+
+logger = logging.getLogger(__name__)
+
 # Compact Specification (SHALL/MUST). Keep under ~2.5k chars for prompt budget.
-UUTGS_SPEC = """\
+_LEGACY_UUTGS_SPEC = """\
 # UUTGS — Universal Unit Test Generation Specification
 
 ## 1. Objective
@@ -74,8 +84,50 @@ Infer from names only · skip exception/edge paths the scenario needs · mock ev
 invent APIs/behaviors absent from source · nondeterministic tests · duplicate cases ·
 import/execute app entrypoints/bootstrap (main/Program/wsgi/Application.main) — test the
 extractable unit (pipe/service/handler/validator/DTO) instead · modify production code.
+
+## 10. Portable across ANY project (hard)
+- Detect language + test/mock stack ONLY from the prompt packet (testingStack / samples /
+  SUT paths) — NEVER assume Nest, Angular, Django, Forensic, or a prior project.
+- Imports/symbols MUST come from provided SUT + related files — NEVER invent packages,
+  namespaces, module paths, or types not visible in context.
+- When a ctor dependency is in related sources, use that type; if only the SUT shows an
+  interface/abstract dep, mock that visible contract — still emit a **compiling** test.
+- Emit under host layout [{pkg}/]AItest/UnitTest/{Module}/ (or APITest) only — NEVER write
+  into production `src/` / `app/` trees.
+- Match SUT file language (`.cs`→xUnit/NUnit/Moq; `.ts`→Jest/Vitest) — NEVER emit Jest for
+  C# SUT or xUnit for a `.ts` Angular service.
+- Use the detected runner only. Include required imports or `/// <reference types=…>` so
+  the file typechecks outside app tsconfig.
+- No machine-specific absolute paths, hardcoded secrets, or env URLs inventing product hosts.
+- One Approved TC → one focused test file; AAA; mock only external I/O deps proven in source.
+- If context Gaps list missing deps: mock visible interfaces from SUT + short TODO — do NOT
+  leave empty/broken files or invent APIs.
 """
 
 
+UUTGS_SPEC = get_rule_text("UUTGS-FULL", fallback=_LEGACY_UUTGS_SPEC)
+
+
 def uutgs_system_block() -> str:
+    mode = (os.environ.get("AITEST_RULE_RETRIEVE_MODE") or "full").strip().lower()
+    if mode == "selective":
+        selected, rule_ids, chars = render_rules_for_profile_with_meta(
+            "PROFILE-UNIT-CODEGEN"
+        )
+        if selected:
+            logger.info(
+                "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+                "PROFILE-UNIT-CODEGEN",
+                mode,
+                ",".join(rule_ids),
+                chars,
+            )
+            return selected.strip()
+    logger.info(
+        "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+        "PROFILE-UNIT-CODEGEN",
+        "full",
+        "UUTGS-FULL",
+        len(UUTGS_SPEC.strip()),
+    )
     return UUTGS_SPEC.strip()

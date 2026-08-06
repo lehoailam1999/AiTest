@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   App,
@@ -35,6 +35,11 @@ const CLI_TYPES = [
     hint: "google-gemini CLI · mặc định path: gemini",
   },
   {
+    value: "antigravity-cli",
+    label: "Antigravity CLI",
+    hint: "Google Antigravity CLI (`agy`) — khác Antigravity IDE. Cài: irm https://antigravity.google/cli/install.ps1 | iex · Path: %LOCALAPPDATA%\\agy\\bin\\agy.exe",
+  },
+  {
     value: "claude-cli",
     label: "Claude Code CLI",
     hint: "Anthropic Claude Code · path: claude",
@@ -52,6 +57,12 @@ const CLI_TYPES = [
   },
 ] as const;
 
+function providerForCliType(cliType: string): string {
+  if (cliType === "ollama") return "ollama";
+  if (cliType === "antigravity-cli") return "antigravity";
+  return "openai";
+}
+
 function statusTone(status?: string | null): "success" | "warning" | "error" | "default" {
   const s = (status || "").toLowerCase();
   if (s === "ready") return "success";
@@ -66,6 +77,8 @@ function cliPathPlaceholder(cliType: string): string {
       return "claude";
     case "cursor-cli":
       return "agent";
+    case "antigravity-cli":
+      return "agy";
     case "ollama":
       return "ollama";
     case "custom-script":
@@ -75,9 +88,43 @@ function cliPathPlaceholder(cliType: string): string {
   }
 }
 
+/** Basename of a CLI path for mismatch checks (agent.cmd → agent). */
+function cliPathBasename(path: string): string {
+  const norm = path.trim().replace(/\\/g, "/");
+  const base = norm.split("/").pop() || norm;
+  return base.replace(/\.(cmd|exe|bat|ps1)$/i, "").toLowerCase();
+}
+
+const CLI_DEFAULT_BASENAMES: Record<string, string[]> = {
+  "gemini-cli": ["gemini"],
+  "antigravity-cli": ["agy", "antigravity"],
+  "claude-cli": ["claude"],
+  "cursor-cli": ["agent", "cursor-agent", "cursor"],
+  ollama: ["ollama"],
+};
+
+function applyConnectionToForm(
+  c: Connection,
+  setters: {
+    setConn: (c: Connection) => void;
+    setModelName: (v: string) => void;
+    setCliType: (v: string) => void;
+    setCliPath: (v: string) => void;
+  }
+) {
+  const type = c.cliType || "gemini-cli";
+  setters.setConn(c);
+  setters.setModelName(c.modelName ?? "");
+  setters.setCliType(type);
+  setters.setCliPath((c.cliPath ?? "").trim() || cliPathPlaceholder(type));
+}
+
 export default function SettingsPage() {
   const { message } = App.useApp();
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const { project } = useProject();
+  const projectId = project?.id ?? null;
   const [conn, setConn] = useState<Connection | null>(null);
   const [modelName, setModelName] = useState("");
   const [cliType, setCliType] = useState("gemini-cli");
@@ -85,22 +132,25 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
-    if (!project) return;
+    if (!projectId) return;
+    const seq = ++loadSeq.current;
     setBusy(true);
     try {
-      const c = await connection.get(project.id);
-      setConn(c);
-      setModelName(c.modelName ?? "");
-      setCliType(c.cliType || "gemini-cli");
-      setCliPath(c.cliPath ?? "");
+      const c = await connection.get(projectId);
+      if (seq !== loadSeq.current) return; // stale — bỏ qua, không đè form
+      applyConnectionToForm(c, { setConn, setModelName, setCliType, setCliPath });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : "Không tải được cấu hình AI");
+      if (seq !== loadSeq.current) return;
+      messageRef.current.error(
+        e instanceof Error ? e.message : "Không tải được cấu hình AI"
+      );
     } finally {
-      setBusy(false);
+      if (seq === loadSeq.current) setBusy(false);
     }
-  }, [project, message]);
+  }, [projectId]);
 
   useEffect(() => {
     void load();
@@ -111,21 +161,28 @@ export default function SettingsPage() {
     [cliType]
   );
 
+  function buildSaveBody() {
+    const resolvedPath = cliPath.trim() || cliPathPlaceholder(cliType);
+    return {
+      provider: providerForCliType(cliType),
+      modelName: modelName.trim(),
+      runnerMode: "AI_CLI" as const,
+      cliType,
+      // Luôn gửi path — undefined bị JSON bỏ → BE giữ path cũ (agent)
+      cliPath: resolvedPath,
+    };
+  }
+
   async function onSave() {
-    if (!project) return;
+    if (!projectId) return;
     setSaving(true);
+    // Chặn load() đang bay đè form trong lúc save
+    loadSeq.current += 1;
     try {
-      const c = await connection.save(project.id, {
-        provider: cliType === "ollama" ? "ollama" : "openai",
-        modelName: modelName.trim() || undefined,
-        runnerMode: "AI_CLI",
-        cliType,
-        cliPath: cliPath.trim() || undefined,
-      });
-      setConn(c);
-      setCliType(c.cliType || "gemini-cli");
-      setCliPath(c.cliPath ?? "");
-      setModelName(c.modelName ?? "");
+      const body = buildSaveBody();
+      setCliPath(body.cliPath);
+      const c = await connection.save(projectId, body);
+      applyConnectionToForm(c, { setConn, setModelName, setCliType, setCliPath });
       message.success("Đã lưu cấu hình AI CLI");
     } catch (err) {
       message.error(err instanceof Error ? err.message : "Lưu thất bại");
@@ -135,22 +192,15 @@ export default function SettingsPage() {
   }
 
   async function onVerify() {
-    if (!project) return;
+    if (!projectId) return;
     setVerifying(true);
+    loadSeq.current += 1;
     try {
-      // Persist AI CLI config before verify
-      await connection.save(project.id, {
-        provider: cliType === "ollama" ? "ollama" : "openai",
-        modelName: modelName.trim() || undefined,
-        runnerMode: "AI_CLI",
-        cliType,
-        cliPath: cliPath.trim() || undefined,
-      });
-      const c = await connection.verify(project.id);
-      setConn(c);
-      setCliType(c.cliType || "gemini-cli");
-      setCliPath(c.cliPath ?? "");
-      setModelName(c.modelName ?? "");
+      const body = buildSaveBody();
+      setCliPath(body.cliPath);
+      await connection.save(projectId, body);
+      const c = await connection.verify(projectId);
+      applyConnectionToForm(c, { setConn, setModelName, setCliType, setCliPath });
       if (c.status === "Ready") {
         message.success("CLI sẵn sàng — AI đã Ready");
       } else {
@@ -242,7 +292,20 @@ export default function SettingsPage() {
                 <Form.Item label="Vendor" required>
                   <Select
                     value={cliType}
-                    onChange={setCliType}
+                    onChange={(next) => {
+                      const prevDefault = cliPathPlaceholder(cliType);
+                      const nextDefault = cliPathPlaceholder(next);
+                      const cur = cliPath.trim();
+                      const curBase = cliPathBasename(cur);
+                      const prevBases = CLI_DEFAULT_BASENAMES[cliType] || [
+                        cliPathBasename(prevDefault),
+                      ];
+                      // Đổi vendor → auto đổi Path nếu đang trống hoặc còn path mặc định vendor cũ
+                      if (!cur || prevBases.includes(curBase) || cur === prevDefault) {
+                        setCliPath(nextDefault);
+                      }
+                      setCliType(next);
+                    }}
                     options={CLI_TYPES.map((p) => ({
                       value: p.value,
                       label: p.label,
@@ -270,12 +333,18 @@ export default function SettingsPage() {
               <Col xs={24} md={8}>
                 <Form.Item
                   label="Model"
-                  tooltip="Cursor: trống = auto · Ollama: bắt buộc"
+                  tooltip="Cursor: trống = auto · Antigravity: slug từ `agy models` · Ollama: bắt buộc"
                 >
                   <Input
                     value={modelName}
                     onChange={(e) => setModelName(e.target.value)}
-                    placeholder={cliType === "ollama" ? "llama3.2" : "auto"}
+                    placeholder={
+                      cliType === "ollama"
+                        ? "llama3.2"
+                        : cliType === "antigravity-cli"
+                          ? "gemini-3.5-flash-medium"
+                          : "auto"
+                    }
                     disabled={locked}
                   />
                 </Form.Item>

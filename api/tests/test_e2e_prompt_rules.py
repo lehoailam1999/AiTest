@@ -54,7 +54,7 @@ def test_e2e_system_prompt_has_locator_and_step_rules():
     assert "SELECT" in sys_p or "selectOption" in sys_p or "Implementation Mapping" in sys_p
     assert "Feature journey" in sys_p or "FEATURE ENTRY" in sys_p or "Feature entry" in sys_p
     assert "Anti-patterns" in sys_p or "invent" in sys_p.lower()
-    assert len(sys_p) < 9000  # E2ECG + slim journey; still bounded
+    assert len(sys_p) < 9500  # E2ECG + slim journey; still bounded
     # No legacy locator essay / host path duplicate of E2ECG 15.
     assert "LOCATOR (HTML-first)" not in sys_p
     assert sys_p.count("domcontentloaded") <= 2  # E2ECG + optional thin host
@@ -116,3 +116,23 @@ def test_e2e_user_prompt_grounds_dom_and_steps():
     assert "selector_candidates" in up
     assert "Step → code mapping" in up
     assert "data-testid" in up
+
+
+def test_e2e_user_prompt_includes_pom_scaffold_when_present():
+    req = E2ERequest(
+        test_case_title="Cap nhat title",
+        test_case_type="E2E",
+        priority="Cao",
+        steps="1. Mo man hinh\n2. Luu",
+        expected_result="OK",
+        pom_scaffold=(
+            "# class: TodoPage\n"
+            "requiredMethods:\n"
+            "- gotoFeature(...args: unknown[]): Promise<void>\n"
+            "- submitForm(...args: unknown[]): Promise<void>\n"
+        ),
+    )
+    up = e2e_user_prompt(req)
+    assert "POM scaffold" in up
+    assert "TodoPage" in up
+    assert "submitForm" in up

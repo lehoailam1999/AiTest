@@ -70,6 +70,8 @@ async def put_connection(
         return errors(400, "provider must be openai|anthropic|gemini|ollama|antigravity")
 
     conn = get_or_create_conn(db, pid)
+    prev_cli_type = (getattr(conn, "cli_type", None) or "").strip().lower()
+    prev_cli_path = (getattr(conn, "cli_path", None) or "").strip()
     conn.backend_type = provider
     # AI CLI only — ignore legacy API_DIRECT from clients
     conn.runner_mode = "AI_CLI"
@@ -80,7 +82,27 @@ async def put_connection(
 
     if "cliPath" in body or "cli_path" in body:
         raw_p = body.get("cliPath") if "cliPath" in body else body.get("cli_path")
-        conn.cli_path = (str(raw_p).strip() if raw_p else None) or None
+        path = (str(raw_p).strip() if raw_p else None) or None
+        if not path:
+            # Empty path → default binary for vendor (tránh giữ `agent` khi đổi Antigravity)
+            defaults = {
+                "claude-cli": "claude",
+                "claude": "claude",
+                "claude-code": "claude",
+                "cursor-cli": "agent",
+                "cursor": "agent",
+                "cursor-agent": "agent",
+                "agent": "agent",
+                "antigravity-cli": "agy",
+                "antigravity": "agy",
+                "agy": "agy",
+                "ollama": "ollama",
+                "ollama-cli": "ollama",
+                "gemini-cli": "gemini",
+            }
+            ctype = (conn.cli_type or "gemini-cli").strip().lower()
+            path = defaults.get(ctype, "gemini")
+        conn.cli_path = path
 
     if "cliArgsJson" in body or "cli_args" in body or "cliArgs" in body:
         raw_a = (
@@ -118,6 +140,14 @@ async def put_connection(
 
     if provider == C.PROVIDER_OLLAMA and not C.is_ai_ready(conn.status):
         conn.status = C.STATUS_NOT_CONFIGURED
+
+    new_cli_type = (getattr(conn, "cli_type", None) or "").strip().lower()
+    new_cli_path = (getattr(conn, "cli_path", None) or "").strip()
+    if (new_cli_type != prev_cli_type or new_cli_path != prev_cli_path) and C.is_ai_ready(
+        conn.status
+    ):
+        conn.status = C.STATUS_NOT_CONFIGURED
+        conn.last_error = None
 
     db.commit()
     db.refresh(conn)

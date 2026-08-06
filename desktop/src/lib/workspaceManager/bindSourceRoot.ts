@@ -88,6 +88,17 @@ export async function bindSourceRoot(
   workspace.setLocalPath(input.projectId, rootPath);
   workspace.addRecent(input.projectId, input.projectName, rootPath);
 
+  // Warm Code Index in background so Gen Unit/E2E can retrieve without a manual Index step
+  try {
+    const { createTauriCodeIndexIo } = await import("../codeIndex/tauriIo");
+    const { syncProjectIndex } = await import("../codeIndex");
+    void syncProjectIndex(rootPath, createTauriCodeIndexIo()).catch(() => {
+      /* best-effort — Gen still falls back to legacy FE resolve */
+    });
+  } catch {
+    /* optional module */
+  }
+
   let workspaceId: string | null = null;
   let indexStatus: string | null = null;
   let fileCount: number | null = null;

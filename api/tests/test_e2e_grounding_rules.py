@@ -79,10 +79,10 @@ def test_fail_closed_stub_no_button_first_invent():
     assert "ungrounded" in labeled.lower() or "raw" in labeled
 
 
-def test_create_open_stub_keeps_portable_create_regex():
-    """Forensic-style openCreate* remains (list Create), not fail-closed."""
+def test_create_open_stub_fail_closed_without_label():
+    """openCreate* requires Spec label — no invent Create regex (P1)."""
     from app.services.e2e_codegen_guard import _render_create_open_stub
 
     stub = _render_create_open_stub("openCreateModal")
-    assert "ungrounded" not in stub.lower()
-    assert "create" in stub.lower() or "tạo" in stub.lower()
+    assert "ungrounded" in stub.lower() or "fail-closed" in stub.lower()
+    assert "tạo mới" not in stub.lower()

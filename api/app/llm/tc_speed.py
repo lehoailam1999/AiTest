@@ -19,8 +19,8 @@ def resolve_tc_speed_mode(
     Return ``fast`` | ``full``.
 
     Precedence: engineHint.speed → AITEST_TC_E2E_SPEED / AITEST_TC_UNIT_SPEED →
-    default **full** for E2E (coverage by Output signals, no numeric ceiling) and Unit.
-    ``fast`` = shorter prompts + anti-bloat emphasis — still full signal coverage for E2E.
+    default **fast** (wall-clock). Opt into full coverage via UI checkbox / env=full.
+    ``fast`` = shorter prompts + anti-bloat; E2E still covers Output signals (soft cap).
     """
     hint = engine_hint if isinstance(engine_hint, dict) else {}
     raw = str(hint.get("speed") or "").strip().lower()
@@ -29,12 +29,12 @@ def resolve_tc_speed_mode(
 
     eng = (preferred_engine or "").strip().lower()
     if eng == "e2e":
-        env = (os.environ.get("AITEST_TC_E2E_SPEED") or "full").strip().lower()
-        return "fast" if env in ("fast", "quick") else "full"
+        env = (os.environ.get("AITEST_TC_E2E_SPEED") or "fast").strip().lower()
+        return "full" if env in ("full", "complete") else "fast"
     if eng == "unit":
-        env = (os.environ.get("AITEST_TC_UNIT_SPEED") or "full").strip().lower()
-        return "fast" if env in ("fast", "quick") else "full"
-    return "full"
+        env = (os.environ.get("AITEST_TC_UNIT_SPEED") or "fast").strip().lower()
+        return "full" if env in ("full", "complete") else "fast"
+    return "fast"
 
 
 def resolve_max_tc_per_module(
@@ -43,11 +43,11 @@ def resolve_max_tc_per_module(
     engine_hint: dict[str, Any] | None = None,
 ) -> int | None:
     """
-    Optional numeric ceiling — **opt-in only**.
+    Optional numeric ceiling.
 
-    E2E: never applies a default N. Coverage size = distinct Output signals
-    (see e2e_tc_analysis_rules). Cap only if engineHint.maxPerModule or
-    AITEST_TC_E2E_MAX_PER_MODULE is explicitly set.
+    E2E speed=fast: soft default 10/module (AITEST_TC_E2E_FAST_MAX_PER_MODULE;
+    set 0 to disable). Explicit maxPerModule / AITEST_TC_E2E_MAX_PER_MODULE win.
+    E2E speed=full: no default ceiling (signal-driven) unless env/hint set.
 
     Unit: soft cap when speed=fast (default 8) unless overridden.
     """
@@ -64,14 +64,22 @@ def resolve_max_tc_per_module(
                 pass
 
     if eng == "e2e":
-        # Opt-in env only — empty/unset → unlimited (signal-driven)
+        # Opt-in hard env always applies
         raw = (os.environ.get("AITEST_TC_E2E_MAX_PER_MODULE") or "").strip()
-        if not raw:
-            return None
-        try:
-            return max(2, min(40, int(raw)))
-        except ValueError:
-            return None
+        if raw:
+            try:
+                return max(2, min(40, int(raw)))
+            except ValueError:
+                pass
+        if (speed or "").strip().lower() == "fast":
+            fast_cap = (os.environ.get("AITEST_TC_E2E_FAST_MAX_PER_MODULE") or "10").strip()
+            if fast_cap in ("", "0", "none", "off"):
+                return None
+            try:
+                return max(2, min(40, int(fast_cap)))
+            except ValueError:
+                return 10
+        return None
 
     if (speed or "").strip().lower() != "fast":
         return None
@@ -146,7 +154,7 @@ def knowledge_enough_skip_source_scan(
 def resolve_fanout_batch_size(*, is_cursor: bool) -> int:
     """
     How many modules to pack into one LLM call (Phase C).
-    Default 2 — reduces cold starts; 1 = legacy one-module-per-call.
+    Default 3 — fewer Cursor cold starts; 1 = one-module-per-call.
     """
     env_key = (
         "AITEST_TC_FANOUT_BATCH_MODULES_CURSOR"
@@ -154,10 +162,10 @@ def resolve_fanout_batch_size(*, is_cursor: bool) -> int:
         else "AITEST_TC_FANOUT_BATCH_MODULES"
     )
     try:
-        n = int(os.environ.get(env_key, "2"))
+        n = int(os.environ.get(env_key, "3"))
     except ValueError:
-        n = 2
-    return max(1, min(3, n))
+        n = 3
+    return max(1, min(4, n))
 
 
 def speed_prompt_addon(

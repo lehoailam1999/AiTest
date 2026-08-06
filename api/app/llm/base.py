@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import hashlib
+import os
 from dataclasses import dataclass, field
 
 
@@ -55,6 +56,9 @@ class UnitRequest:
     # 3-tier AI rules (Project / User) — System lives in unit_system_prompt
     project_rules: str = ""
     user_rules: str = ""
+    # Phase 5 — optional planner AAA hint + index stamp (legacy bodies omit these)
+    planner_hint: str = ""
+    index_version: str = ""
 
 
 @dataclass
@@ -1598,6 +1602,10 @@ def unit_user_prompt(req: UnitRequest) -> str:
         f"Output module folder hint: {or_dash(req.module)}\n"
         f"Output file path (host will write here): {suggested}\n"
     )
+    if (getattr(req, "planner_hint", "") or "").strip():
+        base += "\n" + req.planner_hint.strip() + "\n"
+    if (getattr(req, "index_version", "") or "").strip():
+        base += f"Index version: {req.index_version.strip()}\n"
     if sut_import:
         base += (
             f"SUT import (exact): {sut_import}\n"
@@ -1792,6 +1800,13 @@ class E2ERequest:
     execution_context: str = ""
     # Feature entry path (Desktop-derived or user) — baked into Spec Feature entry step
     feature_path: str = ""
+    # Contract generated from FE/DOM hooks (allow-list for locator grounding)
+    locator_contract: str = ""
+    # Deterministic POM scaffold from TC so LLM maps steps instead of inventing API.
+    pom_scaffold: str = ""
+    # Phase 5 — optional planner Fixture→Cleanup hint + index stamp
+    planner_hint: str = ""
+    index_version: str = ""
 
 
 @dataclass
@@ -1986,6 +2001,10 @@ def e2e_user_prompt(req: E2ERequest) -> str:
         f"Precondition: {req.precondition or '(none)'}\n"
         f"Framework: {req.framework or 'playwright'} / {req.language or 'TypeScript'}\n"
     ]
+    if (getattr(req, "planner_hint", "") or "").strip():
+        parts.append(req.planner_hint.strip() + "\n")
+    if (getattr(req, "index_version", "") or "").strip():
+        parts.append(f"Index version: {req.index_version.strip()}\n")
     parts.append(
         _e2e_steps_checklist(req.steps, req.expected_result, req.test_data)
     )
@@ -2093,6 +2112,22 @@ def e2e_user_prompt(req: E2ERequest) -> str:
         parts.append(
             "## DOM snapshot\n(none — derive locators from FE source / TC labels only; "
             "prefer getByRole+name from Steps; do not invent testids).\n"
+        )
+    if req.locator_contract.strip():
+        parts.append(
+            "## Locator contract (ALLOW-LIST from FE/DOM)\n"
+            "Only use selectors/labels listed here for direct element targeting.\n"
+            "If a needed control is missing, mark as `[Thiếu Context]` or reuse journey helper; "
+            "do NOT invent new testid/css/route selectors.\n"
+            + truncate(req.locator_contract.strip(), 7000)
+            + "\n"
+        )
+    if req.pom_scaffold.strip():
+        parts.append(
+            "## POM scaffold (deterministic — keep method names)\n"
+            "Use this API as the base contract. You may add small helpers, but do not rename/remove scaffold methods.\n"
+            + truncate(req.pom_scaffold.strip(), 5000)
+            + "\n"
         )
     # Login-wall DOM means FE is the real ground truth for post-login controls —
     # do NOT cut FE to 4k (old behavior contradicted the instruction above).
@@ -2234,6 +2269,22 @@ def parse_e2e_files_from_raw(raw: str) -> list[E2EFile]:
     return []
 
 
+def _is_usable_e2e_feature_path(path: str) -> bool:
+    """Reject DoR placeholders like path: [Thiếu Context] mistaken as routes."""
+    p = (path or "").strip().strip("\"'`")
+    if not p or p == "/":
+        return False
+    low = p.lower().replace("\\", "/")
+    if re.search(r"thi[eế]u\s*context|missing\s*context|\[thi[eế]u|todo|tbd|n/a", low):
+        return False
+    if re.search(r"[\[\]{}]", low):
+        return False
+    if p.startswith("http"):
+        return True
+    # Real UI path: /admin/evidence
+    return bool(re.match(r"^/?[A-Za-z][\w\-./]*$", p.replace(" ", "")))
+
+
 def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
     from app.services.test_output_layout import resolve_e2e_file_paths
 
@@ -2256,6 +2307,8 @@ def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
         "http"
     ):
         feature_path_hint = f"/{feature_path_hint}"
+    if not _is_usable_e2e_feature_path(feature_path_hint):
+        feature_path_hint = ""
     if not feature_path_hint:
         for blob in (req.precondition, req.test_data, req.steps):
             m = re.search(
@@ -2265,10 +2318,12 @@ def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
             if m:
                 raw = m.group(1).strip().strip("\"'")
                 if raw:
-                    feature_path_hint = (
+                    cand = (
                         raw if raw.startswith("/") or raw.startswith("http") else f"/{raw}"
                     )
-                    break
+                    if _is_usable_e2e_feature_path(cand):
+                        feature_path_hint = cand
+                        break
 
     resolved = apply_e2e_codegen_guards(
         resolved,
@@ -2277,14 +2332,22 @@ def e2e_result_from_raw(raw: str, req: E2ERequest) -> E2EResult:
         test_case_title=req.test_case_title,
         auth_hints="\n".join(
             [
+                f"featurePath: {feature_path_hint}",
+                f"targetUrl: {req.target_url or ''}",
+                req.execution_context or "",
                 req.precondition or "",
+                req.test_data or "",
                 req.steps or "",
-                req.expected_result or "",
+                # Labeled so ContextMissing gate accepts VN/prose expected without keyword "assert"
+                f"expectedOutcome: {(req.expected_result or '').strip() or '(none)'}",
                 req.project_rules or "",
             ]
         ),
         feature_path=feature_path_hint,
+        locator_contract=req.locator_contract or "",
+        strict_gate=True,
         enforce_journey=True,
+        test_data=req.test_data or "",
     )
     tc_suffix = hashlib.md5((req.test_case_title or "").encode("utf-8")).hexdigest()[:8]
     if tc_suffix:
@@ -2323,7 +2386,8 @@ def default_playwright_config(
     slow_mo_ms: int | None = None,
     include_global_setup: bool | None = None,
 ) -> str:
-    base = (base_url or "http://localhost:3000").rstrip("/")
+    env_base = (os.environ.get("E2E_BASE_URL") or "").strip()
+    base = (base_url or env_base or "http://localhost:3000").rstrip("/")
     def _normalize_storage_rel(rel: str) -> str:
         s = (rel or "").replace("\\", "/").strip()
         if not s:

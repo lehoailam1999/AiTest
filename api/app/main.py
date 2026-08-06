@@ -12,7 +12,6 @@ from app.models import (  # noqa: F401 — register metadata
     ChatMessage,
     ChatSession,
     CoverageUpload,
-    DocumentChunk,
     KnowledgeWorkspace,
     ReportRecord,
     RequirementFile,
@@ -134,18 +133,22 @@ def _ensure_project_meta_columns() -> None:
         "ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS agent_override BOOLEAN DEFAULT FALSE",
     ]
     studio_stmts = [
-        "ALTER TABLE requirement_files ADD COLUMN IF NOT EXISTS chunk_status VARCHAR(40) "
-        "DEFAULT 'none'",
         "ALTER TABLE knowledge_workspaces ADD COLUMN IF NOT EXISTS coverage_json TEXT",
+        # Remove legacy ChunkStore (SRS Phân tích uses extracted_text only)
+        "DROP TABLE IF EXISTS document_chunks CASCADE",
+        "DROP INDEX IF EXISTS ix_requirement_files_chunk_status",
+        "ALTER TABLE requirement_files DROP COLUMN IF EXISTS chunk_status",
     ]
     all_stmts = stmts + tc_stmts + job_stmts + conn_stmts + ws_stmts + studio_stmts
-    with engine.begin() as conn:
-        conn.execute(text("SET LOCAL lock_timeout = '5s'"))
-        for sql in all_stmts:
-            try:
+    # One transaction per statement — a lock timeout must not abort the whole batch
+    # (Postgres: InFailedSqlTransaction cascades if we keep using the same txn).
+    for sql in all_stmts:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '5s'"))
                 conn.execute(text(sql))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("schema patch skipped (%s): %s", sql.split()[2], exc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("schema patch skipped (%s): %s", sql.split()[2], exc)
 
 def _ensure_indexes() -> None:
     from sqlalchemy import text

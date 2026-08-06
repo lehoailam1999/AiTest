@@ -38,6 +38,13 @@ from app.services.project_inspector import (
     ProjectInspector,
     apply_stack_to_generate_fields,
 )
+from app.services.phase5_gen_input import (
+    format_unit_planner_hint,
+    merge_related_from_context_files,
+    parse_context_files,
+    parse_index_version,
+    parse_planner,
+)
 
 # Short-lived cache — batch generate hits same projectRoot repeatedly
 _INSPECT_CACHE: dict[str, tuple[float, Any]] = {}
@@ -93,10 +100,18 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         return errors(400, "projectId and testCaseId required")
     has_packet = packet_is_usable(body.get("contextPacket"))
     has_workspace = bool(str(body.get("workspaceId") or "").strip())
-    if not (body.get("sourceCode") or "").strip() and not has_packet and not has_workspace:
+    has_context_files = bool(
+        parse_context_files(body.get("contextFiles") or body.get("context_files"))
+    )
+    if (
+        not (body.get("sourceCode") or "").strip()
+        and not has_packet
+        and not has_workspace
+        and not has_context_files
+    ):
         return errors(
             400,
-            "sourceCode, contextPacket, or workspaceId required",
+            "sourceCode, contextPacket, workspaceId, or contextFiles required",
         )
 
     project = db.query(Project).filter(Project.id == project_id, Project.deleted_at.is_(None)).first()
@@ -182,6 +197,22 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         source_file_name = resolved.source_file_name
         source_code = resolved.source_code
         related_sources = resolved.related_sources
+
+    # Phase 5 — optional contextFiles / planner (packet & workspace still win)
+    context_files = parse_context_files(body.get("contextFiles") or body.get("context_files"))
+    related_sources = merge_related_from_context_files(
+        related_sources,
+        context_files,
+        primary_path=source_file_name,
+    )
+    if not (source_code or "").strip() and context_files:
+        source_file_name = context_files[0][0]
+        source_code = context_files[0][1]
+        related_sources = merge_related_from_context_files(
+            [],
+            context_files,
+            primary_path=source_file_name,
+        )
 
     if not source_code.strip():
         return errors(
@@ -305,6 +336,10 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         language=language or project.language,
     )
 
+    # Phase 5 extras — optional; ignored when absent (legacy clients unchanged)
+    planner = parse_planner(body.get("planner"))
+    index_version = parse_index_version(body.get("indexVersion") or body.get("index_version"))
+
     req = UnitRequest(
         test_case_title=tc.title,
         test_case_type=tc.type,
@@ -338,6 +373,8 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
         requirement_description=req_desc,
         project_rules=proj_rules,
         user_rules=usr_rules,
+        planner_hint=format_unit_planner_hint(planner),
+        index_version=index_version,
     )
     try:
         result, meta = await generate_unit_for_connection(conn, req)
@@ -363,6 +400,8 @@ async def generate_unit_route(request: Request, db: Annotated[Session, Depends(g
             "agentConfidence": body.get("agentConfidence"),
             "agentEnough": body.get("agentEnough"),
             "agentOverride": bool(body.get("agentOverride")),
+            "indexVersion": index_version or None,
+            "plannerAttached": bool(planner),
         }
     )
 
@@ -515,5 +554,6 @@ async def unit_sandbox_repair_route(request: Request, db: Annotated[Session, Dep
             ],
             "stackInspect": sandbox.stack,
             "runnerUsed": connection_runner_mode(conn),
+            "failureClass": sandbox.failure_class,
         }
     )

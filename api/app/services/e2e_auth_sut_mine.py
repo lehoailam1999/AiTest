@@ -20,8 +20,8 @@ from pathlib import Path
 
 logger = logging.getLogger("aitest.e2e.auth_mine")
 
-# JHipster / Forensic-style seed logins commonly created with password == login.
-_JH_SEED_LOGINS = ("admin", "user", "director", "head", "investigator", "manager", "staff")
+# Domain seeds (director/…) only when JH fingerprint — see _mine_jhipster_defaults.
+_JH_DOMAIN_SEED_LOGINS = ("director", "head", "investigator", "manager", "staff")
 
 _I18N_CRED_RE = re.compile(
     r"(?:tài\s*khoản|username|login|user)\s*=\s*\\\"?(?P<user>[^\\\"'\\s><]+)\\\"?"
@@ -63,11 +63,22 @@ def _role_for_username(username: str) -> str:
 def is_jhipster_project(project_root: Path) -> bool:
     if (project_root / ".yo-rc.json").is_file():
         return True
-    # Nested ClientApp / generator markers
-    for cand in (
+    # Scan common ClientApp / webapp package.json locations (project-agnostic)
+    candidates = [
         project_root / "package.json",
-        project_root / "src" / "Forensic" / "ClientApp" / "package.json",
-    ):
+        project_root / "ClientApp" / "package.json",
+        project_root / "src" / "main" / "webapp" / "package.json",
+    ]
+    # One-level nested: src/*/ClientApp/package.json
+    src = project_root / "src"
+    if src.is_dir():
+        try:
+            for child in src.iterdir():
+                if child.is_dir():
+                    candidates.append(child / "ClientApp" / "package.json")
+        except OSError:
+            pass
+    for cand in candidates:
         if not cand.is_file():
             continue
         try:
@@ -76,7 +87,7 @@ def is_jhipster_project(project_root: Path) -> bool:
             continue
         if "generator-jhipster" in raw or "jhipster" in raw.lower():
             return True
-    return (project_root / ".yo-rc.json").is_file()
+    return False
 
 
 def _mine_cypress_env(root: Path) -> list[MinedCred]:
@@ -123,7 +134,9 @@ def _mine_cypress_env(root: Path) -> list[MinedCred]:
         for k, v in data.items():
             if not isinstance(v, str) or not v.strip():
                 continue
-            km = re.match(r"(?i)^(?:admin|user|director|head|investigator)(?:Username|User|Email)$", k)
+            km = re.match(
+                r"(?i)^([a-z][a-z0-9_-]{1,32})(?:Username|User|Email)$", k
+            )
             if not km:
                 continue
             role = re.sub(r"(?i)(Username|User|Email)$", "", k).lower()
@@ -146,11 +159,9 @@ def _mine_cypress_env(root: Path) -> list[MinedCred]:
 
 def _mine_i18n_hints(root: Path) -> list[MinedCred]:
     out: list[MinedCred] = []
-    # Prefer known JHipster/.NET ClientApp paths (fast) before broad glob.
+    # Prefer common i18n layouts (JHipster / Angular) before broad glob — no product folder.
     candidates: list[Path] = []
     for rel in (
-        "src/Forensic/ClientApp/src/i18n/vi/global.json",
-        "src/Forensic/ClientApp/src/i18n/en/global.json",
         "src/main/webapp/i18n/vi/global.json",
         "src/main/webapp/i18n/en/global.json",
         "ClientApp/src/i18n/vi/global.json",
@@ -159,6 +170,17 @@ def _mine_i18n_hints(root: Path) -> list[MinedCred]:
         p = root / rel
         if p.is_file():
             candidates.append(p)
+    # Nested ClientApp under src/*/
+    src = root / "src"
+    if src.is_dir() and not candidates:
+        try:
+            for child in src.iterdir():
+                for lang in ("vi", "en"):
+                    p = child / "ClientApp" / "src" / "i18n" / lang / "global.json"
+                    if p.is_file():
+                        candidates.append(p)
+        except OSError:
+            pass
     if not candidates:
         for path in root.glob("**/i18n/**/global.json"):
             if "node_modules" in path.parts or "bin" in path.parts:
@@ -269,8 +291,8 @@ def _mine_jhipster_defaults(root: Path) -> list[MinedCred]:
         MinedCred("user", "user", "user", "jhipster-default"),
         MinedCred("default", "admin", "admin", "jhipster-default"),
     ]
-    # Extra Forensic/JHipster-dotnet seed logins (password == login is framework convention)
-    for login in ("director", "head", "investigator"):
+    # Extra domain seed logins only on confirmed JHipster trees (password == login convention)
+    for login in _JH_DOMAIN_SEED_LOGINS:
         out.append(MinedCred(login, login, login, "jhipster-seed-login"))
     return out
 

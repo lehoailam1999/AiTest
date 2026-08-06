@@ -142,7 +142,6 @@ export type RequirementStudioWorkspace = {
   status: string;
   legacySourceId?: string | null;
   fileCount?: number;
-  chunkCount?: number;
   knowledgeStatus?: string;
   knowledgeVersion?: number;
   snapshotCount?: number;
@@ -164,8 +163,6 @@ export type RequirementFileRef = {
   parseError?: string | null;
   parser?: string | null;
   parseWarning?: string | null;
-  chunkStatus?: "none" | "ready" | "error" | string;
-  chunkCount?: number;
   storageKind: string;
   charCount: number;
   hasPreview: boolean;
@@ -173,17 +170,6 @@ export type RequirementFileRef = {
   previewHtml?: string | null;
   createdAt?: string;
   updatedAt?: string;
-};
-
-export type DocumentChunk = {
-  id: string;
-  fileId: string;
-  workspaceId: string;
-  ordinal: number;
-  text: string;
-  charCount: number;
-  heading?: string | null;
-  createdAt?: string;
 };
 
 export type KnowledgePayload = {

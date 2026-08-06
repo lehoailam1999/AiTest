@@ -73,6 +73,31 @@ describe("e2eFeRankBonus", () => {
         e2eFeRankBonus("src/Forensic/Controllers/EvidenceController.cs")
     );
   });
+
+  it("prefers create modal over list shell", async () => {
+    const { formSurfaceCandidatePaths } = await import("./resolveE2eFeSources.js");
+    const cands = formSurfaceCandidatePaths(
+      "src/ClientApp/src/app/admin/evidence/list/evidence.component.html",
+      "Tạo mới vật chứng"
+    );
+    assert.ok(cands.some((p) => /create/i.test(p) && /evidence/i.test(p)));
+    assert.ok(
+      cands.some((p) =>
+        p.endsWith(
+          "/admin/evidence/create/evidence-create-modal.component.html"
+        )
+      ),
+      `expected create-modal under evidence/, got: ${cands.slice(0, 3).join(" | ")}`
+    );
+    assert.ok(
+      e2eFeRankBonus(
+        "src/ClientApp/src/app/admin/evidence/create/evidence-create-modal.component.html"
+      ) >
+        e2eFeRankBonus(
+          "src/ClientApp/src/app/admin/evidence/list/evidence.component.html"
+        )
+    );
+  });
 });
 
 describe("E2E_FEATURE_PATH env", () => {
@@ -83,5 +108,24 @@ describe("E2E_FEATURE_PATH env", () => {
     });
     const pe = playwrightEnvFromConfig(env);
     assert.equal(pe.E2E_FEATURE_PATH, "/evidence");
+  });
+
+  it("injects E2E_<ROLE>_USERNAME|PASSWORD", () => {
+    const env = buildE2EEnvConfig({
+      targetUrl: "http://localhost:9000",
+      username: "admin",
+      password: "admin",
+      role: "admin",
+      roleCredentials: {
+        admin: { username: "admin", password: "admin" },
+        user: { username: "user", password: "user" },
+      },
+    });
+    const pe = playwrightEnvFromConfig(env);
+    assert.equal(pe.E2E_USERNAME, "admin");
+    assert.equal(pe.E2E_ADMIN_USERNAME, "admin");
+    assert.equal(pe.E2E_ADMIN_PASSWORD, "admin");
+    assert.equal(pe.E2E_USER_USERNAME, "user");
+    assert.equal(pe.E2E_USER_PASSWORD, "user");
   });
 });

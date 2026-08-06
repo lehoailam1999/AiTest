@@ -9,9 +9,17 @@ Bám sát tài liệu/requirement/SRS/source context của job hiện tại.
 
 from __future__ import annotations
 
+import logging
+import os
+
+from app.rules import get_rule_text
+from app.rules import render_rules_for_profile_with_meta
+
+logger = logging.getLogger(__name__)
+
 
 # Rule mặc định: cover đủ mọi Feature/file, không bỏ sót module.
-DEFAULT_TC_GENERATION_RULES = """\
+_LEGACY_DEFAULT_TC_GENERATION_RULES = """\
 QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
 0. NGUỒN SỰ THẬT: Chỉ dùng nội dung trong tài liệu đầu vào của job (requirement, SRS, User Story,
    knowledge/analysis, source context, focus modules, target URL/auth hint nếu có).
@@ -73,7 +81,7 @@ QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
 # Shared skeleton when Studio locks Unit|E2E
 # (engine overlay + unit_tc_analysis / e2e_tc_analysis carry SoT detail).
 # Keep thin — do NOT restate bucket map / trace / completeness here.
-COMPACT_SHARED_TC_RULES = """\
+_LEGACY_COMPACT_SHARED_TC_RULES = """\
 QUY TẮC CHUNG (BẮT BUỘC):
 1. Bám Knowledge/Freeze của job — không domain mẫu; bucket rỗng → không invent.
 2. module = tên Feature trong phạm vi; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
@@ -85,7 +93,7 @@ QUY TẮC CHUNG (BẮT BUỘC):
 
 # E2E-only shared — SoT (e2e_tc_analysis_rules) owns coverage/trace/completeness/lock.
 # Do NOT restate Scenario/Workflow/BR/gate here (avoids triple with SoT + overlay).
-E2E_COMPACT_SHARED_TC_RULES = """\
+_LEGACY_E2E_COMPACT_SHARED_TC_RULES = """\
 QUY TẮC CHUNG E2E (format):
 1. module = tên FEATURES; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
 2. precondition / testData / steps / expectedResult cụ thể; thiếu → [Giả định] / [Thiếu Output].
@@ -93,7 +101,7 @@ QUY TẮC CHUNG E2E (format):
 """
 
 # Fan-out / speed=fast — shorter shared block (engine overlay + SPEED MODE addon carry detail).
-SPEED_SHARED_TC_RULES = """\
+_LEGACY_SPEED_SHARED_TC_RULES = """\
 QUY TẮC CHUNG (SPEED):
 1. Bám Knowledge/Freeze — không copy domain mẫu; không invent bucket rỗng.
 2. module = Feature trong phạm vi; title VN [Chức năng]-[Hành động]-[Kết quả].
@@ -102,12 +110,34 @@ QUY TẮC CHUNG (SPEED):
 5. Tôn trọng SPEED MODE (trần mềm) trong system prompt — ưu tiên nhánh chính.
 """
 
-E2E_SPEED_SHARED_TC_RULES = """\
+_LEGACY_E2E_SPEED_SHARED_TC_RULES = """\
 QUY TẮC CHUNG E2E (SPEED format — gọn prompt, đủ cover):
 1. module = FEATURES; title VN [Chức năng]-[Hành động]-[Kết quả].
 2. Steps/expected/precondition/testData cụ thể; thiếu → [Giả định].
 3. Cover đủ tín hiệu Output; cấm TC thừa/trùng — không trần số TC cố định.
 """
+
+DEFAULT_TC_GENERATION_RULES = get_rule_text(
+    "TC-GEN-DEFAULT", fallback=_LEGACY_DEFAULT_TC_GENERATION_RULES
+)
+COMPACT_SHARED_TC_RULES = get_rule_text(
+    "TC-GEN-COMPACT-UNIT", fallback=_LEGACY_COMPACT_SHARED_TC_RULES
+)
+E2E_COMPACT_SHARED_TC_RULES = get_rule_text(
+    "TC-GEN-COMPACT-E2E", fallback=_LEGACY_E2E_COMPACT_SHARED_TC_RULES
+)
+SPEED_SHARED_TC_RULES = get_rule_text(
+    "TC-GEN-SPEED-UNIT", fallback=_LEGACY_SPEED_SHARED_TC_RULES
+)
+E2E_SPEED_SHARED_TC_RULES = get_rule_text(
+    "TC-GEN-SPEED-E2E", fallback=_LEGACY_E2E_SPEED_SHARED_TC_RULES
+)
+
+
+def _tc_gen_selective_enabled() -> bool:
+    mode = (os.environ.get("AITEST_RULE_RETRIEVE_MODE") or "full").strip().lower()
+    gate = (os.environ.get("AITEST_RULE_RETRIEVE_TCGEN") or "").strip().lower()
+    return mode == "selective" and gate not in ("0", "false", "no", "off")
 
 
 def get_tc_generation_rules(
@@ -118,14 +148,55 @@ def get_tc_generation_rules(
     """Entry point — khi lock engine dùng skeleton gọn + overlay riêng (tiết kiệm token)."""
     eng = (preferred_engine or "").strip().lower()
     fast = (speed or "").strip().lower() == "fast"
+    if _tc_gen_selective_enabled():
+        profile = "PROFILE-TC-MIXED-DEFAULT"
+        if eng == "e2e":
+            profile = (
+                "PROFILE-TC-E2E-SHARED-SPEED" if fast else "PROFILE-TC-E2E-SHARED"
+            )
+        elif eng == "unit":
+            profile = (
+                "PROFILE-TC-UNIT-SHARED-SPEED" if fast else "PROFILE-TC-UNIT-SHARED"
+            )
+        selected, rule_ids, chars = render_rules_for_profile_with_meta(profile)
+        if selected:
+            logger.info(
+                "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+                profile,
+                "selective",
+                ",".join(rule_ids),
+                chars,
+            )
+            return selected.strip()
     if eng == "e2e":
+        logger.info(
+            "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+            "PROFILE-TC-E2E-SHARED",
+            "full",
+            "TC-GEN-COMPACT-E2E/TC-GEN-SPEED-E2E",
+            len((E2E_SPEED_SHARED_TC_RULES if fast else E2E_COMPACT_SHARED_TC_RULES).strip()),
+        )
         return (
             E2E_SPEED_SHARED_TC_RULES if fast else E2E_COMPACT_SHARED_TC_RULES
         ).strip()
     if eng == "unit":
+        logger.info(
+            "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+            "PROFILE-TC-UNIT-SHARED",
+            "full",
+            "TC-GEN-COMPACT-UNIT/TC-GEN-SPEED-UNIT",
+            len((SPEED_SHARED_TC_RULES if fast else COMPACT_SHARED_TC_RULES).strip()),
+        )
         if fast:
             return SPEED_SHARED_TC_RULES.strip()
         return COMPACT_SHARED_TC_RULES.strip()
+    logger.info(
+        "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+        "PROFILE-TC-MIXED-DEFAULT",
+        "full",
+        "TC-GEN-DEFAULT",
+        len(DEFAULT_TC_GENERATION_RULES.strip()),
+    )
     return DEFAULT_TC_GENERATION_RULES.strip()
 
 

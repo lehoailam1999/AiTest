@@ -1,0 +1,12 @@
+feature_id,feature_label,user_entrypoint,domain,engines,required_tags,optional_tags,exclude_tags,max_rule_chars_budget,current_inject_mode,selective_profile_id,phase_target
+analysis_heuristic,Phân tích heuristic (sync),Requirement Studio → Phân tích,knowledge_builder,analysis,heuristic;sanitize,features;validation,,0,runtime_only,PROFILE-ANALYSIS-SANITIZE,0
+analysis_enrich,Phân tích AI enrich,Requirement Studio → Phân tích (LLM),analysis,analysis,fidelity;features;flows;validation;schema,actors;br;api;ac;nfr;gaps;exec-context,,4500,full fidelity + compact schema,PROFILE-ANALYSIS-ENRICH,2
+analysis_chat,Chat Knowledge,Requirement Studio → Chat,analysis,analysis,knowledge-diff;chat,,tc-readiness-checklist,2500,chat diff only,PROFILE-ANALYSIS-CHAT,3
+tc_gen_unit,Sinh TC Unit,Jobs / Studio freeze → Unit,tc_gen,unit,traceability;features;validation;br;format,aaa;bootstrap;focus;speed,e2e;playwright,6000,engine_rules + compact,PROFILE-TC-UNIT,2
+tc_gen_e2e,Sinh TC E2E,Jobs / Studio freeze → E2E,tc_gen,e2e,traceability;flows;path;auth-who;coverage;format,auth-hint;target-url;focus;speed,unit;mock,8000,engine_rules + e2e compact,PROFILE-TC-E2E,2
+tc_gen_mixed,Sinh TC mixed (no engine lock),Legacy generate TC,tc_gen,all,coverage;module;self-check,,,7000,DEFAULT_TC_GENERATION_RULES full,PROFILE-TC-MIXED,4
+unit_codegen,Sinh Unit Test code,Generate Unit / CLI,unit_codegen,unit,unit;mock;assertion;isolation;sut-safety;portable;naming,typescript;csharp;stack,,9000,UUTGS full + overlays,PROFILE-UNIT-CODEGEN,2
+e2e_codegen,Sinh E2E Playwright,Generate E2E / e2eJobRunner,e2e_codegen,e2e,playwright;auth;locator;journey;dor;portable;grounding,heal;per-tc-hints,,14000,E2ECG full + overlays,PROFILE-E2E-CODEGEN,2
+api_codegen,Sinh API test,providers API path,api_codegen,api,api;http;openapi,,playwright;ui,1500,inline api_system_prompt,PROFILE-API-CODEGEN,4
+e2e_heal,E2E auto-heal,e2eJobRunner heal loop,e2e_codegen,e2e,locator;dor;errors,,,0,runtime guard + taxonomy,PROFILE-E2E-HEAL,0
+unit_heal,Unit auto-repair,unitWorkspace repair,unit_codegen,unit,errors;repair,,,0,failure_taxonomy,PROFILE-UNIT-HEAL,0

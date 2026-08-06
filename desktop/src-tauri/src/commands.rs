@@ -764,7 +764,10 @@ pub fn list_source_files(
         } else {
             format!(".{ext}")
         };
-        out.extend(find_files(&root, &e, 8));
+        // Forensic/JHipster: …/ClientApp/src/app/admin/<mod>/list/*.ts is depth ~9–12.
+        // Depth 8 silently dropped those files → Code Index / FE resolve mapped wrong
+        // shallow components (e.g. activate) → empty locator contract.
+        out.extend(find_files(&root, &e, 20));
     }
     out.sort();
     out.dedup();

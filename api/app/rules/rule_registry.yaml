@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "UUTGS-FULL",
+      "domain": "unit_codegen",
+      "engines": ["unit"],
+      "priority": "required",
+      "tags": [
+        "unit",
+        "mock",
+        "assertion",
+        "isolation",
+        "sut-safety",
+        "portable",
+        "naming"
+      ],
+      "inject_mode": "full_block",
+      "content": "# UUTGS — Universal Unit Test Generation Specification\n\n## 1. Objective\nThe AI SHALL generate production-ready unit test code that is executable, deterministic,\nmaintainable, and aligned with the target project's conventions and detected test stack.\nThis Specification applies to all supported languages and frameworks.\n\n## 2. Principles\n### 2.1 Source Code Is the Single Source of Truth\nImplementation source (SUT + related sources in the prompt) SHALL be the highest-priority\nevidence for behavior. The AI MUST NOT infer behavior solely from names, comments,\nSRS, or API docs. Approved Test Case defines scenario *intent*; if intent conflicts with\nimplementation, implementation SHALL take precedence (brief comment allowed).\n\n### 2.2 Analyze Before Generate\nGeneration SHALL NOT begin until the AI has performed, from provided context:\nsyntax · semantic · dependency · control-flow · data-flow · exception · side-effect analysis\n(on a language-independent mental model: AST/CFG/DFG/call graph). Language syntax SHALL\nbe applied only in the final emit phase.\n\n## 3. Context\nThe AI SHALL use all provided context: SUT, related sources, DI/ctors, DTOs/entities/enums,\nutilities, existing tests/helpers/fixtures, Unit strategy, and Gaps. If critical dependencies\nare listed under Gaps, the AI MUST NOT invent missing APIs — test the visible surface and\nmark TODO only where unavoidable.\n\n## 4. Dependencies\nThe AI SHALL classify dependencies (pure / internal / external / infrastructure) and mock\nONLY components outside the unit under test (DB, HTTP, queue, cache, FS, cloud, mail, broker).\nThe AI SHALL NOT mock pure functions, value objects, DTOs, mappers, validators, or utilities\nwithout I/O. Mock behavior SHALL mirror real interaction contracts visible in source.\n\n## 5. Scenario Scope\nThe Approved Test Case SHALL bound this generation (one coherent scenario file).\nWithin that scope the AI SHALL derive Arrange/Act/Assert from implementation paths\n(input → validation → branch → logic → state → output → exception → side effects).\nCover happy / invalid / boundary / null-empty / exception paths when they are reachable\nin the SUT and required to establish the TC expected outcome — no uncovered branch that\nthe scenario exercises.\n\n## 6. Assertions & Isolation\nEach test SHALL assert meaningful behavior (return, state, interactions, events, rollback)\nand MUST be independent, deterministic, free of shared mutable order, wall-clock, random,\nnetwork, or live DB. No meaningless asserts. No flaky timing.\n\n## 7. Conventions & Stack\nThe AI SHALL detect language, test framework, mock/assert libraries from the prompt stack\nand style samples, then emit idiomatic code for that ecosystem (Jest/Vitest/xUnit/NUnit/\nJUnit/pytest/testing/… as detected). Match project naming, AAA (or project equivalent),\nfixture/builder/helper patterns from samples.\n\n## 8. Output & Validation\nOutput ONLY the complete test source file (no markdown fences, no prose).\nImports/namespaces/packages/generics/ctors/DI MUST be valid for the suggested path layout.\nBefore finish, the AI SHALL self-check: compiles · runnable · isolated · deterministic ·\ncovers TC intent against implementation · correct mocks · meaningful asserts · no duplicates ·\nno production source edits. Fail any criterion → regenerate mentally then emit once.\n\n## 9. Forbidden\nInfer from names only · skip exception/edge paths the scenario needs · mock everything ·\ninvent APIs/behaviors absent from source · nondeterministic tests · duplicate cases ·\nimport/execute app entrypoints/bootstrap (main/Program/wsgi/Application.main) — test the\nextractable unit (pipe/service/handler/validator/DTO) instead · modify production code.\n\n## 10. Portable across ANY project (hard)\n- Detect language + test/mock stack ONLY from the prompt packet (testingStack / samples /\n  SUT paths) — NEVER assume Nest, Angular, Django, Forensic, or a prior project.\n- Imports/symbols MUST come from provided SUT + related files — NEVER invent packages,\n  namespaces, module paths, or types not visible in context.\n- When a ctor dependency is in related sources, use that type; if only the SUT shows an\n  interface/abstract dep, mock that visible contract — still emit a **compiling** test.\n- Emit under host layout [{pkg}/]AItest/UnitTest/{Module}/ (or APITest) only — NEVER write\n  into production `src/` / `app/` trees.\n- Match SUT file language (`.cs`→xUnit/NUnit/Moq; `.ts`→Jest/Vitest) — NEVER emit Jest for\n  C# SUT or xUnit for a `.ts` Angular service.\n- Use the detected runner only. Include required imports or `/// <reference types=…>` so\n  the file typechecks outside app tsconfig.\n- No machine-specific absolute paths, hardcoded secrets, or env URLs inventing product hosts.\n- One Approved TC → one focused test file; AAA; mock only external I/O deps proven in source.\n- If context Gaps list missing deps: mock visible interfaces from SUT + short TODO — do NOT\n  leave empty/broken files or invent APIs."
+    },
+    {
+      "id": "E2ECG-FULL",
+      "domain": "e2e_codegen",
+      "engines": ["e2e"],
+      "priority": "required",
+      "tags": [
+        "playwright",
+        "auth",
+        "locator",
+        "journey",
+        "dor",
+        "portable",
+        "grounding"
+      ],
+      "inject_mode": "full_block",
+      "content_file": "fragments/e2ecg_full.md"
+    },
+    {
+      "id": "ANALYSIS-TC-READINESS",
+      "domain": "analysis",
+      "engines": ["analysis"],
+      "priority": "required",
+      "tags": ["analysis", "tc-readiness", "features", "flows", "validation", "fidelity", "schema"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/analysis_tc_readiness.md"
+    },
+    {
+      "id": "ANALYSIS-CHAT-DIFF",
+      "domain": "analysis",
+      "engines": ["analysis"],
+      "priority": "required",
+      "tags": ["analysis", "knowledge-diff", "chat"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/analysis_chat_diff.md"
+    },
+    {
+      "id": "TC-GEN-DEFAULT",
+      "domain": "tc_gen",
+      "engines": ["unit", "e2e", "api"],
+      "priority": "required",
+      "tags": ["tc-gen", "coverage", "format"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/tc_default.md"
+    },
+    {
+      "id": "TC-GEN-COMPACT-UNIT",
+      "domain": "tc_gen",
+      "engines": ["unit"],
+      "priority": "required",
+      "tags": ["tc-gen", "unit", "format", "shared"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/tc_compact_unit.md"
+    },
+    {
+      "id": "TC-GEN-COMPACT-E2E",
+      "domain": "tc_gen",
+      "engines": ["e2e"],
+      "priority": "required",
+      "tags": ["tc-gen", "e2e", "format", "shared"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/tc_compact_e2e.md"
+    },
+    {
+      "id": "TC-GEN-SPEED-UNIT",
+      "domain": "tc_gen",
+      "engines": ["unit"],
+      "priority": "optional",
+      "tags": ["tc-gen", "unit", "speed", "format", "shared"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/tc_speed_unit.md"
+    },
+    {
+      "id": "TC-GEN-SPEED-E2E",
+      "domain": "tc_gen",
+      "engines": ["e2e"],
+      "priority": "optional",
+      "tags": ["tc-gen", "e2e", "speed", "format", "shared"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/tc_speed_e2e.md"
+    },
+    {
+      "id": "UNIT-TC-ANALYSIS-FULL",
+      "domain": "tc_gen",
+      "engines": ["unit"],
+      "priority": "required",
+      "tags": ["tc-gen", "unit", "traceability", "validation", "br", "features"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/unit_tc_analysis_full.md"
+    },
+    {
+      "id": "UNIT-TC-ANALYSIS-FAST",
+      "domain": "tc_gen",
+      "engines": ["unit"],
+      "priority": "optional",
+      "tags": ["tc-gen", "unit", "traceability", "speed"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/unit_tc_analysis_fast.md"
+    },
+    {
+      "id": "E2E-TC-ANALYSIS-FULL",
+      "domain": "tc_gen",
+      "engines": ["e2e"],
+      "priority": "required",
+      "tags": ["tc-gen", "e2e", "traceability", "flows", "path", "auth-who", "coverage"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/e2e_tc_analysis_full.md"
+    },
+    {
+      "id": "E2E-TC-ANALYSIS-FAST",
+      "domain": "tc_gen",
+      "engines": ["e2e"],
+      "priority": "optional",
+      "tags": ["tc-gen", "e2e", "traceability", "speed"],
+      "inject_mode": "full_block",
+      "content_file": "fragments/e2e_tc_analysis_fast.md"
+    }
+  ]
+}

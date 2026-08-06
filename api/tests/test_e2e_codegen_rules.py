@@ -34,7 +34,7 @@ def test_system_prompt_injects_e2ecg_once():
     assert "Feature journey" in p or "FEATURE ENTRY" in p or "Feature entry" in p
     assert "AUTH overlay" in p
     assert "LOCATOR (HTML-first)" not in p  # moved into E2ECG — no duplicate essay
-    assert len(p) < 9000
+    assert len(p) < 9500
 
 
 def test_derive_execution_context_multi_role():

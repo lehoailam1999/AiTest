@@ -18,8 +18,16 @@ Injection (single place — do NOT restate in system_prompt / freeze / COMPACT):
 
 from __future__ import annotations
 
+import logging
+import os
+
+from app.rules import get_rule_text
+from app.rules import render_rules_for_profile_with_meta
+
+logger = logging.getLogger(__name__)
+
 # Canonical E2E←Analysis contract. Keep compact — fits under system eng_cap with overlay.
-E2E_TC_FROM_ANALYSIS_RULES = """\
+_LEGACY_E2E_TC_FROM_ANALYSIS_RULES = """\
 ## E2E ← PHÂN TÍCH (Output-driven) — nguồn #1 duy nhất
 Approved Knowledge / Freeze / «KẾT QUẢ PHÂN TÍCH ĐÃ LƯU DB» = SoT (12 bucket + summary).
 CẤM: đọc lại SRS thô · source invent FR · pad · exploratory · TC thừa/trùng.
@@ -43,8 +51,10 @@ target_url/auth_hint = runtime hint, không tạo FR.
 6. BR Expansion: mỗi BUSINESS_RULES quan sát được trên UI → ≥1 TC.
 7. Scenario Expansion (có tín hiệu mới sinh): Happy · Validation · Permission · Boundary · Error —
    CHỈ nhánh có tín hiệu Output (không checklist giả).
-8. Step Expansion: [Hành động]->[Element]->[Data]; label gần nguyên văn Output.
-   Mỗi step kiểm chứng được; cấm bước «kiểm tra chung chung».
+8. Step Expansion: mỗi step BẮT BUỘC dạng `[Hành động] → [Element/nhãn UI] → [Data nếu có]`.
+   Label gần nguyên văn Output. Mỗi step kiểm chứng được.
+   CẤM bước chỉ «kiểm tra / verify / xem màn hình» không chỉ rõ control hoặc data.
+   Post-login: nếu thiếu path: hoặc toàn step vague → ghi `[Thiếu Context]` trong testData.
 9. Expected Binding: chỉ outcome AC/BR/ERROR/VALIDATION/FLOW — 1–3 assert observable.
 10. Coverage gate (không lọt): mọi FEATURES/FLOWS/BR/VALIDATION/AC/ERROR/(ACTORS RBAC)/EXECUTION_CONTEXT
     có item → ≥1 TC. Thiếu lớp có tín hiệu = FAIL (không chấp nhận «đã đủ vì hết quota»).
@@ -64,21 +74,57 @@ Cấm: type≠E2E · Unit/API thuần · duplicate journey · bịa role · pad 
 """
 
 # Compact variant — same coverage contract, shorter wording (token save). No numeric ceiling.
-E2E_TC_FROM_ANALYSIS_RULES_FAST = """\
+_LEGACY_E2E_TC_FROM_ANALYSIS_RULES_FAST = """\
 ## E2E ← PHÂN TÍCH (gọn) — đủ cover, cấm thừa
 SoT = Knowledge/Freeze/DB. Gate: FEATURES + (FLOWS|AC). type=E2E. `trace:` unique/TC.
 Cover đủ item có tín hiệu: FLOWS · FEATURES · AUTH WHO · VALIDATION/BR · ERROR/permission.
 Post-login: `path:`/`featurePath:` bắt buộc (E2E_GROUNDING). Login/PUBLIC miễn.
+Step: `[Hành động]→[Element]→[Data]` — cấm step chỉ «kiểm tra» chung. Thiếu → `[Thiếu Context]`.
 Số TC = số tín hiệu cần cover — không trần N. CẤM: pad · trùng trace · cùng expected+flow · SRS invent.
 1 tín hiệu/TC · expected 1–3 assert · []/GAPS không invent.
 """
 
+E2E_TC_FROM_ANALYSIS_RULES = get_rule_text(
+    "E2E-TC-ANALYSIS-FULL", fallback=_LEGACY_E2E_TC_FROM_ANALYSIS_RULES
+)
+E2E_TC_FROM_ANALYSIS_RULES_FAST = get_rule_text(
+    "E2E-TC-ANALYSIS-FAST", fallback=_LEGACY_E2E_TC_FROM_ANALYSIS_RULES_FAST
+)
+
+
+def _tc_gen_selective_enabled() -> bool:
+    mode = (os.environ.get("AITEST_RULE_RETRIEVE_MODE") or "full").strip().lower()
+    gate = (os.environ.get("AITEST_RULE_RETRIEVE_TCGEN") or "").strip().lower()
+    return mode == "selective" and gate not in ("0", "false", "no", "off")
+
 
 def append_e2e_tc_from_analysis_rules(prompt: str, *, speed: bool = False) -> str:
     """Prepend Output-driven contract so truncate(eng_cap) keeps SoT if budget is tight."""
-    block = (
-        E2E_TC_FROM_ANALYSIS_RULES_FAST if speed else E2E_TC_FROM_ANALYSIS_RULES
-    ).strip()
+    block = (E2E_TC_FROM_ANALYSIS_RULES_FAST if speed else E2E_TC_FROM_ANALYSIS_RULES).strip()
+    if _tc_gen_selective_enabled():
+        profile = (
+            "PROFILE-TC-E2E-ANALYSIS-SPEED"
+            if speed
+            else "PROFILE-TC-E2E-ANALYSIS"
+        )
+        selected, rule_ids, chars = render_rules_for_profile_with_meta(profile)
+        if selected:
+            logger.info(
+                "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+                profile,
+                "selective",
+                ",".join(rule_ids),
+                chars,
+            )
+            block = selected.strip()
+    else:
+        logger.info(
+            "RuleProfile apply profile=%s mode=%s ids=%s chars=%s",
+            "PROFILE-TC-E2E-ANALYSIS",
+            "full",
+            "E2E-TC-ANALYSIS-FULL/E2E-TC-ANALYSIS-FAST",
+            len((E2E_TC_FROM_ANALYSIS_RULES_FAST if speed else E2E_TC_FROM_ANALYSIS_RULES).strip()),
+        )
     base = (prompt or "").rstrip()
     if block in base:
         return base

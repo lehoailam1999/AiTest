@@ -1,8 +1,7 @@
-"""Requirement Studio application — upload (R1) + chunking (R2) + knowledge (R3)."""
+"""Requirement Studio application — upload (R1) + knowledge (R3)."""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -10,10 +9,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.features.requirement_studio.chunking import chunk_document_text
+from app import constants as C
 from app.features.requirement_studio.chat_orchestrator import (
     apply_knowledge_diff,
     chat_system_prompt,
@@ -25,10 +24,17 @@ from app.features.requirement_studio.coverage_analyzer import (
     analyze_requirement_coverage,
     coverage_score_pct,
 )
+from app.features.requirement_studio.analysis_records import replace_analysis_records
+from app.features.requirement_studio.knowledge_pipeline import (
+    build_knowledge,
+    clear_enrich_state,
+    get_enrich_state,
+    load_chunk_pairs,
+    set_enrich_state,
+)
 from app.features.requirement_studio.dto import (
     chat_message_dto,
     chat_session_dto,
-    chunk_dto,
     file_ref_dto,
     knowledge_dto,
     snapshot_dto,
@@ -36,17 +42,8 @@ from app.features.requirement_studio.dto import (
     workspace_dto,
 )
 from app.features.requirement_studio.knowledge_builder import (
-    build_knowledge_user_prompt,
-    build_knowledge_user_prompt_pass2,
-    build_knowledge_heuristic,
-    chunks_input_hash,
-    knowledge_system_prompt,
-    knowledge_system_prompt_pass2,
-    merge_knowledge_payloads,
     normalize_knowledge_payload,
-    parse_knowledge_llm_json,
 )
-from app.llm.perf_timing import elapsed_ms, now_ms, timing_dict
 from app.features.requirement_studio.snapshot_prompt import (
     build_freeze_bundle,
     parse_json_field,
@@ -56,7 +53,6 @@ from app.models.domain import (
     AiBackendConnection,
     ChatMessage,
     ChatSession,
-    DocumentChunk,
     GenerationTask,
     Job,
     KnowledgeWorkspace,
@@ -75,179 +71,10 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 15_000_000
 MAX_FILES_PER_REQUEST = 20
-ANALYSIS_RECORD_TYPES: tuple[str, ...] = (
-    "SUMMARY_SCOPE",
-    "FEATURES",
-    "ACTORS_PERMISSIONS",
-    "BUSINESS_FLOWS",
-    "EXECUTION_CONTEXT",
-    "BUSINESS_RULES",
-    "VALIDATION_DATA",
-    "API_UI",
-    "ERROR_HANDLING",
-    "ACCEPTANCE",
-    "NFR_CONSTRAINTS",
-    "GAPS",
-)
-
-# In-memory enrich progress (no migration). Key = workspace_id str.
-_enrich_state: dict[str, dict[str, Any]] = {}
-
-
-def get_enrich_state(workspace_id: uuid.UUID | str) -> dict[str, Any]:
-    row = _enrich_state.get(str(workspace_id)) or {}
-    return {
-        "enrichPending": bool(row.get("enrichPending")),
-        "enrichError": row.get("enrichError"),
-        "cursorChatId": row.get("cursorChatId"),
-        "timing": row.get("timing") if isinstance(row.get("timing"), dict) else None,
-        "cacheHit": bool(row.get("cacheHit")),
-    }
-
-
-def set_enrich_state(
-    workspace_id: uuid.UUID | str,
-    *,
-    enrich_pending: bool,
-    enrich_error: str | None = None,
-    cursor_chat_id: str | None = None,
-    timing: dict[str, Any] | None = None,
-    cache_hit: bool | None = None,
-) -> None:
-    key = str(workspace_id)
-    prev = _enrich_state.get(key) or {}
-    _enrich_state[key] = {
-        "enrichPending": enrich_pending,
-        "enrichError": enrich_error,
-        "cursorChatId": cursor_chat_id
-        if cursor_chat_id is not None
-        else prev.get("cursorChatId"),
-        "timing": timing if timing is not None else prev.get("timing"),
-        "cacheHit": bool(cache_hit) if cache_hit is not None else bool(prev.get("cacheHit")),
-    }
-
-
-def clear_enrich_state(workspace_id: uuid.UUID | str) -> None:
-    _enrich_state.pop(str(workspace_id), None)
 
 
 def _alive(model):
     return model.deleted_at.is_(None)
-
-
-def _analysis_count(value: object) -> int:
-    if isinstance(value, list):
-        return len(value)
-    if isinstance(value, str):
-        return 1 if value.strip() else 0
-    return 0
-
-
-def _analysis_records_from_payload(payload: dict | None) -> list[dict]:
-    data = payload if isinstance(payload, dict) else {}
-    return [
-        {
-            "type": "SUMMARY_SCOPE",
-            "title": "Tóm tắt & phạm vi",
-            "itemCount": _analysis_count(data.get("summary")),
-            "content": {"summary": data.get("summary") or ""},
-        },
-        {
-            "type": "FEATURES",
-            "title": "Chức năng",
-            "itemCount": _analysis_count(data.get("features")),
-            "content": data.get("features") or [],
-        },
-        {
-            "type": "ACTORS_PERMISSIONS",
-            "title": "Actors & quyền",
-            "itemCount": _analysis_count(data.get("actors")),
-            "content": data.get("actors") or [],
-        },
-        {
-            "type": "BUSINESS_FLOWS",
-            "title": "Luồng nghiệp vụ",
-            "itemCount": _analysis_count(data.get("useCases")),
-            "content": data.get("useCases") or [],
-        },
-        {
-            "type": "EXECUTION_CONTEXT",
-            "title": "Execution Context",
-            "itemCount": _analysis_count(data.get("executionContexts")),
-            "content": data.get("executionContexts") or [],
-        },
-        {
-            "type": "BUSINESS_RULES",
-            "title": "Business rules",
-            "itemCount": _analysis_count(data.get("businessRules")),
-            "content": data.get("businessRules") or [],
-        },
-        {
-            "type": "VALIDATION_DATA",
-            "title": "Validation & dữ liệu",
-            "itemCount": _analysis_count(data.get("validationRules")),
-            "content": data.get("validationRules") or [],
-        },
-        {
-            "type": "API_UI",
-            "title": "API / giao diện",
-            "itemCount": _analysis_count(data.get("apiSummary")),
-            "content": data.get("apiSummary") or [],
-        },
-        {
-            "type": "ERROR_HANDLING",
-            "title": "Xử lý lỗi",
-            "itemCount": _analysis_count(data.get("exceptions")),
-            "content": data.get("exceptions") or [],
-        },
-        {
-            "type": "ACCEPTANCE",
-            "title": "Acceptance",
-            "itemCount": _analysis_count(data.get("acceptanceCriteria")),
-            "content": data.get("acceptanceCriteria") or [],
-        },
-        {
-            "type": "NFR_CONSTRAINTS",
-            "title": "Ràng buộc NFR",
-            "itemCount": _analysis_count(data.get("constraints")),
-            "content": data.get("constraints") or [],
-        },
-        {
-            "type": "GAPS",
-            "title": "Thiếu sót",
-            "itemCount": _analysis_count(data.get("gaps")),
-            "content": data.get("gaps") or [],
-        },
-    ]
-
-
-def _replace_analysis_records(
-    db: Session,
-    *,
-    workspace_id: uuid.UUID,
-    project_id: uuid.UUID,
-    knowledge_id: uuid.UUID | None,
-    knowledge_version: int,
-    payload: dict | None,
-) -> None:
-    db.query(RequirementAnalysisRecord).filter(
-        RequirementAnalysisRecord.workspace_id == workspace_id
-    ).delete(synchronize_session=False)
-    for row in _analysis_records_from_payload(payload):
-        if row["type"] not in ANALYSIS_RECORD_TYPES:
-            continue
-        db.add(
-            RequirementAnalysisRecord(
-                workspace_id=workspace_id,
-                project_id=project_id,
-                knowledge_id=knowledge_id,
-                knowledge_version=int(knowledge_version or 0),
-                type=row["type"],
-                title=row["title"],
-                item_count=int(row["itemCount"] or 0),
-                content_json=json.dumps(row["content"], ensure_ascii=False),
-            )
-        )
 
 
 def get_project(db: Session, project_id: uuid.UUID) -> Project | None:
@@ -274,19 +101,6 @@ def get_file(db: Session, file_id: uuid.UUID) -> RequirementFile | None:
     )
 
 
-def _chunk_counts_by_file(
-    db: Session, file_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, int]:
-    if not file_ids:
-        return {}
-    rows = db.execute(
-        select(DocumentChunk.file_id, func.count())
-        .where(DocumentChunk.file_id.in_(file_ids), _alive(DocumentChunk))
-        .group_by(DocumentChunk.file_id)
-    ).all()
-    return {fid: int(n) for fid, n in rows}
-
-
 def list_workspaces(db: Session, project_id: uuid.UUID) -> list[dict]:
     rows = db.scalars(
         select(RequirementWorkspace)
@@ -304,14 +118,6 @@ def list_workspaces(db: Session, project_id: uuid.UUID) -> list[dict]:
             .where(
                 RequirementFile.workspace_id == ws.id,
                 _alive(RequirementFile),
-            )
-        )
-        chunk_count = db.scalar(
-            select(func.count())
-            .select_from(DocumentChunk)
-            .where(
-                DocumentChunk.workspace_id == ws.id,
-                _alive(DocumentChunk),
             )
         )
         snap_count = db.scalar(
@@ -373,7 +179,6 @@ def list_workspaces(db: Session, project_id: uuid.UUID) -> list[dict]:
         dto = workspace_dto(
             ws,
             file_count=int(file_count or 0),
-            chunk_count=int(chunk_count or 0),
             knowledge_status=(kw.status if kw else "empty"),
         )
         dto["knowledgeVersion"] = int(kw.version or 0) if kw else 0
@@ -399,7 +204,7 @@ def create_workspace(
     db.add(ws)
     db.commit()
     db.refresh(ws)
-    return workspace_dto(ws, file_count=0, chunk_count=0, knowledge_status="empty")
+    return workspace_dto(ws, file_count=0, knowledge_status="empty")
 
 
 def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
@@ -464,11 +269,6 @@ def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
         .delete(synchronize_session=False)
     )
 
-    deleted_chunks = (
-        db.query(DocumentChunk)
-        .filter(DocumentChunk.workspace_id == workspace_id)
-        .delete(synchronize_session=False)
-    )
     deleted_files = (
         db.query(RequirementFile)
         .filter(RequirementFile.workspace_id == workspace_id)
@@ -495,7 +295,6 @@ def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
         "deletedSnapshots": int(deleted_snaps or 0),
         "deletedChatMessages": int(deleted_msgs or 0),
         "deletedChatSessions": int(deleted_sessions or 0),
-        "deletedChunks": int(deleted_chunks or 0),
         "deletedFiles": int(deleted_files or 0),
         "deletedKnowledge": int(deleted_knowledge or 0),
         "deletedAnalysisRecords": int(deleted_analysis or 0),
@@ -518,100 +317,14 @@ def list_files(db: Session, workspace_id: uuid.UUID) -> list[dict]:
         )
         .order_by(RequirementFile.created_at.asc())
     ).all()
-    counts = _chunk_counts_by_file(db, [f.id for f in rows])
-    return [
-        file_ref_dto(f, chunk_count=counts.get(f.id, 0)) for f in rows
-    ]
+    return [file_ref_dto(f) for f in rows]
 
 
 def get_file_detail(db: Session, file_id: uuid.UUID) -> dict | None:
     row = get_file(db, file_id)
     if row is None:
         return None
-    counts = _chunk_counts_by_file(db, [row.id])
-    return file_ref_dto(
-        row,
-        include_text=True,
-        chunk_count=counts.get(row.id, 0),
-    )
-
-
-def list_chunks(db: Session, file_id: uuid.UUID) -> list[dict]:
-    rows = db.scalars(
-        select(DocumentChunk)
-        .where(DocumentChunk.file_id == file_id, _alive(DocumentChunk))
-        .order_by(DocumentChunk.ordinal.asc())
-    ).all()
-    return [chunk_dto(c) for c in rows]
-
-
-def _soft_delete_chunks_for_file(db: Session, file_id: uuid.UUID) -> None:
-    now = datetime.now(timezone.utc)
-    db.execute(
-        update(DocumentChunk)
-        .where(DocumentChunk.file_id == file_id, _alive(DocumentChunk))
-        .values(deleted_at=now)
-    )
-
-
-def replace_chunks_for_file(
-    db: Session, row: RequirementFile, *, commit: bool = True
-) -> int:
-    """Rebuild ChunkStore from extracted_text. Returns chunk count."""
-    _soft_delete_chunks_for_file(db, row.id)
-
-    text = (row.extracted_text or "").strip()
-    if row.parse_status != "ready" or not text:
-        row.chunk_status = "none"
-        if commit:
-            db.commit()
-            db.refresh(row)
-        return 0
-
-    pieces = chunk_document_text(text)
-    for piece in pieces:
-        db.add(
-            DocumentChunk(
-                file_id=row.id,
-                workspace_id=row.workspace_id,
-                ordinal=piece.ordinal,
-                text=piece.text,
-                char_count=len(piece.text),
-                heading=piece.heading,
-            )
-        )
-    row.chunk_status = "ready" if pieces else "none"
-    if commit:
-        db.commit()
-        db.refresh(row)
-    return len(pieces)
-
-
-def rechunk_file(db: Session, file_id: uuid.UUID) -> dict | None:
-    row = get_file(db, file_id)
-    if row is None:
-        return None
-    count = replace_chunks_for_file(db, row, commit=True)
-    mark_knowledge_stale(db, row.workspace_id)
-    return file_ref_dto(row, chunk_count=count)
-
-
-def rechunk_workspace(db: Session, workspace_id: uuid.UUID) -> dict:
-    rows = db.scalars(
-        select(RequirementFile).where(
-            RequirementFile.workspace_id == workspace_id,
-            _alive(RequirementFile),
-            RequirementFile.parse_status == "ready",
-        )
-    ).all()
-    total_chunks = 0
-    updated = 0
-    for row in rows:
-        total_chunks += replace_chunks_for_file(db, row, commit=False)
-        updated += 1
-    db.commit()
-    mark_knowledge_stale(db, workspace_id)
-    return {"filesUpdated": updated, "chunkCount": total_chunks}
+    return file_ref_dto(row, include_text=True)
 
 
 def soft_delete_file(db: Session, file_id: uuid.UUID) -> RequirementFile | None:
@@ -620,7 +333,6 @@ def soft_delete_file(db: Session, file_id: uuid.UUID) -> RequirementFile | None:
         return None
     now = datetime.now(timezone.utc)
     wid = row.workspace_id
-    _soft_delete_chunks_for_file(db, file_id)
     row.deleted_at = now
     db.commit()
     mark_knowledge_stale(db, wid)
@@ -635,7 +347,7 @@ def ingest_upload(
     raw: bytes,
     mime_type: str | None,
 ) -> dict:
-    """Parse + persist FileRef + auto-chunk when parse succeeds (R1+R2)."""
+    """Parse + persist FileRef when parse succeeds (R1)."""
     name = (file_name or "upload").strip() or "upload"
     sha = hashlib.sha256(raw).hexdigest()
     mime = (mime_type or "").strip() or None
@@ -647,7 +359,6 @@ def ingest_upload(
         byte_size=len(raw),
         content_sha256=sha,
         parse_status="pending",
-        chunk_status="none",
         storage_kind="inline",
         content_bytes=raw,
     )
@@ -675,15 +386,10 @@ def ingest_upload(
 
     db.add(row)
     db.flush()
-
-    chunk_count = 0
-    if row.parse_status == "ready":
-        chunk_count = replace_chunks_for_file(db, row, commit=False)
-
     db.commit()
     db.refresh(row)
     mark_knowledge_stale(db, workspace.id)
-    return file_ref_dto(row, include_text=False, chunk_count=chunk_count)
+    return file_ref_dto(row, include_text=False)
 
 
 def get_knowledge_row(
@@ -698,10 +404,37 @@ def get_knowledge_row(
 
 
 def get_knowledge(db: Session, workspace_id: uuid.UUID) -> dict:
-    return knowledge_dto(
-        get_knowledge_row(db, workspace_id),
-        enrich=get_enrich_state(workspace_id),
-    )
+    row = get_knowledge_row(db, workspace_id)
+    enrich = get_enrich_state(workspace_id)
+    # Heal orphaned building rows: enrich task died / API restarted / hung past TTL.
+    if row is not None and (row.status or "") == "building":
+        pending = bool(enrich.get("enrichPending"))
+        age_sec = 0.0
+        if row.updated_at is not None:
+            try:
+                age_sec = (
+                    datetime.now(timezone.utc) - row.updated_at.astimezone(timezone.utc)
+                ).total_seconds()
+            except Exception:
+                age_sec = 0.0
+        # No live enrich marker, or stuck > 4 minutes → surface heuristic as ready.
+        if (not pending) or age_sec > 240:
+            row.status = "ready"
+            if not row.error:
+                row.error = (
+                    "LLM enrich timeout/interrupted — giữ bản heuristic."
+                    if pending or age_sec > 240
+                    else None
+                )
+            db.commit()
+            db.refresh(row)
+            set_enrich_state(
+                workspace_id,
+                enrich_pending=False,
+                enrich_error=row.error,
+            )
+            enrich = get_enrich_state(workspace_id)
+    return knowledge_dto(row, enrich=enrich)
 
 
 def mark_knowledge_stale(db: Session, workspace_id: uuid.UUID) -> None:
@@ -714,469 +447,8 @@ def mark_knowledge_stale(db: Session, workspace_id: uuid.UUID) -> None:
         db.commit()
 
 
-def _load_chunk_pairs(
-    db: Session, workspace_id: uuid.UUID
-) -> tuple[list[tuple[str | None, str]], list[str], int, int]:
-    files = db.scalars(
-        select(RequirementFile).where(
-            RequirementFile.workspace_id == workspace_id,
-            _alive(RequirementFile),
-            RequirementFile.parse_status == "ready",
-        )
-    ).all()
-    file_names = [f.file_name for f in files]
-    chunks = db.scalars(
-        select(DocumentChunk)
-        .where(
-            DocumentChunk.workspace_id == workspace_id,
-            _alive(DocumentChunk),
-        )
-        .order_by(DocumentChunk.file_id.asc(), DocumentChunk.ordinal.asc())
-    ).all()
-    pairs = [(c.heading, c.text) for c in chunks]
-    return pairs, file_names, len(files), len(chunks)
-
-
-def _persist_knowledge_payload(
-    db: Session,
-    row: KnowledgeWorkspace,
-    workspace: RequirementWorkspace,
-    payload: dict,
-    *,
-    builder: str,
-    file_count: int,
-    chunk_count: int,
-    bump_version: bool = True,
-    enrich_input_hash: str | None = None,
-    enrich_timing: dict | None = None,
-) -> None:
-    payload = normalize_knowledge_payload(payload)
-    row.payload_json = json.dumps(payload, ensure_ascii=False)
-    row.summary = (payload.get("summary") or "")[:4000] or None
-    row.builder = builder
-    row.status = "ready"
-    if bump_version:
-        row.version = int(row.version or 0) + 1
-    row.source_file_count = file_count
-    row.source_chunk_count = chunk_count
-    row.error = None
-    row.built_at = datetime.now(timezone.utc)
-    pairs_text = []
-    try:
-        pairs, _, _, _ = _load_chunk_pairs(db, workspace.id)
-        pairs_text = [t for _, t in pairs]
-    except Exception:
-        pairs_text = []
-    coverage = analyze_requirement_coverage(payload, chunk_texts=pairs_text)
-    if enrich_input_hash or enrich_timing:
-        perf = dict(coverage.get("perf") or {}) if isinstance(coverage, dict) else {}
-        if enrich_input_hash:
-            perf["enrichInputHash"] = enrich_input_hash
-        if enrich_timing:
-            perf["timing"] = enrich_timing
-        if isinstance(coverage, dict):
-            coverage["perf"] = perf
-    row.coverage_json = json.dumps(coverage, ensure_ascii=False)
-    _replace_analysis_records(
-        db,
-        workspace_id=workspace.id,
-        project_id=workspace.project_id,
-        knowledge_id=row.id,
-        knowledge_version=row.version,
-        payload=payload,
-    )
-
-
-async def enrich_knowledge_background(
-    workspace_id: uuid.UUID,
-    project_id: uuid.UUID,
-    *,
-    expected_version: int,
-) -> None:
-    """Background Cursor/LLM enrich after heuristic ready. Own DB session.
-
-    Phase A/B: timing logs, chunk-hash cache skip, parallel pass1+pass2 groups.
-    """
-    from app.database import SessionLocal
-    from app.services.ai_service import RUNNER_AI_CLI, chat_for_connection
-
-    t0 = now_ms()
-    set_enrich_state(workspace_id, enrich_pending=True, enrich_error=None, cache_hit=False)
-    db = SessionLocal()
-    try:
-        workspace = get_workspace(db, workspace_id)
-        row = get_knowledge_row(db, workspace_id)
-        if workspace is None or row is None:
-            set_enrich_state(
-                workspace_id,
-                enrich_pending=False,
-                enrich_error="Knowledge/workspace missing",
-            )
-            return
-        if int(row.version or 0) != int(expected_version):
-            set_enrich_state(workspace_id, enrich_pending=False, enrich_error=None)
-            return
-
-        t_prep = now_ms()
-        pairs, file_names, file_count, chunk_count = _load_chunk_pairs(db, workspace_id)
-        input_hash = chunks_input_hash(pairs, file_names)
-        heuristic = normalize_knowledge_payload(
-            parse_json_field(row.payload_json) or {}
-        )
-        cached_payload = _enrich_payload_cache.get(str(workspace_id))
-        if (
-            cached_payload
-            and cached_payload.get("hash") == input_hash
-            and isinstance(cached_payload.get("payload"), dict)
-        ):
-            prepare_ms = elapsed_ms(t_prep)
-            merged = merge_knowledge_payloads(heuristic, cached_payload["payload"])
-            timing = timing_dict(
-                prepare_ms=prepare_ms,
-                llm_ms=0,
-                persist_ms=0,
-                prompt_chars=0,
-                provider="cache",
-                total_ms=elapsed_ms(t0),
-                cache_hit=1,
-            )
-            t_persist = now_ms()
-            _persist_knowledge_payload(
-                db,
-                row,
-                workspace,
-                merged,
-                builder=str(cached_payload.get("builder") or "llm"),
-                file_count=file_count,
-                chunk_count=chunk_count,
-                bump_version=True,
-                enrich_input_hash=input_hash,
-                enrich_timing=timing,
-            )
-            timing["persist_ms"] = elapsed_ms(t_persist)
-            timing["total_ms"] = elapsed_ms(t0)
-            db.commit()
-            set_enrich_state(
-                workspace_id,
-                enrich_pending=False,
-                enrich_error=None,
-                timing=timing,
-                cache_hit=True,
-            )
-            logger.info(
-                "Knowledge enrich CACHE HIT workspace=%s hash=%s prepare_ms=%s total_ms=%s",
-                workspace_id,
-                input_hash[:12],
-                prepare_ms,
-                timing["total_ms"],
-            )
-            return
-
-        conn = db.scalar(
-            select(AiBackendConnection).where(
-                AiBackendConnection.project_id == project_id
-            )
-        )
-        if conn is None:
-            set_enrich_state(
-                workspace_id,
-                enrich_pending=False,
-                enrich_error="AI connection missing",
-            )
-            return
-
-        user_p1 = build_knowledge_user_prompt(pairs, file_names=file_names, pass1=True)
-        user_p2 = build_knowledge_user_prompt_pass2(pairs, file_names=file_names)
-        sys_p1 = knowledge_system_prompt(pass1=True)
-        sys_p2 = knowledge_system_prompt_pass2()
-        prompt_chars = len(user_p1) + len(user_p2) + len(sys_p1) + len(sys_p2)
-        prepare_ms = elapsed_ms(t_prep)
-
-        async def _one(sys_p: str, user_p: str, *, create_chat: bool):
-            return await chat_for_connection(
-                conn, sys_p, user_p, create_chat=create_chat
-            )
-
-        t_llm = now_ms()
-        (raw1, meta1), (raw2, meta2) = await asyncio.gather(
-            _one(sys_p1, user_p1, create_chat=True),
-            _one(sys_p2, user_p2, create_chat=False),
-        )
-        llm_ms = elapsed_ms(t_llm)
-        chat_id = meta1.get("cursorChatId") or meta2.get("cursorChatId")
-        if isinstance(chat_id, str) and chat_id.strip():
-            set_enrich_state(
-                workspace_id,
-                enrich_pending=True,
-                cursor_chat_id=chat_id.strip(),
-            )
-
-        llm1 = parse_knowledge_llm_json(raw1) or {}
-        llm2 = parse_knowledge_llm_json(raw2) or {}
-        llm_payload = merge_knowledge_payloads(llm1, llm2)
-        useful = bool(
-            llm_payload
-            and (
-                llm_payload.get("summary")
-                or any(
-                    llm_payload.get(k)
-                    for k in (
-                        "features",
-                        "businessRules",
-                        "actors",
-                        "useCases",
-                        "validationRules",
-                        "apiSummary",
-                        "exceptions",
-                        "acceptanceCriteria",
-                        "constraints",
-                        "executionContexts",
-                    )
-                )
-            )
-        )
-        provider = (
-            "llm-cli"
-            if (
-                meta1.get("runnerUsed") == RUNNER_AI_CLI
-                or meta2.get("runnerUsed") == RUNNER_AI_CLI
-            )
-            else "llm"
-        )
-        if not useful:
-            gaps = list(heuristic.get("gaps") or [])
-            gaps.insert(
-                0,
-                {
-                    "text": "LLM enrich không trả JSON hữu ích — giữ bản heuristic.",
-                },
-            )
-            heuristic["gaps"] = gaps
-            timing = timing_dict(
-                prepare_ms=prepare_ms,
-                llm_ms=llm_ms,
-                persist_ms=0,
-                prompt_chars=prompt_chars,
-                provider=provider,
-                total_ms=elapsed_ms(t0),
-            )
-            t_persist = now_ms()
-            _persist_knowledge_payload(
-                db,
-                row,
-                workspace,
-                heuristic,
-                builder="heuristic-v1",
-                file_count=file_count,
-                chunk_count=chunk_count,
-                bump_version=False,
-                enrich_input_hash=input_hash,
-                enrich_timing=timing,
-            )
-            timing["persist_ms"] = elapsed_ms(t_persist)
-            timing["total_ms"] = elapsed_ms(t0)
-            db.commit()
-            set_enrich_state(
-                workspace_id,
-                enrich_pending=False,
-                enrich_error="LLM enrich empty",
-                cursor_chat_id=chat_id if isinstance(chat_id, str) else None,
-                timing=timing,
-                cache_hit=False,
-            )
-            logger.info(
-                "Knowledge enrich EMPTY workspace=%s prepare_ms=%s llm_ms=%s prompt_chars=%s",
-                workspace_id,
-                prepare_ms,
-                llm_ms,
-                prompt_chars,
-            )
-            return
-
-        merged = merge_knowledge_payloads(heuristic, llm_payload)
-        builder = provider
-        db.refresh(row)
-        if int(row.version or 0) != int(expected_version):
-            # Another build superseded this enrich — clear pending; keep DB status
-            if (row.status or "") == "building":
-                row.status = "ready"
-                db.commit()
-            set_enrich_state(workspace_id, enrich_pending=False)
-            return
-        timing = timing_dict(
-            prepare_ms=prepare_ms,
-            llm_ms=llm_ms,
-            persist_ms=0,
-            prompt_chars=prompt_chars,
-            provider=provider,
-            total_ms=0,
-        )
-        t_persist = now_ms()
-        _persist_knowledge_payload(
-            db,
-            row,
-            workspace,
-            merged,
-            builder=builder,
-            file_count=file_count,
-            chunk_count=chunk_count,
-            bump_version=True,
-            enrich_input_hash=input_hash,
-            enrich_timing=timing,
-        )
-        timing["persist_ms"] = elapsed_ms(t_persist)
-        timing["total_ms"] = elapsed_ms(t0)
-        db.commit()
-        _enrich_payload_cache[str(workspace_id)] = {
-            "hash": input_hash,
-            "payload": llm_payload,
-            "builder": builder,
-        }
-        set_enrich_state(
-            workspace_id,
-            enrich_pending=False,
-            enrich_error=None,
-            cursor_chat_id=chat_id if isinstance(chat_id, str) else None,
-            timing=timing,
-            cache_hit=False,
-        )
-        logger.info(
-            "Knowledge enrich OK workspace=%s v%s→%s builder=%s "
-            "prepare_ms=%s llm_ms=%s persist_ms=%s prompt_chars=%s total_ms=%s chat=%s",
-            workspace_id,
-            expected_version,
-            row.version,
-            builder,
-            prepare_ms,
-            llm_ms,
-            timing["persist_ms"],
-            prompt_chars,
-            timing["total_ms"],
-            (chat_id or "")[:16] if isinstance(chat_id, str) else "",
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Knowledge enrich failed workspace=%s: %s", workspace_id, e)
-        try:
-            row = get_knowledge_row(db, workspace_id)
-            workspace = get_workspace(db, workspace_id)
-            if row is not None and workspace is not None:
-                payload = normalize_knowledge_payload(
-                    parse_json_field(row.payload_json) or {}
-                )
-                gaps = list(payload.get("gaps") or [])
-                gaps.insert(
-                    0,
-                    {"text": f"LLM enrich lỗi — giữ heuristic. ({e})"},
-                )
-                payload["gaps"] = gaps
-                row.payload_json = json.dumps(payload, ensure_ascii=False)
-                row.summary = (payload.get("summary") or "")[:4000] or None
-                # Unstick UI: never leave status=building after enrich ends
-                row.status = "ready"
-                row.error = str(e)[:500]
-                db.commit()
-        except Exception:
-            db.rollback()
-        set_enrich_state(
-            workspace_id,
-            enrich_pending=False,
-            enrich_error=str(e)[:500],
-            timing=timing_dict(total_ms=elapsed_ms(t0), error=1),
-        )
-    finally:
-        db.close()
-
-
-# In-process enrich cache: workspace_id → {hash, payload, builder}
-_enrich_payload_cache: dict[str, dict[str, Any]] = {}
-
-
-async def build_knowledge(
-    db: Session,
-    workspace: RequirementWorkspace,
-    *,
-    use_llm: bool = True,
-) -> dict:
-    """
-    Progressive Knowledge build:
-    1) Heuristic → status=ready immediately (enrichPending if LLM scheduled)
-    2) Background Cursor/LLM enrich merges + bumps version
-    """
-    pairs, file_names, file_count, chunk_count = _load_chunk_pairs(db, workspace.id)
-    if chunk_count == 0:
-        raise ValueError(
-            "Chưa có đoạn tài liệu — upload và tách đoạn trước khi dựng Knowledge"
-        )
-
-    row = get_knowledge_row(db, workspace.id)
-    if row is None:
-        row = KnowledgeWorkspace(
-            workspace_id=workspace.id,
-            project_id=workspace.project_id,
-            status="building",
-            version=0,
-        )
-        db.add(row)
-    else:
-        row.status = "building"
-        row.error = None
-    db.commit()
-    db.refresh(row)
-
-    payload = build_knowledge_heuristic(pairs, file_names=file_names)
-    _persist_knowledge_payload(
-        db,
-        row,
-        workspace,
-        payload,
-        builder="heuristic-v1",
-        file_count=file_count,
-        chunk_count=chunk_count,
-        bump_version=True,
-    )
-    db.commit()
-    db.refresh(row)
-    expected_version = int(row.version or 0)
-
-    schedule_enrich = False
-    if use_llm:
-        conn = db.scalar(
-            select(AiBackendConnection).where(
-                AiBackendConnection.project_id == workspace.project_id
-            )
-        )
-        schedule_enrich = conn is not None
-
-    if schedule_enrich:
-        # Keep status=building so UI/Freeze không hiện heuristic trước khi AI xong
-        row.status = "building"
-        db.commit()
-        db.refresh(row)
-        set_enrich_state(workspace.id, enrich_pending=True, enrich_error=None)
-        try:
-            asyncio.get_running_loop().create_task(
-                enrich_knowledge_background(
-                    workspace.id,
-                    workspace.project_id,
-                    expected_version=expected_version,
-                )
-            )
-        except RuntimeError:
-            # No running loop — enrich inline (tests / sync context)
-            await enrich_knowledge_background(
-                workspace.id,
-                workspace.project_id,
-                expected_version=expected_version,
-            )
-            db.refresh(row)
-    else:
-        clear_enrich_state(workspace.id)
-
-    return knowledge_dto(row, enrich=get_enrich_state(workspace.id))
-
-
 def analyze_coverage(db: Session, workspace_id: uuid.UUID) -> dict:
-    """Recompute Requirement Coverage from current Knowledge + chunks (R4)."""
+    """Recompute Requirement Coverage from current Knowledge + file text (R4)."""
     row = get_knowledge_row(db, workspace_id)
     if row is None or row.status not in ("ready", "stale"):
         raise ValueError("Cần Knowledge Ready trước khi phân tích Coverage")
@@ -1186,12 +458,12 @@ def analyze_coverage(db: Session, workspace_id: uuid.UUID) -> dict:
             payload = json.loads(row.payload_json)
         except Exception:
             payload = None
-    pairs, _, _, _ = _load_chunk_pairs(db, workspace_id)
+    pairs, _, _, _ = load_chunk_pairs(db, workspace_id)
     coverage = analyze_requirement_coverage(
         payload, chunk_texts=[t for _, t in pairs]
     )
     row.coverage_json = json.dumps(coverage, ensure_ascii=False)
-    _replace_analysis_records(
+    replace_analysis_records(
         db,
         workspace_id=row.workspace_id,
         project_id=row.project_id,
@@ -1405,14 +677,14 @@ async def post_chat_turn(
         kw.payload_json = json.dumps(new_payload, ensure_ascii=False)
         kw.summary = (new_payload.get("summary") or "")[:4000] or kw.summary
         kw.version = int(kw.version or 0) + 1
-        pairs, _, _, _ = _load_chunk_pairs(db, workspace.id)
+        pairs, _, _, _ = load_chunk_pairs(db, workspace.id)
         coverage = analyze_requirement_coverage(
             new_payload, chunk_texts=[t for _, t in pairs]
         )
         kw.coverage_json = json.dumps(coverage, ensure_ascii=False)
         kw.builder = kw.builder or "chat"
         session.knowledge_version = kw.version
-        _replace_analysis_records(
+        replace_analysis_records(
             db,
             workspace_id=workspace.id,
             project_id=workspace.project_id,
@@ -1483,17 +755,6 @@ def _collect_uploaded_files_for_freeze(
         if remaining <= 0:
             break
         text = (f.extracted_text or "").strip()
-        if not text:
-            # Fallback: join chunks
-            chunks = db.scalars(
-                select(DocumentChunk)
-                .where(
-                    DocumentChunk.file_id == f.id,
-                    _alive(DocumentChunk),
-                )
-                .order_by(DocumentChunk.ordinal.asc())
-            ).all()
-            text = "\n\n".join((c.text or "").strip() for c in chunks if c.text).strip()
         if not text:
             out.append({"fileName": f.file_name, "text": ""})
             continue
@@ -1717,7 +978,6 @@ def enqueue_generate_from_snapshot(
     max_per_module: int | None = None,
 ) -> Job:
     """R7 — create Job bound to snapshotId only (BR-V2-16)."""
-    from app import constants as C
     from app.services.job_context_stash import stash_job_engine_hint
 
     if mode not in ("append", "replace"):

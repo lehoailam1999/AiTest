@@ -134,7 +134,7 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
         <Space orientation="vertical" size={0}>
           <Typography.Text strong>{t}</Typography.Text>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {row.fileCount ?? 0} file · {row.chunkCount ?? 0} đoạn
+            {row.fileCount ?? 0} file
             {row.knowledgeVersion ? ` · Phân tích v${row.knowledgeVersion}` : ""}
           </Typography.Text>
         </Space>

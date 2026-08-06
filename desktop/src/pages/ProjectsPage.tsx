@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
   App,
@@ -16,11 +16,61 @@ import { FolderOpenOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { projects } from "../api";
 import type { Project } from "../api/types";
-import { SourceRootBar } from "../components/SourceRootBar";
+import { bindSourceRoot } from "../lib/workspaceManager";
 import { ROUTES } from "../lib/productRoutes";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
-import type { ProjectScan } from "../tauri/bridge";
+import { isTauri, pickProjectFolder } from "../tauri/bridge";
+
+/** Source-root picker — lives only inside Create / Edit modals. */
+function SourcePathField({
+  value,
+  onChange,
+  disabled,
+}: {
+  value?: string;
+  onChange?: (v: string) => void;
+  disabled?: boolean;
+}) {
+  const { message } = App.useApp();
+  const [picking, setPicking] = useState(false);
+
+  async function onPick() {
+    if (!isTauri()) {
+      message.error("Cần chạy Desktop (Tauri) để chọn thư mục trên máy.");
+      return;
+    }
+    setPicking(true);
+    try {
+      const picked = await pickProjectFolder();
+      if (picked) onChange?.(picked.trim());
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "Không chọn được thư mục");
+    } finally {
+      setPicking(false);
+    }
+  }
+
+  return (
+    <Space.Compact style={{ width: "100%" }}>
+      <Input
+        value={value}
+        onChange={(e) => onChange?.(e.target.value)}
+        placeholder="D:\MyApp  hoặc  /Users/…/repo"
+        disabled={disabled}
+        allowClear
+      />
+      <Button
+        icon={<FolderOpenOutlined />}
+        loading={picking}
+        disabled={disabled || !isTauri()}
+        onClick={() => void onPick()}
+      >
+        Chọn thư mục
+      </Button>
+    </Space.Compact>
+  );
+}
 
 export default function ProjectsPage() {
   const { message, modal } = App.useApp();
@@ -31,7 +81,6 @@ export default function ProjectsPage() {
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editItem, setEditItem] = useState<Project | null>(null);
-  const [rootTick, setRootTick] = useState(0);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
 
@@ -55,6 +104,52 @@ export default function ProjectsPage() {
     void load();
   }, [load]);
 
+  /** Bind path from Modal save — scan stack + open workspace. */
+  async function bindPathFromModal(opts: {
+    projectId: string;
+    projectName: string;
+    localPath: string;
+  }): Promise<{ ok: boolean; detail: string }> {
+    const path = opts.localPath.trim();
+    if (!path) return { ok: false, detail: "Chưa có path" };
+    if (!isTauri()) {
+      return { ok: false, detail: "Cần Desktop (Tauri) để gắn source root" };
+    }
+    try {
+      const result = await bindSourceRoot({
+        projectId: opts.projectId,
+        projectName: opts.projectName,
+        rootPath: path,
+      });
+      if (result.syncedProject) {
+        setItems((prev) =>
+          prev.map((p) => (p.id === result.syncedProject!.id ? result.syncedProject! : p))
+        );
+      }
+      if (result.syncError) {
+        return {
+          ok: true,
+          detail: `Đã gắn «${result.rootPath}» nhưng sync stack lỗi: ${result.syncError}`,
+        };
+      }
+      if (result.openError) {
+        return {
+          ok: true,
+          detail: `Đã gắn «${result.rootPath}»; phiên server: ${result.openError}`,
+        };
+      }
+      return {
+        ok: true,
+        detail: `Đã gắn source «${result.rootPath}» · sẵn sàng Gen Unit/E2E`,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        detail: e instanceof Error ? e.message : "Gắn source thất bại",
+      };
+    }
+  }
+
   async function onCreate() {
     try {
       const values = await createForm.validateFields();
@@ -65,9 +160,28 @@ export default function ProjectsPage() {
         description: values.description?.trim() || undefined,
       });
       setProject(created.id, created.name);
+
+      const localPath = String(values.localPath || "").trim();
+      if (localPath) {
+        const bind = await bindPathFromModal({
+          projectId: created.id,
+          projectName: created.name,
+          localPath,
+        });
+        if (bind.ok) message.success(`Đã tạo dự án. ${bind.detail}`);
+        else {
+          message.warning(
+            `Đã tạo dự án nhưng chưa gắn source: ${bind.detail}. Mở Sửa dự án để gắn lại.`
+          );
+        }
+      } else {
+        message.success(
+          "Đã tạo dự án. Mở Sửa dự án để gắn thư mục source trước khi Gen test."
+        );
+      }
+
       setCreateOpen(false);
       createForm.resetFields();
-      message.success("Đã tạo dự án. Tiếp theo: Mở dự án → import thư mục source.");
       await load();
     } catch (e) {
       if (e && typeof e === "object" && "errorFields" in e) return;
@@ -79,12 +193,21 @@ export default function ProjectsPage() {
 
   function openEdit(p: Project) {
     setEditItem(p);
-    editForm.setFieldsValue({
-      name: p.name,
-      code: p.code ?? "",
-      description: p.description ?? "",
-    });
   }
+
+  // destroyOnHidden unmounts Form — fill only after Modal/Form remount.
+  useEffect(() => {
+    if (!editItem) {
+      editForm.resetFields();
+      return;
+    }
+    editForm.setFieldsValue({
+      name: editItem.name,
+      code: editItem.code ?? "",
+      description: editItem.description ?? "",
+      localPath: workspace.getLocalPath(editItem.id) || "",
+    });
+  }, [editItem, editForm]);
 
   async function onUpdate() {
     if (!editItem) return;
@@ -97,8 +220,35 @@ export default function ProjectsPage() {
         description: values.description?.trim() || undefined,
       });
       if (active?.id === updated.id) setProject(updated.id, updated.name);
+
+      const nextPath = String(values.localPath || "").trim();
+      const prevPath = (workspace.getLocalPath(editItem.id) || "").trim();
+      if (nextPath && nextPath !== prevPath) {
+        const bind = await bindPathFromModal({
+          projectId: updated.id,
+          projectName: updated.name,
+          localPath: nextPath,
+        });
+        if (bind.ok) message.success(`Đã cập nhật. ${bind.detail}`);
+        else message.warning(`Đã lưu meta nhưng gắn source lỗi: ${bind.detail}`);
+      } else if (nextPath && nextPath === prevPath) {
+        // Same path — re-bind to refresh scan/index (Modal owns rescan)
+        const bind = await bindPathFromModal({
+          projectId: updated.id,
+          projectName: updated.name,
+          localPath: nextPath,
+        });
+        if (bind.ok) message.success(`Đã cập nhật · làm mới source. ${bind.detail}`);
+        else message.success("Đã cập nhật project");
+      } else if (!nextPath && prevPath) {
+        message.success(
+          "Đã cập nhật dự án (giữ source root cũ — chọn lại path trong form nếu muốn đổi)."
+        );
+      } else {
+        message.success("Đã cập nhật project");
+      }
+
       setEditItem(null);
-      message.success("Đã cập nhật project");
       await load();
     } catch (e) {
       if (e && typeof e === "object" && "errorFields" in e) return;
@@ -124,32 +274,6 @@ export default function ProjectsPage() {
     });
   }
 
-  const activeProject = useMemo(
-    () => (active ? items.find((p) => p.id === active.id) ?? null : null),
-    [active, items]
-  );
-  const activeLocalPath = useMemo(() => {
-    void rootTick;
-    return active ? workspace.getLocalPath(active.id) : null;
-  }, [active, rootTick]);
-
-  function onSourceRootBound(payload: {
-    rootPath: string;
-    syncedProject: Project | null;
-    scan: ProjectScan;
-  }) {
-    setRootTick((n) => n + 1);
-    if (payload.syncedProject) {
-      setItems((prev) =>
-        prev.map((p) => (p.id === payload.syncedProject!.id ? payload.syncedProject! : p))
-      );
-    }
-  }
-
-  function onSourceRootSynced(project: Project) {
-    setItems((prev) => prev.map((p) => (p.id === project.id ? project : p)));
-  }
-
   const columns: ColumnsType<Project> = [
     {
       title: "Tên dự án",
@@ -168,11 +292,12 @@ export default function ProjectsPage() {
       key: "import",
       render: (_, p) => {
         const summary = [p.language, p.framework].filter(Boolean).join(" · ") || "Chưa import";
+        const path = workspace.getLocalPath(p.id);
         return (
           <Space orientation="vertical" size={0}>
             <span>{summary}</span>
             <Typography.Text type="secondary" style={{ fontSize: "0.78rem" }}>
-              {workspace.getLocalPath(p.id) ? "Đã gắn source root" : "Chưa gắn source root"}
+              {path ? "Đã gắn source root" : "Chưa gắn source root"}
             </Typography.Text>
           </Space>
         );
@@ -183,30 +308,11 @@ export default function ProjectsPage() {
     {
       title: "Hành động",
       key: "actions",
-      width: 520,
+      width: 320,
       render: (_, p) => (
         <Space wrap>
           <Button size="small" type={active?.id === p.id ? "primary" : "default"} onClick={() => setProject(p.id, p.name)}>
             {active?.id === p.id ? "Đang chọn" : "Chọn"}
-          </Button>
-          <Button
-            size="small"
-            icon={<FolderOpenOutlined />}
-            onClick={() => {
-              setProject(p.id, p.name);
-              navigate("/unit-test");
-            }}
-          >
-            Unit test
-          </Button>
-          <Button
-            size="small"
-            onClick={() => {
-              setProject(p.id, p.name);
-              navigate(ROUTES.e2eTest);
-            }}
-          >
-            E2E test
           </Button>
           <Button
             size="small"
@@ -235,9 +341,6 @@ export default function ProjectsPage() {
           <Typography.Title level={2} style={{ margin: 0 }}>
             Dự án
           </Typography.Title>
-          <Typography.Text type="secondary">
-            Luồng chuẩn: Tạo dự án → Chọn dự án → Import source code (project root) → Unit/E2E.
-          </Typography.Text>
         </div>
         <Space>
           <Button onClick={() => navigate(ROUTES.unitTest)} disabled={!active}>
@@ -252,26 +355,15 @@ export default function ProjectsPage() {
         </Space>
       </header>
 
-      {active ? (
-        <div style={{ marginTop: 12, marginBottom: 12 }}>
-          {activeProject ? (
-            <SourceRootBar
-              project={{ id: activeProject.id, name: activeProject.name }}
-              localPath={activeLocalPath}
-              onBound={onSourceRootBound}
-              onSynced={onSourceRootSynced}
-            />
-          ) : null}
-        </div>
-      ) : (
+      {!active ? (
         <Alert
-          style={{ marginTop: 12 }}
+          style={{ marginTop: 12, marginBottom: 12 }}
           type="warning"
           showIcon
           message="Bước 1 · Chọn dự án"
-          description="Chọn một dự án trong bảng dưới để gắn source code."
+          description="Chọn một dự án trong bảng dưới, hoặc Tạo mới và gắn source trong Modal."
         />
-      )}
+      ) : null}
 
       <Table
         rowKey="id"
@@ -289,9 +381,10 @@ export default function ProjectsPage() {
         onCancel={() => setCreateOpen(false)}
         onOk={onCreate}
         confirmLoading={saving}
-        okText="Tạo"
+        okText="Tạo & gắn source"
         cancelText="Huỷ"
         destroyOnHidden
+        width={560}
       >
         <Form form={createForm} layout="vertical" preserve={false}>
           <Form.Item name="name" label="Tên dự án" rules={[{ required: true, message: "Nhập tên dự án" }]}>
@@ -301,20 +394,58 @@ export default function ProjectsPage() {
             <Input placeholder="tuỳ chọn" />
           </Form.Item>
           <Form.Item name="description" label="Mô tả">
-            <Input.TextArea rows={3} placeholder="tuỳ chọn" />
+            <Input.TextArea rows={2} placeholder="tuỳ chọn" />
           </Form.Item>
+          <Form.Item
+            name="localPath"
+            label="Thư mục source (project root)"
+            extra={
+              isTauri()
+                ? "Chọn repo trên máy trong Modal này — scan stack + mở workspace khi Tạo."
+                : "Chỉ gắn được khi chạy Desktop (Tauri)."
+            }
+            rules={
+              isTauri()
+                ? [{ required: true, message: "Chọn thư mục source để Gen test" }]
+                : []
+            }
+          >
+            <SourcePathField />
+          </Form.Item>
+          {!isTauri() ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message="UI web không gắn được folder local — mở Desktop app."
+            />
+          ) : null}
         </Form>
       </Modal>
 
       <Modal
         title="Cập nhật dự án"
         open={!!editItem}
-        onCancel={() => setEditItem(null)}
+        onCancel={() => {
+          setEditItem(null);
+          editForm.resetFields();
+        }}
         onOk={onUpdate}
         confirmLoading={saving}
-        okText="Lưu"
+        okText="Lưu & gắn source"
         cancelText="Huỷ"
         destroyOnHidden
+        afterOpenChange={(open) => {
+          if (open && editItem) {
+            editForm.setFieldsValue({
+              name: editItem.name,
+              code: editItem.code ?? "",
+              description: editItem.description ?? "",
+              localPath: workspace.getLocalPath(editItem.id) || "",
+            });
+          }
+        }}
+        width={560}
       >
         <Form form={editForm} layout="vertical" preserve={false}>
           <Form.Item name="name" label="Tên dự án" rules={[{ required: true, message: "Nhập tên dự án" }]}>
@@ -324,8 +455,41 @@ export default function ProjectsPage() {
             <Input />
           </Form.Item>
           <Form.Item name="description" label="Mô tả">
-            <Input.TextArea rows={3} />
+            <Input.TextArea rows={2} />
           </Form.Item>
+          <Form.Item
+            name="localPath"
+            label="Thư mục source (project root)"
+            extra="Đổi path hoặc giữ nguyên rồi Lưu → gắn / làm mới scan + sync language/framework."
+            rules={
+              isTauri()
+                ? [{ required: true, message: "Chọn thư mục source để Gen test" }]
+                : []
+            }
+          >
+            <SourcePathField />
+          </Form.Item>
+          {editItem && (workspace.getLocalPath(editItem.id) || "").trim() ? (
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message="Source root đã gắn"
+              description={
+                <Typography.Text code copyable style={{ fontSize: 12 }}>
+                  {workspace.getLocalPath(editItem.id)}
+                </Typography.Text>
+              }
+            />
+          ) : editItem ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message="Chưa gắn project root"
+              description="Chọn thư mục ở trên rồi Lưu để scan stack và Gen Unit/E2E."
+            />
+          ) : null}
         </Form>
       </Modal>
     </div>

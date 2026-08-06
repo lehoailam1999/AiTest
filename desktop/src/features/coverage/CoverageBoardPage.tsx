@@ -54,7 +54,6 @@ export default function CoverageBoardPage() {
         : undefined;
   const [studioStatus, setStudioStatus] = useState<StudioStatusSnapshot>({
     fileCount: 0,
-    chunkCount: 0,
     knowledgeStatus: "empty",
     hasSnapshot: false,
   });
@@ -110,7 +109,6 @@ export default function CoverageBoardPage() {
     () =>
       buildRequirementJourney({
         fileCount: studioStatus.fileCount,
-        chunkCount: studioStatus.chunkCount,
         knowledgeStatus: studioStatus.knowledgeStatus,
         hasSnapshot: studioStatus.hasSnapshot,
         pendingReviewCount: journeyPendingCount,

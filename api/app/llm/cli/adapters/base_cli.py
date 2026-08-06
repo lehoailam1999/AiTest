@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from dataclasses import replace
 from typing import Any
 
 from app.llm.base import (
@@ -76,7 +77,7 @@ class BaseCLIAdapter(BaseLLMAdapter):
             cmd.extend(self.interactive_args)
         if self.cli_args:
             cmd.extend(self.cli_args)
-        if self.model_name and self.vendor == "gemini-cli":
+        if self.model_name and self.vendor in ("gemini-cli", "antigravity-cli"):
             if "--model" not in cmd:
                 cmd.extend(["--model", self.model_name])
         if self.vendor == "ollama":
@@ -313,7 +314,7 @@ class BaseCLIAdapter(BaseLLMAdapter):
     ) -> str:
         """Generic system+user prompt via CLI (Knowledge / chat enrich)."""
         del resume_chat_id, create_chat  # Cursor overrides; other CLIs use session pool
-        prompt = f"{system}\n\n---\n\n{user}"
+        prompt = f"{system}\n\n---\n\n{user}" if (system or "").strip() else user
         topic_key = "knowledge-chat"
         self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
         return await self._run_prompt(prompt, topic_key=topic_key)
@@ -358,19 +359,59 @@ class BaseCLIAdapter(BaseLLMAdapter):
             user_rules=req.user_rules,
             auth_mode=auth_mode,
         )
+        use_two_pass = bool((req.pom_scaffold or "").strip()) and not heal
         usr_p = e2e_user_prompt(req)
-        prompt = (
-            f"{sys_p}\n\n---\n\n{usr_p}\n\n"
-            "Output only ### FILE: sections with full file contents (no prose). "
-            "Do NOT create or edit any files on disk — return text only."
-        )
         topic_key = "e2e_test_heal" if heal else "e2e_test_gen"
         self.last_session_key = self.pool.get_session_key(self.project_id, topic_key)
         prefer_oneshot = self.vendor == "cursor-cli"
-        raw = await self._run_prompt(
-            prompt, topic_key=topic_key, prefer_oneshot=prefer_oneshot
-        )
         try:
+            if use_two_pass:
+                p1 = (
+                    f"{sys_p}\n\n---\n\n{usr_p}\n\n"
+                    "PASS 1/2 (Spec-first mapping): return Spec + minimal Page skeleton only.\n"
+                    "- Keep scaffold method names exactly.\n"
+                    "- Map all TC steps into test.step and calls to page methods.\n"
+                    "- If method body uncertain, keep deterministic TODO-free placeholder that compiles.\n"
+                    "Output only ### FILE sections with full file contents (no prose). "
+                    "Do NOT create or edit any files on disk — return text only."
+                )
+                raw_p1 = await self._run_prompt(
+                    p1,
+                    topic_key="e2e_test_gen_p1",
+                    prefer_oneshot=prefer_oneshot,
+                )
+                phase1 = e2e_result_from_raw(raw_p1, req)
+                req_p2 = replace(
+                    req,
+                    existing_files=[(f.path, f.content) for f in phase1.files],
+                    repair_context=(
+                        "PASS 2/2: Complete page object internals for scaffold methods.\n"
+                        "Reuse existing method names and Spec calls from Current E2E files.\n"
+                        "Ground locators strictly by locator contract and FE/DOM evidence."
+                    ),
+                )
+                usr_p2 = e2e_user_prompt(req_p2)
+                p2 = (
+                    f"{sys_p}\n\n---\n\n{usr_p2}\n\n"
+                    "PASS 2/2 (POM-completion): refine Page methods, keep Spec stable unless mismatch.\n"
+                    "Output only ### FILE sections with full file contents (no prose). "
+                    "Do NOT create or edit any files on disk — return text only."
+                )
+                raw = await self._run_prompt(
+                    p2,
+                    topic_key="e2e_test_gen_p2",
+                    prefer_oneshot=prefer_oneshot,
+                )
+                return e2e_result_from_raw(raw, req_p2)
+
+            prompt = (
+                f"{sys_p}\n\n---\n\n{usr_p}\n\n"
+                "Output only ### FILE: sections with full file contents (no prose). "
+                "Do NOT create or edit any files on disk — return text only."
+            )
+            raw = await self._run_prompt(
+                prompt, topic_key=topic_key, prefer_oneshot=prefer_oneshot
+            )
             return e2e_result_from_raw(raw, req)
         except ValueError as exc:
             raise LLMError(str(exc)) from exc

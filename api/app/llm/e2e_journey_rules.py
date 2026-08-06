@@ -1,31 +1,18 @@
 """
-E2E feature-journey rules — Phase C Feature entry ONLY.
+E2E feature-journey adapter.
 
-Auth/role/locator/assert/Act-Arrange → ``e2e_codegen_rules.py`` (E2ECG 1–19). Do not restate.
-Spec order Auth→Feature→Arrange→Act → E2ECG Rule 7 (Phase 2 guard enforces).
-
-Cursor: ``.cursor/rules/e2e-feature-journey.mdc`` — keep in sync (Phase C only).
+Single rule SoT is ``api/app/llm/e2e_codegen_rules.py``.
+This file stays as a thin compatibility layer because ``e2e_system_prompt()``
+imports ``E2E_FEATURE_JOURNEY_RULES``.
 """
 
 from __future__ import annotations
 
-# Unique value = Feature entry. Everything else → E2ECG + E2E_GROUNDING.
+# Runtime uses only this concise pointer to avoid duplicated rule text.
 E2E_FEATURE_JOURNEY_RULES = """\
-## Feature entry (Phase C — after auth, before fill)
-
-Also follow E2E_GROUNDING (path+landmark+fail-closed). Prefer deep-link **per TC**:
-1. Spec/POM Feature-entry prose / `E2E_FEATURE_PATH` — highest
-2. TC `path:` / `featurePath:` + path tokens (required on post-login TC)
-3. FE route file → URL segment (e.g. `app/foo/routes.ts` or `pages/foo/` → `/foo` — **from this project only**)
-4. Inspect routes scored vs TC tokens
-Guard force-bakes into Spec↔POM. Do NOT invent app routes (`/admin/...`, `/app/...`) without a signal.
-Menu only if path still unknown — label from this project's Inspect DOM.
-Landmark visible; open Create/Edit before fills if fields live in dialog.
-`gotoFeature` alone does not auto-click Create.
-
-### Anti-patterns
-- Fill on login/home · invented routes · assert dialog fields on list page ·
-  inventing `button.first()` when DOM/FE empty (fail-closed → Phase-3)
+## Feature entry policy
+Use `api/app/llm/e2e_codegen_rules.py` as the single rule source (E2ECG Rules 1–27).
+Do not restate or override journey/auth/locator/order rules here.
 """
 
 
@@ -37,7 +24,7 @@ def e2e_journey_user_checklist(
     steps: str = "",
     expected_result: str = "",
 ) -> str:
-    """Per-TC Feature-entry hints only — auth/context live in Execution Context block + E2ECG."""
+    """Per-TC hints only. Authoritative behavior is in E2ECG (single SoT)."""
     blob = f"{test_case_title}\n{test_case_type}\n{precondition}\n{steps}\n{expected_result}".lower()
     hints: list[str] = []
     if any(

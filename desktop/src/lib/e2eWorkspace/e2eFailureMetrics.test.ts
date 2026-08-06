@@ -69,7 +69,19 @@ describe("aggregateE2eMetrics", () => {
     assert.equal(m.failByCategory.timeout, 1);
     assert.equal(m.failByCategory.locator, 1);
     assert.equal(m.failSharePct.auth, 33.3);
-    assert.match(formatE2eMetricsReport(m), /Phase 4 metrics/);
+    assert.match(formatE2eMetricsReport(m), /Phase 6 e2e metrics/);
     assert.match(formatE2eMetricsReport(m), /Auth \/ login/);
+    assert.equal(m.failByStandardTaxonomy.PreconditionFailed, 1);
+    assert.equal(m.failByStandardTaxonomy.LocatorNotFound, 2);
+  });
+});
+
+describe("toStandardTaxonomy", () => {
+  it("maps desktop categories to AI_TEST_RULES names", async () => {
+    const { toStandardTaxonomy } = await import("./e2eFailureMetrics.js");
+    assert.equal(toStandardTaxonomy("auth"), "PreconditionFailed");
+    assert.equal(toStandardTaxonomy("locator"), "LocatorNotFound");
+    assert.equal(toStandardTaxonomy("assert"), "BusinessAssertionFailed");
+    assert.equal(toStandardTaxonomy("feature_entry"), "ContextMissing");
   });
 });

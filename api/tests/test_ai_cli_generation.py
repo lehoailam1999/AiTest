@@ -72,6 +72,53 @@ def test_build_gemini_cli_adapter():
     assert "--yolo" in cmd
 
 
+def test_build_antigravity_cli_adapter():
+    conn = types.SimpleNamespace(
+        project_id="00000000-0000-0000-0000-000000000001",
+        runner_mode="AI_CLI",
+        cli_type="antigravity-cli",
+        cli_path="",
+        cli_args_json="",
+        model_name="gemini-3.5-flash-medium",
+    )
+    adapter = build_cli_adapter(conn)
+    assert adapter.vendor == "antigravity-cli"
+    cmd = adapter.build_command(oneshot=True)
+    assert cmd[0] == "agy"
+    assert "-p" in cmd
+    assert "--model" in cmd
+    assert "gemini-3.5-flash-medium" in cmd
+
+    alias = types.SimpleNamespace(
+        project_id="00000000-0000-0000-0000-000000000001",
+        runner_mode="AI_CLI",
+        cli_type="agy",
+        cli_path="C:\\tools\\agy.exe",
+        cli_args_json='["--print-timeout","15m"]',
+        model_name=None,
+    )
+    adapter2 = build_cli_adapter(alias)
+    assert adapter2.vendor == "antigravity-cli"
+    cmd2 = adapter2.build_command(oneshot=True)
+    assert cmd2[0] == "C:\\tools\\agy.exe"
+    assert "--print-timeout" in cmd2
+
+
+def test_antigravity_health_rejects_cursor_agent_path():
+    import asyncio
+
+    conn = types.SimpleNamespace(
+        project_id="00000000-0000-0000-0000-000000000001",
+        runner_mode="AI_CLI",
+        cli_type="antigravity-cli",
+        cli_path="agent",
+        cli_args_json="",
+        model_name=None,
+    )
+    adapter = build_cli_adapter(conn)
+    assert asyncio.run(adapter.health_check()) is False
+
+
 def test_build_cursor_cli_adapter():
     conn = types.SimpleNamespace(
         project_id="00000000-0000-0000-0000-000000000001",
@@ -189,4 +236,95 @@ def test_cli_adapter_generate_unit():
     assert "expect(1)" in result.code
     assert result.file_name
     assert "AItest" in result.suggested_path.replace("\\", "/") or "UnitTest" in result.suggested_path
+
+
+def test_cli_adapter_generate_e2e_two_pass_with_scaffold():
+    import asyncio
+
+    from app.llm.base import E2ERequest
+    from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
+
+    adapter = CursorCLIAdapter("00000000-0000-0000-0000-000000000001")
+    calls: list[str | None] = []
+
+    async def fake_run(prompt, *, topic_key=None, prefer_oneshot=None, resume_chat_id=None):
+        del prefer_oneshot, resume_chat_id
+        calls.append(topic_key)
+        if topic_key == "e2e_test_gen_p1":
+            return (
+                "### FILE: pages/todo.page.ts\n```ts\n"
+                "export class TodoPage { constructor(public page: any) {} async gotoFeature() {} async submitForm() {} async expectExpectedState() {} }\n```\n"
+                "### FILE: specs/todo.spec.ts\n```ts\n"
+                "import { test } from '@playwright/test';\n"
+                "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
+                "import { TodoPage } from '../pages/todo.page';\n"
+                "test('x', async ({ page }) => {\n"
+                "  const pom = new TodoPage(page);\n"
+                "  await test.step('0. Đăng nhập / authenticate', async () => { await ensureAuthenticated(page); });\n"
+                "  await test.step('1. Feature entry', async () => { await pom.gotoFeature(); });\n"
+                "  await test.step('2. Act', async () => { await pom.submitForm(); });\n"
+                "  await test.step('3. Assert', async () => { await pom.expectExpectedState(); });\n"
+                "});\n"
+                "```\n"
+            )
+        return (
+            "### FILE: pages/todo.page.ts\n```ts\n"
+            "export class TodoPage { constructor(public page: any) {} async gotoFeature() { await this.page.goto('/'); } async submitForm() { await this.page.locator('form button[type=\"submit\"]').first().click(); } async expectExpectedState() { await this.page.locator('body').first().waitFor(); } }\n```\n"
+            "### FILE: specs/todo.spec.ts\n```ts\n"
+            "import { test } from '@playwright/test';\n"
+            "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
+            "import { TodoPage } from '../pages/todo.page';\n"
+            "test('x', async ({ page }) => {\n"
+            "  const pom = new TodoPage(page);\n"
+            "  await test.step('0. Đăng nhập / authenticate', async () => { await ensureAuthenticated(page); });\n"
+            "  await test.step('1. Feature entry', async () => { await pom.gotoFeature(); });\n"
+            "  await test.step('2. Act', async () => { await pom.submitForm(); });\n"
+            "  await test.step('3. Assert', async () => { await pom.expectExpectedState(); });\n"
+            "});\n"
+            "```\n"
+        )
+
+    adapter._run_prompt = fake_run  # type: ignore[method-assign]
+    req = E2ERequest(
+        test_case_title="Todo flow",
+        test_case_type="E2E",
+        priority="High",
+        steps="1. Mo man hinh\n2. Luu",
+        expected_result="Thanh cong",
+        pom_scaffold="# class: TodoPage\nrequiredMethods:\n- gotoFeature(...args: unknown[]): Promise<void>",
+    )
+    out = asyncio.run(adapter.generate_e2e(req))
+    assert len(out.files) >= 1
+    assert calls[:2] == ["e2e_test_gen_p1", "e2e_test_gen_p2"]
+
+
+def test_cli_adapter_generate_e2e_single_pass_without_scaffold():
+    import asyncio
+
+    from app.llm.base import E2ERequest
+    from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
+
+    adapter = CursorCLIAdapter("00000000-0000-0000-0000-000000000001")
+    calls: list[str | None] = []
+
+    async def fake_run(prompt, *, topic_key=None, prefer_oneshot=None, resume_chat_id=None):
+        del prompt, prefer_oneshot, resume_chat_id
+        calls.append(topic_key)
+        return (
+            "### FILE: specs/todo.spec.ts\n```ts\n"
+            "import { test } from '@playwright/test';\n"
+            "test('x', async () => {});\n"
+            "```\n"
+        )
+
+    adapter._run_prompt = fake_run  # type: ignore[method-assign]
+    req = E2ERequest(
+        test_case_title="Todo flow",
+        test_case_type="E2E",
+        priority="High",
+        steps="1. Mo man hinh",
+        expected_result="Thanh cong",
+    )
+    _ = asyncio.run(adapter.generate_e2e(req))
+    assert calls == ["e2e_test_gen"]
 

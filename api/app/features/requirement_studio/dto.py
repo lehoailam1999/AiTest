@@ -1,11 +1,10 @@
-"""DTOs for Requirement Studio FileRefs + Chunks + Knowledge (R1–R3)."""
+"""DTOs for Requirement Studio FileRefs + Knowledge."""
 
 from __future__ import annotations
 
 import json
 
 from app.models.domain import (
-    DocumentChunk,
     KnowledgeWorkspace,
     RequirementFile,
     RequirementSnapshot,
@@ -19,7 +18,6 @@ def workspace_dto(
     ws: RequirementWorkspace,
     *,
     file_count: int | None = None,
-    chunk_count: int | None = None,
     knowledge_status: str | None = None,
 ) -> dict:
     out: dict = {
@@ -33,8 +31,6 @@ def workspace_dto(
     }
     if file_count is not None:
         out["fileCount"] = file_count
-    if chunk_count is not None:
-        out["chunkCount"] = chunk_count
     if knowledge_status is not None:
         out["knowledgeStatus"] = knowledge_status
     return out
@@ -44,7 +40,6 @@ def file_ref_dto(
     f: RequirementFile,
     *,
     include_text: bool = False,
-    chunk_count: int | None = None,
 ) -> dict:
     """FileRef API shape — never expose content_bytes."""
     out: dict = {
@@ -58,32 +53,16 @@ def file_ref_dto(
         "parseError": f.parse_error,
         "parser": f.parser,
         "parseWarning": f.parse_warning,
-        "chunkStatus": getattr(f, "chunk_status", None) or "none",
         "storageKind": f.storage_kind,
         "charCount": len(f.extracted_text) if f.extracted_text else 0,
         "hasPreview": bool(f.preview_html),
         "createdAt": f.created_at,
         "updatedAt": f.updated_at,
     }
-    if chunk_count is not None:
-        out["chunkCount"] = chunk_count
     if include_text:
         out["extractedText"] = f.extracted_text
         out["previewHtml"] = f.preview_html
     return out
-
-
-def chunk_dto(c: DocumentChunk) -> dict:
-    return {
-        "id": c.id,
-        "fileId": c.file_id,
-        "workspaceId": c.workspace_id,
-        "ordinal": c.ordinal,
-        "text": c.text,
-        "charCount": c.char_count,
-        "heading": c.heading,
-        "createdAt": c.created_at,
-    }
 
 
 def knowledge_dto(
@@ -137,10 +116,10 @@ def knowledge_dto(
         "status": "building" if enrich_pending else k.status,
         "version": k.version,
         "builder": k.builder,
-        "summary": None if enrich_pending else k.summary,
-        # Không trả payload heuristic ra UI khi đang enrich — tránh hiện bản tạm trước
-        "payload": None if enrich_pending else payload,
-        "coverage": None if enrich_pending else coverage,
+        # Keep heuristic visible while AI enrich runs (UI shows banner).
+        "summary": k.summary,
+        "payload": payload,
+        "coverage": coverage,
         "sourceFileCount": k.source_file_count,
         "sourceChunkCount": k.source_chunk_count,
         "error": k.error,

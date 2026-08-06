@@ -1152,7 +1152,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                 global_total = max(len(all_modules), total + len(prior_done))
                 done_offset = len(prior_done)
                 if is_cursor:
-                    # Parallel per-module (hidden 2-turn hoặc oneshot). Default concurrency 3.
+                    # Parallel per-module (hidden 2-turn hoặc oneshot). Default concurrency 4.
                     try:
                         concurrency = max(
                             1,
@@ -1161,13 +1161,13 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                                 int(
                                     os.environ.get(
                                         "AITEST_TC_FANOUT_CONCURRENCY_CURSOR",
-                                        "3",
+                                        "4",
                                     )
                                 ),
                             ),
                         )
                     except ValueError:
-                        concurrency = 3
+                        concurrency = 4
                     # Slimmer per-module budgets (module-scoped freeze slice)
                     content_soft_max = 12_000
                     source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
