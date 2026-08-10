@@ -1,12 +1,20 @@
+import {
+  extractUnitIntent,
+  filterStrongRankTokens,
+  filterUnitLogicLayerCandidates,
+  isDeniedUnitPrimaryPath,
+  UNIT_INTENT_DEFS,
+} from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import { normalizeFunctionLabel } from "../normalizeFunctionLabel";
+import { isExcludedFromUnitRetrieve } from "../retrieval/rankScore";
 import {
   expandVietnameseToCodeTokens,
   parseCodeHintsFromText,
   type CodeAliasMap,
 } from "./viCodeAliases";
 import type { ProjectFileIndex, ResolvedSeed, SeedCandidate } from "./types";
-import { findByStem } from "./projectIndex";
+import { findByStem, findByToken } from "./projectIndex";
 
 /** Bỏ dấu tiếng Việt để khớp tên file Latin / PascalCase. */
 export function stripDiacritics(s: string): string {
@@ -56,18 +64,26 @@ const STOP = new Set(
 );
 
 const LAYER_BONUS = [
-  { re: /(^|\/)(src|lib|app|backend|server|api)(\/|$)/i, pts: 22 },
-  { re: /(controller|service|handler|manager|usecase|use-case|repository|repo|api|page|viewmodel|view)\b/i, pts: 14 },
-  { re: /\b(dto|model|entity|domain)\b/i, pts: 4 },
+  { re: /(^|\/)(src|lib|app|backend|server|api|application|domain)(\/|$)/i, pts: 22 },
+  {
+    re: /(controller|service|handler|manager|usecase|use-case|repository|repo|validator|validation|policy|authorization|command|query)\b/i,
+    pts: 18,
+  },
+  { re: /\b(dto|model|entity|domain|mapper|helper|util)\b/i, pts: 6 },
 ];
 
-/** Không lấy tài liệu / script phụ làm SUT (vd. docs/generate_srs.py trên Nest+Jest). */
+/** Không lấy tài liệu / FE shell / thin HTTP client làm SUT Unit. */
 const LAYER_PENALTY = [
   {
     re: /(^|\/)(docs?|documentation|scripts?|tools?|examples?|samples?|fixtures?|tmp|temp|migrations?)(\/|$)/i,
     pts: -90,
   },
   { re: /(generate_srs|openapi|swagger|readme)/i, pts: -55 },
+  {
+    re: /(\/clientapp\/|\/client-app\/|\/wwwroot\/|\/components?\/|\/pages?\/|\/views?\/|\.component\.(ts|js))/i,
+    pts: -70,
+  },
+  { re: /\.designer\.cs$|\.snapshot\.cs$|modelsnapshot\.cs$/i, pts: -100 },
 ];
 
 type ExtFamily = "node" | "python" | "dotnet" | "other";
@@ -156,11 +172,17 @@ function tokensFromTc(
   const hintBlob = [tc.testData ?? "", tc.precondition ?? "", tc.steps ?? ""].join("\n");
   const { codeTokens, pathHints } = parseCodeHintsFromText(hintBlob);
 
-  const moduleTokens = extractMatchTokens(tc.module ?? "", projectAliases);
-  const titleTokens = extractMatchTokens(tc.title ?? "", projectAliases);
-  const bodyTokens = extractMatchTokens(
-    [tc.steps, tc.expectedResult, tc.precondition ?? ""].join(" "),
-    projectAliases
+  const moduleTokens = filterStrongRankTokens(
+    extractMatchTokens(tc.module ?? "", projectAliases)
+  );
+  const titleTokens = filterStrongRankTokens(
+    extractMatchTokens(tc.title ?? "", projectAliases)
+  );
+  const bodyTokens = filterStrongRankTokens(
+    extractMatchTokens(
+      [tc.steps, tc.expectedResult, tc.precondition ?? ""].join(" "),
+      projectAliases
+    )
   );
   const techBody = bodyTokens.filter(
     (t) => /[A-Z]/.test(t) || t.includes("_") || t.length >= 5
@@ -193,7 +215,8 @@ function scorePath(
   titleTokens: string[],
   bodyTokens: string[],
   hintTokens: string[] = [],
-  dominantFamily: ExtFamily = "other"
+  dominantFamily: ExtFamily = "other",
+  requirementTokens: string[] = []
 ): { score: number; hits: string[] } {
   const { lower, stem, segments } = pathParts(pathRel);
   const stemAscii = stripDiacritics(stem).toLowerCase();
@@ -203,6 +226,14 @@ function scorePath(
   const hitToken = (t: string, weightStem: number, weightSeg: number, weightPath: number) => {
     const tl = stripDiacritics(t).toLowerCase();
     if (tl.length < 2) return;
+    // Short tokens: segment/stem equality only (activate ⊃ vat).
+    if (tl.length <= 3) {
+      if (stemAscii === tl || segments.some((seg) => seg.replace(/\.[^.]+$/, "") === tl)) {
+        score += weightStem;
+        hits.push(t);
+      }
+      return;
+    }
     if (stemAscii === tl || stemAscii.includes(tl) || tl.includes(stemAscii)) {
       score += weightStem;
       hits.push(t);
@@ -215,6 +246,8 @@ function scorePath(
     }
   };
 
+  // Progressive: requirement → hints/markers → module → title → body
+  for (const t of requirementTokens) hitToken(t, 36, 24, 10);
   for (const t of hintTokens) hitToken(t, 40, 28, 12);
   for (const t of moduleTokens) hitToken(t, 28, 18, 8);
   for (const t of titleTokens) hitToken(t, 14, 8, 4);
@@ -255,6 +288,13 @@ export type SeedResolveOptions = {
   projectAliases?: CodeAliasMap | null;
   /** Token EN/code từ AI (map VI→identifier) — ưu tiên như hintTokens */
   extraCodeTokens?: string[] | null;
+  /** Requirement title — progressive grounding (highest soft scope) */
+  requirementTitle?: string | null;
+  /**
+   * Profile unit.scope — default backend.
+   * UI/master intents refuse writeBack under backend.
+   */
+  unitScope?: "backend" | "frontend" | "any";
 };
 
 /**
@@ -273,23 +313,54 @@ export function resolveSeedCandidates(
     tc,
     opts.projectAliases
   );
-  const aiTokens = uniq(
-    (opts.extraCodeTokens ?? [])
-      .map((t) => String(t).trim())
-      .filter(Boolean)
-      .flatMap((t) => [t, ...extractMatchTokens(t, opts.projectAliases)])
+  const requirementTokens = filterStrongRankTokens(
+    extractMatchTokens(opts.requirementTitle || "", opts.projectAliases)
   );
-  const effectiveHints = uniq([...hintTokens, ...aiTokens]);
-  const effectiveAll = uniq([...effectiveHints, ...all]);
+  const aiTokens = filterStrongRankTokens(
+    uniq(
+      (opts.extraCodeTokens ?? [])
+        .map((t) => String(t).trim())
+        .filter(Boolean)
+        .flatMap((t) => [t, ...extractMatchTokens(t, opts.projectAliases)])
+    )
+  );
+  const intent = extractUnitIntent(tc, {
+    projectAliases: opts.projectAliases,
+    requirementTitle: opts.requirementTitle,
+    uiFromTitleModuleOnly: true,
+  });
+  // Body-rule: rank with body-rule class features (Upload/MaxFileSize), not
+  // upload_resource Digital* or alias Evidence — those soft-boost via module/req.
+  const bodyRuleRankTokens = filterStrongRankTokens(
+    uniq(
+      UNIT_INTENT_DEFS.filter(
+        (d) => d.requiresBodyRule && intent.classes.includes(d.id)
+      ).flatMap((d) => [...d.featureTokens, ...(d.rulePatterns ?? d.codePatterns)])
+    )
+  );
+  const intentTokens = filterStrongRankTokens(
+    uniq(
+      (intent.requiresBodyRule && bodyRuleRankTokens.length
+        ? bodyRuleRankTokens
+        : intent.requiresBodyRule
+          ? [...intent.classFeatureTokens, ...intent.codePatterns]
+          : [...intent.featureTokens, ...intent.codePatterns]
+      ).filter((t) => t.length >= 3)
+    )
+  );
+  const effectiveHints = uniq([...hintTokens, ...aiTokens, ...intentTokens]);
+  const effectiveAll = uniq([...effectiveHints, ...requirementTokens, ...all]);
   if (!effectiveAll.length && !pathHints.length) return [];
 
   const dominant = dominantExtFamily(index);
   const scored: SeedCandidate[] = [];
 
-  // path: hints → ưu tiên tuyệt đối nếu khớp file local
+  // path: hints → ưu tiên tuyệt đối nếu khớp file local (production only)
   for (const hint of pathHints) {
     const h = hint.replace(/\\/g, "/").toLowerCase();
     for (const f of index.files) {
+      if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
+      // Explicit path: may point at FE — keep for manual override; auto still filtered later
       const p = f.pathRel.replace(/\\/g, "/").toLowerCase();
       if (p === h || p.endsWith(`/${h}`) || p.includes(h)) {
         scored.push({
@@ -302,7 +373,104 @@ export function resolveSeedCandidates(
     }
   }
 
-  for (const f of index.files) {
+  // Progressive pool: Requirement scopes → Module narrows → then score (+ title)
+  const reqPool = new Map<string, (typeof index.files)[0]>();
+  for (const t of requirementTokens) {
+    for (const f of findByToken(index, t)) {
+      if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
+      reqPool.set(f.pathRel, f);
+    }
+  }
+  let scoped = reqPool.size > 0 ? [...reqPool.values()] : null;
+  if (scoped && moduleTokens.length) {
+    const modNarrow = scoped.filter((f) => {
+      const low = f.pathRel.toLowerCase();
+      const stem = f.stem.toLowerCase();
+      return moduleTokens.some((t) => {
+        const tl = t.toLowerCase();
+        return low.includes(tl) || stem.includes(tl);
+      });
+    });
+    if (modNarrow.length) scoped = modNarrow;
+  }
+  // Title further narrows when still broad
+  if (scoped && scoped.length > 24 && titleTokens.length) {
+    const titleNarrow = scoped.filter((f) => {
+      const low = f.pathRel.toLowerCase();
+      const stem = f.stem.toLowerCase();
+      return titleTokens.some((t) => {
+        const tl = t.toLowerCase();
+        return tl.length >= 3 && (low.includes(tl) || stem.includes(tl));
+      });
+    });
+    if (titleNarrow.length) scoped = titleNarrow;
+  }
+
+  const poolTokens = uniq([
+    ...requirementTokens,
+    ...moduleTokens,
+    ...effectiveHints,
+    ...titleTokens.slice(0, 12),
+  ]);
+  const pool = new Map<string, (typeof index.files)[0]>();
+  if (scoped) {
+    for (const f of scoped) pool.set(f.pathRel, f);
+  } else {
+    for (const t of poolTokens) {
+      for (const f of findByToken(index, t)) {
+        if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
+        pool.set(f.pathRel, f);
+      }
+    }
+  }
+  // If requirement tokens miss the path-index (e.g. VI noun vs English folder),
+  // fall back to module/title/hint pool — do not return empty (blocks all enrich).
+  if (requirementTokens.length && reqPool.size === 0 && pool.size === 0) {
+    for (const t of uniq([...moduleTokens, ...titleTokens, ...effectiveHints])) {
+      for (const f of findByToken(index, t)) {
+        if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
+        pool.set(f.pathRel, f);
+      }
+    }
+  }
+  // Phase 1/3: body-rule class tokens lead the pool (upload_size_limit → Upload/
+  // InitUpload), not broader upload_resource Digital* or project aliases (Evidence).
+  const bodyRuleFeat = uniq(
+    UNIT_INTENT_DEFS.filter(
+      (d) => d.requiresBodyRule && intent.classes.includes(d.id)
+    )
+      .flatMap((d) => d.featureTokens)
+      .filter((x) => x.length >= 4)
+  );
+  const classFeat = (
+    intent.requiresBodyRule && bodyRuleFeat.length
+      ? bodyRuleFeat
+      : intent.classFeatureTokens
+  ).filter((x) => x.length >= 4);
+  const intentPool = new Map<string, (typeof index.files)[0]>();
+  for (const t of classFeat) {
+    for (const f of findByToken(index, t)) {
+      if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
+      if (isDeniedUnitPrimaryPath(f.pathRel)) continue;
+      intentPool.set(f.pathRel, f);
+    }
+  }
+  if (intent.requiresBodyRule && intentPool.size > 0) {
+    pool.clear();
+    for (const f of intentPool.values()) pool.set(f.pathRel, f);
+  } else {
+    for (const f of intentPool.values()) pool.set(f.pathRel, f);
+  }
+  const scanList =
+    pool.size > 0 && pool.size < Math.max(80, index.files.length * 0.35)
+      ? [...pool.values()]
+      : requirementTokens.length && pool.size > 0
+        ? [...pool.values()]
+        : index.files;
+
+  for (const f of scanList) {
+    if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
+    if (isDeniedUnitPrimaryPath(f.pathRel)) continue;
     if (scored.some((s) => s.pathRel === f.pathRel)) continue;
     const { score, hits } = scorePath(
       f.pathRel,
@@ -310,7 +478,8 @@ export function resolveSeedCandidates(
       titleTokens,
       bodyTokens,
       effectiveHints,
-      dominant
+      dominant,
+      requirementTokens
     );
     if (score < 8) continue;
     scored.push({
@@ -333,6 +502,7 @@ export function resolveSeedCandidates(
         : effectiveAll) {
       const byStem = findByStem(index, t);
       for (const f of byStem) {
+        if (isExcludedFromUnitRetrieve(f.pathRel)) continue;
         scored.push({
           pathRel: f.pathRel,
           score: 6,
@@ -344,7 +514,23 @@ export function resolveSeedCandidates(
     scored.sort((a, b) => b.score - a.score);
   }
 
-  return scored.slice(0, limit);
+  const filtered = filterUnitLogicLayerCandidates(scored, {
+    tcText: [
+      tc.title,
+      tc.module,
+      tc.steps,
+      tc.expectedResult,
+      tc.testData,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+  // Explicit path: hints win even if shape is denied (manual marker intent)
+  if (!filtered.length) {
+    const hinted = scored.filter((s) => s.score >= 200);
+    return hinted.slice(0, limit);
+  }
+  return filtered.slice(0, limit);
 }
 
 export function resolveSeedFromTestCase(

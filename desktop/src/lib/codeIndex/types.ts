@@ -37,7 +37,7 @@ export type ExportInfo = {
 
 export type FileParseResult = {
   pathRel: string;
-  language: "ts" | "tsx" | "js" | "jsx";
+  language: "ts" | "tsx" | "js" | "jsx" | "cs";
   symbols: IndexedSymbol[];
   imports: ImportEdge[];
   exports: ExportInfo[];

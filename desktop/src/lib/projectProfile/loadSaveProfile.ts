@@ -8,17 +8,50 @@ import {
   PROFILE_SCHEMA,
   UNIT_CONVENTIONS_REL,
 } from "./constants.js";
-import type { ProjectProfile } from "./types.js";
+import type { ProjectProfile, UnitProfile } from "./types.js";
 import type { ProfileIo } from "./types.js";
 
 function norm(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\/+/, "");
 }
 
+/** Fill missing unit gate knobs — portable defaults for every SUT repo. */
+export function normalizeUnitProfile(
+  unit?: Partial<UnitProfile> | null
+): UnitProfile {
+  const u = unit || {};
+  return {
+    runner: u.runner ?? "",
+    testFrameworks: Array.isArray(u.testFrameworks) ? u.testFrameworks : [],
+    mockHint: u.mockHint ?? "",
+    scope: u.scope === "frontend" || u.scope === "any" || u.scope === "backend"
+      ? u.scope
+      : "backend",
+    minAlignment:
+      typeof u.minAlignment === "number" && Number.isFinite(u.minAlignment)
+        ? u.minAlignment
+        : 50,
+    requireMarkers:
+      u.requireMarkers === false
+        ? false
+        : Array.isArray(u.requireMarkers) && u.requireMarkers.length
+          ? u.requireMarkers
+          : u.requireMarkers === true
+            ? true
+            : ["path", "code"],
+    sutMap: u.sutMap && typeof u.sutMap === "object" ? u.sutMap : {},
+    domainGuards: Array.isArray(u.domainGuards) ? u.domainGuards : [],
+    codeAliasesFile: u.codeAliasesFile || ".ai-test/code-aliases.json",
+    intentRulesFile: u.intentRulesFile || ".ai-test/unit-intent-rules.json",
+    allowDiskReresolve: u.allowDiskReresolve === true,
+  };
+}
+
 export function parseProjectProfileJson(raw: string): ProjectProfile | null {
   try {
     const data = JSON.parse(raw) as ProjectProfile;
     if (!data || data.schema !== PROFILE_SCHEMA) return null;
+    data.unit = normalizeUnitProfile(data.unit);
     return data;
   } catch {
     return null;
@@ -52,6 +85,19 @@ export function mergeProjectProfile(
     ...discovered,
     moduleMap,
     reuseRoots,
+    unit: normalizeUnitProfile({
+      ...discovered.unit,
+      ...existing.unit,
+      // Preserve per-repo SoT arrays/maps when discover returns empty shells
+      sutMap:
+        existing.unit?.sutMap && Object.keys(existing.unit.sutMap).length
+          ? existing.unit.sutMap
+          : discovered.unit?.sutMap,
+      domainGuards:
+        existing.unit?.domainGuards?.length
+          ? existing.unit.domainGuards
+          : discovered.unit?.domainGuards,
+    }),
     updatedAt: discovered.updatedAt,
   };
 }
@@ -62,7 +108,11 @@ export async function saveProjectProfile(
   io: ProfileIo,
   conventionFiles: Record<string, string>
 ): Promise<void> {
-  const json = JSON.stringify(profile, null, 2);
+  const toSave: ProjectProfile = {
+    ...profile,
+    unit: normalizeUnitProfile(profile.unit),
+  };
+  const json = JSON.stringify(toSave, null, 2);
   await io.writeFile(projectRoot, PROFILE_REL_PATH, json);
   for (const [rel, content] of Object.entries(conventionFiles)) {
     await io.writeFile(projectRoot, rel, content);
@@ -118,7 +168,11 @@ export function createEmptyProfile(projectName = ""): ProjectProfile {
     locatorPolicy: ["testid", "role", "label"],
     moduleMap: {},
     reuseRoots: [],
-    unit: { runner: "", testFrameworks: [], mockHint: "" },
+    unit: normalizeUnitProfile({
+      runner: "",
+      testFrameworks: [],
+      mockHint: "",
+    }),
     updatedAt: new Date().toISOString(),
   };
 }

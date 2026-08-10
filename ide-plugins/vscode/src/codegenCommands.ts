@@ -1,12 +1,13 @@
 /**
  * Codegen Protocol handlers — Apply files (path jail) + Run tests + Phase B stubs.
  */
-import { spawn } from "node:child_process";
+import { spawn, type SpawnOptions } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import {
   assertSafeAitestTargetRel,
   filterAllowedEnv,
+  isAllowedUnitLayoutPath,
   IdeNotifications,
   makeNotification,
   type CodegenApplyFilesParams,
@@ -21,6 +22,8 @@ import {
   type CodegenTestRunReport,
 } from "@aitest/ide-protocol";
 import { workspaceRoot } from "./semanticContext";
+import { markUnitGenCancelled } from "./unitGenCommands";
+import { spawnCli } from "./cursorAgentCliEngine";
 
 const cancelledIds = new Set<string>();
 
@@ -49,6 +52,7 @@ function notifyResult(notify: NotifyFn, result: CodegenResultCallback): void {
 
 export function handleCodegenCancel(params: CodegenCancelParams): { ok: boolean } {
   cancelledIds.add(params.commandId);
+  markUnitGenCancelled(params.commandId);
   return { ok: true };
 }
 
@@ -84,8 +88,9 @@ export async function handleCodegenApplyFiles(
       if (params.layout === "e2e" && !/\/e2etest\//i.test(`/${safe}/`)) {
         throw new Error(`Path jail E2E: thiếu segment E2ETest (got ${safe})`);
       }
-      if (params.layout === "unit" && !/\/unittest\//i.test(`/${safe}/`)) {
-        throw new Error(`Path jail Unit: thiếu segment UnitTest (got ${safe})`);
+      // Unit tests under UnitTest/; also allow AItest-root scaffold (csproj/jest/tsconfig).
+      if (params.layout === "unit" && !isAllowedUnitLayoutPath(safe)) {
+        throw new Error(`Path jail Unit: thiếu UnitTest/ hoặc scaffold AItest root (got ${safe})`);
       }
       const abs = path.join(root, ...safe.split("/"));
       const existed = await fileExists(abs);
@@ -176,10 +181,9 @@ async function runProcess(
 ): Promise<{ code: number; log: string; durationMs: number }> {
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), {
+    const child = spawnCli(command[0], command.slice(1), {
       cwd,
       env: { ...process.env, ...env },
-      shell: process.platform === "win32",
     });
     let log = "";
     const onData = (buf: Buffer) => {

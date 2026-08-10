@@ -5,10 +5,10 @@ export const CODE_INDEX_REL_PATH = ".ai-test/index.db";
 
 export const CODE_INDEX_SCHEMA = "aitest-code-index-v1" as const;
 
-export const CODE_INDEX_PARSER = "lightweight-ts-js-v1";
+export const CODE_INDEX_PARSER = "lightweight-ts-js-cs-v1";
 
-/** Extensions indexed in Phase 1 (TS/JS first). */
-export const CODE_INDEX_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"] as const;
+/** Extensions indexed (TS/JS + lightweight C# for .NET Approve). */
+export const CODE_INDEX_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".cs"] as const;
 
 /** Dir name segments to skip when filtering list paths (defense in depth). */
 export const CODE_INDEX_SKIP_DIR_SEGMENTS = new Set(
@@ -50,11 +50,14 @@ export function shouldIndexPath(pathRel: string): boolean {
   return CODE_INDEX_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-export function languageFromPath(pathRel: string): "ts" | "tsx" | "js" | "jsx" | null {
+export function languageFromPath(
+  pathRel: string
+): "ts" | "tsx" | "js" | "jsx" | "cs" | null {
   const lower = normalizeRelPath(pathRel).toLowerCase();
   if (lower.endsWith(".tsx")) return "tsx";
   if (lower.endsWith(".ts")) return "ts";
   if (lower.endsWith(".jsx")) return "jsx";
   if (lower.endsWith(".js")) return "js";
+  if (lower.endsWith(".cs")) return "cs";
   return null;
 }

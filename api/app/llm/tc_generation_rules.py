@@ -82,13 +82,13 @@ QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
 # (engine overlay + unit_tc_analysis / e2e_tc_analysis carry SoT detail).
 # Keep thin — do NOT restate bucket map / trace / completeness here.
 _LEGACY_COMPACT_SHARED_TC_RULES = """\
-QUY TẮC CHUNG (BẮT BUỘC):
-1. Bám Knowledge/Freeze của job — không domain mẫu; bucket rỗng → không invent.
-2. module = tên Feature trong phạm vi; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
-3. precondition / testData / steps / expectedResult cụ thể, kiểm được; thiếu → [Giả định].
-4. Mỗi tín hiệu độc lập trong phạm vi → ≥1 TC; không gộp nhiều tín hiệu; không trần giả tạo.
-5. Không gộp Unit+E2E trong 1 TC. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
-6. Self-check: còn tín hiệu chưa có TC → bổ sung; đủ → dừng (không pad).
+QUY TẮC CHUNG UNIT (BẮT BUỘC — BACKEND ONLY, PORTABLE):
+1. Bám Knowledge/Freeze — không domain/framework mẫu; bucket rỗng → không invent.
+2. module = Feature; title VN `[Feature] - [Hành động BE] - [Kết quả]` — cấm Class.Method Latin · cấm form/popup/wizard/Bước/UI.
+3. Steps: Arrange mock port → Act gọi SUT backend → Assert return/exception/side-effect (không click/fill).
+4. Mỗi tín hiệu backend độc lập → ≥1 TC (BR/VALIDATION/ERROR/authz); không gộp; không pad UI-only.
+5. Không gộp Unit+E2E. UI/wizard/form → không sinh trong phiên Unit. priority/severity thang Việt.
+6. Self-check: còn FEATURES/BR/VALIDATION/ERROR/(authz) chưa cover → bổ sung; đủ → dừng.
 """
 
 # E2E-only shared — SoT (e2e_tc_analysis_rules) owns coverage/trace/completeness/lock.
@@ -102,12 +102,12 @@ QUY TẮC CHUNG E2E (format):
 
 # Fan-out / speed=fast — shorter shared block (engine overlay + SPEED MODE addon carry detail).
 _LEGACY_SPEED_SHARED_TC_RULES = """\
-QUY TẮC CHUNG (SPEED):
-1. Bám Knowledge/Freeze — không copy domain mẫu; không invent bucket rỗng.
-2. module = Feature trong phạm vi; title VN [Chức năng]-[Hành động]-[Kết quả].
-3. Steps/expected/precondition/testData cụ thể; thiếu → [Giả định].
-4. Không gộp Unit+E2E. priority/severity thang Việt.
-5. Tôn trọng SPEED MODE (trần mềm) trong system prompt — ưu tiên nhánh chính.
+QUY TẮC CHUNG UNIT (SPEED — BACKEND ONLY, PORTABLE):
+1. Bám Knowledge/Freeze — không invent bucket rỗng; không gắn stack/domain mẫu.
+2. module = Feature; title VN `[Feature]-[Hành động BE]-[Kết quả]` (cấm Class.Method Latin · cấm form/popup/Bước/UI).
+3. Steps/expected = mock → gọi SUT backend → assert return/exception; thiếu → [Giả định].
+4. Không gộp Unit+E2E; không sinh TC UI. Ưu tiên cover BR+VALIDATION+ERROR trước pad FEATURES.
+5. Tôn trọng SPEED MODE — nhánh backend chính; priority/severity thang Việt.
 """
 
 _LEGACY_E2E_SPEED_SHARED_TC_RULES = """\
@@ -232,32 +232,34 @@ def engine_generation_rules(
         if fast:
             parts = [
                 "=== PHIÊN SINH UNIT (SPEED) ===",
-                "1. type=`Unit` only — hàm/service/validator/handler; không UI.",
-                "2. Steps: Arrange mock → Act → Assert return/exception/side-effect.",
-                "3. Cấm SUT entrypoint bootstrap (main.ts, Program.cs, …).",
+                "1. type=`Unit` only — **backend logic** mọi stack; SUT Latin từ Phân tích/source — cấm invent class VI.",
+                "2. Steps: Arrange mock port → Act gọi SUT BE → Assert return/exception/side-effect.",
+                "3. Cấm: form/popup/wizard/Bước/chuyển bước/enable-UI/page/component · ClientApp/`*.component.*` + bootstrap.",
             ]
             if cap:
                 parts.append(
-                    f"4. Trần mềm ≤{cap} TC/module: FEATURES happy + VALIDATION/BR chính."
+                    f"4. Trần mềm ≤{cap} TC/module: cover hết BR+VALIDATION+ERROR/(authz) trước; "
+                    "FEATURES happy tối thiểu 1 — không cắt lớp có tín hiệu."
                 )
             else:
-                parts.append("4. Ưu tiên nhánh chính có trong Phân tích.")
+                parts.append(
+                    "4. Cover đủ BR/VALIDATION/ERROR/(authz) có trong Phân tích trước pad FEATURES."
+                )
             if focus_modules.strip():
                 parts.append(f"5. Focus module: {focus_modules.strip()}.")
             return append_unit_tc_from_analysis_rules("\n".join(parts), speed=True)
 
         parts = [
             "=== PHIÊN SINH UNIT ===",
-            "1. type=`Unit` only — không E2E/UI click-fill.",
-            "2. Steps: (1) input+mock → (2) gọi SUT → (3) assert return/exception/side-effect.",
-            "3. Expected khớp rule/text Phân tích (+ code nếu có).",
-            "4. SUT = pipe/controller/service/validator/DTO/handler — "
-            "cấm bootstrap (main.ts/js, Program.cs, wsgi/asgi, Spring Boot Application.main).",
-            "5. testData: `trace:` (bắt buộc) + tùy chọn `code:`/`path:` map source "
-            "(tránh path entrypoint trừ Project Extra cho phép).",
+            "1. type=`Unit` only — BACKEND ONLY; không E2E/wizard/Bước N/enable-UI.",
+            "2. Steps: mock port → gọi SUT → assert return/exception (không click/fill).",
+            "3. Expected khớp Phân tích; SUT Latin Handler/Service — cấm invent class VI · "
+            "cấm ClientApp/`*.component.*`; API→handler (không HTTP-200-only).",
+            "4. testData: `trace:` bắt buộc; `path:`/`code:` khuyến khích — Approve bổ sung.",
+            "5. Thiếu SUT production → không bịa class; UI-only → bỏ (E2E).",
         ]
         if focus_modules.strip():
-            parts.append(f"6. Focus module (khớp FEATURES): {focus_modules.strip()}.")
+            parts.append(f"7. Focus module (khớp FEATURES): {focus_modules.strip()}.")
         return append_unit_tc_from_analysis_rules("\n".join(parts), speed=False)
 
     from app.llm.e2e_tc_analysis_rules import append_e2e_tc_from_analysis_rules

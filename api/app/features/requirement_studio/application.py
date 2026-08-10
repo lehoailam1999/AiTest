@@ -207,6 +207,39 @@ def create_workspace(
     return workspace_dto(ws, file_count=0, knowledge_status="empty")
 
 
+def update_workspace(
+    db: Session,
+    workspace_id: uuid.UUID,
+    *,
+    title: str | None = None,
+) -> dict | None:
+    """Rename Requirement workspace (title only)."""
+    ws = get_workspace(db, workspace_id)
+    if ws is None:
+        return None
+    if title is not None:
+        cleaned = (title or "").strip()
+        if not cleaned:
+            raise ValueError("title is required")
+        ws.title = cleaned[:300]
+    db.commit()
+    db.refresh(ws)
+    file_count = db.scalar(
+        select(func.count())
+        .select_from(RequirementFile)
+        .where(
+            RequirementFile.workspace_id == workspace_id,
+            _alive(RequirementFile),
+        )
+    )
+    kw = get_knowledge_row(db, workspace_id)
+    return workspace_dto(
+        ws,
+        file_count=int(file_count or 0),
+        knowledge_status=(kw.status if kw else "empty"),
+    )
+
+
 def hard_delete_workspace(db: Session, workspace_id: uuid.UUID) -> dict | None:
     """Hard-delete Requirement workspace and all related DB rows."""
     ws = db.get(RequirementWorkspace, workspace_id)

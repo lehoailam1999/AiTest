@@ -190,7 +190,7 @@ function parseTopLevelSymbols(src: string, cleaned: string): IndexedSymbol[] {
 
 export function parseTsJsSource(pathRel: string, content: string): FileParseResult | null {
   const lang = languageFromPath(pathRel);
-  if (!lang) return null;
+  if (!lang || lang === "cs") return null;
   const cleaned = stripCommentsAndStrings(content);
   return {
     pathRel: normalizeRelPath(pathRel),

@@ -16,8 +16,10 @@ import { FolderOpenOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { projects } from "../api";
 import type { Project } from "../api/types";
+import { IdeConnectPanel } from "../components/IdeConnectPanel";
 import { bindSourceRoot } from "../lib/workspaceManager";
 import { ROUTES } from "../lib/productRoutes";
+import { useIdeBridgeSession } from "../lib/ideBridge/session";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
 import { isTauri, pickProjectFolder } from "../tauri/bridge";
@@ -76,6 +78,8 @@ export default function ProjectsPage() {
   const { message, modal } = App.useApp();
   const navigate = useNavigate();
   const { project: active, setProject, clearProject } = useProject();
+  const ideStatus = useIdeBridgeSession((s) => s.status);
+  const ideWs = useIdeBridgeSession((s) => s.workspaceRoot);
   const [items, setItems] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -293,12 +297,21 @@ export default function ProjectsPage() {
       render: (_, p) => {
         const summary = [p.language, p.framework].filter(Boolean).join(" · ") || "Chưa import";
         const path = workspace.getLocalPath(p.id);
+        const isActive = active?.id === p.id;
         return (
           <Space orientation="vertical" size={0}>
             <span>{summary}</span>
             <Typography.Text type="secondary" style={{ fontSize: "0.78rem" }}>
               {path ? "Đã gắn source root" : "Chưa gắn source root"}
             </Typography.Text>
+            {isActive ? (
+              <Typography.Text type="secondary" style={{ fontSize: "0.78rem" }}>
+                IDE:{" "}
+                {ideStatus === "connected"
+                  ? `Connected${ideWs ? ` · ${ideWs.replace(/^.*[\\/]/, "")}` : ""}`
+                  : "Chưa Connect"}
+              </Typography.Text>
+            ) : null}
           </Space>
         );
       },
@@ -384,7 +397,7 @@ export default function ProjectsPage() {
         okText="Tạo & gắn source"
         cancelText="Huỷ"
         destroyOnHidden
-        width={560}
+        width={640}
       >
         <Form form={createForm} layout="vertical" preserve={false}>
           <Form.Item name="name" label="Tên dự án" rules={[{ required: true, message: "Nhập tên dự án" }]}>
@@ -420,6 +433,13 @@ export default function ProjectsPage() {
               message="UI web không gắn được folder local — mở Desktop app."
             />
           ) : null}
+          <Typography.Text
+            type="secondary"
+            style={{ display: "block", marginBottom: 8, fontSize: 12 }}
+          >
+            IDE bridge — mở đúng folder source trong Cursor rồi Connect (có thể Connect sau khi Tạo).
+          </Typography.Text>
+          <IdeConnectPanel compact />
         </Form>
       </Modal>
 
@@ -445,7 +465,7 @@ export default function ProjectsPage() {
             });
           }
         }}
-        width={560}
+        width={640}
       >
         <Form form={editForm} layout="vertical" preserve={false}>
           <Form.Item name="name" label="Tên dự án" rules={[{ required: true, message: "Nhập tên dự án" }]}>
@@ -490,6 +510,13 @@ export default function ProjectsPage() {
               description="Chọn thư mục ở trên rồi Lưu để scan stack và Gen Unit/E2E."
             />
           ) : null}
+          <Typography.Text
+            type="secondary"
+            style={{ display: "block", marginBottom: 8, marginTop: 4, fontSize: 12 }}
+          >
+            IDE bridge — Cursor Open Folder đúng source ở trên, rồi Connect (Gen Unit / Apply).
+          </Typography.Text>
+          <IdeConnectPanel compact />
         </Form>
       </Modal>
     </div>

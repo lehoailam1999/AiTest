@@ -75,9 +75,10 @@ export async function handleTcSyncApprovedMd(
 
 /** Best-effort read for Phase B Gen supplemental SoT (not Gen authority). */
 export async function readApprovedTcMarkdownRel(
-  pathRel: string
+  pathRel: string,
+  projectRoot?: string
 ): Promise<{ path: string; content: string } | null> {
-  const root = workspaceRoot();
+  const root = (projectRoot || "").trim() || workspaceRoot();
   if (!root) return null;
   try {
     const safe = assertSafeAiTestCasesRel(pathRel);

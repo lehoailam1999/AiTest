@@ -90,7 +90,7 @@ import { aiConnectionDisplayLabel } from "../../lib/aiConnectionLabel";
 import { E2ePipelineStrip } from "./E2ePipelineStrip";
 import { E2eResultTabs } from "./E2eResultTabs";
 import { CodegenResultPanel } from "../../components/CodegenResultPanel";
-import { IdeConnectPanel } from "../../components/IdeConnectPanel";
+import { isIdeCodegenReady } from "../../lib/ideProtocol";
 import {
   E2eBatchConsole,
   type E2eBatchPipelineRow,
@@ -1964,7 +1964,19 @@ export default function E2ETestPage() {
           onGateChange={onGateChange}
         />
 
-        <IdeConnectPanel />
+        {!isIdeCodegenReady() ? (
+          <Alert
+            type="info"
+            showIcon
+            message="Connect IDE ở trang Dự án"
+            description={
+              <span>
+                Gắn source + Connect IDE trong <Link to={ROUTES.projects}>Dự án → Sửa dự án</Link>{" "}
+                (Cursor mở đúng repo đích) — dùng cho Apply/Run qua Extension.
+              </span>
+            }
+          />
+        ) : null}
 
         {approved.length > 0 && !approved.some((t) => isE2eTestCaseType(t.type)) ? (
           <Alert

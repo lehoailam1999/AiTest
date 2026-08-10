@@ -3,7 +3,10 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildIdeLocalGenerateBody } from "./ideLocalCommands.js";
+import {
+  buildIdeLocalGenerateBody,
+  shouldPreferCodeIndex,
+} from "./ideLocalCommands.js";
 import type { AITestContextPacket } from "./contextPacket/types.js";
 import { CONTEXT_PACKET_VERSION } from "./contextPacket/types.js";
 
@@ -33,6 +36,20 @@ function samplePacket(): AITestContextPacket {
     },
   };
 }
+
+describe("shouldPreferCodeIndex", () => {
+  it("enables TS/JS and C#; blocks empty and unindexed langs", () => {
+    assert.equal(shouldPreferCodeIndex("TypeScript"), true);
+    assert.equal(shouldPreferCodeIndex("javascript"), true);
+    assert.equal(shouldPreferCodeIndex("C#"), true);
+    assert.equal(shouldPreferCodeIndex("csharp"), true);
+    assert.equal(shouldPreferCodeIndex("dotnet"), true);
+    assert.equal(shouldPreferCodeIndex(""), false);
+    assert.equal(shouldPreferCodeIndex(null), false);
+    assert.equal(shouldPreferCodeIndex("Python"), false);
+    assert.equal(shouldPreferCodeIndex("Java"), false);
+  });
+});
 
 describe("buildIdeLocalGenerateBody Phase 5", () => {
   it("omits planner/indexVersion when not provided (legacy-compatible)", () => {

@@ -44,7 +44,14 @@ flowchart LR
 4. Output jail code: `AItest/UnitTest|E2ETest/...`.
 5. TC markdown jail: chỉ `.ai-test/test-cases/**/*.md` (tách với AItest jail).
 6. Auth storageState / auth-seed; Playwright project hoặc shared runner.
-7. Fallback: không bridge → Tauri ghi `.ai-test/`; Apply/Verify fallback như trước.
+7. Fallback Apply/Verify: không bridge → Tauri ghi `.ai-test/` như trước.
+8. **Unit Gen architecture (2026-08):**
+   - Flow một chiều: **Approve** (ghi TC MD) → **Connect IDE** → Gen → staging → Verify → Apply.
+   - **Không** silent fallback `POST /generate-unit`. Legacy API chỉ qua nút «Gen legacy (API)».
+   - Rule SoT: `packages/ide-protocol` `UNIT_CONVENTIONS_CORE` → seed `.ai-test/unit-conventions.md`.
+   - Gen Owner = Extension `UnitGenEngine` (default `CursorAgentCliEngine`); Desktop = `UnitJobRunner` + protocol only.
+   - Job state: `draft|generating|generated|gen_failed|verifying|pass|fail|applied|discarded` + `via` + `timeline` + `transforms`.
+   - Fail-closed: thiếu IDE / TC MD / SUT → `gen_failed` + CTA; transport retry tối đa 1 lần.
 
 ---
 
@@ -55,7 +62,8 @@ flowchart LR
 | `aitest/codegen.applyFiles` | A | ✅ |
 | `aitest/codegen.runTests` | A | ✅ |
 | `aitest/codegen.cancel` | A | ✅ |
-| `aitest/codegen.generateUnitBatch` / `generateE2eBatch` | B | ✅ Stub |
+| `aitest/codegen.generateUnitBatch` | B.1 | ✅ Extension `UnitGenEngine` (CLI); Desktop **fail-closed** (no API auto-fallback) |
+| `aitest/codegen.generateE2eBatch` | B | ✅ Stub |
 | `aitest/codegen.progress` / `result` | A | ✅ |
 | `aitest/tc.syncApprovedMd` | C | ✅ |
 
@@ -68,7 +76,10 @@ Types: `codegenTypes.ts`, `tcTypes.ts`. Jails: `codegenPathJail.ts`, `tcPathJail
 | Layer | Files |
 |-------|--------|
 | Protocol | `methods.ts`, `tcTypes.ts`, `tcPathJail.ts`, `client.ts`, `codegen.test.ts` |
-| Extension | `tcSyncCommands.ts`, `bridgeServer.ts`, `codegenCommands.ts` |
+| Extension | `tcSyncCommands.ts`, `unitGenCommands.ts`, `unitGenParse.ts`, `bridgeServer.ts`, `codegenCommands.ts` |
+| Desktop Phase B | `ideProtocol/phaseBGen.ts`, `unitWorkspace/unitJobRunner.ts`, `GenerateUnitPage` (IDE required) |
+| Extension Gen | `unitGenEngine.ts`, `cursorAgentCliEngine.ts`, `unitGenCommands.ts` |
+| Conventions SoT | `packages/ide-protocol/src/unitConventions.ts` |
 | Desktop TC sync | `desktop/src/lib/approvedTcSync/*` |
 | Wire Approve | `ReviewQueuePanel.tsx`, `RequirementsPage.tsx` |
 | Apply/Run | `ideProtocol/*`, `stagingApply.ts`, `applyManager.ts`, `e2eJobRunner.ts` |
@@ -81,10 +92,9 @@ Types: `codegenTypes.ts`, `tcTypes.ts`. Jails: `codegenPathJail.ts`, `tcPathJail
 
 - [x] Phase 0–5 — Hybrid A/B Apply/Run/UI/guard-only (xem lịch sử)
 - [x] **Phase 6 / C** — Approved TC → `.ai-test/test-cases/{module}/{testCaseId}.md`
-  - [x] `aitest/tc.syncApprovedMd` + Extension handler + path jail
-  - [x] Desktop render MD + sync IDE ưu tiên / Tauri fallback
-  - [x] Wire sau Approve (Coverage ReviewQueue + Requirements)
-  - [ ] Extension Gen đọc MD làm SoT bổ sung khi Phase B Agent Gen bật (chỉ helper `readApprovedTcMarkdownRel` sẵn)
+- [x] **Phase B.1 Unit Gen** — Extension `UnitGenEngine` + Desktop `UnitJobRunner` fail-closed (Approve MD + IDE required)
+- [x] **Unit conventions SoT** — shared `@aitest/ide-protocol` → `.ai-test/unit-conventions.md` (quantified limits)
+- [x] **Unit job observability** — timeline / transforms / via / metrics on manifest
 
 ---
 

@@ -53,6 +53,8 @@ export async function buildContextPacket(input: {
   policy?: ContextBuildPolicy;
   /** Alias VI→code theo dự án (project.meta.codeAliases) */
   codeAliases?: Record<string, string[]> | null;
+  /** Requirement title — progressive Unit SUT grounding */
+  requirementTitle?: string | null;
   /** Path related ép buộc (vd. từ AI rank) — đọc thêm local */
   forcedRelatedPaths?: string[] | null;
 }): Promise<AITestContextPacket> {
@@ -92,6 +94,7 @@ export async function buildContextPacket(input: {
 
   const { best: autoSeed, candidates } = resolveSeedFromTestCaseWithAlternatives(tc, index, {
     projectAliases: input.codeAliases,
+    requirementTitle: input.requirementTitle,
   });
   const seed =
     input.manualPrimaryPath && input.manualPrimaryPath.trim()

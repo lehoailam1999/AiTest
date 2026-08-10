@@ -24,8 +24,10 @@ export {
   mergeProjectProfile,
   discoverProjectProfile,
 };
+export { renderAllConventionFiles } from "./renderConventions.js";
+export { renderUnitConventionsMd, UNIT_CONVENTIONS_CORE } from "./unitConventionsCore.js";
 export { createTauriProfileIo } from "./tauriIo.js";
-export { createEmptyProfile } from "./loadSaveProfile.js";
+export { createEmptyProfile, normalizeUnitProfile } from "./loadSaveProfile.js";
 export {
   resolveProfileForVerify,
   applyStorageStateToVerifyFiles,

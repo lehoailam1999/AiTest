@@ -1,33 +1,48 @@
 ---
-description: Unit TC gen bám sát Phân tích DB/Knowledge — ISTQB / ISO 29119
-globs: api/app/llm/tc_generation_rules.py,api/app/llm/unit_tc_analysis_rules.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/features/requirement_studio/snapshot_prompt.py,desktop/src/features/unit-test/**,desktop/src/pages/GenerateUnitPage.tsx
+description: Unit TC gen bám sát Phân tích DB/Knowledge — ISTQB / ISO 29119 — Backend only
+globs: api/app/llm/tc_generation_rules.py,api/app/llm/unit_tc_analysis_rules.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/features/requirement_studio/snapshot_prompt.py,api/app/services/unit_tc_gen_guard.py,desktop/src/features/unit-test/**,desktop/src/pages/GenerateUnitPage.tsx
 alwaysApply: false
 ---
 
 # Rules Unit TC ← Phân tích (Knowledge)
 
 > **Một nguồn runtime:** [`unit_tc_analysis_rules.py`](api/app/llm/unit_tc_analysis_rules.py) — prepend trong [`engine_generation_rules("unit")`](api/app/llm/tc_generation_rules.py).  
-> Không copy lại map 11 tiêu chí vào `system_prompt` / COMPACT / freeze / analysis-DB header.
+> Post-gen: [`unit_tc_gen_guard.py`](api/app/services/unit_tc_gen_guard.py) — drop wizard/UI; gỡ Class.Method khỏi title.  
+> Không copy lại map bucket vào `system_prompt` / COMPACT / freeze / analysis-DB header.
 
-Pipeline: Tài liệu → Phân tích (DB) → Freeze → **Sinh TC Unit**.
+Pipeline: Tài liệu → Phân tích (DB) → Freeze → **Sinh TC Unit (Backend only)** → guard → Draft → Approve (`path:`/`code:`) → Gen code.
 
 Chuẩn: ISTQB (EP/BVA/Decision Table) + ISO 29119-3 (traceability).
 
-## Phân tầng prompt (tránh lặp)
+## Phạm vi
+
+Unit = backend logic (service / use-case / handler / validator / domain / authz / error) — portable mọi stack.  
+CQRS→Handler/Service · MVC→service (không thin controller). Mock port/repo — không ORM làm SUT.  
+Không form/popup/wizard/Bước N/chuyển bước/enable-UI/ClientApp/`*.component.*`. UI-only → E2E hoặc bỏ.  
+Title Unit **chỉ tiếng Việt** — cấm Class.Method Latin trong title; SUT qua Approve `path:`/`code:`.  
+Không hardcode ngôn ngữ/framework/domain sản phẩm.
+
+## Phân tầng prompt
 
 | Tầng | Nội dung |
 |------|----------|
-| `UNIT ← PHÂN TÍCH` | SoT + map 11 bucket + `trace:` + cấm invent |
-| Engine Unit overlay | AAA steps, cấm bootstrap, focus module |
-| COMPACT/SPEED shared | Title/module/priority skeleton chung |
-| system_prompt Unit | Lock type=Unit + trỏ sang khối trên |
-| Freeze / DB block | **Data** Knowledge — header ngắn, không restatement rule |
+| `UNIT ← PHÂN TÍCH` | SoT + map + coverage gate + Decision Table + `trace:` |
+| Engine Unit overlay | AAA backend, soft-cap ưu tiên BR/VALIDATION/ERROR, focus |
+| COMPACT/SPEED shared | Title VN; self-check cover |
+| system_prompt Unit | Lock type=Unit BACKEND ONLY |
+| Post-gen guard | Drop UI/wizard; strip Class.Method from title |
+| Freeze / DB block | **Data** Knowledge — không restatement rule |
 
 ## Map nhanh
 
-FEATURES/BR/VALIDATION/ERROR/(API path)/(AC không-UI) → Unit TC.  
-SUMMARY/GAPS/NFR hệ thống/UI-only → không pad / E2E.
+FEATURES / mỗi BR (+fail) / mỗi VALIDATION (EP/+BVA) / ERROR / API→handler (không HTTP-200-only) / ACTORS+EXECUTION_CONTEXT authz / AC không-UI → Unit.  
+SUMMARY / GAPS / NFR hệ thống / UI-only / wizard → không pad / E2E.  
+`path:`/`code:` khuyến khích nếu biết; Approve bổ sung.
+
+## Sau nâng cấp rule
+
+Sinh lại Unit (hoặc xóa Draft lệch) → Approve để có `path:`/`code:` trước Gen code.
 
 ## Khi sửa
 
-Chỉ sửa contract trong `unit_tc_analysis_rules.py` (+ `.mdc` này). Overlay Unit giữ ngắn.
+Chỉ sửa contract trong `unit_tc_analysis_rules.py` + fragments `unit_tc_analysis_*.md` (+ `.mdc` này). Overlay Unit giữ ngắn. Guard heuristics trong `unit_tc_gen_guard.py`.

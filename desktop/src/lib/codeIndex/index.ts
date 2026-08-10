@@ -11,8 +11,13 @@
 export { CODE_INDEX_REL_PATH, CODE_INDEX_EXTENSIONS, CODE_INDEX_SCHEMA } from "./constants";
 export { scanProjectFiles } from "./scanProject";
 export { parseTsJsSource } from "./parseTsAst";
+export { parseCsharpSource } from "./parseCsharp";
 export { buildSymbolIndex } from "./buildSymbolIndex";
-export { buildDependencyGraph, resolveRelativeImport } from "./buildDependencyGraph";
+export {
+  buildDependencyGraph,
+  resolveRelativeImport,
+  resolveImportSpecifier,
+} from "./buildDependencyGraph";
 export { hashContent } from "./hashContent";
 export {
   emptySnapshot,

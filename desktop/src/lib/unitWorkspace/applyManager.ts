@@ -15,6 +15,8 @@ import {
   manifestHasAitestCsharpTests,
 } from "./ensureAitestDotnet";
 import { ideApplyFiles, isIdeCodegenReady, rememberCodegenResult } from "../ideProtocol";
+import { pushTimeline } from "./unitJobEvents";
+import { recordUnitJobMetric } from "../unitJobMetrics";
 
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"] as const;
 
@@ -149,7 +151,14 @@ async function writeManifestOverlay(
       for (const g of ideResult.workspaceTree.generatedFiles) {
         if (g.status === "CREATED" || g.status === "UPDATED") applied.push(g.path);
         if (g.status === "REJECTED_JAIL" || g.status === "ERROR") {
-          throw new Error(g.error || `IDE Apply failed: ${g.path}`);
+          // Partial Apply: other files may already be on disk — surface clear error.
+          const okN = applied.length;
+          throw new Error(
+            (g.error || `IDE Apply failed: ${g.path}`) +
+              (okN
+                ? ` (${okN} file khác đã ghi; kiểm tra AItest/ trên SUT)`
+                : "")
+          );
         }
       }
     }
@@ -217,12 +226,18 @@ async function rollbackWrittenTargets(
 async function finalizeAppliedRun(
   projectRoot: string,
   safe: UnitWorkspaceManifest,
-  appliedPaths: string[]
+  appliedPaths: string[],
+  applyTimeMs?: number
 ): Promise<ApplyManyItemResult> {
   const next: UnitWorkspaceManifest = {
     ...safe,
     status: "applied",
     appliedAt: new Date().toISOString(),
+    timeline: pushTimeline(
+      safe.timeline || [],
+      "job.apply.completed",
+      applyTimeMs != null ? `applyTimeMs=${applyTimeMs}` : undefined
+    ),
   };
   syncApplyAudit(next, appliedPaths, true);
   let stagingCleaned = false;
@@ -235,6 +250,19 @@ async function finalizeAppliedRun(
     } catch {
       /* ignore */
     }
+  }
+  if (typeof applyTimeMs === "number") {
+    recordUnitJobMetric({
+      projectId: next.projectId,
+      contextSource: next.via === "ide-extension" ? "implementation-plan" : "local-fs",
+      runnerUsed: next.via || "unknown",
+      ideConnected: next.via === "ide-extension",
+      jobId: next.jobId,
+      via: next.via || null,
+      applyTimeMs,
+      durationMs: applyTimeMs,
+      ok: true,
+    });
   }
   return {
     runId: next.runId,
@@ -295,9 +323,16 @@ export async function applyManyWorkspacesToRepo(
 
   const writtenByRun = new Map<string, string[]>();
   const allWritten: string[] = [];
+  const applyStarted = Date.now();
 
   try {
     for (const p of prepared) {
+      const marked: UnitWorkspaceManifest = {
+        ...p.safe,
+        timeline: pushTimeline(p.safe.timeline || [], "job.apply.started"),
+      };
+      await saveManifest(projectRoot, marked).catch(() => {});
+      p.safe = marked;
       const applied = await writeManifestOverlay(projectRoot, p.safe);
       writtenByRun.set(p.runId, applied);
       allWritten.push(...applied);
@@ -307,10 +342,16 @@ export async function applyManyWorkspacesToRepo(
     throw e;
   }
 
+  const applyTimeMs = Date.now() - applyStarted;
   const results: ApplyManyItemResult[] = [...earlyFails];
   for (const p of prepared) {
     results.push(
-      await finalizeAppliedRun(projectRoot, p.safe, writtenByRun.get(p.runId) || [])
+      await finalizeAppliedRun(
+        projectRoot,
+        p.safe,
+        writtenByRun.get(p.runId) || [],
+        applyTimeMs
+      )
     );
   }
 

@@ -700,6 +700,7 @@ export default function RequirementsPage() {
                         projectId: project.id,
                         projectRoot: workspace.getLocalPath(project.id),
                         cases: [tc],
+                        requirementTitle: r.title,
                       });
                       if (sync.ok && sync.written.length) {
                         message.success(

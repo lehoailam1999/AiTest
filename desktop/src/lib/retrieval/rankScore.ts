@@ -4,6 +4,11 @@
  *
  * Portable: exclude / boost by path shape + token overlap — never product names.
  */
+import {
+  isDeniedUnitPrimaryPath,
+  isWeakUnitClientPath,
+  UNIT_RANK_POLICY,
+} from "@aitest/ide-protocol";
 
 export function normalizeKeywords(keywords: string[]): string[] {
   const seen = new Set<string>();
@@ -44,21 +49,50 @@ export function symbolKeywordScore(symbolNames: string[], keywords: string[]): n
   return score;
 }
 
-/** Prefer backend-ish paths for Unit. */
+/** Prefer backend-ish logic layers for Unit. */
 export function unitPathBonus(pathRel: string): number {
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
   let bonus = 0;
-  if (/\.(service|controller|repository|repo|entity|model|dto|handler|usecase|use-case)\./.test(p))
+  // EF / generated — never Unit primary
+  if (
+    /\/migrations?\//.test(p) ||
+    /\.designer\.cs$/.test(p) ||
+    /\.snapshot\.cs$/.test(p) ||
+    /modelsnapshot\.cs$/.test(p)
+  ) {
+    return -100;
+  }
+  if (
+    /\.(service|controller|repository|repo|entity|model|dto|handler|usecase|use-case|validator|policy|command)\./.test(
+      p
+    ) ||
+    /(handler|command|validator|usecase|policy)\.cs$/i.test(p)
+  )
     bonus += 30;
-  if (/\/(services?|controllers?|repositories?|entities|domain|application)\//.test(p)) bonus += 20;
+  if (
+    /\/(services?|controllers?|repositories?|entities|domain|application|handlers|commands|validators)\//.test(
+      p
+    )
+  )
+    bonus += 20;
   if (/\.(spec|test)\./.test(p) || /\/(__)?tests?(__)?\//.test(p)) bonus -= 40;
-  if (/\/(components?|pages?|views?|templates?)\//.test(p)) bonus -= 15;
-  if (/\.(tsx|jsx|vue|html)$/.test(p) && !/\.service\./.test(p)) bonus -= 10;
+  if (/tests?\.cs$/.test(p) || /\/integration\//.test(p)) bonus -= 80;
+  if (/\/(components?|pages?|views?|templates?|clientapp|client-app|wwwroot)\//.test(p))
+    bonus -= 35;
+  if (/\.(tsx|jsx|vue|html|component\.ts)$/.test(p)) bonus -= 25;
+  // Align with Phase 2 thin HTTP client deny (soft demote in rank)
+  if (isWeakUnitClientPath(pathRel) && !/\/(services?|application|domain|handlers?)\//.test(p)) {
+    bonus -= 40;
+  }
+  // Infrastructure/Data without handler/service — weak Unit seed
+  if (/\/data\//.test(p) && !/(handler|service|validator|repository)/.test(p)) bonus -= 25;
   return bonus;
 }
 
 /**
- * Hard-exclude from Unit retrieve — E2E/POM/spec/generated noise.
+ * Hard-exclude from Unit retrieve — never use existing tests / E2E / generated as SUT.
+ * Root cause for TC-021-style failures: Integration *Test.cs under test/ was ranked as primary.
+ * Also exclude EF / ORM migration & designer artifacts (portable path shapes).
  */
 export function isExcludedFromUnitRetrieve(pathRel: string): boolean {
   const p = pathRel.replace(/\\/g, "/").toLowerCase();
@@ -71,6 +105,15 @@ export function isExcludedFromUnitRetrieve(pathRel: string): boolean {
   if (/\.(spec|test)\.(ts|tsx|js|jsx)$/.test(p)) return true;
   if (p.includes("/node_modules/") || p.includes("/dist/") || p.includes("/coverage/")) return true;
   if (/\.(component)\.(html|css|scss)$/.test(p)) return true;
+  // Existing test projects / suites (dotnet + general) — production Unit SUT only
+  if (/(^|\/)(test|tests|__tests__|spec)(\/|$)/.test(p)) return true;
+  if (p.includes("/integration/") || p.includes("/integrations/")) return true;
+  if (/\/[^/]+\.(test|tests)(\/|$)/.test(p)) return true;
+  if (/tests?\.cs$/.test(p) || /\.(tests?|spec)\.cs$/.test(p)) return true;
+  // Generated DB migration / designer / snapshot artifacts (EF, similar ORMs)
+  if (/(^|\/)migrations?(\/|$)/.test(p)) return true;
+  if (/\.designer\.cs$/.test(p) || /\.snapshot\.cs$/.test(p) || /modelsnapshot\.cs$/.test(p))
+    return true;
   return false;
 }
 
@@ -96,10 +139,14 @@ export function isExcludedFromE2eRetrieve(pathRel: string): boolean {
 }
 
 /**
- * True when index primary is unsafe as Unit SUT (E2E page / pure UI).
+ * True when index primary is unsafe as Unit SUT (E2E page / pure UI / denied FE).
  */
 export function isUnsuitableUnitPrimary(pathRel: string): boolean {
-  return isExcludedFromUnitRetrieve(pathRel) || unitPathBonus(pathRel) < 0;
+  return (
+    isExcludedFromUnitRetrieve(pathRel) ||
+    isDeniedUnitPrimaryPath(pathRel) ||
+    unitPathBonus(pathRel) < 0
+  );
 }
 
 /**
@@ -253,6 +300,9 @@ export function hasSemanticE2eReasons(reasons: string[]): boolean {
 }
 
 export function clampTopK(topK?: number): number {
-  const n = topK ?? 8;
-  return Math.min(10, Math.max(5, Math.floor(n)));
+  const n = topK ?? UNIT_RANK_POLICY.retrieveTopKDefault;
+  return Math.min(
+    UNIT_RANK_POLICY.retrieveTopKMax,
+    Math.max(UNIT_RANK_POLICY.retrieveTopKMin, Math.floor(n))
+  );
 }

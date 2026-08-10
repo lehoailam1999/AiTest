@@ -15,5 +15,7 @@ export { useCodegenUiStore } from "./codegenUiStore.js";
 export { guardE2eFilesViaApi } from "./guardE2eFiles.js";
 export {
   tryExtensionGenerateE2eBatch,
+  tryExtensionGenerateUnitBatch,
+  cancelExtensionCodegen,
   postGuardE2eDraftFiles,
 } from "./phaseBGen.js";

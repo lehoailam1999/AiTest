@@ -2,7 +2,7 @@
   "name": "aitest-ide",
   "displayName": "AITest IDE Bridge",
   "description": "AITest V2 — semantic context bridge for Desktop Orchestrator (VS Code / Cursor)",
-  "version": "0.1.1",
+  "version": "0.1.15",
   "publisher": "aitest",
   "private": true,
   "engines": {

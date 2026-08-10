@@ -34,6 +34,7 @@ from app.services.ai_service import (
     connection_is_cursor_cli,
     generate_test_cases_for_connection,
 )
+from app.services.unit_tc_gen_guard import filter_unit_tc_drafts
 from app.services.requirement_content import (
     change_summary_from_description,
     content_meta_from_description,
@@ -223,13 +224,37 @@ def _persist_generated_drafts(
     """
     Insert new TestCase rows from drafts (dedupe via existing_keys, mutated in-place).
     Same mapping rules as legacy end-of-job persist — Unit/E2E type coerce unchanged.
+    When preferred_engine=unit: drop UI/wizard drafts; strip Class.Method from title.
     Returns number of rows inserted.
     """
     if not drafts:
         return 0
+    work = list(drafts)
+    if (preferred_engine or "").strip().lower() == "unit":
+        work, dropped_n, sanitized_n = filter_unit_tc_drafts(work)
+        if dropped_n or sanitized_n:
+            logger.info(
+                "Unit TC guard job=%s dropped=%s title_sanitized=%s kept=%s",
+                job_id,
+                dropped_n,
+                sanitized_n,
+                len(work),
+            )
+            try:
+                from app.services.job_progress import set_job_progress
+
+                set_job_progress(
+                    job_id,
+                    f"[unit-guard] loại {dropped_n} TC UI/wizard · gỡ Class.Method title={sanitized_n} · giữ {len(work)}",
+                    persist=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+    if not work:
+        return 0
     count = db.query(TestCase).filter(TestCase.project_id == project_id).count()
     inserted = 0
-    for d in drafts:
+    for d in work:
         key = dup_key(d.title, d.steps)
         if key in existing_keys:
             continue
@@ -291,6 +316,7 @@ def _engine_readiness_warnings(bundle: dict | None, preferred: str | None) -> li
     knowledge = bundle.get("knowledge") if isinstance(bundle.get("knowledge"), dict) else bundle
     gaps = knowledge.get("gaps") if isinstance(knowledge.get("gaps"), list) else []
     actors = knowledge.get("actors") if isinstance(knowledge.get("actors"), list) else []
+    features = knowledge.get("features") if isinstance(knowledge.get("features"), list) else []
     rules = knowledge.get("businessRules") if isinstance(knowledge.get("businessRules"), list) else []
     validations = (
         knowledge.get("validationRules")
@@ -314,6 +340,25 @@ def _engine_readiness_warnings(bundle: dict | None, preferred: str | None) -> li
             warns.append("thiếu business rules (Unit vẫn chạy — coverage có thể mỏng)")
         if not validations and not apis and not entities:
             warns.append("thiếu validation/API/entity (Unit vẫn chạy)")
+        # Soft: FEATURES look UI-only (wizard/form/page) without BE verbs
+        feat_blob = " ".join(
+            str(
+                (f.get("name") if isinstance(f, dict) else None)
+                or (f.get("title") if isinstance(f, dict) else None)
+                or f
+            )
+            for f in features
+        ).lower()
+        if features and re.search(
+            r"form|popup|wizard|màn\s*hình|giao\s*diện|click|bước\s*\d+",
+            feat_blob,
+        ) and not re.search(
+            r"handler|service|api|validation|rule|auth|quy\s*tắc|backend",
+            feat_blob,
+        ):
+            warns.append(
+                "FEATURES nghiêng UI/wizard — Unit chỉ cover logic BE; UI-only → E2E"
+            )
     if preferred == "e2e":
         use_cases = (
             knowledge.get("useCases") if isinstance(knowledge.get("useCases"), list) else []

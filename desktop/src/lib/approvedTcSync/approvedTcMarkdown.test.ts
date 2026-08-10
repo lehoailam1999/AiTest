@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   approvedTcMarkdownRelPath,
   buildApprovedTcMarkdownFiles,
+  parseApprovedTcGrounding,
   renderApprovedTestCaseMarkdown,
 } from "./approvedTcMarkdown.js";
 import type { TestCase } from "../../api/types";
@@ -51,5 +52,46 @@ describe("approvedTcMarkdown", () => {
     assert.match(md, /^---\n/);
     assert.match(md, /testCaseId: TC-LOGIN-01/);
     assert.match(md, /reviewStatus: Approved/);
+  });
+
+  it("includes Module + Function Grounding progressive resolve block", () => {
+    const md = renderApprovedTestCaseMarkdown(sample({ module: "Phân loại VTKT" }), {
+      requirementTitle: "Vật chứng",
+    });
+    assert.match(md, /requirement: Vật chứng/);
+    assert.match(md, /## Grounding \(Unit Gen\)/);
+    assert.match(md, /requirement: Vật chứng/);
+    assert.match(md, /function: Phân loại VTKT/);
+    assert.match(md, /module: Phân loại VTKT/);
+    assert.match(md, /\| Module \| Vật chứng \|/);
+    assert.match(md, /\| Function \| Phân loại VTKT \|/);
+    assert.match(md, /Module → Function → Title/);
+    assert.match(md, /SUT resolve \(tự động khi Approve\)/);
+    assert.match(md, /### Resolved SUT/);
+    assert.match(md, /index\/path-index/);
+    const g = parseApprovedTcGrounding(md);
+    assert.equal(g.requirement, "Vật chứng");
+    assert.equal(g.module, "Phân loại VTKT");
+  });
+
+  it("does not fall back Module (requirement) to Function", () => {
+    const md = renderApprovedTestCaseMarkdown(
+      sample({ module: "Chọn vị trí lưu trữ vật chứng" })
+    );
+    assert.match(md, /\| Module \| — \|/);
+    assert.match(md, /requirement: —/);
+    assert.match(md, /function: Chọn vị trí lưu trữ vật chứng/);
+    assert.match(md, /module: Chọn vị trí lưu trữ vật chứng/);
+  });
+
+  it("parses function alias from grounding", () => {
+    const g = parseApprovedTcGrounding(`## Grounding (Unit Gen)
+
+requirement: Tạo mới vật chứng
+function: Gán vật chứng vào hồ sơ vụ án
+title: validate bắt buộc
+`);
+    assert.equal(g.requirement, "Tạo mới vật chứng");
+    assert.equal(g.module, "Gán vật chứng vào hồ sơ vụ án");
   });
 });

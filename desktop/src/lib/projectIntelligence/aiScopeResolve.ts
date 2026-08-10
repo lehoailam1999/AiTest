@@ -3,6 +3,11 @@ import type { TestCase } from "../../api/types";
 import { buildProjectIndexCached } from "./projectIndex";
 import { collectModuleRelatedPaths } from "./relatedFilesFromTc";
 import { resolveSeedCandidates } from "./tcSeedResolver";
+import {
+  isAcceptableUnitScopePath,
+  pickFirstAcceptableUnitScopePath,
+  tcBlobForUnitScope,
+} from "./unitScopeAccept";
 import type { CodeAliasMap } from "./viCodeAliases";
 
 /**
@@ -89,24 +94,32 @@ export async function resolveScopeWithAi(input: {
     }
   }
 
-  if (!candidates.length) {
+  const tcText = tcBlobForUnitScope(input.testCase);
+  const acceptOpts = { tcText, codeAliases: input.codeAliases };
+  const filtered = candidates.filter((p) =>
+    isAcceptableUnitScopePath({ pathRel: p, ...acceptOpts })
+  );
+
+  if (!filtered.length) {
     return {
       primary: null,
       related: [],
-      reason: "Không có ứng viên path từ TC",
+      reason: candidates.length
+        ? "Ứng viên path lệch domain / không phải Unit SUT"
+        : "Không có ứng viên path từ TC",
       usedAi: false,
-      candidates: [],
+      candidates: filtered,
       codeTokens: aiTokens,
     };
   }
 
   if (input.useAi === false) {
     return {
-      primary: candidates[0],
-      related: candidates.slice(1, 9),
+      primary: filtered[0],
+      related: filtered.slice(1, 9),
       reason: seeds[0]?.reason ?? "Heuristic FE",
       usedAi: false,
-      candidates,
+      candidates: filtered,
       codeTokens: aiTokens,
     };
   }
@@ -115,29 +128,47 @@ export async function resolveScopeWithAi(input: {
     const ranked = await resolveSourceScope.run({
       projectId: input.projectId,
       testCaseId: input.testCase.id,
-      candidates: candidates.slice(0, 60),
+      candidates: filtered.slice(0, 60),
     });
     const prefix = aiTokens.length
       ? `VI→EN: ${aiTokens.slice(0, 6).join(", ")}${aiTokens.length > 6 ? "…" : ""}. `
       : "";
+    const aiPrimary = (ranked.primary || "").replace(/\\/g, "/") || null;
+    const primary =
+      (aiPrimary &&
+      isAcceptableUnitScopePath({ pathRel: aiPrimary, ...acceptOpts })
+        ? aiPrimary
+        : null) ||
+      pickFirstAcceptableUnitScopePath(
+        [aiPrimary, ...(ranked.related || []), ...filtered].filter(Boolean) as string[],
+        acceptOpts
+      );
+    const related = (ranked.related ?? [])
+      .map((p) => p.replace(/\\/g, "/"))
+      .filter(
+        (p) =>
+          p !== primary && isAcceptableUnitScopePath({ pathRel: p, ...acceptOpts })
+      );
     return {
-      primary: ranked.primary || candidates[0],
-      related: ranked.related ?? [],
-      reason: `${prefix}${ranked.reason || tokenReason || "AI xếp hạng"}`,
+      primary,
+      related: related.length ? related : filtered.filter((p) => p !== primary).slice(0, 8),
+      reason: primary
+        ? `${prefix}${ranked.reason || tokenReason || "AI xếp hạng"}`
+        : "AI xếp hạng · bỏ primary lệch domain",
       usedAi: true,
-      candidates,
+      candidates: filtered,
       codeTokens: aiTokens,
     };
   } catch {
     return {
-      primary: candidates[0],
-      related: candidates.slice(1, 9),
+      primary: filtered[0],
+      related: filtered.slice(1, 9),
       reason:
         aiTokens.length > 0
           ? `Token AI: ${aiTokens.slice(0, 6).join(", ")} · ${seeds[0]?.reason ?? "heuristic"}`
           : seeds[0]?.reason ?? "Heuristic FE (AI không sẵn sàng)",
       usedAi: aiTokens.length > 0,
-      candidates,
+      candidates: filtered,
       codeTokens: aiTokens,
     };
   }

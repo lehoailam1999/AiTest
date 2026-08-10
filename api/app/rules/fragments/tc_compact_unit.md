@@ -1,7 +1,7 @@
-QUY TẮC CHUNG (BẮT BUỘC):
-1. Bám Knowledge/Freeze của job — không domain mẫu; bucket rỗng → không invent.
-2. module = tên Feature trong phạm vi; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
-3. precondition / testData / steps / expectedResult cụ thể, kiểm được; thiếu → [Giả định].
-4. Mỗi tín hiệu độc lập trong phạm vi → ≥1 TC; không gộp nhiều tín hiệu; không trần giả tạo.
-5. Không gộp Unit+E2E trong 1 TC. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
-6. Self-check: còn tín hiệu chưa có TC → bổ sung; đủ → dừng (không pad).
+QUY TẮC CHUNG UNIT (BẮT BUỘC — BACKEND ONLY, PORTABLE):
+1. Bám Knowledge/Freeze — không domain/framework mẫu; bucket rỗng → không invent.
+2. module = Feature; title VN `[Feature] - [Hành động BE] - [Kết quả]` — cấm Class.Method Latin · cấm form/popup/wizard/Bước/UI.
+3. Steps: Arrange mock port → Act gọi SUT backend → Assert return/exception/side-effect (không click/fill/chuyển bước/enable-UI).
+4. Mỗi tín hiệu backend độc lập → ≥1 TC (BR/VALIDATION/ERROR/authz); API→handler (không HTTP-200-only); không gộp; không pad UI-only/ClientApp.
+5. Không gộp Unit+E2E. UI/wizard/form → không sinh trong phiên Unit. priority/severity thang Việt.
+6. Self-check: còn FEATURES/BR/VALIDATION/ERROR/(authz) chưa cover → bổ sung; đủ → dừng.

@@ -1004,6 +1004,11 @@ export const requirementStudio = {
     authFetch<import("./types").RequirementStudioWorkspace>(
       `/requirement-workspaces/${workspaceId}`
     ),
+  updateWorkspace: (workspaceId: string, body: { title: string }) =>
+    authFetch<import("./types").RequirementStudioWorkspace>(
+      `/requirement-workspaces/${workspaceId}`,
+      { method: "PUT", body: JSON.stringify(body) }
+    ),
   deleteWorkspace: (workspaceId: string) =>
     authFetch<{
       status: string;

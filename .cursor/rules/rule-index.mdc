@@ -30,6 +30,7 @@ alwaysApply: false
 | Sinh TC E2E | `PROFILE-TC-E2E` | traceability, flows, path, auth-who, coverage |
 | Sinh Unit code | `PROFILE-UNIT-CODEGEN` | unit, mock, assertion, isolation, sut-safety, portable, naming |
 | Sinh E2E code | `PROFILE-E2E-CODEGEN` | playwright, auth, locator, journey, dor, portable, grounding |
+| Approve Unit grounding (portable) | `.cursor/rules/code-aliases-unit-gen.mdc` (**alwaysApply**) + SUT `.ai-test/code-aliases.json` | discover-from-index; no product nouns in AITest |
 
 **Hiện tại:** UUTGS đã đọc từ registry; Unit hỗ trợ profile retrieve qua `AITEST_RULE_RETRIEVE_MODE=selective` (MVP).  
 E2E selective bật thêm `AITEST_RULE_RETRIEVE_E2E=1`.  

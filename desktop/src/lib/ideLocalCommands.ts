@@ -73,6 +73,14 @@ export function ideSearchByName(
     out.push({ pathRel: base.pathRel, score: 90, reason: "basename" });
   }
 
+  const tokenHits = index.byToken.get(q) ?? [];
+  for (const f of tokenHits) {
+    if (out.length >= limit) break;
+    if (seen.has(f.pathRel)) continue;
+    seen.add(f.pathRel);
+    out.push({ pathRel: f.pathRel, score: 80, reason: "token" });
+  }
+
   for (const f of index.files) {
     if (out.length >= limit) break;
     if (seen.has(f.pathRel)) continue;
@@ -105,6 +113,13 @@ export type BuildGenerateContextInput = {
   preferIndexContext?: boolean;
   /** Sync code index if missing (default true when preferIndexContext) */
   syncIndexIfMissing?: boolean;
+  /**
+   * Approved TC markdown from `.ai-test/test-cases/` (SoT on disk).
+   * Merged into resolve/alignment so path:/code: markers work even when DB Test Data lags.
+   */
+  approvedTcMd?: string | null;
+  /** Requirement title for progressive SUT grounding */
+  requirementTitle?: string | null;
 };
 
 export type BuildGenerateContextResult = {
@@ -117,6 +132,8 @@ export type BuildGenerateContextResult = {
   primaryContent: string;
   /** Phase 5 — TestPlan for AAA hint (optional; legacy callers ignore) */
   planner?: import("./testPlanner/types").TestPlan;
+  /** Phase 1 — Unit Implementation Plan (entry + layers) */
+  implementationPlan?: import("./testPlanner/types").UnitImplementationPlan | null;
   /** Phase 5 — code index schema stamp when index-backed */
   indexVersion?: string;
   /** How primary was resolved */
@@ -124,37 +141,80 @@ export type BuildGenerateContextResult = {
 };
 
 /**
- * buildUnitContext — prefer Phase 4 index-backed packet; fallback IDE closure.
+ * Prefer Code Index + Implementation Planner when language is indexed
+ * (TS/JS + C#). Empty language → false (mixed monorepo safety).
+ * Java/Python/Go/… still legacy until index parsers exist.
+ */
+export function shouldPreferCodeIndex(language: string | null | undefined): boolean {
+  const lang = (language || "").toLowerCase().trim();
+  if (!lang) return false;
+  if (/typescript|javascript|tsx|jsx|\bts\b|\bjs\b|node/.test(lang)) return true;
+  if (/c#|csharp|dotnet|\.net/.test(lang)) return true;
+  return false;
+}
+
+/**
+ * buildUnitContext — prefer index-backed packet (TS/JS/C#); fallback IDE closure.
  * Does not call Backend; does not persist source.
  */
 export async function buildGenerateContext(
   input: BuildGenerateContextInput
 ): Promise<BuildGenerateContextResult> {
-  const preferIndex = input.preferIndexContext !== false && isTauri();
-  const langLower = (input.language || "").toLowerCase();
-  // Phase 1 index = TS/JS only. Skip for CLR/JVM/Python/Go Unit (use legacy scope).
-  const skipIndexForLang =
-    /c#|csharp|dotnet|\.net|f#|vb|java|kotlin|python|go\b|php|ruby|swift/.test(langLower);
-  // Only prefer index for explicit JS/TS — empty language must NOT use TS index
-  // (Forensic often has C# + ClientApp; empty lang + index → wrong Angular SUT).
-  const preferJsTsIndex =
-    !skipIndexForLang &&
-    /typescript|javascript|tsx|jsx|\bts\b|\bjs\b|node/.test(langLower);
+  // Prefer disk MD markers over stale DB Test Data for resolve + domain checks.
+  const approvedMd = (input.approvedTcMd || "").trim();
+  const testCase: TestCase = approvedMd
+    ? {
+        ...input.testCase,
+        testData: [input.testCase.testData, approvedMd].filter(Boolean).join("\n\n"),
+      }
+    : input.testCase;
 
-  if (preferIndex && preferJsTsIndex) {
+  const preferIndex =
+    input.preferIndexContext !== false && isTauri() && shouldPreferCodeIndex(input.language);
+
+  if (preferIndex) {
     try {
       const { createTauriCodeIndexIo } = await import("./codeIndex/tauriIo");
       const { buildIndexBackedContext } = await import("./contextBuilder");
       const { isUnsuitableUnitPrimary } = await import("./retrieval/rankScore");
       const built = await buildIndexBackedContext({
         projectRoot: input.projectRoot,
-        testCase: input.testCase,
+        testCase,
         io: createTauriCodeIndexIo(),
         language: input.language,
         framework: input.framework,
         syncIfMissing: input.syncIndexIfMissing !== false,
         forceTestType: "Unit",
       });
+      const impl = built.implementationPlan;
+
+      // Phase 1 Context Strategy: planner not ready → empty packet (no legacy poison)
+      if (impl && impl.status !== "ready") {
+        const emptyPacket: AITestContextPacket = {
+          ...built.packet,
+          purpose: input.purpose ?? "generate-unit",
+          files: [],
+          meta: {
+            ...built.packet.meta,
+            projectId: input.projectId,
+            language: input.language || built.packet.meta.language,
+            framework: input.framework || built.packet.meta.framework,
+          },
+        };
+        const view = toUnitContextView(emptyPacket);
+        return {
+          packet: emptyPacket,
+          view: { ...view, primaryPath: "", primaryContent: "" },
+          packetForApi: packetForApi(emptyPacket),
+          primaryPath: "",
+          primaryContent: "",
+          planner: built.plan,
+          implementationPlan: impl,
+          indexVersion: built.snapshot.meta.schema,
+          contextSource: "implementation-plan",
+        };
+      }
+
       const primaryPath = built.packet.files[0]?.pathRel || "";
       if (
         built.packet.files.length &&
@@ -172,7 +232,6 @@ export async function buildGenerateContext(
             framework: input.framework || built.packet.meta.framework,
           },
         };
-        // Optional user/heuristic override: promote manual primary if present in packet or readable
         const manual = (input.manualPrimaryPath || "").replace(/\\/g, "/");
         if (manual && packet.files[0]?.pathRel !== manual) {
           const hit = packet.files.find((f) => f.pathRel === manual);
@@ -198,8 +257,9 @@ export async function buildGenerateContext(
           primaryPath: primary?.pathRel ?? view.primaryPath ?? "",
           primaryContent: primary?.content ?? view.primaryContent ?? "",
           planner: built.plan,
+          implementationPlan: impl,
           indexVersion: built.snapshot.meta.schema,
-          contextSource: "code-index",
+          contextSource: "implementation-plan",
         };
       }
     } catch {
@@ -214,11 +274,12 @@ export async function buildGenerateContext(
     language: input.language,
     framework: input.framework,
     projectId: input.projectId,
-    testCase: input.testCase,
+    testCase,
     allSourcePaths: input.allSourcePaths,
     manualPrimaryPath: input.manualPrimaryPath,
     policy,
     codeAliases: input.codeAliases,
+    requirementTitle: input.requirementTitle,
     forcedRelatedPaths: input.forcedRelatedPaths,
   });
 
@@ -227,16 +288,84 @@ export async function buildGenerateContext(
   let planner: import("./testPlanner/types").TestPlan | undefined;
   try {
     const { planFromTestCase } = await import("./testPlanner/planFromTestCase");
-    planner = planFromTestCase({ testCaseId: input.testCase.id });
+    planner = planFromTestCase({ testCaseId: testCase.id });
   } catch {
     planner = undefined;
   }
+
+  const primaryPath = primary?.pathRel ?? view.primaryPath ?? "";
+  const primaryContent = primary?.content ?? view.primaryContent ?? "";
+  if (primaryPath && primaryContent) {
+    try {
+      const { isUnsuitableUnitPrimary } = await import("./retrieval/rankScore");
+      if (isUnsuitableUnitPrimary(primaryPath)) {
+        const emptyPacket: AITestContextPacket = {
+          ...packet,
+          files: [],
+        };
+        return {
+          packet: emptyPacket,
+          view: { ...view, primaryPath: "", primaryContent: "" },
+          packetForApi: packetForApi(emptyPacket),
+          primaryPath: "",
+          primaryContent: "",
+          planner,
+          contextSource: "project-intelligence",
+        };
+      }
+      const { isPacketSutAcceptable, sutDomainConflict } = await import(
+        "@aitest/ide-protocol"
+      );
+      const tcBlob = [
+        approvedMd,
+        testCase.title,
+        testCase.module,
+        testCase.testData,
+        testCase.steps,
+        testCase.expectedResult,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const domain = sutDomainConflict({
+        tcText: tcBlob,
+        primaryPath,
+        codeAliases: input.codeAliases,
+      });
+      if (
+        domain.conflict ||
+        !isPacketSutAcceptable({
+          tcText: tcBlob,
+          primaryPath,
+          sourceExcerpt: primaryContent,
+          codeAliases: input.codeAliases,
+        })
+      ) {
+        // Do not poison Extension with a wrong primary (domain mismatch / weak align).
+        const emptyPacket: AITestContextPacket = {
+          ...packet,
+          files: [],
+        };
+        return {
+          packet: emptyPacket,
+          view: { ...view, primaryPath: "", primaryContent: "" },
+          packetForApi: packetForApi(emptyPacket),
+          primaryPath: "",
+          primaryContent: "",
+          planner,
+          contextSource: "project-intelligence",
+        };
+      }
+    } catch {
+      /* keep packet if protocol unavailable */
+    }
+  }
+
   return {
     packet,
     view,
     packetForApi: packetForApi(packet),
-    primaryPath: primary?.pathRel ?? view.primaryPath ?? "",
-    primaryContent: primary?.content ?? view.primaryContent ?? "",
+    primaryPath,
+    primaryContent,
     planner,
     contextSource: "project-intelligence",
   };
@@ -334,7 +463,7 @@ export function buildIdeLocalGenerateBody(input: {
   };
 }
 
-export async function loadUnitProjectRules(projectRoot: string, maxChars = 2000): Promise<string> {
+export async function loadUnitProjectRules(projectRoot: string, maxChars = 8000): Promise<string> {
   const rel = ".ai-test/unit-conventions.md";
   const raw = await ideReadFile(projectRoot, rel).catch(() => "");
   const text = raw.trim();

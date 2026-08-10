@@ -12,7 +12,13 @@ import { listDependencies, loadIndexSnapshot } from "../codeIndex/index";
 import { syncProjectIndex } from "../codeIndex/incrementalSync";
 import { CODE_INDEX_REL_PATH } from "../codeIndex/constants";
 import { planFromTestCase } from "../testPlanner/planFromTestCase";
-import type { PlannerRequirementInput, TestPlan } from "../testPlanner/types";
+import type {
+  PlannerRequirementInput,
+  TestPlan,
+  UnitImplementationPlan,
+} from "../testPlanner/types";
+import { getOrBuildUnitImplementationPlan } from "../testPlanner/contextCache";
+import { UNIT_GEN_LIMITS } from "@aitest/ide-protocol";
 import { retrieveForPlan } from "../retrieval/retrieveForPlan";
 import type { BusinessRetrieveResult, RetrieveFilesResult } from "../retrieval/types";
 import type { TestCase } from "../../api/types";
@@ -43,6 +49,8 @@ export type BuildIndexContextInput = {
 
 export type IndexBackedContextResult = {
   plan: TestPlan;
+  /** Phase 1 Implementation Planner (Unit); null for E2E path */
+  implementationPlan: UnitImplementationPlan | null;
   retrieve: RetrieveFilesResult;
   business: BusinessRetrieveResult;
   snapshot: CodeIndexSnapshot;
@@ -135,7 +143,53 @@ export async function buildIndexBackedContext(
   const isE2e = plan.testType === "E2E";
   const budget = input.budget || (isE2e ? E2E_INDEX_BUDGET : UNIT_INDEX_BUDGET);
 
-  const ranked = retrieve.files;
+  let implementationPlan: UnitImplementationPlan | null = null;
+  let ranked = retrieve.files;
+
+  if (!isE2e) {
+    const { plan: impl, cacheHit } = await getOrBuildUnitImplementationPlan({
+      projectRoot: input.projectRoot,
+      testCaseId: input.testCase.testCaseId || input.testCase.id,
+      tc: plannerTc,
+      intent: plan,
+      snapshot,
+      frameworkHint: input.testingFramework || input.framework,
+      readFile: async (pathRel) => {
+        try {
+          return await input.io.readFile(input.projectRoot, pathRel);
+        } catch {
+          return null;
+        }
+      },
+      maxLayers: Math.min(
+        UNIT_GEN_LIMITS.maxRelatedFiles,
+        budget.maxRelatedFiles || UNIT_GEN_LIMITS.maxRelatedFiles
+      ),
+    });
+    implementationPlan = impl;
+    notes.push(
+      cacheHit ? "implementation-plan cache hit" : "implementation-plan built",
+      `implementation-plan status=${impl.status}`,
+      ...impl.notes.slice(0, 6)
+    );
+
+    if (impl.status === "ready" && impl.entry) {
+      // Force packet from planner layers (Context Strategy)
+      ranked = impl.layers.map((layer, i) => ({
+        pathRel: layer.pathRel,
+        rankScore: 1000 - i,
+        reasons: [layer.role, layer.reason],
+      }));
+      notes.push(`planner entry=${impl.entry.pathRel} layers=${impl.layers.length}`);
+    } else {
+      // Fail-closed: do not ship weak retrieve primary (audit-log / digital-file)
+      ranked = [];
+      notes.push(
+        "implementation-plan not ready — emptying packet (add path:/code: markers)"
+      );
+    }
+  }
+
   if (!ranked.length) {
     notes.push("retrieve returned 0 files");
   }
@@ -145,37 +199,56 @@ export async function buildIndexBackedContext(
   let primaryPath = "";
   let primaryContent = "";
   const relatedSources: { path: string; content: string }[] = [];
+  const rootNorm = input.projectRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+
+  const toRel = (p: string): string => {
+    let r = (p || "").replace(/\\/g, "/");
+    if (!r) return r;
+    const low = r.toLowerCase();
+    const rootLow = rootNorm.toLowerCase();
+    if (rootLow && (low === rootLow || low.startsWith(rootLow + "/"))) {
+      r = r.slice(rootNorm.length).replace(/^\/+/, "");
+    }
+    // Strip drive-absolute leftovers
+    if (/^[a-z]:\//i.test(r)) {
+      const idx = r.toLowerCase().indexOf("/src/");
+      if (idx >= 0) r = r.slice(idx + 1);
+    }
+    return r.replace(/^\/+/, "");
+  };
 
   for (let i = 0; i < ranked.length; i++) {
     const hit = ranked[i];
-    if (i > 0 && packetFiles.length > budget.maxRelatedFiles) break;
+    if (packetFiles.length > 0 && packetFiles.length > budget.maxRelatedFiles) break;
     let raw = "";
+    const pathRel = toRel(hit.pathRel);
     try {
-      raw = await input.io.readFile(input.projectRoot, hit.pathRel);
+      raw = await input.io.readFile(input.projectRoot, pathRel);
     } catch {
-      truncated.push(hit.pathRel);
+      truncated.push(pathRel || hit.pathRel);
       continue;
     }
-    const max = i === 0 ? budget.maxPrimaryChars : budget.maxRelatedChars;
+    const isPrimary = packetFiles.length === 0;
+    const max = isPrimary ? budget.maxPrimaryChars : budget.maxRelatedChars;
     const { text, truncated: wasTrunc } = trimChars(raw, max);
-    if (wasTrunc) truncated.push(hit.pathRel);
-    if (total + text.length > budget.maxTotalChars && i > 0) {
-      truncated.push(`omitted:${hit.pathRel}`);
+    if (wasTrunc) truncated.push(pathRel);
+    if (total + text.length > budget.maxTotalChars && !isPrimary) {
+      truncated.push(`omitted:${pathRel}`);
       break;
     }
     total += text.length;
-    const role = i === 0 ? "primary" : "dependency";
+    const role = isPrimary ? "primary" : "dependency";
     packetFiles.push({
-      pathRel: hit.pathRel,
+      pathRel,
       role,
       content: text,
       why: `rank=${hit.rankScore}; ${hit.reasons.slice(0, 3).join(",")}`,
     });
-    if (i === 0) {
-      primaryPath = hit.pathRel;
+    if (isPrimary) {
+      primaryPath = pathRel;
       primaryContent = text;
     } else {
-      relatedSources.push({ path: hit.pathRel, content: text });
+      relatedSources.push({ path: pathRel, content: text });
     }
   }
 
@@ -210,11 +283,17 @@ export async function buildIndexBackedContext(
     },
     sourceUnderTest: {
       pathRel: primaryPath || undefined,
-      symbol: plan.action,
+      symbol:
+        implementationPlan?.entry?.symbol ||
+        plan.action,
     },
     unitStrategy: {
       whatToTest: plan.action,
-      whatToMock: plan.keywords.filter((k) => /service|repo|client|http/i.test(k)).slice(0, 6),
+      whatToMock: (
+        implementationPlan?.mocks?.length
+          ? implementationPlan.mocks
+          : plan.keywords.filter((k) => /service|repo|client|http/i.test(k))
+      ).slice(0, 6),
       forbidden: [
         "Do not invent APIs absent from provided sources",
         "Do not hardcode project-specific absolute paths or secrets",
@@ -225,9 +304,13 @@ export async function buildIndexBackedContext(
     diagnostics: {
       truncated,
       omittedPaths: truncated.filter((t) => t.startsWith("omitted:")).map((t) => t.slice(8)),
-      seedReason: retrieve.primary
-        ? `index-retrieve score=${retrieve.primary.rankScore}`
-        : "index-retrieve-empty",
+      seedReason: implementationPlan?.status === "ready"
+        ? `implementation-plan:${implementationPlan.entry?.pathRel}`
+        : retrieve.primary
+          ? `index-retrieve score=${retrieve.primary.rankScore}`
+          : implementationPlan
+            ? `implementation-plan:${implementationPlan.status}`
+            : "index-retrieve-empty",
       seedCandidates: ranked.slice(0, 10).map((r) => ({
         pathRel: r.pathRel,
         score: r.rankScore,
@@ -294,6 +377,7 @@ export async function buildIndexBackedContext(
 
   return {
     plan,
+    implementationPlan,
     retrieve,
     business,
     snapshot,

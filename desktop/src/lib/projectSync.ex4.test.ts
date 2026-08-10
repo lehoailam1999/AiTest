@@ -55,7 +55,7 @@ describe("buildProjectMetaFromScan EX4.3", () => {
     assert.equal(next.aiRules?.user, "u");
   });
 
-  it("uses profile conventions excerpt as projectAuto seed", () => {
+  it("uses E2E profile conventions excerpt as projectAuto seed (Unit stays file SoT)", () => {
     const seed = buildProjectAutoFromProfileConventions({
       e2eConventions: "# E2E conventions\nUse data-cy",
       unitConventions: "# Unit conventions\nPrefer AAA",
@@ -65,6 +65,6 @@ describe("buildProjectMetaFromScan EX4.3", () => {
     });
     assert.match(next.aiRules?.projectAuto || "", /project profile/i);
     assert.match(next.aiRules?.projectAuto || "", /E2E conventions/);
-    assert.match(next.aiRules?.projectAuto || "", /Unit conventions/);
+    assert.doesNotMatch(next.aiRules?.projectAuto || "", /Unit conventions/);
   });
 });

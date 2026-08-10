@@ -45,14 +45,26 @@ _NUMBERED_STEP_RE = re.compile(
     re.M,
 )
 
-# Section / hollow flows that must never become BUSINESS_FLOWS items.
+# Exact section headings that must never become BUSINESS_FLOWS items.
 _HOLLOW_FLOW_NAME = re.compile(
     r"(?i)^(?:"
     r"luồng\s+ngoại\s+lệ(?:\s*\([^)]*\))?|"
     r"exception\s+flows?(?:\s*\([^)]*\))?|"
     r"alternate\s+flows?|alternative\s+flows?|error\s+flows?|"
+    r"luồng\s+phụ|"
     r"nhánh\s+lỗi|nhánh\s+ngoại\s+lệ"
     r")\.?\s*$"
+)
+# Substring reject: "UC-02 Exception Flow", "Luồng phụ đăng nhập", etc.
+_NON_MAIN_FLOW_HINT = re.compile(
+    r"(?i)(?:"
+    r"luồng\s+ngoại\s+lệ|"
+    r"exception\s+flows?|"
+    r"alternate\s+flows?|alternative\s+flows?|"
+    r"error\s+flows?|alt\s+flows?|"
+    r"luồng\s+phụ|"
+    r"nhánh\s+lỗi|nhánh\s+ngoại\s+lệ"
+    r")"
 )
 _META_ANALYSIS_ECHO = re.compile(
     r"(?i)(?:"
@@ -84,16 +96,40 @@ _STYLE_BLOCK = """\
 """
 
 
+def is_non_main_business_flow(
+    name: str | None,
+    steps: str | None = None,
+) -> bool:
+    """True when name/steps mark Exception / Alt / Luồng phụ — not Main Success Scenario."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    if _HOLLOW_FLOW_NAME.match(n) or _NON_MAIN_FLOW_HINT.search(n):
+        return True
+    # First step line only — avoid rejecting MSS that mention "lỗi" mid-flow narrative
+    first = ""
+    for ln in (steps or "").splitlines():
+        t = ln.strip()
+        if t:
+            first = re.sub(r"^\d+[.)]\s*", "", t)
+            break
+    if first and (
+        _HOLLOW_FLOW_NAME.match(first) or _NON_MAIN_FLOW_HINT.search(first)
+    ):
+        return True
+    return False
+
+
 def is_hollow_use_case(
     name: str | None,
     steps: str | None = None,
     mermaid: str | None = None,
 ) -> bool:
-    """True when item is empty Exception-Flow heading or analysis meta — not a real UC."""
+    """True when item is empty Exception-Flow heading, non-MSS, or analysis meta."""
     n = (name or "").strip()
     s = (steps or "").strip()
     m = sanitize_flow_mermaid(mermaid) if mermaid else ""
-    if _HOLLOW_FLOW_NAME.match(n):
+    if is_non_main_business_flow(n, s):
         return True
     blob = f"{n}\n{s}\n{m}"
     if _META_ANALYSIS_ECHO.search(blob):
@@ -111,7 +147,11 @@ def is_hollow_use_case(
         return True
     if len(labels) == 1:
         only = labels[0]
-        if _HOLLOW_FLOW_NAME.match(only) or _META_ANALYSIS_ECHO.search(only):
+        if (
+            _HOLLOW_FLOW_NAME.match(only)
+            or _NON_MAIN_FLOW_HINT.search(only)
+            or _META_ANALYSIS_ECHO.search(only)
+        ):
             return True
         if n and only.lower() == n.lower():
             return True

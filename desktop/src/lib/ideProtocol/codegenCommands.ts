@@ -175,14 +175,24 @@ export function rememberCodegenResult(result: CodegenResultCallback | CodegenApp
     "testRunReport" in result
       ? (result as CodegenResultCallback).testRunReport
       : undefined;
+  const draftFiles =
+    "files" in result && Array.isArray((result as CodegenResultCallback).files)
+      ? (result as CodegenResultCallback).files!
+      : [];
+  const fromTree = (tree?.generatedFiles || []).map((f) => ({
+    path: f.path,
+    status: f.status,
+    error: f.error,
+  }));
+  const fromDraft = draftFiles.map((f) => ({
+    path: f.path,
+    status: "CREATED",
+    error: undefined as string | undefined,
+  }));
   lastTree = {
     commandId: result.commandId,
     status: result.status,
-    files: (tree?.generatedFiles || []).map((f) => ({
-      path: f.path,
-      status: f.status,
-      error: f.error,
-    })),
+    files: fromTree.length ? fromTree : fromDraft,
     runReport: run
       ? {
           passed: run.passed,

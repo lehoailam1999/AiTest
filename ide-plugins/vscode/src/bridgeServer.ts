@@ -8,6 +8,7 @@ import {
   IdeMethods,
   IdeNotifications,
   IDE_PROTOCOL_VERSION,
+  EXTENSION_CAPABILITIES,
   createDiscovery,
   writeBridgeDiscovery,
   clearBridgeDiscovery,
@@ -32,6 +33,8 @@ import {
   type CodegenCancelParams,
   type CodegenGenerateUnitBatchParams,
   type CodegenGenerateE2eBatchParams,
+  type CodegenOpenSessionParams,
+  type CodegenCloseSessionParams,
   type TcSyncApprovedMdParams,
 } from "@aitest/ide-protocol/node";
 import {
@@ -58,6 +61,7 @@ import {
   handleCodegenRunTests,
 } from "./codegenCommands";
 import { handleTcSyncApprovedMd } from "./tcSyncCommands";
+import { handleCodegenGenerateUnitBatch } from "./unitGenCommands";
 
 export type BridgeHandle = {
   port: number;
@@ -126,12 +130,21 @@ export async function startIdeBridgeServer(opts?: {
       switch (msg.method) {
         case IdeMethods.health: {
           const snap = await buildFocusSnapshot();
+          let extensionVersion: string | undefined;
+          try {
+            extensionVersion = vscode.extensions.getExtension("aitest.aitest-ide")
+              ?.packageJSON?.version;
+          } catch {
+            /* ignore */
+          }
           const health: BridgeHealth = {
             status: "connected",
             ide: detectIde(),
             protocolVersion: IDE_PROTOCOL_VERSION,
             workspaceRoot: workspaceRoot() || undefined,
             focus: snap?.focus,
+            capabilities: [...EXTENSION_CAPABILITIES],
+            extensionVersion,
             supportedMethods: [
               IdeMethods.getSemanticContext,
               IdeMethods.searchSymbol,
@@ -147,6 +160,8 @@ export async function startIdeBridgeServer(opts?: {
               IdeMethods.codegenCancel,
               IdeMethods.codegenGenerateUnitBatch,
               IdeMethods.codegenGenerateE2eBatch,
+              IdeMethods.codegenOpenSession,
+              IdeMethods.codegenCloseSession,
               IdeMethods.tcSyncApprovedMd,
             ],
           };
@@ -313,14 +328,58 @@ export async function startIdeBridgeServer(opts?: {
           reply(makeSuccess(msg.id, handleCodegenCancel({ ...p, action: "CANCEL" })));
           break;
         }
+        case IdeMethods.codegenOpenSession: {
+          const p = (msg.params ?? {}) as CodegenOpenSessionParams;
+          const root = (p.projectRoot || workspaceRoot() || "").trim();
+          if (!root) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "projectRoot required"));
+            break;
+          }
+          try {
+            const { openAgentCliSession } = await import("./agentCliSession");
+            const session = openAgentCliSession(root);
+            reply(
+              makeSuccess(msg.id, {
+                ok: true,
+                sessionId: session.id,
+                workspaceRoot: session.workspaceRoot,
+                capabilities: [...EXTENSION_CAPABILITIES],
+              })
+            );
+          } catch (e) {
+            reply(
+              makeError(
+                msg.id,
+                RpcErrorCode.internal,
+                e instanceof Error ? e.message : String(e)
+              )
+            );
+          }
+          break;
+        }
+        case IdeMethods.codegenCloseSession: {
+          const p = (msg.params ?? {}) as CodegenCloseSessionParams;
+          if (!p?.sessionId) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "sessionId required"));
+            break;
+          }
+          const { closeAgentCliSession } = await import("./agentCliSession");
+          reply(makeSuccess(msg.id, closeAgentCliSession(p.sessionId)));
+          break;
+        }
         case IdeMethods.codegenGenerateUnitBatch: {
           const p = (msg.params ?? {}) as CodegenGenerateUnitBatchParams;
-          reply(
-            makeSuccess(
-              msg.id,
-              handleCodegenGenerateStub("unit", p?.commandId || "unknown")
-            )
-          );
+          if (!p?.commandId || !Array.isArray(p.items)) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "commandId + items required"));
+            break;
+          }
+          const notify: (method: string, params: unknown) => void = (method, params) => {
+            const body = JSON.stringify(makeNotification(method, params));
+            for (const c of clients) {
+              if (authed.has(c) && c.readyState === WebSocket.OPEN) c.send(body);
+            }
+          };
+          reply(makeSuccess(msg.id, await handleCodegenGenerateUnitBatch(p, notify)));
           break;
         }
         case IdeMethods.codegenGenerateE2eBatch: {

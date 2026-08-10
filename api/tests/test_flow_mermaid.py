@@ -66,7 +66,10 @@ def test_enrich_steps_only_fills_mermaid():
 
 
 def test_hollow_exception_flow_dropped():
-    from app.features.requirement_studio.flow_mermaid import is_hollow_use_case
+    from app.features.requirement_studio.flow_mermaid import (
+        is_hollow_use_case,
+        is_non_main_business_flow,
+    )
 
     assert is_hollow_use_case("Luồng ngoại lệ (Exception Flow)", "Luồng ngoại lệ (Exception Flow)")
     assert is_hollow_use_case(
@@ -77,6 +80,39 @@ def test_hollow_exception_flow_dropped():
         "X",
         "Luồng ngoại lệ (Exception Flow) được khai báo nhưng trống — thiếu điều kiện kích hoạt",
     )
+    assert is_non_main_business_flow("UC-02 Exception Flow", "1. Fail\n2. Show error")
+    assert is_non_main_business_flow("Luồng phụ đăng nhập", "1. A\n2. B")
+    assert is_non_main_business_flow("Alternate flow cancel", "1. Cancel")
+    assert is_hollow_use_case(
+        "UC-02 Exception Flow",
+        "1. Nhập sai\n2. Hiện lỗi",
+    )
+    assert is_hollow_use_case("Luồng phụ đăng nhập", "1. Mở popup\n2. Đóng")
+    assert not is_non_main_business_flow("Đăng nhập", "1. Mở form\n2. Submit")
+    assert not is_hollow_use_case("Đăng nhập", "1. Mở form\n2. Nhập email\n3. Submit")
+
+
+def test_normalize_drops_non_main_alt_and_exception_named_ucs():
+    payload = normalize_knowledge_payload(
+        {
+            "useCases": [
+                {
+                    "name": "UC-02 Exception Flow",
+                    "steps": "1. Sai mật khẩu\n2. Hiện thông báo lỗi",
+                },
+                {
+                    "name": "Luồng phụ quên mật khẩu",
+                    "steps": "1. Mở link\n2. Nhập email",
+                },
+                {
+                    "name": "Đăng nhập",
+                    "steps": "1. Mở form\n2. Nhập email\n3. Submit",
+                },
+            ],
+        }
+    )
+    names = [u["name"] for u in payload["useCases"]]
+    assert names == ["Đăng nhập"]
 
 
 def test_normalize_drops_hollow_exception_flow_uc_and_shortens_gap():

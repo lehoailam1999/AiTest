@@ -3,7 +3,6 @@ import { Link } from "react-router-dom";
 import {
   App,
   Button,
-  Drawer,
   Form,
   Input,
   Modal,
@@ -17,13 +16,11 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import {
   CheckOutlined,
-  CloudUploadOutlined,
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
-  EyeOutlined,
 } from "@ant-design/icons";
-import { testcases } from "../../../api";
+import { requirementStudio, testcases } from "../../../api";
 import type { TestCase } from "../../../api/types";
 import { EnginePicker } from "../../../components/EnginePicker";
 import {
@@ -37,11 +34,8 @@ import { syncApprovedTestCasesMdBestEffort } from "../../../lib/approvedTcSync";
 import {
   ENGINE_TOOLTIP,
   TC_TYPE_OPTIONS,
-  engineLabel,
-  engineTagColor,
   resolveTestEngine,
 } from "../../../lib/testEngine";
-import { e2eTestUrl, unitTestUrl } from "../../../lib/productRoutes";
 import { workspace } from "../../../workspace";
 
 type Props = {
@@ -51,6 +45,8 @@ type Props = {
   moduleFilter?: string;
   /** Pre-filter engine from URL / after generate */
   engineFilter?: "unit" | "e2e" | "all";
+  /** Requirement Studio workspace — sync MD uses workspace.title as Module */
+  workspaceId?: string | null;
   loading?: boolean;
   onChanged: () => void;
 };
@@ -98,11 +94,16 @@ function cellHtml(value: string): string {
  * Xuất .xls (HTML Excel) — mở bằng Excel/LibreOffice sẽ hiện đủ nội dung ô,
  * wrap text + xuống dòng trong cùng cell (CSV thường bị cắt khi mở Excel).
  */
-function downloadCasesExcel(rows: TestCase[], filenamePrefix = "test-cases") {
+function downloadCasesExcel(
+  rows: TestCase[],
+  filenamePrefix = "test-cases",
+  requirementTitle?: string | null
+) {
   const headers = [
     "ID",
-    "Title",
     "Module",
+    "Function",
+    "Title",
     "Type",
     "Priority",
     "Status",
@@ -111,14 +112,15 @@ function downloadCasesExcel(rows: TestCase[], filenamePrefix = "test-cases") {
     "Expected",
     "TestData",
   ];
-  const colWidths = [72, 220, 110, 90, 90, 90, 200, 280, 280, 180];
+  const colWidths = [72, 140, 160, 220, 90, 90, 90, 200, 280, 280, 180];
   const thead = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   const tbody = rows
     .map((c) => {
       const vals = [
         c.testCaseId,
-        c.title,
+        requirementTitle || "",
         c.module || "",
+        c.title,
         labelOf(typeLabel, c.type),
         labelOf(priorityLabel, c.priority),
         displayReviewStatus(c.reviewStatus).label,
@@ -186,18 +188,19 @@ export function ReviewQueuePanel({
   cases,
   moduleFilter,
   engineFilter: engineFilterProp,
+  workspaceId,
   loading,
   onChanged,
 }: Props) {
   const { message, modal } = App.useApp();
   const [selected, setSelected] = useState<Key[]>([]);
   const [busy, setBusy] = useState(false);
+  const [workspaceTitle, setWorkspaceTitle] = useState<string | null>(null);
   const [moduleSel, setModuleSel] = useState<string>(moduleFilter || "__all__");
   const [statusSel, setStatusSel] = useState<StatusFilter>("__all__");
   const [engineSel, setEngineSel] = useState<EngineFilter>(
     engineFilterProp === "unit" || engineFilterProp === "e2e" ? engineFilterProp : "all"
   );
-  const [preview, setPreview] = useState<TestCase | null>(null);
   const [editing, setEditing] = useState<TestCase | null>(null);
   const [editBusy, setEditBusy] = useState(false);
   const [form] = Form.useForm<EditForm>();
@@ -205,6 +208,25 @@ export function ReviewQueuePanel({
   useEffect(() => {
     if (moduleFilter) setModuleSel(moduleFilter);
   }, [moduleFilter]);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setWorkspaceTitle(null);
+      return;
+    }
+    let cancelled = false;
+    void requirementStudio
+      .getWorkspace(workspaceId)
+      .then((ws) => {
+        if (!cancelled) setWorkspaceTitle((ws.title || "").trim() || null);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceTitle(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
 
   useEffect(() => {
     if (engineFilterProp === "unit" || engineFilterProp === "e2e") {
@@ -222,7 +244,7 @@ export function ReviewQueuePanel({
   const modules = useMemo(() => {
     const s = new Set<string>();
     for (const c of cases) {
-      s.add((c.module || "").trim() || "(Chưa gán module)");
+      s.add((c.module || "").trim() || "(Chưa gán chức năng)");
     }
     return [...s].sort((a, b) => a.localeCompare(b, "vi"));
   }, [cases]);
@@ -240,7 +262,7 @@ export function ReviewQueuePanel({
         }
       }
       if (moduleSel === "__all__") return true;
-      const m = (c.module || "").trim() || "(Chưa gán module)";
+      const m = (c.module || "").trim() || "(Chưa gán chức năng)";
       return m === moduleSel || m.toLowerCase() === moduleSel.toLowerCase();
     });
   }, [cases, moduleSel, statusSel, engineSel]);
@@ -260,25 +282,6 @@ export function ReviewQueuePanel({
   const filteredPendingIds = useMemo(
     () => filtered.filter((c) => isTcPendingReview(c.reviewStatus)).map((c) => c.id),
     [filtered]
-  );
-
-  const filteredApprovedIds = useMemo(
-    () =>
-      filtered
-        .filter((c) => String(c.reviewStatus || "").toLowerCase() === "approved")
-        .map((c) => c.id),
-    [filtered]
-  );
-
-  const selectedApprovedIds = useMemo(
-    () =>
-      selected
-        .map(String)
-        .filter((id) => {
-          const row = cases.find((c) => c.id === id);
-          return String(row?.reviewStatus || "").toLowerCase() === "approved";
-        }),
-    [selected, cases]
   );
 
   async function bulkApprove(ids: string[]) {
@@ -302,77 +305,28 @@ export function ReviewQueuePanel({
           projectId,
           projectRoot: workspace.getLocalPath(projectId),
           cases: approved,
+          requirementTitle: workspaceTitle,
         });
         if (sync.ok && sync.written.length) {
-          message.success(sync.message || `Đã sync ${sync.written.length} TC sang source`);
+          message.success(
+            sync.message ||
+              `Đã duyệt và ghi ${sync.written.length} TC → .ai-test/test-cases/`
+          );
         } else if (!sync.ok || sync.via === "skipped") {
           message.warning(
             sync.errors[0] ||
               sync.message ||
               "Duyệt OK nhưng chưa ghi .ai-test/test-cases — gắn project root hoặc Connect IDE"
           );
+        } else if (fail === 0) {
+          message.success(`Đã duyệt ${ok} test case.`);
         }
+      } else if (fail === 0) {
+        message.success(`Đã duyệt ${ok} test case.`);
       }
-      if (fail === 0) message.success(`Đã duyệt ${ok} test case.`);
-      else message.warning(`Duyệt: OK ${ok}, lỗi ${fail}.`);
+      if (fail > 0) message.warning(`Duyệt: OK ${ok}, lỗi ${fail}.`);
       setSelected([]);
       onChanged();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /** Sync .md for already-Approved TCs — no re-approve. */
-  async function syncApprovedMd(ids: string[]) {
-    const toSync = cases.filter(
-      (c) =>
-        ids.includes(c.id) &&
-        String(c.reviewStatus || "").toLowerCase() === "approved"
-    );
-    if (toSync.length === 0) {
-      message.info(
-        "Không có TC Approved trong lựa chọn. Lọc «Đã duyệt» rồi bấm Sync MD (hoặc Sync từng dòng)."
-      );
-      return;
-    }
-    setBusy(true);
-    try {
-      const bound = workspace.getLocalPath(projectId);
-      if (!bound) {
-        message.warning({
-          content:
-            "Chưa gắn mã nguồn trên Desktop — sẽ thử IDE workspace. Nên vào Projects gắn D:\\Xlab\\Forensic\\forensic.",
-          duration: 8,
-        });
-      }
-      const sync = await syncApprovedTestCasesMdBestEffort({
-        projectId,
-        projectRoot: bound,
-        cases: toSync,
-      });
-      if (sync.ok && sync.written.length) {
-        message.success({
-          content:
-            sync.message ||
-            `Đã ghi ${sync.written.length} file → ${(sync.projectRoot || "").replace(/\\/g, "/")}/.ai-test/test-cases/`,
-          duration: 10,
-        });
-        if (sync.warning) message.warning({ content: sync.warning, duration: 10 });
-      } else {
-        message.error({
-          content:
-            sync.warning ||
-            sync.errors[0] ||
-            sync.message ||
-            "Sync thất bại — Projects → gắn Forensic, Connect IDE (WS=Forensic), lọc Đã duyệt → Sync MD.",
-          duration: 14,
-        });
-      }
-    } catch (e) {
-      message.error({
-        content: e instanceof Error ? e.message : String(e),
-        duration: 14,
-      });
     } finally {
       setBusy(false);
     }
@@ -429,7 +383,6 @@ export function ReviewQueuePanel({
       });
       message.success("Đã cập nhật test case.");
       setEditing(null);
-      if (preview?.id === editing.id) setPreview(null);
       onChanged();
     } catch (e) {
       if (e && typeof e === "object" && "errorFields" in e) return;
@@ -451,7 +404,6 @@ export function ReviewQueuePanel({
           await testcases.remove(row.id);
           message.success("Đã xoá test case.");
           setSelected((prev) => prev.filter((k) => String(k) !== row.id));
-          if (preview?.id === row.id) setPreview(null);
           if (editing?.id === row.id) setEditing(null);
           onChanged();
         } catch (e) {
@@ -467,7 +419,7 @@ export function ReviewQueuePanel({
       message.info("Không có test case để tải về.");
       return;
     }
-    downloadCasesExcel(filtered);
+    downloadCasesExcel(filtered, "test-cases", workspaceTitle);
     message.success(`Đã tải ${filtered.length} test case (Excel).`);
   }
 
@@ -479,29 +431,38 @@ export function ReviewQueuePanel({
       fixed: "left",
     },
     {
+      title: "Module",
+      key: "requirement",
+      width: 180,
+      ellipsis: true,
+      render: () =>
+        workspaceTitle ? (
+          <Tag className="tc-review-cell-tag" color="geekblue" title={workspaceTitle}>
+            {workspaceTitle}
+          </Tag>
+        ) : (
+          <Typography.Text type="secondary">—</Typography.Text>
+        ),
+    },
+    {
+      title: "Function",
+      dataIndex: "module",
+      width: 200,
+      ellipsis: true,
+      render: (v: string | null | undefined) =>
+        v ? (
+          <Tag className="tc-review-cell-tag" title={v}>
+            {v}
+          </Tag>
+        ) : (
+          <Typography.Text type="secondary">—</Typography.Text>
+        ),
+    },
+    {
       title: "Tiêu đề",
       dataIndex: "title",
       ellipsis: true,
-    },
-    {
-      title: "Module",
-      dataIndex: "module",
-      width: 268,
-      render: (v: string | null | undefined) =>
-        v ? <Tag>{v}</Tag> : <Typography.Text type="secondary">—</Typography.Text>,
-    },
-    {
-      title: (
-        <Tooltip title={ENGINE_TOOLTIP}>
-          <span>Engine</span>
-        </Tooltip>
-      ),
-      key: "engine",
-      width: 88,
-      render: (_, row) => {
-        const eng = resolveTestEngine(row.type);
-        return <Tag color={engineTagColor(eng)}>{engineLabel(eng)}</Tag>;
-      },
+      width: 280,
     },
     {
       title: "Loại",
@@ -512,47 +473,31 @@ export function ReviewQueuePanel({
     {
       title: "Ưu tiên",
       dataIndex: "priority",
-      width: 88,
+      width: 96,
       render: (v: string) => labelOf(priorityLabel, v),
     },
     {
       title: "Trạng thái",
       dataIndex: "reviewStatus",
-      width: 100,
+      width: 110,
       render: (s: string) => {
         const { label, color } = displayReviewStatus(s);
-        return <Tag color={color}>{label}</Tag>;
+        return (
+          <Tag className="tc-review-cell-tag" color={color}>
+            {label}
+          </Tag>
+        );
       },
     },
     {
       title: "Thao tác",
       key: "actions",
-      width: 260,
+      width: 96,
       fixed: "right",
       align: "center",
       render: (_, row) => {
-        const canApprove = isTcPendingReview(row.reviewStatus);
-        const eng = resolveTestEngine(row.type);
-        const jobUrl =
-          eng === "e2e"
-            ? e2eTestUrl({ testCaseId: row.id, module: row.module || undefined })
-            : unitTestUrl({
-                mode: "single",
-                testCaseId: row.id,
-                module: row.module || undefined,
-              });
-        const jobLabel = eng === "e2e" ? "Chạy E2E Job" : "Chạy Unit Job";
         return (
-          <Space size={4} className="tc-review-actions" wrap>
-            <Tooltip title="Xem chi tiết">
-              <Button
-                type="text"
-                size="small"
-                icon={<EyeOutlined />}
-                aria-label="Xem chi tiết"
-                onClick={() => setPreview(row)}
-              />
-            </Tooltip>
+          <Space size={2} className="tc-review-actions" wrap={false}>
             <Tooltip title="Sửa">
               <Button
                 type="text"
@@ -572,40 +517,6 @@ export function ReviewQueuePanel({
                 onClick={() => confirmDelete(row)}
               />
             </Tooltip>
-            {canApprove ? (
-              <Button
-                size="small"
-                type="primary"
-                icon={<CheckOutlined />}
-                loading={busy}
-                onClick={() => void bulkApprove([row.id])}
-              >
-                Duyệt
-              </Button>
-            ) : (
-              <>
-                <Tag color="success" style={{ marginInlineEnd: 0 }}>
-                  Đã duyệt
-                </Tag>
-                <Tooltip title="Ghi .md vào .ai-test/test-cases/ (không cần duyệt lại)">
-                  <Button
-                    size="small"
-                    icon={<CloudUploadOutlined />}
-                    loading={busy}
-                    onClick={() => void syncApprovedMd([row.id])}
-                  >
-                    Sync MD
-                  </Button>
-                </Tooltip>
-                <Tooltip title={ENGINE_TOOLTIP}>
-                  <Link to={jobUrl}>
-                    <Button size="small" type="primary" ghost>
-                      {jobLabel}
-                    </Button>
-                  </Link>
-                </Tooltip>
-              </>
-            )}
           </Space>
         );
       },
@@ -645,9 +556,9 @@ export function ReviewQueuePanel({
           className="coverage-review-select"
           value={moduleSel}
           onChange={(e) => setModuleSel(e.target.value)}
-          aria-label="Lọc module"
+          aria-label="Lọc Function"
         >
-          <option value="__all__">Tất cả module</option>
+          <option value="__all__">Tất cả Function</option>
           {modules.map((m) => (
             <option key={m} value={m}>
               {m}
@@ -684,30 +595,6 @@ export function ReviewQueuePanel({
               : ""}{" "}
           ({filteredPendingIds.length})
         </Button>
-        <Tooltip title="Ghi .md Approved vào project/.ai-test/test-cases/ (không duyệt lại)">
-          <Button
-            icon={<CloudUploadOutlined />}
-            disabled={
-              busy ||
-              (selectedApprovedIds.length === 0 && filteredApprovedIds.length === 0)
-            }
-            loading={busy}
-            onClick={() =>
-              void syncApprovedMd(
-                selectedApprovedIds.length > 0
-                  ? selectedApprovedIds
-                  : filteredApprovedIds
-              )
-            }
-          >
-            Sync MD
-            {selectedApprovedIds.length > 0
-              ? ` (${selectedApprovedIds.length})`
-              : filteredApprovedIds.length > 0
-                ? ` (${filteredApprovedIds.length})`
-                : ""}
-          </Button>
-        </Tooltip>
         <Link to="/requirement">
           <Button type="link">Về Requirement Studio →</Button>
         </Link>
@@ -727,92 +614,12 @@ export function ReviewQueuePanel({
               disabled: !isTcPendingReview(row.reviewStatus),
             }),
           }}
-          scroll={{ x: 980, y: "max(40vh, 240px)" }}
+          scroll={{ x: 1180, y: "max(40vh, 240px)" }}
+          tableLayout="fixed"
           pagination={{ pageSize: 20, showSizeChanger: true, responsive: true }}
           locale={{ emptyText: "Không có test case khớp bộ lọc." }}
         />
       </div>
-
-      <Drawer
-        title={preview ? `${preview.testCaseId} · ${preview.title}` : "Chi tiết TC"}
-        open={!!preview}
-        onClose={() => setPreview(null)}
-        width="min(480px, 96vw)"
-        extra={
-          preview ? (
-            <Space wrap>
-              <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(preview)}>
-                Sửa
-              </Button>
-              <Button
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={() => confirmDelete(preview)}
-              >
-                Xoá
-              </Button>
-              {isTcPendingReview(preview.reviewStatus) ? (
-                <Button
-                  type="primary"
-                  size="small"
-                  icon={<CheckOutlined />}
-                  onClick={() => {
-                    const id = preview.id;
-                    setPreview(null);
-                    void bulkApprove([id]);
-                  }}
-                >
-                  Duyệt
-                </Button>
-              ) : null}
-            </Space>
-          ) : null
-        }
-      >
-        {preview ? (
-          <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-            <div>
-              <Typography.Text type="secondary">Trạng thái</Typography.Text>
-              <div>
-                <Tag color={displayReviewStatus(preview.reviewStatus).color}>
-                  {displayReviewStatus(preview.reviewStatus).label}
-                </Tag>
-              </div>
-            </div>
-            <div>
-              <Typography.Text type="secondary">Module</Typography.Text>
-              <div>{preview.module || "—"}</div>
-            </div>
-            <div>
-              <Typography.Text type="secondary">Tiền điều kiện</Typography.Text>
-              <pre className="detail-block" style={{ whiteSpace: "pre-wrap" }}>
-                {preview.precondition || "—"}
-              </pre>
-            </div>
-            <div>
-              <Typography.Text type="secondary">Các bước</Typography.Text>
-              <pre className="detail-block" style={{ whiteSpace: "pre-wrap" }}>
-                {preview.steps}
-              </pre>
-            </div>
-            <div>
-              <Typography.Text type="secondary">Kết quả mong đợi</Typography.Text>
-              <pre className="detail-block" style={{ whiteSpace: "pre-wrap" }}>
-                {preview.expectedResult}
-              </pre>
-            </div>
-            {preview.testData ? (
-              <div>
-                <Typography.Text type="secondary">Test data</Typography.Text>
-                <pre className="detail-block" style={{ whiteSpace: "pre-wrap" }}>
-                  {preview.testData}
-                </pre>
-              </div>
-            ) : null}
-          </Space>
-        ) : null}
-      </Drawer>
 
       <Modal
         title={editing ? `Sửa ${editing.testCaseId}` : "Sửa test case"}
@@ -826,17 +633,26 @@ export function ReviewQueuePanel({
         width={640}
       >
         <Form form={form} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item label="Module">
+            <Input.TextArea
+              rows={1}
+              value={workspaceTitle || ""}
+              placeholder="Module (từ Studio — chỉ xem)"
+              readOnly
+              disabled
+            />
+          </Form.Item>
+          <Form.Item name="module" label="Function">
+            <Input.TextArea rows={2} placeholder="Tên Function (feature)" />
+          </Form.Item>
           <Form.Item
             name="title"
             label="Tiêu đề"
             rules={[{ required: true, message: "Nhập tiêu đề" }]}
           >
-            <Input />
+            <Input.TextArea rows={2} placeholder="Tiêu đề test case" />
           </Form.Item>
           <Space wrap style={{ width: "100%" }} styles={{ item: { flex: 1, minWidth: 160 } }}>
-            <Form.Item name="module" label="Module" style={{ marginBottom: 12, width: "100%" }}>
-              <Input placeholder="Tên chức năng / module" />
-            </Form.Item>
             <Form.Item
               name="type"
               label={

@@ -7,6 +7,7 @@ import {
   isExcludedFromE2eRetrieve,
   isExcludedFromUnitRetrieve,
   isUnsuitableE2ePrimary,
+  isUnsuitableUnitPrimary,
   retrieveBusinessContext,
   retrieveE2eSources,
   retrieveForPlan,
@@ -284,6 +285,42 @@ describe("retrieval Phase 3", () => {
     assert.equal(
       isExcludedFromUnitRetrieve(
         "src/Forensic/ClientApp/src/app/entities/evidence/service/evidence.service.ts"
+      ),
+      false
+    );
+  });
+
+  it("excludes EF Migrations / Designer from Unit SUT", () => {
+    assert.equal(
+      isExcludedFromUnitRetrieve(
+        "src/Forensic.Infrastructure/Data/Migrations/20260205065923_AddUserOrganizationUnit_Relation.Designer.cs"
+      ),
+      true
+    );
+    assert.equal(
+      isUnsuitableUnitPrimary(
+        "src/Forensic.Infrastructure/Data/Migrations/20260205065923_AddUserOrganizationUnit_Relation.Designer.cs"
+      ),
+      true
+    );
+  });
+
+  it("excludes existing Integration/dotnet test projects from Unit SUT", () => {
+    assert.equal(
+      isExcludedFromUnitRetrieve(
+        "test/Forensic.Test/Integration/Api/Upload/UploadControllerIntegrationTest.cs"
+      ),
+      true
+    );
+    assert.equal(
+      isUnsuitableUnitPrimary(
+        "test/Forensic.Test/Integration/Api/Upload/UploadControllerIntegrationTest.cs"
+      ),
+      true
+    );
+    assert.equal(
+      isExcludedFromUnitRetrieve(
+        "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs"
       ),
       false
     );

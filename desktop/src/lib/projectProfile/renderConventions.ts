@@ -1,4 +1,7 @@
 import type { ProjectProfile } from "./types.js";
+import { renderUnitConventionsMd } from "./unitConventionsCore.js";
+
+export { renderUnitConventionsMd, UNIT_CONVENTIONS_CORE } from "./unitConventionsCore.js";
 
 export function renderE2eConventionsMd(profile: ProjectProfile): string {
   const lines: string[] = [
@@ -75,21 +78,6 @@ export function renderE2ePlaywrightRunMd(profile: ProjectProfile): string {
   if (pw.seed.globalSetupRel) {
     lines.push("", `Global setup: ${pw.seed.globalSetupRel}`);
   }
-  return lines.join("\n");
-}
-
-export function renderUnitConventionsMd(profile: ProjectProfile): string {
-  const unit = profile.unit;
-  const lines: string[] = [
-    "# Unit test conventions (auto — project profile)",
-    "",
-    `Test frameworks: ${unit?.testFrameworks?.join(", ") || "(detect on Sprint 3)"}`,
-    "",
-    "## Layout",
-    "- Unit → `AItest/UnitTest/{Requirement}/{TC}/`",
-    "- Do not import/run bootstrap entrypoints (main, Program.cs, wsgi).",
-  ];
-  if (unit?.mockHint) lines.push("", unit.mockHint);
   return lines.join("\n");
 }
 

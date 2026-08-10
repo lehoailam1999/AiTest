@@ -25,11 +25,50 @@ def test_unit_analysis_rules_cover_eleven_buckets_and_trace():
         "ACCEPTANCE",
         "NFR",
         "GAPS",
+        "EXECUTION_CONTEXT",
     ):
         assert label in text
+    assert "ACTORS_PERMISSIONS" in text
+    assert "NFR_CONSTRAINTS" in text
     assert "trace:" in text
     assert "ISTQB" in text
     assert "29119" in text
+    assert "BACKEND" in text.upper() or "backend" in text
+    assert "Decision Table" in text
+    assert "coverage gate" in text.lower() or "Coverage gate" in text or "itemCount" in text
+    assert "1 tổ hợp" in text or "tổ hợp" in text
+    assert "negative" in text.lower() or "từ chối" in text
+    for ban in ("form", "popup", "wizard", "Bước"):
+        assert ban.lower() in text.lower() or ban in text
+    assert "ClientApp" in text or "*.component" in text
+    assert "invent" in text.lower() or "bịa" in text or "cấm" in text.lower()
+    assert "CQRS" in text or "Handler" in text
+    assert "HTTP" in text or "200" in text
+
+
+def test_unit_analysis_fast_covers_br_validation_authz():
+    fast = UNIT_TC_FROM_ANALYSIS_RULES_FAST
+    assert "BR" in fast or "BUSINESS" in fast.upper()
+    assert "VALIDATION" in fast.upper()
+    assert "ERROR" in fast.upper()
+    assert "authz" in fast.lower() or "EXEC_CONTEXT" in fast or "ACTORS" in fast
+    assert "trace:" in fast
+    assert "wizard" in fast.lower() or "popup" in fast.lower() or "Bước" in fast
+    assert "ClientApp" in fast or "component" in fast.lower()
+    assert "invent" in fast.lower() or "bịa" in fast or "VI" in fast
+
+
+def test_unit_rules_backend_only_in_engine_and_shared():
+    eng = engine_generation_rules("unit")
+    assert "BACKEND" in eng.upper()
+    assert "popup" in eng.lower() or "wizard" in eng.lower()
+    assert "portable" in eng.lower() or "mọi stack" in eng.lower() or "SUT" in eng
+    shared = get_tc_generation_rules(preferred_engine="unit")
+    assert "BACKEND" in shared.upper()
+    assert "PORTABLE" in shared.upper() or "Hành động BE" in shared
+    fast = engine_generation_rules("unit", speed="fast")
+    assert "backend" in fast.lower() or "BACKEND" in fast
+    assert "wizard" in fast.lower() or "popup" in fast.lower() or "Bước" in fast
 
 
 def test_append_prepares_analysis_first():
@@ -60,15 +99,22 @@ def test_engine_unit_injects_analysis_fidelity_without_map_dup():
     assert "≤5" in fast or "5" in fast
 
 
+def test_engine_unit_soft_cap_prefers_br_validation_error():
+    fast = engine_generation_rules("unit", speed="fast", max_per_module=5)
+    assert "BR" in fast and "VALIDATION" in fast and "ERROR" in fast
+    assert "≤5" in fast or "5" in fast
+
+
 def test_unit_custom_rules_fit_eng_cap():
     shared = get_tc_generation_rules(preferred_engine="unit")
     eng = engine_generation_rules("unit")
     custom = f"{eng}\n\n{shared}".strip()
-    assert len(custom) < 4200
+    assert len(custom) < 4200, f"custom rules too long: {len(custom)}"
     kept = truncate(custom, 4200)
     assert "GAPS" in kept
     assert "trace:" in kept
     assert "PHIÊN SINH UNIT" in kept
+    assert "EXECUTION_CONTEXT" in kept
 
 
 def test_system_prompt_unit_defers_to_analysis_block():

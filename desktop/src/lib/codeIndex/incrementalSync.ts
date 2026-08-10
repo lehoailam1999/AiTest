@@ -3,6 +3,7 @@ import { buildSymbolIndex } from "./buildSymbolIndex";
 import { CODE_INDEX_PARSER, CODE_INDEX_REL_PATH, CODE_INDEX_SCHEMA } from "./constants";
 import { hashContent } from "./hashContent";
 import { emptySnapshot, loadIndexSnapshot, saveIndexSnapshot } from "./indexStore";
+import { parseCsharpSource } from "./parseCsharp";
 import { parseTsJsSource } from "./parseTsAst";
 import { scanProjectFiles } from "./scanProject";
 import type {
@@ -82,7 +83,9 @@ export async function syncProjectIndex(
       continue;
     }
 
-    const parsedFile = parseTsJsSource(pathRel, content);
+    const parsedFile = pathRel.toLowerCase().endsWith(".cs")
+      ? parseCsharpSource(pathRel, content)
+      : parseTsJsSource(pathRel, content);
     if (!parsedFile) continue;
     parsed++;
     const rec: FileIndexRecord = {
@@ -106,7 +109,11 @@ export async function syncProjectIndex(
   }
 
   next.symbolIndex = buildSymbolIndex(next.symbolsByFile);
-  next.dependencyGraph = buildDependencyGraph(next.importsByFile);
+  const knownFiles = new Set(Object.keys(next.files));
+  next.dependencyGraph = buildDependencyGraph(next.importsByFile, {
+    knownFiles,
+    symbolIndex: next.symbolIndex,
+  });
   next.meta.fileCount = Object.keys(next.files).length;
   next.meta.symbolCount = Object.values(next.symbolsByFile).reduce(
     (n, s) => n + s.length,
@@ -118,6 +125,13 @@ export async function syncProjectIndex(
   );
 
   await saveIndexSnapshot(projectRoot, io, next, indexRelPath);
+
+  try {
+    const { clearUnitPlanCache } = await import("../testPlanner/contextCache");
+    clearUnitPlanCache(projectRoot);
+  } catch {
+    /* planner cache optional */
+  }
 
   return {
     snapshot: next,

@@ -312,11 +312,14 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "useCases",
         "label": "Luồng nghiệp vụ",
         "instruction": (
-            "Mỗi item = 1 Main Success Scenario từ «Luồng chính» của UC-xx trong SRS.\n"
-            "Bắt buộc đủ 3 field — steps lấy từ Luồng chính (tách <br>/1.2.3.), "
-            "mermaid = flowchart TD tổng hợp từ steps (≥2 node hành động).\n"
+            "Mỗi UC = đúng 1 item Main Success Scenario (Luồng chính) — không nhân bản.\n"
+            "CẤM item riêng cho Exception / Alternate / Luồng phụ / nhánh lỗi "
+            "(→ exceptions / ERROR_HANDLING).\n"
+            "Bắt buộc đủ 3 field — steps từ Luồng chính (tách <br>/1.2.3.), "
+            "mermaid = flowchart TD happy path từ steps (≥2 node hành động).\n"
             "1) name: tên UC đúng SRS (≤8 từ), VD «Xem danh sách công việc». "
-            "CẤM dump bảng markdown; CẤM Phạm vi/Mục tiêu/file›section; CẤM Exception Flow trống.\n"
+            "CẤM dump bảng; CẤM Phạm vi/Mục tiêu/file›section; "
+            "CẤM tên chứa Exception Flow / Luồng phụ / Alternate.\n"
             "2) mermaid: CHỈ flowchart TD (không ```): "
             "([Bắt đầu]) → [hành động]… → ([Kết thúc]); node ≤6 từ; "
             "CẤM node = hàng bảng «| Mục | Nội dung |».\n"

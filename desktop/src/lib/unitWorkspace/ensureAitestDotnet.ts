@@ -11,6 +11,7 @@
  * 4. Uniquify test class names (+ constructors) from file hash suffix
  */
 import { listSourceFiles, readTextFile, writeTextFile } from "../../tauri/bridge";
+import { detectCsharpPackagesFromTestCode } from "@aitest/ide-protocol";
 import { overlayRelPath } from "./paths";
 import { writeTextFileIfChanged } from "./contentDedup";
 import type { UnitWorkspaceManifest } from "./types";
@@ -357,29 +358,83 @@ export function detectCentralPackageManagement(dirPackagesPropsXml: string | nul
   return /ManagePackageVersionsCentrally\s*>\s*true/i.test(dirPackagesPropsXml);
 }
 
+/** Package ids already declared as PackageVersion under CPM. */
+export function parseCentralPackageVersionIds(
+  dirPackagesPropsXml: string | null
+): Set<string> {
+  const out = new Set<string>();
+  if (!dirPackagesPropsXml) return out;
+  for (const m of dirPackagesPropsXml.matchAll(
+    /<PackageVersion\s+Include="([^"]+)"/gi
+  )) {
+    const id = (m[1] || "").trim();
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * Under CPM, only keep packages that already have PackageVersion in Directory.Packages.props.
+ * Avoids NU1008 when AITest detects usings (e.g. Logging.Abstractions) not listed centrally.
+ * Transitive refs via ProjectReference still work.
+ */
+export function filterPackagesForCentralManagement(
+  packages: string[],
+  centralIds: Set<string>
+): string[] {
+  if (!centralIds.size) return packages;
+  return packages.filter((p) => centralIds.has(p));
+}
+
 export function buildAitestUnitTestsCsproj(opts: {
   targetFramework: string;
   sutCsprojRelFromAitest: string;
   centralPackageVersions: boolean;
+  /** Extra NuGet packages detected from generated tests (FluentAssertions, EF Sqlite, …). */
+  extraPackages?: string[];
 }): string {
   const tfm = opts.targetFramework || "net8.0";
   const sut = opts.sutCsprojRelFromAitest.replace(/\//g, "\\");
+  const basePkgs = [
+    "Microsoft.NET.Test.Sdk",
+    "xunit",
+    "xunit.runner.visualstudio",
+    "Moq",
+  ];
+  const extra = [...new Set(opts.extraPackages || [])].filter(
+    (p) => !basePkgs.some((b) => b.toLowerCase() === p.toLowerCase())
+  );
+  const versions: Record<string, string> = {
+    "Microsoft.NET.Test.Sdk": "17.11.1",
+    xunit: "2.9.2",
+    "xunit.runner.visualstudio": "2.8.2",
+    Moq: "4.20.72",
+    FluentAssertions: "6.12.2",
+    "Microsoft.EntityFrameworkCore.Sqlite": "8.0.11",
+    "Microsoft.EntityFrameworkCore.InMemory": "8.0.11",
+    "Microsoft.EntityFrameworkCore": "8.0.11",
+    "Microsoft.AspNetCore.Mvc.Testing": "8.0.11",
+    "Microsoft.Extensions.DependencyInjection": "8.0.1",
+    "Microsoft.Extensions.Logging.Abstractions": "8.0.2",
+    NSubstitute: "5.1.0",
+    AutoFixture: "4.18.1",
+    Bogus: "35.6.1",
+  };
+  const allPkgs = [...basePkgs, ...extra];
   const pkgRefs = opts.centralPackageVersions
-    ? [
-        `    <PackageReference Include="Microsoft.NET.Test.Sdk" />`,
-        `    <PackageReference Include="xunit" />`,
-        `    <PackageReference Include="xunit.runner.visualstudio" />`,
-        `    <PackageReference Include="Moq" />`,
-      ]
-    : [
-        `    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />`,
-        `    <PackageReference Include="xunit" Version="2.9.2" />`,
-        `    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">`,
-        `      <PrivateAssets>all</PrivateAssets>`,
-        `      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>`,
-        `    </PackageReference>`,
-        `    <PackageReference Include="Moq" Version="4.20.72" />`,
-      ];
+    ? allPkgs.map((p) => `    <PackageReference Include="${p}" />`)
+    : allPkgs.flatMap((p) => {
+        const ver = versions[p] || "8.0.0";
+        if (p === "xunit.runner.visualstudio") {
+          return [
+            `    <PackageReference Include="${p}" Version="${ver}">`,
+            `      <PrivateAssets>all</PrivateAssets>`,
+            `      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>`,
+            `    </PackageReference>`,
+          ];
+        }
+        return [`    <PackageReference Include="${p}" Version="${ver}" />`];
+      });
   return (
     `<Project Sdk="Microsoft.NET.Sdk">\n` +
     `\n` +
@@ -664,11 +719,31 @@ export async function ensureAitestDotnetInWorkspace(input: {
     pkg || parentDir(sutRel || "") || ""
   );
   const central = detectCentralPackageManagement(dirPackages);
+  const centralIds = central
+    ? parseCentralPackageVersionIds(dirPackages)
+    : new Set<string>();
+  const extraPkgs = new Set<string>();
+  for (const f of working.files) {
+    if (f.op === "delete" || !/\.cs$/i.test(f.targetRel)) continue;
+    if (!/(?:^|\/)AItest\//i.test(f.targetRel.replace(/\\/g, "/"))) continue;
+    try {
+      const body = await readTextFile(input.projectRoot, f.workspaceRel);
+      for (const p of detectCsharpPackagesFromTestCode(body)) extraPkgs.add(p);
+    } catch {
+      /* skip */
+    }
+  }
+  // CPM: never emit PackageReference for packages missing PackageVersion (NU1008).
+  let extraList = [...extraPkgs];
+  if (central) {
+    extraList = filterPackagesForCentralManagement(extraList, centralIds);
+  }
   const unitProjRel = aitestUnitTestsCsprojRel(packagePrefix);
   const unitProjBody = buildAitestUnitTestsCsproj({
     targetFramework: tfm,
     sutCsprojRelFromAitest: sutFromAitest,
     centralPackageVersions: central,
+    extraPackages: extraList,
   });
 
   const workspaceRel = overlayRelPath(working.runId, unitProjRel, packagePrefix);

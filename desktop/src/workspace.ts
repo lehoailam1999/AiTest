@@ -1,6 +1,6 @@
 /**
  * In-memory + localStorage persistence for project↔localPath binding.
- * Sync MD / Gen / Verify cần path sống sót sau restart Desktop.
+ * Gen / Verify / Approve→MD cần path sống sót sau restart Desktop.
  */
 export type RecentProject = {
   id: string;

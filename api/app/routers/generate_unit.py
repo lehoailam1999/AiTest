@@ -50,6 +50,14 @@ from app.services.phase5_gen_input import (
 _INSPECT_CACHE: dict[str, tuple[float, Any]] = {}
 _INSPECT_TTL_SEC = 120.0
 
+# Legacy note: primary Unit Gen + Repair is Desktop → Extension → Cursor AI CLI.
+# This router remains for API-Test / older clients — not the Unit code Gen owner.
+logger = logging.getLogger(__name__)
+logger.info(
+    "generate_unit router loaded — Unit code Gen/Repair prefer Extension CLI; "
+    "this API path is legacy/compat"
+)
+
 
 def _cached_inspect_project(
     project_root: str,

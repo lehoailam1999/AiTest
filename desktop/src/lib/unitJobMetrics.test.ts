@@ -54,4 +54,31 @@ describe("unitJobMetrics U0", () => {
     assert.equal(labelContextSource("local-fs"), "Local FS");
     assert.match(labelContextSource("agent-ide"), /tuỳ chọn/i);
   });
+
+  it("P3 records phase timings and sizes", () => {
+    const pid = "p3";
+    recordUnitJobMetric({
+      projectId: pid,
+      contextSource: "implementation-plan",
+      cliTimeMs: 1000,
+      verifyTimeMs: 200,
+      applyTimeMs: 50,
+      contextSize: 4000,
+      retrievedFiles: 3,
+      promptTokens: 500,
+    });
+    recordUnitJobMetric({
+      projectId: pid,
+      contextSource: "implementation-plan",
+      cliTimeMs: 2000,
+      verifyTimeMs: 400,
+      applyTimeMs: 100,
+    });
+    const s = summarizeUnitJobMetrics({ projectId: pid });
+    assert.equal(s.avgCliTimeMs, 1500);
+    assert.equal(s.avgVerifyTimeMs, 300);
+    assert.equal(s.avgApplyTimeMs, 75);
+    const events = summarizeUnitJobMetrics({ projectId: pid });
+    assert.equal(events.total, 2);
+  });
 });

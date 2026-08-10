@@ -41,10 +41,39 @@ export type AuthProfile = {
   loginPath?: string;
 };
 
+/** Optional domain guard rule (mirrors ide-protocol UnitDomainGuardRule). */
+export type UnitDomainGuardRuleProfile = {
+  whenModuleMatches?: string;
+  allowPathContains?: string[];
+  denyPathContains?: string[];
+};
+
 export type UnitProfile = {
   runner: string;
   testFrameworks: string[];
   mockHint: string;
+  /**
+   * Unit Gen target layer. Default `"backend"` — UI/master TCs → FAIL_FEATURE_GAP.
+   * Set `"frontend"` / `"any"` only when the profile intentionally allows UI Unit Gen.
+   */
+  scope?: "backend" | "frontend" | "any";
+  /** Absolute Gen floor (default 50). alignment &lt; this → never call CLI. */
+  minAlignment?: number;
+  /** Require path:/code: markers before Gen. Array form = require those keys. */
+  requireMarkers?: boolean | string[];
+  /**
+   * When true, Extension may fuzzy-resolve SUT from disk if packet/markers fail.
+   * Default false — Desktop owns resolve; Extension verify-only.
+   */
+  allowDiskReresolve?: boolean;
+  /** Optional TC-id / cue → primary path overrides (per-repo only). */
+  sutMap?: Record<string, string>;
+  /** Portable domain allow/deny by module cue. */
+  domainGuards?: UnitDomainGuardRuleProfile[];
+  /** Relative path to VI→code aliases (default `.ai-test/code-aliases.json`). */
+  codeAliasesFile?: string;
+  /** Relative path to project intent rules (default `.ai-test/unit-intent-rules.json`). */
+  intentRulesFile?: string;
 };
 
 export type ProjectProfile = {

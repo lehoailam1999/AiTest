@@ -469,9 +469,9 @@ export function sutModuleSpecifier(testRel: string, sourceRel: string): string {
 }
 
 /**
- * AItest/{Kind}/{Requirement}/{TestCaseTitle}/file
- * Prefer opts.requirementTitle + testCaseTitle; else legacy opts.module / source path.
- * jest/tsconfig are NOT placed here — only under AItest/ root via ensureAitestJestTsconfig.
+ * Unit layout: [{packagePrefix}/]AItest/UnitTest/{RequirementOrModule}/{file}
+ * (no nested TC folder). E2E may use Requirement/TC depth via buildRequirementTcModule.
+ * jest/tsconfig stay under AItest/ root via ensureAitestJestTsconfig.
  */
 export function underGeneratedTestFolder(
   kind: GeneratedTestKind | string,

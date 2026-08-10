@@ -11,6 +11,31 @@ import {
   buildApprovedTcMarkdownFiles,
   type ApprovedTcMdFile,
 } from "./approvedTcMarkdown";
+import { enrichApprovedCasesWithUnitMarkers } from "./enrichUnitMarkersFromIndex";
+import { mergeRequirementTitleFillGap } from "./requirementTitleFillGap";
+import { buildRequirementTitleByCaseKey } from "./resolveRequirementTitles";
+
+export {
+  parseApprovedTcGrounding,
+  renderUnitGroundingBlock,
+  buildApprovedTcMarkdownFiles,
+  approvedTcMarkdownRelPath,
+  renderApprovedTestCaseMarkdown,
+  type ApprovedTcMdFile,
+  type ApprovedTcMdRenderOpts,
+} from "./approvedTcMarkdown";
+
+export {
+  enrichApprovedCasesWithUnitMarkers,
+  enrichTestDataWithUnitMarkers,
+  enrichTcTestDataFromIndex,
+  enrichTcTestDataFromIndexAsync,
+  pickConfidentUnitSeed,
+  UNIT_AUTO_MARKER,
+} from "./enrichUnitMarkersFromIndex";
+
+export { buildRequirementTitleByCaseKey } from "./resolveRequirementTitles";
+export { mergeRequirementTitleFillGap } from "./requirementTitleFillGap";
 
 export type SyncApprovedTcMdResult = {
   ok: boolean;
@@ -67,7 +92,7 @@ export async function resolveSyncProjectRoot(
     }
     return {
       root: "",
-      warning: `Project root «${bound}» là AITest tool — gắn Forensic trên Projects hoặc mở Forensic trong Cursor.`,
+      warning: `Project root «${bound}» là AITest tool — gắn thư mục source dự án đích trên Projects, hoặc mở repo đích trong Cursor.`,
     };
   }
 
@@ -85,7 +110,7 @@ export async function resolveSyncProjectRoot(
       return {
         root: "",
         warning:
-          `IDE đang mở AITest tool («${ideWs}»). Gắn mã nguồn Dự án A trên Desktop, hoặc Open Folder Forensic trong Cursor rồi Start Bridge.`,
+          `IDE đang mở AITest tool («${ideWs}»). Gắn mã nguồn dự án đích trên Desktop, hoặc Open Folder repo SUT trong Cursor rồi Start Bridge.`,
       };
     }
     return { root: ideWs };
@@ -94,7 +119,7 @@ export async function resolveSyncProjectRoot(
   return {
     root: "",
     warning:
-      "Chưa gắn project root. Vào Projects → gắn thư mục Forensic, hoặc Connect IDE với Cursor đang mở Forensic.",
+      "Chưa gắn project root. Vào Projects → gắn thư mục source dự án đích, hoặc Connect IDE với Cursor đang mở repo SUT.",
   };
 }
 
@@ -158,9 +183,18 @@ export async function syncApprovedTestCasesMd(opts: {
   projectId: string;
   projectRoot: string | null | undefined;
   cases: TestCase[];
+  /** Single Requirement title when approving under one req */
+  requirementTitle?: string | null;
+  /** Per TC / snapshot id → requirement title */
+  requirementTitleByCaseKey?: Record<string, string> | null;
+  /** Optional pre-listed source paths (skip listSourceFiles) */
+  allSourcePaths?: string[] | null;
+  codeAliases?: import("../projectIntelligence/viCodeAliases").CodeAliasMap | null;
 }): Promise<SyncApprovedTcMdResult> {
-  const files = buildApprovedTcMarkdownFiles(opts.cases);
-  if (!files.length) {
+  const approved = opts.cases.filter(
+    (c) => String(c.reviewStatus || "").toLowerCase() === "approved"
+  );
+  if (!approved.length) {
     return {
       ok: false,
       via: "skipped",
@@ -173,6 +207,10 @@ export async function syncApprovedTestCasesMd(opts: {
 
   const { root, warning } = await resolveSyncProjectRoot(opts.projectRoot);
   if (!root) {
+    const files = buildApprovedTcMarkdownFiles(approved, {
+      requirementTitle: opts.requirementTitle,
+      requirementTitleByCaseKey: opts.requirementTitleByCaseKey,
+    });
     return {
       ok: false,
       via: "skipped",
@@ -183,6 +221,60 @@ export async function syncApprovedTestCasesMd(opts: {
       warning,
     };
   }
+
+  // Requirement entity title (from Requirements page) — never invent from module.
+  let requirementTitleByCaseKey: Record<string, string> = {
+    ...(await buildRequirementTitleByCaseKey(opts.projectId, approved)),
+    ...(opts.requirementTitleByCaseKey || {}),
+  };
+  requirementTitleByCaseKey = mergeRequirementTitleFillGap(
+    approved,
+    requirementTitleByCaseKey,
+    opts.requirementTitle
+  );
+
+  const reqResolved = approved.filter(
+    (tc) =>
+      (requirementTitleByCaseKey[tc.id] ||
+        requirementTitleByCaseKey[tc.testCaseId] ||
+        opts.requirementTitle ||
+        "").trim().length > 0
+  ).length;
+  let reqNote =
+    reqResolved > 0
+      ? ` · requirement ${reqResolved}/${approved.length}`
+      : ` · requirement thiếu (gắn sourceId hoặc Approve từ trang Requirement)`;
+
+  // Auto path:/code: from ProjectFileIndex when seed is confident (fail-closed).
+  let casesToWrite = approved;
+  let enrichNote = "";
+  try {
+    const enriched = await enrichApprovedCasesWithUnitMarkers({
+      projectId: opts.projectId,
+      projectRoot: root,
+      cases: approved,
+      requirementTitle: opts.requirementTitle,
+      requirementTitleByCaseKey,
+      codeAliases: opts.codeAliases,
+      allSourcePaths: opts.allSourcePaths,
+    });
+    casesToWrite = enriched.cases;
+    if (enriched.enrichedCount > 0) {
+      const via = enriched.usedCodeIndex ? "index.db" : "path-index";
+      enrichNote = ` · auto path:/code: ${enriched.enrichedCount}/${approved.length} via ${via} (${enriched.indexFileCount} files)`;
+    } else if (enriched.indexFileCount > 0) {
+      const via = enriched.usedCodeIndex ? "index.db" : "path-index";
+      enrichNote = ` · ${via} ${enriched.indexFileCount} files (chưa đủ tin cậy để auto-marker)`;
+    }
+  } catch {
+    /* enrich optional — still sync MD */
+  }
+  enrichNote = `${reqNote}${enrichNote}`;
+
+  const files = buildApprovedTcMarkdownFiles(casesToWrite, {
+    requirementTitle: opts.requirementTitle,
+    requirementTitleByCaseKey,
+  });
 
   // 1) Tauri disk first (renderer-safe)
   if (isTauri()) {
@@ -204,7 +296,7 @@ export async function syncApprovedTestCasesMd(opts: {
         errors: disk.errors,
         projectRoot: root,
         warning,
-        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/`,
+        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/${enrichNote}`,
       };
     }
     // Tauri failed — try IDE
@@ -212,7 +304,13 @@ export async function syncApprovedTestCasesMd(opts: {
     if (client?.isConnected) {
       try {
         const ide = await writeViaIde(opts.projectId, root, files);
-        if (ide.written.length) return { ...ide, warning };
+        if (ide.written.length) {
+          return {
+            ...ide,
+            warning,
+            message: `${ide.message || ""}${enrichNote}`.trim(),
+          };
+        }
         return {
           ok: false,
           via: "ide",
@@ -254,7 +352,11 @@ export async function syncApprovedTestCasesMd(opts: {
   if (client?.isConnected) {
     try {
       const ide = await writeViaIde(opts.projectId, root, files);
-      return { ...ide, warning };
+      return {
+        ...ide,
+        warning,
+        message: `${ide.message || ""}${enrichNote}`.trim(),
+      };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return {
@@ -288,6 +390,10 @@ export async function syncApprovedTestCasesMdBestEffort(opts: {
   projectId: string;
   projectRoot: string | null | undefined;
   cases: TestCase[];
+  requirementTitle?: string | null;
+  requirementTitleByCaseKey?: Record<string, string> | null;
+  allSourcePaths?: string[] | null;
+  codeAliases?: import("../projectIntelligence/viCodeAliases").CodeAliasMap | null;
 }): Promise<SyncApprovedTcMdResult> {
   try {
     return await syncApprovedTestCasesMd(opts);

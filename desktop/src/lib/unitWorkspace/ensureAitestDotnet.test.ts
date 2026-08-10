@@ -14,9 +14,11 @@ import {
   ensureCsharpUniqueTestClass,
   ensureCsprojExcludesAitest,
   ensureSiblingDomainEntitiesUsing,
+  filterPackagesForCentralManagement,
   fixCsharpMoqCompilePitfalls,
   isDefaultDotnetTestCommand,
   isTestCsprojRel,
+  parseCentralPackageVersionIds,
   parseCsharpErrorFileRels,
   parseTargetFramework,
   pickProductionProjectRefFromCsproj,
@@ -200,6 +202,18 @@ describe("ensureAitestDotnet", () => {
     });
     assert.match(body, /PackageReference Include="Moq"\s*\/>/);
     assert.doesNotMatch(body, /Include="Moq" Version=/);
+  });
+
+  it("CPM filter drops packages missing PackageVersion (Logging)", () => {
+    const central = parseCentralPackageVersionIds(`
+      <PackageVersion Include="Moq" Version="4.20.72" />
+      <PackageVersion Include="FluentAssertions" Version="7.0.0" />
+    `);
+    const kept = filterPackagesForCentralManagement(
+      ["Moq", "FluentAssertions", "Microsoft.Extensions.Logging.Abstractionsctions"],
+      central
+    );
+    assert.deepEqual(kept, ["Moq", "FluentAssertions"]);
   });
 
   it("builds verify command under packagePrefix", () => {

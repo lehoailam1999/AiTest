@@ -2,7 +2,7 @@
  * UnitRetriever — Top-K source files from Code Index + TestPlan keywords.
  */
 import type { CodeIndexSnapshot } from "../codeIndex/types";
-import { resolveRelativeImport } from "../codeIndex/buildDependencyGraph";
+import { resolveImportSpecifier } from "../codeIndex/buildDependencyGraph";
 import type { TestPlan } from "../testPlanner/types";
 import {
   clampTopK,
@@ -12,6 +12,7 @@ import {
   symbolKeywordScore,
   unitPathBonus,
 } from "./rankScore";
+import { UNIT_RANK_POLICY } from "@aitest/ide-protocol";
 import type { RankedFileHit, RetrieveFilesResult, RetrieveOptions } from "./types";
 
 function symbolsForFile(snap: CodeIndexSnapshot, pathRel: string): string[] {
@@ -26,7 +27,7 @@ export function retrieveUnitSources(
   plan: TestPlan,
   opts?: RetrieveOptions
 ): RetrieveFilesResult {
-  const topK = clampTopK(opts?.topK);
+  const topK = clampTopK(opts?.topK ?? UNIT_RANK_POLICY.retrieveTopKDefault);
   const keywords = normalizeKeywords([
     ...plan.keywords,
     plan.module,
@@ -87,7 +88,12 @@ export function retrieveUnitSources(
     if (meta.score < 20) continue;
     const specs = snapshot.dependencyGraph[importer] || [];
     for (const spec of specs) {
-      const resolved = resolveRelativeImport(importer, spec, known);
+      const asPath = known.has(spec) ? spec : null;
+      const resolved =
+        asPath ||
+        resolveImportSpecifier(importer, spec, known, {
+          symbolIndex: snapshot.symbolIndex,
+        });
       if (!resolved || resolved === importer) continue;
       const cur = scores.get(resolved) || { score: 0, reasons: [] };
       cur.score += 12;

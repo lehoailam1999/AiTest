@@ -3,16 +3,19 @@ import { stripCodeFences } from "../stripCodeFences";
 import { manifestRelPath, newRunId, overlayRelPath } from "./paths";
 import type {
   ManifestFileEntry,
+  UnitTransformName,
   UnitWorkspaceManifest,
   WorkspacePreviewFile,
   WorkspaceFileOp,
 } from "./types";
+import { pushTimeline } from "./unitJobEvents";
 import {
   coerceAitestApplyPath,
   isFlatAitestTarget,
   rewriteSutImports,
   testFileNameFromSource,
 } from "../testOutputLayout";
+import { assertStackMatchesPath } from "@aitest/ide-protocol";
 import { resolvePackagePrefix } from "../resolvePackagePrefix";
 import {
   ensureAitestJestTsconfigInWorkspace,
@@ -62,25 +65,36 @@ export async function createUnitWorkspaceRun(input: {
   artifactKind?: "unit" | "api";
   packagePrefix?: string | null;
   packageName?: string | null;
+  jobId?: string;
+  via?: UnitWorkspaceManifest["via"];
+  commandId?: string;
+  status?: UnitWorkspaceManifest["status"];
 }): Promise<UnitWorkspaceManifest> {
   const runId = newRunId(input.testCaseId);
+  const jobId = input.jobId || runId;
   const packagePrefix =
     input.packagePrefix !== undefined && input.packagePrefix !== null
       ? input.packagePrefix.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")
       : await resolvePackagePrefix(input.projectRoot, input.sourceFileName);
+  const timeline = pushTimeline([], "job.queued", `via=${input.via || "unknown"}`);
   const manifest: UnitWorkspaceManifest = {
     version: 1,
     runId,
+    jobId,
     projectId: input.projectId,
     testCaseId: input.testCaseId,
     createdAt: new Date().toISOString(),
-    status: "draft",
+    status: input.status ?? "draft",
     files: [],
     provider: input.provider,
     sourceFileName: input.sourceFileName,
     artifactKind: input.artifactKind ?? "unit",
     packagePrefix,
     packageName: input.packageName?.trim() || undefined,
+    via: input.via,
+    commandId: input.commandId,
+    timeline,
+    transforms: [],
   };
   await saveManifest(input.projectRoot, manifest);
   return manifest;
@@ -140,13 +154,25 @@ export async function addArtifactToWorkspace(input: {
   }
 
   let body = stripCodeFences(input.content);
+  assertStackMatchesPath(targetRel, body);
+  const transforms: UnitTransformName[] = [...(input.manifest.transforms || [])];
+  let timeline = input.manifest.timeline || [];
   if (srcName) {
     body = rewriteSutImports(body, { testRel: targetRel, sourceRel: srcName });
+    if (!transforms.includes("rewriteSutImports")) transforms.push("rewriteSutImports");
+    timeline = pushTimeline(timeline, "job.transform", "rewriteSutImports");
   }
+  const beforeJest = body;
   body = ensureJestReferencePreamble(body, targetRel);
+  if (body !== beforeJest) {
+    if (!transforms.includes("jestPreamble")) transforms.push("jestPreamble");
+    timeline = pushTimeline(timeline, "job.transform", "jestPreamble");
+  }
   if (/\.cs$/i.test(targetRel) && /(?:^|\/)AItest\//i.test(targetRel.replace(/\\/g, "/"))) {
     const shortId = csharpShortIdFromPath(targetRel);
     body = sanitizeCsharpAitestCode(body, shortId);
+    if (!transforms.includes("csharpSanitize")) transforms.push("csharpSanitize");
+    timeline = pushTimeline(timeline, "job.transform", "csharpSanitize");
   }
   const content = body;
 
@@ -176,6 +202,8 @@ export async function addArtifactToWorkspace(input: {
     status: "generated",
     files,
     packagePrefix,
+    transforms,
+    timeline,
   };
 
   if (looksLikeJestTsTest(targetRel, content)) {

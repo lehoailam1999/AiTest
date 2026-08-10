@@ -26,6 +26,10 @@ class CreateWorkspaceBody(BaseModel):
     title: str | None = Field(default=None, max_length=300)
 
 
+class UpdateWorkspaceBody(BaseModel):
+    title: str = Field(..., min_length=1, max_length=300)
+
+
 class BuildKnowledgeBody(BaseModel):
     useLlm: bool = True
 
@@ -91,6 +95,25 @@ def get_workspace(
         return errors(404, "workspace not found")
     files = app_svc.list_files(db, wid)
     return ok(workspace_dto(ws, file_count=len(files)))
+
+
+@router.put("/requirement-workspaces/{workspace_id}")
+def update_workspace(
+    workspace_id: str,
+    body: UpdateWorkspaceBody,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Sửa tên Requirement (title)."""
+    wid = _uuid(workspace_id)
+    if wid is None:
+        return errors(400, "invalid workspace id")
+    try:
+        result = app_svc.update_workspace(db, wid, title=body.title)
+    except ValueError as exc:
+        return errors(400, str(exc))
+    if result is None:
+        return errors(404, "workspace not found")
+    return ok(result)
 
 
 @router.delete("/requirement-workspaces/{workspace_id}")

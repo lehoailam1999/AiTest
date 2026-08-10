@@ -1,8 +1,18 @@
+import type {
+  UnitGenVia,
+  UnitJobTimelineEntry,
+  UnitTransformName,
+} from "./unitJobEvents";
+
+export type { UnitGenVia, UnitJobTimelineEntry, UnitTransformName };
+
 export type WorkspaceFileOp = "new" | "modify" | "delete";
 
 export type UnitWorkspaceStatus =
   | "draft"
+  | "generating"
   | "generated"
+  | "gen_failed"
   | "verifying"
   | "pass"
   | "fail"
@@ -41,6 +51,14 @@ export type UnitWorkspaceManifest = {
   packagePrefix?: string;
   /** Step 5 — npm scope / gradle project name for coverage tagging */
   packageName?: string;
+  /** Correlation id for Gen → Verify → Apply */
+  jobId?: string;
+  /** IDE RPC command id when via ide-extension */
+  commandId?: string;
+  via?: UnitGenVia;
+  transforms?: UnitTransformName[];
+  timeline?: UnitJobTimelineEntry[];
+  failReason?: string;
 };
 
 export type VerifyStageName = "compile" | "test" | "coverage";

@@ -46,6 +46,7 @@ describe("contextBuilder Phase 4", () => {
   it("builds budgeted packet from index retrieve (Unit)", async () => {
     const files: Record<string, string> = {
       "src/order/order.service.ts": `
+import { PaymentService } from "./payment.service";
 export class OrderService {
   constructor(private pay: PaymentService) {}
   create() { return this.pay.charge(); }
@@ -65,6 +66,8 @@ export class PaymentService { charge() { return 1; } }
         type: "Unit",
         module: "Order",
         steps: "Mock PaymentService; Call OrderService.create; Assert",
+        testData:
+          "path: src/order/order.service.ts\ncode: OrderService",
       }),
       io,
       syncIfMissing: false,
@@ -77,7 +80,13 @@ export class PaymentService { charge() { return 1; } }
     assert.ok(built.packet.files.length <= 10);
     assert.ok(built.packet.files[0].content.includes("OrderService") || built.packet.files.some((f) => f.content.includes("OrderService")));
     assert.ok(built.packet.unitStrategy?.forbidden?.length);
-    assert.match(built.packet.diagnostics.seedReason || "", /index-retrieve|business|deps/i);
+    assert.match(built.packet.diagnostics.seedReason || "", /implementation-plan|index-retrieve|business|deps/i);
+    assert.ok(built.implementationPlan);
+    assert.equal(built.implementationPlan?.status, "ready");
+    assert.ok(
+      built.packet.files.some((f) => f.pathRel.includes("payment")),
+      "multi-layer dep PaymentService expected"
+    );
   });
 
   it("builds e2eFe bundle for E2E plan", async () => {

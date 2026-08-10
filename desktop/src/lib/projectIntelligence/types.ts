@@ -11,6 +11,11 @@ export type ProjectFileIndex = {
   files: IndexedFile[];
   byStem: Map<string, IndexedFile[]>;
   byBaseName: Map<string, IndexedFile>;
+  /**
+   * Inverted index: path-segment + PascalCase stem tokens → files.
+   * Used for fast Unit seed candidate pools (avoid full-tree scan).
+   */
+  byToken: Map<string, IndexedFile[]>;
 };
 
 export type ResolvedSeed = {

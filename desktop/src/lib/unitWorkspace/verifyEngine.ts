@@ -10,6 +10,8 @@ import type {
   VerifyStageResult,
 } from "./types";
 import { workspaceRunDir } from "./paths";
+import { pushTimeline } from "./unitJobEvents";
+import { recordUnitJobMetric } from "../unitJobMetrics";
 import {
   buildAitestJestCommand,
   ensureAitestJestTsconfigInWorkspace,
@@ -153,8 +155,12 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
   if (!manifest.files.length) {
     throw new Error("Workspace không có file để verify.");
   }
-
-  let working: UnitWorkspaceManifest = { ...manifest, status: "verifying" };
+  const verifyStarted = Date.now();
+  let working: UnitWorkspaceManifest = {
+    ...manifest,
+    status: "verifying",
+    timeline: pushTimeline(manifest.timeline || [], "job.verify.started"),
+  };
   await saveManifest(projectRoot, working);
 
   const stages: VerifyStageResult[] = [];
@@ -286,6 +292,29 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
 
     await saveManifest(projectRoot, working);
     syncVerifyReport(working, report);
+
+    const verifyTimeMs = Date.now() - verifyStarted;
+    working = {
+      ...working,
+      timeline: pushTimeline(
+        working.timeline || [],
+        overallPass ? "job.verify.completed" : "job.verify.failed",
+        `verifyTimeMs=${verifyTimeMs}`
+      ),
+    };
+    await saveManifest(projectRoot, working);
+    recordUnitJobMetric({
+      projectId: working.projectId,
+      contextSource: working.via === "ide-extension" ? "implementation-plan" : "local-fs",
+      runnerUsed: working.via || "unknown",
+      ideConnected: working.via === "ide-extension",
+      jobId: working.jobId,
+      via: working.via || null,
+      verifyTimeMs,
+      durationMs: verifyTimeMs,
+      ok: overallPass,
+      failReason: overallPass ? null : "verify_failed",
+    });
 
     const logBody = stages.map((s) => `=== ${s.stage} (${s.success ? "PASS" : "FAIL"}) ===\n${s.logExcerpt}`).join("\n\n");
     await writeTextFile(

@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
 import {
   Alert,
   App,
@@ -12,20 +16,11 @@ import {
   Select,
   Space,
   Steps,
-  Tag,
-  Typography,
+  Typography
 } from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { IdeConnectPanel } from "../components/IdeConnectPanel";
-import { CodegenResultPanel } from "../components/CodegenResultPanel";
-import { generateTcUrl } from "../lib/testingJourney";
-import { ROUTES, requirementUrl, activityUrl } from "../lib/productRoutes";
-import {
-  PauseCircleOutlined,
-  PlayCircleOutlined,
-  ThunderboltOutlined,
-} from "@ant-design/icons";
-import { audit, connection, generateApiTest, generateUnit, projects, requirementStudio, requirements, testcases } from "../api";
+import { audit, connection, generateApiTest, projects, requirementStudio, requirements, testcases } from "../api";
 import type {
   Connection,
   Project,
@@ -33,33 +28,14 @@ import type {
   TestCase,
   UnitResult,
 } from "../api/types";
+import { CodegenResultPanel } from "../components/CodegenResultPanel";
+import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
+import { ReadyStrip } from "../components/ReadyStrip";
+import { UnitScopePanel } from "../components/UnitScopePanel";
 import {
-  metaSyncedAt,
-  normalizeProjectMeta,
-} from "../lib/projectSync";
-import {
-  languageFromSourcePath,
-  sourceExtensionsForLanguage,
-  suggestApiTestPath,
-  suggestUnitTestPath,
-  testFrameworkOptions,
-} from "../lib/stackHints";
-import { discoverOpenApiSpec } from "../lib/openapiDiscovery";
-import { useProject } from "../state/ProjectContext";
-import { workspace } from "../workspace";
-import { isTauri } from "../tauri/bridge";
-import { syncWorkspaceRun } from "../lib/unitWorkspace/auditSync";
-import {
-  createUnitWorkspaceRun,
-  addArtifactToWorkspace,
-  loadWorkspacePreviews,
-  loadManifest,
-} from "../lib/unitWorkspace/manager";
-import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWorkspace/types";
-import {
-  BatchRunConsole,
   BATCH_NOTE_RUNNING,
   BATCH_NOTE_WAITING,
+  BatchRunConsole,
   batchTcSnapshot,
   isBatchQueueNote,
   markBatchRowsPaused,
@@ -67,43 +43,71 @@ import {
   type BatchPipelineRow,
 } from "../features/unit-test/BatchRunConsole";
 import {
-  generateErrorLogRel,
-  saveErrorLogFile,
-} from "../lib/unitWorkspace/errorLogStore";
-import {
   BatchStagingPreview,
   type BatchStagingJob,
 } from "../features/unit-test/BatchStagingPreview";
-import { UnitScopePanel } from "../components/UnitScopePanel";
-import { ReadyStrip } from "../components/ReadyStrip";
 import { aiConnectionDisplayLabel } from "../lib/aiConnectionLabel";
-import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
-import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
+import {
+  createBatchRunControl,
+  type BatchRunStatus,
+} from "../lib/batchRunControl";
 import type { AITestContextPacket } from "../lib/contextPacket/types";
+import {
+  buildGenerateContext,
+  buildIdeLocalGenerateBody,
+  ideListSourceFiles,
+  ideReadFile,
+  loadUnitProjectRules,
+  type IdeLocalGenerateBody,
+} from "../lib/ideLocalCommands";
+import {
+  isIdeCodegenReady,
+} from "../lib/ideProtocol";
+import { discoverOpenApiSpec } from "../lib/openapiDiscovery";
+import { ROUTES, activityUrl, requirementUrl } from "../lib/productRoutes";
+import { resolveScopeWithAi } from "../lib/projectIntelligence/aiScopeResolve";
 import type { UnitContextPacket } from "../lib/projectIntelligence/types";
+import {
+  isAcceptableUnitScopePath,
+  pickFirstAcceptableUnitScopePath,
+  tcBlobForUnitScope,
+} from "../lib/projectIntelligence/unitScopeAccept";
+import type { CodeAliasMap } from "../lib/projectIntelligence/viCodeAliases";
+import {
+  metaSyncedAt,
+  normalizeProjectMeta,
+} from "../lib/projectSync";
+import { resolvePackagePrefix } from "../lib/resolvePackagePrefix";
+import { runPool } from "../lib/runPool";
+import {
+  languageFromSourcePath,
+  sourceExtensionsForLanguage,
+  suggestApiTestPath,
+  suggestUnitTestPath,
+  testFrameworkOptions,
+} from "../lib/stackHints";
+import { isUnitTestCaseType } from "../lib/testEngine";
+import { generateTcUrl } from "../lib/testingJourney";
 import {
   GENERATED_TEST_FOLDERS,
   buildRequirementTcModule,
   uniquifyTestTargetRel,
 } from "../lib/testOutputLayout";
+import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
+import { recordUnitJobMetric } from "../lib/unitJobMetrics";
+import { syncWorkspaceRun } from "../lib/unitWorkspace/auditSync";
 import {
-  createBatchRunControl,
-  type BatchRunStatus,
-} from "../lib/batchRunControl";
-import { runPool } from "../lib/runPool";
-
-/** Parallel Cursor/API generate — mỗi TC 1 request + workspace riêng; cap 3. */
-const UNIT_GEN_CONCURRENCY = 3;
+  generateErrorLogRel,
+  saveErrorLogFile,
+} from "../lib/unitWorkspace/errorLogStore";
 import {
-  buildGenerateContext,
-  buildIdeLocalGenerateBody,
-  ideListSourceFiles,
-  loadUnitProjectRules,
-  ideReadFile,
-  type IdeLocalGenerateBody,
-} from "../lib/ideLocalCommands";
-import { resolvePackagePrefix } from "../lib/resolvePackagePrefix";
-import { labelContextSource, recordUnitJobMetric } from "../lib/unitJobMetrics";
+  addArtifactToWorkspace,
+  createUnitWorkspaceRun,
+  loadManifest,
+  loadWorkspacePreviews,
+} from "../lib/unitWorkspace/manager";
+import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWorkspace/types";
+import { startUnitIdeGenJob } from "../lib/unitWorkspace/unitJobRunner";
 import {
   ensureWorkspaceOpen,
   getActiveWorkspaceId,
@@ -111,9 +115,12 @@ import {
   readWorkspaceFiles,
   resolveWorkspaceScope,
 } from "../lib/workspaceManager";
-import { resolveScopeWithAi } from "../lib/projectIntelligence/aiScopeResolve";
-import type { CodeAliasMap } from "../lib/projectIntelligence/viCodeAliases";
-import { isUnitTestCaseType } from "../lib/testEngine";
+import { useProject } from "../state/ProjectContext";
+import { isTauri } from "../tauri/bridge";
+import { workspace } from "../workspace";
+
+/** Parallel Cursor/API generate — mỗi TC 1 request + workspace riêng; cap 3. */
+const UNIT_GEN_CONCURRENCY = 3;
 
 function displayRel(localPath: string | null, absOrRel: string): string {
   if (!localPath) return absOrRel;
@@ -152,6 +159,19 @@ async function resolveTcSourcePrimary(opts: {
   const scopedPaths = fw
     ? opts.allSourcePaths.filter((p) => pathMatchesUnitFramework(p, fw))
     : opts.allSourcePaths;
+  const tcText = tcBlobForUnitScope(opts.testCase);
+  const acceptOpts = { tcText, codeAliases: opts.codeAliases };
+  const fwOk = (p: string | null | undefined) =>
+    Boolean(p && pathMatchesUnitFramework(p, fw));
+  const domainOk = (p: string | null | undefined) =>
+    Boolean(
+      p &&
+        isAcceptableUnitScopePath({
+          pathRel: p,
+          tcText: acceptOpts.tcText,
+          codeAliases: acceptOpts.codeAliases,
+        })
+    );
 
   const ranked = await resolveWorkspaceScope(
     opts.workspaceId,
@@ -162,7 +182,24 @@ async function resolveTcSourcePrimary(opts: {
   let related = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
   let reason = ranked.reason || "BE workspace resolve";
 
-  const primaryOk = primary && pathMatchesUnitFramework(primary, fw);
+  // Same gate as Gen: drop unsuitable / domain-conflict BE primary before UI shows it.
+  if (primary && (!fwOk(primary) || !domainOk(primary))) {
+    const fromRelated = pickFirstAcceptableUnitScopePath(
+      related.filter((p) => fwOk(p)),
+      acceptOpts
+    );
+    if (fromRelated) {
+      related = related.filter((p) => p !== fromRelated && fwOk(p) && domainOk(p));
+      primary = fromRelated;
+      reason = `${reason} · đổi primary (domain/SUT gate)`;
+    } else {
+      primary = null;
+      related = [];
+      reason = `Bỏ BE primary lệch domain/SUT`;
+    }
+  }
+
+  const primaryOk = Boolean(primary && fwOk(primary) && domainOk(primary));
   if ((!primary || !primaryOk) && (scopedPaths.length > 0 || opts.allSourcePaths.length > 0)) {
     const fe = await resolveScopeWithAi({
       projectId: opts.projectId,
@@ -171,30 +208,34 @@ async function resolveTcSourcePrimary(opts: {
       codeAliases: opts.codeAliases,
       useAi: opts.useAi,
     });
-    if (fe.primary && pathMatchesUnitFramework(fe.primary, fw)) {
+    if (fe.primary && fwOk(fe.primary) && domainOk(fe.primary)) {
       primary = fe.primary.replace(/\\/g, "/");
       related = (fe.related || [])
         .map((p) => p.replace(/\\/g, "/"))
-        .filter((p) => pathMatchesUnitFramework(p, fw));
+        .filter((p) => fwOk(p) && domainOk(p));
       reason = primaryOk
         ? `FE fallback · ${fe.reason || "heuristic"}`
         : `FE · khớp ${fw || "stack"} · ${fe.reason || "heuristic"}`;
     } else if (primary && !primaryOk) {
       primary = null;
       related = [];
-      reason = `Bỏ scope lệch framework (${fw})`;
+      reason = fw && primary && !fwOk(primary)
+        ? `Bỏ scope lệch framework (${fw})`
+        : `Bỏ scope lệch domain/SUT`;
     }
   }
 
   if (primary && fw) {
-    related = related.filter((p) => pathMatchesUnitFramework(p, fw));
+    related = related.filter((p) => pathMatchesUnitFramework(p, fw) && domainOk(p));
+  }
+  if (primary && !domainOk(primary)) {
+    return {
+      primary: null,
+      related: [],
+      reason: "Không khớp SUT an toàn cho TC (domain/SUT gate)",
+    };
   }
   return { primary, related, reason };
-}
-
-function tcHasExplicitSourceHint(tc: TestCase): boolean {
-  const blob = `${tc.testData || ""}\n${tc.precondition || ""}\n${tc.steps || ""}`;
-  return /\b(code|path)\s*:/i.test(blob);
 }
 
 type ScopeRank = { primary: string | null; related: string[]; reason: string };
@@ -311,8 +352,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   const [sourceRootTick, setSourceRootTick] = useState(0);
   const [batchRunStatus, setBatchRunStatus] = useState<BatchRunStatus>("idle");
   const batchControlRef = useRef(createBatchRunControl());
-  /** Batch: reuse AI/heuristic scope per module (unless TC has code:/path: hint). */
-  const moduleScopeCacheRef = useRef<Map<string, ScopeRank>>(new Map());
+  /** Per-TC scope cache only — never reuse primary across TCs in the same module. */
+  const tcScopeCacheRef = useRef<Map<string, ScopeRank>>(new Map());
 
   useEffect(() => {
     return batchControlRef.current.subscribe(setBatchRunStatus);
@@ -321,17 +362,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   async function resolveTcSourcePrimaryCached(
     opts: Parameters<typeof resolveTcSourcePrimary>[0]
   ): Promise<ScopeRank> {
-    const modKey = (opts.testCase.module || "").trim().toLowerCase() || "__none__";
-    if (!tcHasExplicitSourceHint(opts.testCase)) {
-      const hit = moduleScopeCacheRef.current.get(modKey);
-      if (hit?.primary) {
-        return { ...hit, reason: `${hit.reason} · module-cache` };
-      }
+    const tcKey = opts.testCase.id;
+    const hit = tcScopeCacheRef.current.get(tcKey);
+    if (hit) {
+      return { ...hit, reason: `${hit.reason} · tc-cache` };
     }
     const ranked = await resolveTcSourcePrimary(opts);
-    if (!tcHasExplicitSourceHint(opts.testCase) && ranked.primary) {
-      moduleScopeCacheRef.current.set(modKey, ranked);
-    }
+    tcScopeCacheRef.current.set(tcKey, ranked);
     return ranked;
   }
 
@@ -692,52 +729,95 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
       let reason = 'Manual pick';
       if (!primary) {
-        const pathsForMatch =
-          sourceFiles.length > 0
-            ? sourceFiles.map((f) => displayRel(localPath, f))
-            : await listWorkspaceSourceFiles(wsId).then((xs) =>
-                xs.map((x) => x.replace(/\\/g, "/"))
-              ).catch(() => [] as string[]);
-        const ranked = await resolveTcSourcePrimary({
-          projectId: project.id,
-          workspaceId: wsId,
-          testCase: selectedTc,
-          allSourcePaths: pathsForMatch,
-          useAi: useAiScope && aiReady !== false,
-          codeAliases: (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
-            ?.codeAliases,
-          preferredFramework: framework === "auto" ? testFwResolution?.framework : framework,
-        });
-        primary = ranked.primary;
-        related = ranked.related ?? [];
-        reason = ranked.reason || 'BE workspace resolve';
+        // Unit code Gen path uses startUnitIdeGenJob (Desktop gate + Extension CLI).
+        // Scope UI: prefer Approved markers only — no AI/FE fuzzy (avoids dual resolve).
+        const { extractTcSourceMarkers } = await import("@aitest/ide-protocol");
+        const markers = extractTcSourceMarkers(
+          [selectedTc.testData, selectedTc.steps, selectedTc.expectedResult]
+            .filter(Boolean)
+            .join("\n")
+        );
+        if (markers.paths[0]) {
+          primary = markers.paths[0].replace(/\\/g, "/");
+          related = markers.related.map((p) => p.replace(/\\/g, "/"));
+          reason = "Test Data path:/code: markers";
+        } else if (isApiKind) {
+          const pathsForMatch =
+            sourceFiles.length > 0
+              ? sourceFiles.map((f) => displayRel(localPath, f))
+              : await listWorkspaceSourceFiles(wsId).then((xs) =>
+                  xs.map((x) => x.replace(/\\/g, "/"))
+                ).catch(() => [] as string[]);
+          const ranked = await resolveTcSourcePrimary({
+            projectId: project.id,
+            workspaceId: wsId,
+            testCase: selectedTc,
+            allSourcePaths: pathsForMatch,
+            useAi: useAiScope && aiReady !== false,
+            codeAliases: (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+              ?.codeAliases,
+            preferredFramework: framework === "auto" ? testFwResolution?.framework : framework,
+          });
+          primary = ranked.primary;
+          related = ranked.related ?? [];
+          reason = ranked.reason || "BE workspace resolve";
+        } else {
+          primary = null;
+          related = [];
+          reason = "Chưa có path:/code: — Approve/enrich trước khi Gen Unit";
+        }
       }
 
-      const paths = [primary, ...related].filter(Boolean) as string[];
-      const reads = await readWorkspaceFiles(wsId, paths);
-      const byPath = new Map(reads.map((r) => [r.path.replace(/\\/g, '/'), r]));
-      const primaryRel = (primary || '').replace(/\\/g, '/');
-      const primaryContent = byPath.get(primaryRel)?.content || '';
+      let paths = [primary, ...related].filter(Boolean) as string[];
+      let reads = await readWorkspaceFiles(wsId, paths);
+      let byPath = new Map(reads.map((r) => [r.path.replace(/\\/g, "/"), r]));
+      let primaryRel = (primary || "").replace(/\\/g, "/");
+      let primaryContent = byPath.get(primaryRel)?.content || "";
+
+      // Content-level gate (same as buildGenerateContext) so Local FS alert never shows a poison SUT.
+      if (primaryRel && primaryContent && !manualSourcePickRef.current) {
+        try {
+          const { isPacketSutAcceptable } = await import("@aitest/ide-protocol");
+          const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+            ?.codeAliases;
+          const ok = isPacketSutAcceptable({
+            tcText: tcBlobForUnitScope(selectedTc),
+            primaryPath: primaryRel,
+            sourceExcerpt: primaryContent,
+            codeAliases: aliases,
+          });
+          if (!ok) {
+            primary = null;
+            related = [];
+            primaryRel = "";
+            primaryContent = "";
+            paths = [];
+            byPath = new Map();
+            reason = "Bỏ SUT lệch domain/align (content gate)";
+          }
+        } catch {
+          /* keep path-only gate result */
+        }
+      }
 
       const relatedView = related.map((p) => {
-        const rel = p.replace(/\\/g, '/');
+        const rel = p.replace(/\\/g, "/");
         return {
           pathRel: rel,
-          content: byPath.get(rel)?.content || '',
-          role: 'dependency' as const,
+          content: byPath.get(rel)?.content || "",
+          role: "dependency" as const,
         };
       });
 
       const view: UnitContextPacket = {
         primaryPath: primaryRel,
         primaryContent,
-        related: [
-          { pathRel: primaryRel, content: primaryContent, role: 'primary' },
-          ...relatedView,
-        ],
+        related: primaryRel
+          ? [{ pathRel: primaryRel, content: primaryContent, role: "primary" }, ...relatedView]
+          : relatedView,
         seed: primaryRel ? { pathRel: primaryRel, score: 100, reason } : null,
         candidates: paths.map((p) => ({
-          pathRel: p.replace(/\\/g, '/'),
+          pathRel: p.replace(/\\/g, "/"),
           score: 50,
           reason,
         })),
@@ -747,16 +827,24 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       setContextPacket(view);
       setUnitPacketV1(null);
 
-      if (!manualSourcePickRef.current && primaryRel) {
-        const primaryMatch = matchSourceFile(primaryRel) ?? primaryRel;
-        setSourceFile(primaryMatch);
-        sourceFileRef.current = primaryMatch;
-        if (primaryContent) setSourceCode(primaryContent);
-        const relatedMatches = related
-          .map((r) => matchSourceFile(r) ?? r)
-          .filter((p): p is string => Boolean(p) && p !== primaryMatch);
-        setRelatedSourceFiles(relatedMatches);
-        relatedSourceFilesRef.current = relatedMatches;
+      if (!manualSourcePickRef.current) {
+        if (primaryRel) {
+          const primaryMatch = matchSourceFile(primaryRel) ?? primaryRel;
+          setSourceFile(primaryMatch);
+          sourceFileRef.current = primaryMatch;
+          if (primaryContent) setSourceCode(primaryContent);
+          const relatedMatches = related
+            .map((r) => matchSourceFile(r) ?? r)
+            .filter((p): p is string => Boolean(p) && p !== primaryMatch);
+          setRelatedSourceFiles(relatedMatches);
+          relatedSourceFilesRef.current = relatedMatches;
+        } else {
+          setSourceFile(undefined);
+          sourceFileRef.current = undefined;
+          setSourceCode("");
+          setRelatedSourceFiles([]);
+          relatedSourceFilesRef.current = [];
+        }
       }
     } catch (e) {
       message.error(e instanceof Error ? e.message : 'Quét scope thất bại');
@@ -775,6 +863,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     framework,
     testFwResolution?.framework,
     serverProject?.meta,
+    isApiKind,
   ]);
 
   useEffect(() => {
@@ -856,7 +945,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     void resolveScope();
   }
 
-  async function runForTestCase(tc: TestCase, opts?: { batch?: boolean }) {
+  async function runForTestCase(
+    tc: TestCase,
+    opts?: { batch?: boolean }
+  ) {
     if (!project || !localPath || !isTauri()) {
       throw new Error(
         isApiKind
@@ -872,6 +964,56 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
 
     const wsId = await ensureWorkspaceOpen(project.id, localPath);
+
+    // Unit code Gen: Desktop orchestrates → Extension → Cursor CLI only (no API Gen).
+    if (!isApiKind) {
+      const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+        ?.codeAliases;
+      const reqTitle = requirementTitleForTc(tc, requirementsList, selectedReqId);
+      const out = await startUnitIdeGenJob({
+        projectRoot: localPath,
+        projectId: project.id,
+        tc,
+        deps: {
+          language,
+          framework,
+          broadLocalContext,
+          sourceFiles,
+          codeAliases: aliases,
+          requirementTitle: reqTitle,
+          onProgress: (msg) => {
+            if (!batch) message.loading({ content: msg, key: "unit-gen", duration: 0 });
+          },
+        },
+      });
+      message.destroy("unit-gen");
+      if (!out.ok) {
+        throw new Error(out.error);
+      }
+      if (!batch) {
+        message.success(
+          `Unit Job (IDE) · ${out.manifest.runId.slice(0, 8)}… → ${out.writeRel}` +
+            (out.manifest.sourceFileName ? ` · SUT ${out.manifest.sourceFileName}` : "")
+        );
+        const previews = await loadWorkspacePreviews(localPath, out.manifest);
+        setResult({
+          code: out.code,
+          suggestedPath: out.writeRel,
+          fileName: out.writeRel.split("/").pop() || "test.ts",
+          testCaseId: tc.id,
+          projectId: project.id,
+          provider: "ide-extension",
+          runnerUsed: "IDE_EXTENSION",
+        });
+        setWritePath(out.writeRel);
+        setWsManifest(out.manifest);
+        setWsPreviews(previews);
+        setWsSelectedRel(out.manifest.files[0]?.targetRel || out.writeRel);
+      }
+      return { runId: out.runId, packagePrefix: out.packagePrefix };
+    }
+
+    // API Test artifact only (OpenAPI / handler) — still Desktop → API ↔ AI CLI.
     const paths =
       sourceFiles.length > 0
         ? sourceFiles
@@ -884,8 +1026,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       !/c#|csharp|dotnet|\.net|f#|vb|java|kotlin|python|go\b|php|ruby|swift/.test(langLower) &&
       (!!langLower || /typescript|javascript|tsx|jsx|\bts\b|\bjs\b|node/.test(langLower));
 
-    // Phase 4: JS/TS → index-first. C#/other → legacy rank first (index has no .cs yet).
-    // See docs/CODEGEN_LEGACY_CLEANUP.md
     let ctx;
     let primaryRel = "";
     let relatedRels: string[] = [];
@@ -911,7 +1051,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         .map((f) => f.pathRel);
     }
 
-    if (!primaryRel && !(isApiKind && openApiSpec.trim())) {
+    if (!primaryRel && !openApiSpec.trim()) {
       const ranked = await resolveTcSourcePrimaryCached({
         projectId: project.id,
         workspaceId: wsId,
@@ -923,12 +1063,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       });
       primaryRel = (ranked.primary || "").replace(/\\/g, "/");
       relatedRels = (ranked.related || []).map((p) => p.replace(/\\/g, "/"));
-      if (!primaryRel && !(isApiKind && openApiSpec.trim())) {
+      if (!primaryRel && !openApiSpec.trim()) {
         throw new Error(
-          isApiKind
-            ? `Không tìm handler/OpenAPI cho «${tc.title}». Thêm openapi.yaml hoặc chọn file thủ công.`
-            : `Không tìm được mã nguồn cho «${tc.title}» (module=${tc.module || "—"}). ` +
-                `Gợi ý: chọn file thủ công, hoặc thêm «code: ClassName» / «path: src/...» vào TestData.`
+          `Không tìm handler/OpenAPI cho «${tc.title}». Thêm openapi.yaml hoặc chọn file thủ công.`
         );
       }
       ctx = await buildGenerateContext({
@@ -948,11 +1085,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     }
 
     if (!ctx) {
-      throw new Error("Không tạo được context packet cho Unit gen.");
+      throw new Error("Không tạo được context packet cho API test gen.");
     }
 
-    const relName = primaryRel || (isApiKind ? "openapi.yaml" : "snippet.txt");
-    // Context packet + API body luôn khóa theo tc.id — không dùng shared UI selection.
+    const relName = primaryRel || "openapi.yaml";
     if (!batch) {
       setContextPacket(ctx.view);
       setUnitPacketV1(ctx.packet);
@@ -973,46 +1109,34 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       className: classHint,
       module: tc.module || undefined,
       packagePrefix,
-      openApiSpec: isApiKind ? openApiSpec || undefined : undefined,
+      openApiSpec: openApiSpec || undefined,
       workspaceId: wsId,
       projectRoot: localPath,
       planner: ctx.planner,
       indexVersion: ctx.indexVersion,
       contextSource: ctx.contextSource,
       projectRules: unitProjectRules,
-      projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
+      projectRulesSource: unitProjectRules
+        ? ("unit-conventions" as const)
+        : ("none" as const),
     });
-    const res = isApiKind
-      ? await generateApiTest.run(genBody)
-      : await generateUnit.run(genBody);
+    const res = await generateApiTest.run(genBody);
 
     const view = ctx.view;
     const primaryContent = ctx.primaryContent;
 
     const reqTitle = requirementTitleForTc(tc, requirementsList, selectedReqId);
     const layoutModule = buildRequirementTcModule(reqTitle, tc.title, tc.module);
-    const feHint = isApiKind
-      ? suggestApiTestPath({
-          language,
-          framework: framework === "auto" ? "" : framework,
-          className: classHint,
-          sourceFileName: relName,
-          module: tc.module || undefined,
-          requirementTitle: reqTitle,
-          testCaseTitle: tc.title,
-          packagePrefix,
-        })
-      : suggestUnitTestPath({
-          language,
-          framework: framework === "auto" ? "" : framework,
-          sourceFileName: relName,
-          className: classHint,
-          module: tc.module || undefined,
-          requirementTitle: reqTitle,
-          testCaseTitle: tc.title,
-          packagePrefix,
-        });
-    // FE owns folder layout (Requirement/TC title); uniquify bằng tc.id → không đụng file TC khác.
+    const feHint = suggestApiTestPath({
+      language,
+      framework: framework === "auto" ? "" : framework,
+      className: classHint,
+      sourceFileName: relName,
+      module: tc.module || undefined,
+      requirementTitle: reqTitle,
+      testCaseTitle: tc.title,
+      packagePrefix,
+    });
     const targetPath = uniquifyTestTargetRel(feHint.relativePath, tc.id);
 
     let manifest = await createUnitWorkspaceRun({
@@ -1021,9 +1145,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       testCaseId: tc.id,
       provider: res.provider,
       sourceFileName: relName,
-      artifactKind: isApiKind ? "api" : "unit",
+      artifactKind: "api",
       packagePrefix,
       packageName: res.stackInspect?.package_name,
+      status: "generating",
     });
     const added = await addArtifactToWorkspace({
       projectRoot: localPath,
@@ -1039,6 +1164,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       contextSource: "local-fs",
       runnerUsed: res.runnerUsed,
       ideConnected: false,
+      jobId: manifest.jobId,
+      ok: true,
     });
     if (!batch) {
       message.success(
@@ -1166,7 +1293,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setBusy(true);
     const control = batchControlRef.current;
     control.start();
-    moduleScopeCacheRef.current.clear();
+    tcScopeCacheRef.current.clear();
     setBatchProgress({ current: 0, total: workList.length, label: workList[0].title });
 
     let campaignId: string | undefined;
@@ -1337,7 +1464,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setBusy(true);
     const control = batchControlRef.current;
     control.start();
-    moduleScopeCacheRef.current.clear();
+    tcScopeCacheRef.current.clear();
     setBatchProgress({ current: 0, total: workList.length, label: workList[0].title });
 
     let campaignId: string | undefined;
@@ -1526,7 +1653,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gapsMode, gapsPrompted, loading, project, moduleGroups, gapsModulesParam]);
 
-  /** Happy path: Local FS + AI CLI only. */
+  /** Unit code Gen: IDE Extension only (fail-closed). API Test artifact uses API path below. */
   async function runUnitJob() {
     try {
       await run();
@@ -1536,23 +1663,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   }
 
   async function run() {
-    const hasFileScope = Boolean(
-      sourceFile ||
-        contextPacket?.primaryPath ||
-        (isApiKind && openApiSpec.trim())
-    );
-    const hasPastedOnly =
-      Boolean(sourceCode.trim()) && !sourceFile && !contextPacket?.primaryPath;
-    if (
-      !project ||
-      !testCaseId ||
-      (!hasFileScope && !hasPastedOnly && !(isApiKind && openApiSpec.trim()))
-    ) {
-      message.error(
-        isApiKind
-          ? "Cần TC Approved và OpenAPI hoặc chọn file handler."
-          : "Cần TC Approved + project root (Local FS) hoặc chọn/dán mã nguồn."
-      );
+    if (!project || !testCaseId) {
+      message.error("Cần chọn TC Approved.");
       return;
     }
     if (!aiReady) {
@@ -1560,9 +1672,96 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       return;
     }
     if (!localPath || !isTauri()) {
-      message.warning("Cần gắn project root trên trang này trước khi sinh → Bản nháp test.");
+      message.error("Cần Desktop + gắn project root.");
       return;
     }
+
+    const tc =
+      approved.find((t) => t.id === testCaseId) ||
+      allTestCases.find((t) => t.id === testCaseId);
+    if (!tc) {
+      message.error("Không tìm thấy TC đã chọn.");
+      return;
+    }
+
+    // Unit: Desktop orchestrates → Extension → Cursor CLI only.
+    if (!isApiKind) {
+      setBusy(true);
+      try {
+        const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+          ?.codeAliases;
+        const reqTitle = requirementTitleForTc(tc, requirementsList, selectedReqId);
+        const out = await startUnitIdeGenJob({
+          projectRoot: localPath,
+          projectId: project.id,
+          tc,
+          deps: {
+            language,
+            framework,
+            broadLocalContext,
+            sourceFiles,
+            codeAliases: aliases,
+            requirementTitle: reqTitle,
+            onProgress: (msg) =>
+              message.loading({ content: msg, key: "unit-gen", duration: 0 }),
+          },
+        });
+        message.destroy("unit-gen");
+        if (!out.ok) {
+          message.error(out.error);
+          return;
+        }
+        setResult({
+          code: out.code,
+          suggestedPath: out.writeRel,
+          fileName: out.writeRel.split("/").pop() || "test.ts",
+          testCaseId: tc.id,
+          projectId: project.id,
+          provider: "ide-extension",
+          runnerUsed: "IDE_EXTENSION",
+        });
+        setWritePath(out.writeRel);
+        const previews = await loadWorkspacePreviews(localPath, out.manifest);
+        setWsManifest(out.manifest);
+        setWsPreviews(previews);
+        setWsSelectedRel(out.manifest.files[0]?.targetRel || out.writeRel);
+        const singleRow: BatchRow = {
+          key: tc.id,
+          testCaseId: tc.testCaseId,
+          title: tc.title,
+          status: "ok",
+          workspaceRunId: out.manifest.runId,
+          packagePrefix: out.manifest.packagePrefix,
+          ...batchTcSnapshot(tc),
+        };
+        setBatchResults([singleRow]);
+        await refreshBatchStaging([singleRow]);
+        message.success(
+          `Unit Job (IDE) · ${out.manifest.runId.slice(0, 8)}… · ${out.writeRel}`
+        );
+        focusVerifyConsole();
+      } catch (e) {
+        message.destroy("unit-gen");
+        message.error(e instanceof Error ? e.message : "Sinh unit thất bại");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // API Test artifact — Desktop → API ↔ AI CLI.
+    const hasFileScope = Boolean(
+      sourceFile ||
+        contextPacket?.primaryPath ||
+        openApiSpec.trim()
+    );
+    const hasPastedOnly =
+      Boolean(sourceCode.trim()) && !sourceFile && !contextPacket?.primaryPath;
+    if (!hasFileScope && !hasPastedOnly && !openApiSpec.trim()) {
+      message.error("Cần TC Approved và OpenAPI hoặc chọn file handler.");
+      return;
+    }
+
     setBusy(true);
     setResult(null);
     setWsManifest(null);
@@ -1572,11 +1771,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     setBatchJobs([]);
     try {
       const wsId = await ensureWorkspaceOpen(project.id, localPath);
-      const tc = selectedTc;
-      if (!tc) {
-        message.error("Không tìm thấy test case đã duyệt.");
-        return;
-      }
 
       type GenBody =
         | IdeLocalGenerateBody
@@ -1590,12 +1784,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             className?: string;
             module?: string;
             openApiSpec?: string;
+            projectRoot?: string;
           };
 
       let genBody: GenBody | null = null;
       let classHint = "";
       let outName = "";
-      let usedLanguage = language;
+      const usedLanguage = language;
       const usedSource: "ide" | "local-fs" | "agent-ide" = "local-fs";
 
       {
@@ -1622,7 +1817,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             className: classHint,
             module: tc.module || undefined,
             projectRoot: localPath,
-            ...(isApiKind ? { openApiSpec: openApiSpec || undefined } : {}),
+            openApiSpec: openApiSpec || undefined,
           };
         } else {
           const paths =
@@ -1660,7 +1855,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             language: language ?? undefined,
             className: classHint,
             module: tc.module || undefined,
-            openApiSpec: isApiKind ? openApiSpec || undefined : undefined,
+            openApiSpec: openApiSpec || undefined,
             workspaceId: wsId,
             projectRoot: localPath,
             planner: ctx.planner,
@@ -1682,12 +1877,12 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         ...prepared,
         packagePrefix,
         projectRules: unitProjectRules,
-        projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
+        projectRulesSource: unitProjectRules
+          ? ("unit-conventions" as const)
+          : ("none" as const),
       };
 
-      const res = isApiKind
-        ? await generateApiTest.run(body)
-        : await generateUnit.run(body);
+      const res = await generateApiTest.run(body);
       setResult(res);
       const reqTitle = selectedTc
         ? requirementTitleForTc(selectedTc, requirementsList, selectedReqId)
@@ -1697,27 +1892,16 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         selectedTc?.title,
         selectedTc?.module
       );
-      const feHint = isApiKind
-        ? suggestApiTestPath({
-            language: usedLanguage,
-            framework: framework === "auto" ? "" : framework,
-            className: classHint,
-            sourceFileName: outName,
-            module: selectedTc?.module || undefined,
-            requirementTitle: reqTitle,
-            testCaseTitle: selectedTc?.title,
-            packagePrefix,
-          })
-        : suggestUnitTestPath({
-            language: usedLanguage,
-            framework: framework === "auto" ? "" : framework,
-            sourceFileName: outName,
-            className: classHint,
-            module: selectedTc?.module || undefined,
-            requirementTitle: reqTitle,
-            testCaseTitle: selectedTc?.title,
-            packagePrefix,
-          });
+      const feHint = suggestApiTestPath({
+        language: usedLanguage,
+        framework: framework === "auto" ? "" : framework,
+        className: classHint,
+        sourceFileName: outName,
+        module: selectedTc?.module || undefined,
+        requirementTitle: reqTitle,
+        testCaseTitle: selectedTc?.title,
+        packagePrefix,
+      });
       const targetPath = uniquifyTestTargetRel(feHint.relativePath, testCaseId || "");
       setWritePath(targetPath);
       if (localPath && isTauri() && targetPath) {
@@ -1727,9 +1911,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           testCaseId,
           provider: res.provider,
           sourceFileName: outName,
-          artifactKind: isApiKind ? "api" : "unit",
+          artifactKind: "api",
           packagePrefix,
           packageName: res.stackInspect?.package_name,
+          status: "generating",
         });
         const added = await addArtifactToWorkspace({
           projectRoot: localPath,
@@ -1749,12 +1934,13 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           contextSource: usedSource,
           runnerUsed: res.runnerUsed,
           ideConnected: false,
+          jobId: manifest.jobId,
+          ok: true,
         });
         const previews = await loadWorkspacePreviews(localPath, manifest);
         setWsManifest(manifest);
         setWsPreviews(previews);
         setWsSelectedRel(added.entry.targetRel);
-        // Same pipeline as Theo Requirement: 1 TC = batch 1 phần tử → Staging + Verify & Apply.
         const singleRow: BatchRow = {
           key: tc.id,
           testCaseId: tc.testCaseId,
@@ -1766,13 +1952,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         };
         setBatchResults([singleRow]);
         await refreshBatchStaging([singleRow]);
-        message.success(
-          isApiKind
-            ? `Đã sinh API test · Bản nháp (${added.entry.op})`
-            : `Unit Job OK${
-                res.runnerUsed === "AI_CLI" ? " · AI CLI" : ""
-              } · ${labelContextSource(usedSource)} · ${manifest.runId.slice(0, 8)}…`
-        );
+        message.success(`Đã sinh API test · Bản nháp (${added.entry.op})`);
         focusVerifyConsole();
       } else {
         setWsManifest(null);
@@ -1781,14 +1961,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         setBatchResults([]);
         setBatchJobs([]);
         message.success(
-          `Đã sinh ${isApiKind ? "API" : "unit"} test bằng ${res.provider}${
+          `Đã sinh API test bằng ${res.provider}${
             res.runnerUsed === "AI_CLI" ? " · AI CLI" : ""
           } (chưa lưu bản nháp — cần Desktop + project root)`
         );
       }
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : isApiKind ? "Sinh API test thất bại" : "Sinh unit thất bại"
+        e instanceof Error ? e.message : "Sinh API test thất bại"
       );
     } finally {
       setBusy(false);
@@ -1871,6 +2051,54 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
 
     setRepairing(true);
     try {
+      // Unit Repair: Extension → AI CLI (same engine as Gen). API /generate-unit is legacy.
+      if (!isApiKind) {
+        const { repairUnitViaIdeExtension } = await import(
+          "../lib/unitWorkspace/repairUnitViaIde"
+        );
+        const aliases = (serverProject?.meta as { codeAliases?: CodeAliasMap } | null)
+          ?.codeAliases;
+        const out = await repairUnitViaIdeExtension({
+          manifest: current,
+          input: {
+            projectRoot: localPath,
+            projectId: project.id,
+            testCaseId: selectedTc?.testCaseId || testCaseId,
+            title: selectedTc?.title || selected.entry.targetRel,
+            module: selectedTc?.module,
+            targetRel: selected.entry.targetRel,
+            failingTestContent: selected.content,
+            repairContext: `${repairContext}\n\n(failClass=${failClass})`,
+            primaryPath: primary?.pathRel,
+            primaryContent: primary?.content,
+            packagePrefix: current.packagePrefix,
+            testData: selectedTc?.testData,
+            steps: selectedTc?.steps,
+            expectedOutcome: selectedTc?.expectedResult,
+            contextPacket: unitPacketV1 || contextPacket || undefined,
+            codeAliases: aliases,
+          },
+        });
+        if (!out.ok) {
+          message.error(out.error);
+          throw new Error(out.error);
+        }
+        const nextPreviews = await loadWorkspacePreviews(localPath, out.manifest);
+        setResult({
+          code: out.code,
+          suggestedPath: selected.entry.targetRel,
+          fileName: selected.entry.targetRel.split("/").pop() || "test.ts",
+          testCaseId,
+          projectId: project.id,
+          provider: "ide-extension",
+          runnerUsed: "IDE_EXTENSION_REPAIR",
+        });
+        setWsManifest(out.manifest);
+        setWsPreviews(nextPreviews);
+        setWsSelectedRel(selected.entry.targetRel);
+        return out.manifest;
+      }
+
       const unitProjectRules = await loadUnitProjectRules(localPath).catch(() => "");
       const repairBody = {
         projectId: project.id,
@@ -1896,13 +2124,14 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           })),
         ],
         repairContext: `${repairContext}\n\n(failClass=${failClass})`,
-        projectRules: unitProjectRules,
-        projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
         ...(isApiKind ? { openApiSpec: openApiSpec || undefined } : {}),
+        projectRules: unitProjectRules,
+        projectRulesSource: unitProjectRules
+          ? ("unit-conventions" as const)
+          : ("none" as const),
       };
-      const res = isApiKind
-        ? await generateApiTest.run(repairBody)
-        : await generateUnit.run(repairBody);
+      // API Test Repair only — Unit uses Extension path above.
+      const res = await generateApiTest.run(repairBody);
 
       const added = await addArtifactToWorkspace({
         projectRoot: localPath,
@@ -1983,8 +2212,11 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
   }
 
   const pipelineStep = useMemo(() => {
-    if (wsManifest && (wsManifest.status === "pass" || wsManifest.status === "applied")) return 2;
+    if (wsManifest?.status === "applied") return 3;
+    if (wsManifest && (wsManifest.status === "pass" || wsManifest.status === "fail" || wsManifest.status === "verifying"))
+      return 2;
     if (result || wsManifest) return 1;
+    if (isIdeCodegenReady()) return 0;
     return 0;
   }, [wsManifest, result]);
 
@@ -2051,8 +2283,50 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           }
         />
 
-        <IdeConnectPanel />
-        <CodegenResultPanel title="IDE Extension — Apply / Run tree" />
+        {!isIdeCodegenReady() && !isApiKind ? (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message="Connect IDE bắt buộc trước Gen Unit"
+            description={
+              <span>
+                Thứ tự: Approve (ghi TC MD) →{" "}
+                <Link to={ROUTES.projects}>Connect IDE (Dự án)</Link> → Gen → Verify → Apply.
+                Không còn fallback API tự động.
+              </span>
+            }
+          />
+        ) : null}
+        <CodegenResultPanel title="IDE Extension — Gen / Apply / Run" />
+        {wsManifest?.timeline?.length ? (
+          <Collapse
+            style={{ marginBottom: 8 }}
+            items={[
+              {
+                key: "timeline",
+                label: `Job timeline · ${wsManifest.jobId || wsManifest.runId} · ${wsManifest.status}${
+                  wsManifest.via ? ` · ${wsManifest.via}` : ""
+                }`,
+                children: (
+                  <Typography.Paragraph
+                    style={{ margin: 0, fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap" }}
+                  >
+                    {(wsManifest.timeline || [])
+                      .map(
+                        (e) =>
+                          `${e.at}  ${e.event}${e.detail ? ` — ${e.detail}` : ""}`
+                      )
+                      .join("\n")}
+                    {wsManifest.transforms?.length
+                      ? `\ntransforms: ${wsManifest.transforms.join(", ")}`
+                      : ""}
+                  </Typography.Paragraph>
+                ),
+              },
+            ]}
+          />
+        ) : null}
 
         {noApproved ? (
           <Card style={{ textAlign: "center", padding: "48px 24px" }}>
@@ -2081,8 +2355,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         <>
       <Steps
         current={pipelineStep}
-        style={{ marginTop: 16, marginBottom: 8, maxWidth: 640 }}
+        style={{ marginTop: 16, marginBottom: 8, maxWidth: 720 }}
         items={[
+          { title: "Approve + IDE" },
           { title: "Unit Job" },
           { title: "Verify" },
           { title: "Apply" },
@@ -2199,7 +2474,8 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                   !localPath ||
                   !isTauri() ||
                   batchRunStatus === "paused" ||
-                  (busy && batchRunStatus === "running")
+                  (busy && batchRunStatus === "running") ||
+                  (!isApiKind && !isIdeCodegenReady())
                 }
               >
                 ⚡ Chạy Unit Job · Tất cả Unit TC trong Requirement ({filteredTestCases.length} TC)
@@ -2349,28 +2625,32 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               ) : null}
             </div>
 
-            <Button
-              type="primary"
-              size="large"
-              icon={<ThunderboltOutlined />}
-              onClick={() => void runUnitJob()}
-              loading={busy}
-              disabled={
-                !aiReady ||
-                !testCaseId ||
-                !runnerOk ||
-                !localPath ||
-                !isTauri() ||
-                !(
-                  Boolean(contextPacket?.primaryPath) ||
-                  Boolean(sourceFile) ||
-                  Boolean(sourceCode.trim()) ||
-                  (isApiKind && Boolean(openApiSpec.trim()))
-                )
-              }
-            >
-              Chạy Unit Job
-            </Button>
+            <Space wrap>
+              <Button
+                type="primary"
+                size="large"
+                icon={<ThunderboltOutlined />}
+                onClick={() => void runUnitJob()}
+                loading={busy}
+                disabled={
+                  !aiReady ||
+                  !testCaseId ||
+                  !runnerOk ||
+                  !localPath ||
+                  !isTauri() ||
+                  (isApiKind
+                    ? !(
+                        Boolean(contextPacket?.primaryPath) ||
+                        Boolean(sourceFile) ||
+                        Boolean(sourceCode.trim()) ||
+                        Boolean(openApiSpec.trim())
+                      )
+                    : !isIdeCodegenReady())
+                }
+              >
+                Chạy Unit Job
+              </Button>
+            </Space>
 
             {batchResults.length > 0 ? (
               <BatchRunConsole

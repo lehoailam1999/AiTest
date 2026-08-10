@@ -26,10 +26,16 @@ type IdeBridgeSessionState = {
   confidence: string | null;
   language: string | null;
   lastFocusAt: number | null;
+  /** Phase 2 — negotiated capabilities from health */
+  capabilities: string[];
+  extensionVersion: string | null;
+  /** Phase 2 — reusable Unit Gen CLI session id */
+  unitGenSessionId: string | null;
   connect: () => Promise<void>;
   disconnect: () => void;
   /** Clear caret-boost UI without disconnecting bridge */
   clearFocus: () => void;
+  setUnitGenSession: (sessionId: string | null) => void;
   /** Full packet on demand (generate path) */
   getSemanticContext: () => Promise<IdeSemanticPacket | null>;
 };
@@ -46,6 +52,9 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
   confidence: null,
   language: null,
   lastFocusAt: null,
+  capabilities: [],
+  extensionVersion: null,
+  unitGenSessionId: null,
 
   connect: async () => {
     if (get().status === "connecting") return;
@@ -53,10 +62,26 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
     if (get().status === "connected" || conn) {
       unsubFocus?.();
       unsubFocus = null;
+      const prevSession = get().unitGenSessionId;
+      if (prevSession && conn?.client.isConnected) {
+        try {
+          await conn.client.codegenCloseSession({ sessionId: prevSession });
+        } catch {
+          /* ignore */
+        }
+      }
       conn?.client.disconnect();
       conn = null;
     }
-    set({ status: "connecting", error: null, focus: null, workspaceRoot: null });
+    set({
+      status: "connecting",
+      error: null,
+      focus: null,
+      workspaceRoot: null,
+      capabilities: [],
+      extensionVersion: null,
+      unitGenSessionId: null,
+    });
     try {
       if (!isTauri()) {
         throw new Error("Cần Desktop (Tauri) để đọc ide-bridge.json");
@@ -93,6 +118,8 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
           confidence: null,
           language: null,
           workspaceRoot: health.workspaceRoot ?? discovery.workspaceRoot ?? null,
+          capabilities: health.capabilities ?? [],
+          extensionVersion: health.extensionVersion ?? null,
           error: null,
           lastFocusAt: null,
         });
@@ -102,6 +129,8 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
           ide: discovery.ide,
           focus: null,
           workspaceRoot: discovery.workspaceRoot ?? null,
+          capabilities: [],
+          extensionVersion: null,
           error: null,
         });
       }
@@ -113,13 +142,20 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
         ide: null,
         focus: null,
         workspaceRoot: null,
+        capabilities: [],
+        extensionVersion: null,
+        unitGenSessionId: null,
       });
     }
   },
 
   disconnect: () => {
+    const sessionId = get().unitGenSessionId;
     unsubFocus?.();
     unsubFocus = null;
+    if (sessionId && conn?.client.isConnected) {
+      void conn.client.codegenCloseSession({ sessionId }).catch(() => {});
+    }
     conn?.client.disconnect();
     conn = null;
     set({
@@ -131,6 +167,9 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
       confidence: null,
       language: null,
       lastFocusAt: null,
+      capabilities: [],
+      extensionVersion: null,
+      unitGenSessionId: null,
     });
   },
 
@@ -141,6 +180,10 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
       language: null,
       lastFocusAt: null,
     });
+  },
+
+  setUnitGenSession: (sessionId) => {
+    set({ unitGenSessionId: sessionId });
   },
 
   getSemanticContext: async () => {

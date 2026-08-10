@@ -1,14 +1,22 @@
 /**
- * Knowledge BUSINESS_FLOWS Mermaid — ~3× compact size, centered in panel.
+ * Knowledge BUSINESS_FLOWS Mermaid — full height; zoom width only.
  */
 import { useEffect, useId, useRef, useState } from "react";
-import { Typography } from "antd";
+import { Button, Space, Typography } from "antd";
+import {
+  ZoomInOutlined,
+  ZoomOutOutlined,
+} from "@ant-design/icons";
 
 type Props = {
   chart: string;
 };
 
 type MermaidApi = typeof import("mermaid").default;
+
+const MIN_SCALE = 0.5;
+const MAX_SCALE = 2.5;
+const STEP = 0.25;
 
 let mermaidImport: Promise<MermaidApi> | null = null;
 
@@ -17,7 +25,6 @@ async function getMermaid(): Promise<MermaidApi> {
     mermaidImport = import("mermaid").then((m) => m.default);
   }
   const mermaid = await mermaidImport;
-  // Re-init each time so size/theme knobs stay in sync after code updates
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: "strict",
@@ -42,11 +49,11 @@ async function getMermaid(): Promise<MermaidApi> {
     flowchart: {
       htmlLabels: false,
       curve: "basis",
-      /* ~3× compact (6/22/28) */
       padding: 20,
       nodeSpacing: 66,
       rankSpacing: 84,
-      useMaxWidth: true,
+      // false: keep intrinsic size so parent width zoom works (useMaxWidth → 0-width parent collapses)
+      useMaxWidth: false,
     },
   });
   return mermaid;
@@ -56,6 +63,7 @@ export default function MermaidBlock({ chart }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const reactId = useId().replace(/:/g, "");
   const [error, setError] = useState<string | null>(null);
+  const [scale, setScale] = useState(1);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,9 +80,12 @@ export default function MermaidBlock({ chart }: Props) {
         const svgEl = hostRef.current.querySelector("svg");
         if (svgEl) {
           svgEl.setAttribute("role", "img");
-          svgEl.removeAttribute("width");
           svgEl.removeAttribute("height");
           svgEl.setAttribute("class", "knowledge-mermaid-svg");
+          // Width driven by CSS (.knowledge-mermaid-host width %); keep aspect via viewBox
+          svgEl.style.width = "100%";
+          svgEl.style.height = "auto";
+          svgEl.style.maxHeight = "none";
         }
       } catch (e) {
         if (!cancelled) {
@@ -91,9 +102,44 @@ export default function MermaidBlock({ chart }: Props) {
 
   if (!chart.trim()) return null;
 
+  const zoomOut = () =>
+    setScale((s) => Math.max(MIN_SCALE, Math.round((s - STEP) * 100) / 100));
+  const zoomIn = () =>
+    setScale((s) => Math.min(MAX_SCALE, Math.round((s + STEP) * 100) / 100));
+  const zoomReset = () => setScale(1);
+
   return (
     <div className="knowledge-mermaid-card">
-      <div ref={hostRef} className="knowledge-mermaid" />
+      <div className="knowledge-mermaid-toolbar">
+        <Space size={4}>
+          <Button
+            type="text"
+            size="small"
+            icon={<ZoomOutOutlined />}
+            onClick={zoomOut}
+            disabled={scale <= MIN_SCALE}
+            aria-label="Zoom out"
+          />
+          <Button type="text" size="small" onClick={zoomReset} aria-label="Reset zoom">
+            {Math.round(scale * 100)}%
+          </Button>
+          <Button
+            type="text"
+            size="small"
+            icon={<ZoomInOutlined />}
+            onClick={zoomIn}
+            disabled={scale >= MAX_SCALE}
+            aria-label="Zoom in"
+          />
+        </Space>
+      </div>
+      <div className="knowledge-mermaid">
+        <div
+          ref={hostRef}
+          className="knowledge-mermaid-host"
+          style={{ width: `${scale * 100}%` }}
+        />
+      </div>
       {error ? (
         <Typography.Paragraph
           type="secondary"

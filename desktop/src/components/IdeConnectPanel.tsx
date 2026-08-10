@@ -1,5 +1,6 @@
 /**
  * P2/P5.5 — Connect IDE + live focus (stack-agnostic; VS Code / Cursor / …).
+ * Primary home: Modal Tạo/Sửa dự án (cùng gắn source root). Unit/E2E link về Dự án → Sửa.
  */
 import { useEffect } from "react";
 import { Alert, Button, Space, Tag, Typography } from "antd";
@@ -174,7 +175,7 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
               onClick={() => void connect()}
               disabled={!tauri}
             >
-              Connect IDE (tuỳ chọn)
+              Connect IDE
             </Button>
           )}
         </Space>
@@ -184,7 +185,7 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
         <Alert
           type={!tauri ? "error" : "warning"}
           showIcon
-          title={!tauri ? "Cần cửa sổ AITest Desktop (Tauri)" : "IDE viewer chưa kết nối (tuỳ chọn)"}
+          title={!tauri ? "Cần cửa sổ AITest Desktop (Tauri)" : "IDE chưa kết nối"}
           description={
             !tauri ? (
               <span>
@@ -194,10 +195,8 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
               </span>
             ) : (
               <span>
-                Không bắt buộc để chạy Unit Job. Cài plugin AITest (Cursor / VS Code /{" "}
-                <strong>Antigravity</strong>) chỉ khi muốn mở file / boost — rồi Reload Window.
-                Status bar phải có <strong>AITest :port</strong>. Nếu thiếu: Command Palette →{" "}
-                <strong>AITest: Start IDE Bridge</strong>, rồi bấm Connect IDE (tuỳ chọn).
+                Mở folder source đích trong Cursor → status bar <strong>AITest :port</strong> →
+                bấm Connect. Cùng bước với gắn thư mục source ở trên.
                 {error ? (
                   <>
                     {" "}

@@ -53,3 +53,49 @@ export type AnalyzeIntentResult = {
   keywords: string[];
   actionHint?: string;
 };
+
+/** Phase 1 Implementation Planner — TC → entry + multi-layer deps (Desktop). */
+export type UnitPlanLayerKind =
+  | "handler"
+  | "service"
+  | "controller"
+  | "usecase"
+  | "other";
+
+export type UnitPlanLayerRole =
+  | "entry"
+  | "dependency"
+  | "contract"
+  | "test_fixture";
+
+export type UnitPlanEntry = {
+  pathRel: string;
+  symbol?: string;
+  methodHints: string[];
+  layer: UnitPlanLayerKind;
+};
+
+export type UnitPlanLayer = {
+  pathRel: string;
+  role: UnitPlanLayerRole;
+  reason: string;
+};
+
+export type UnitImplementationPlanStatus =
+  | "ready"
+  | "needs_marker"
+  | "unresolved";
+
+export type UnitImplementationPlan = {
+  entry: UnitPlanEntry | null;
+  layers: UnitPlanLayer[];
+  mocks: string[];
+  existingTests: string[];
+  framework?: string;
+  confidence: number;
+  markers: { paths: string[]; codes: string[] };
+  status: UnitImplementationPlanStatus;
+  notes: string[];
+  /** Intent plan used as input */
+  intent: TestPlan;
+};

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildDependencyGraph, resolveRelativeImport } from "./buildDependencyGraph.js";
+import { buildDependencyGraph, resolveRelativeImport, resolveImportSpecifier } from "./buildDependencyGraph.js";
 import { buildSymbolIndex } from "./buildSymbolIndex.js";
 import { shouldIndexPath } from "./constants.js";
 import { syncProjectIndex } from "./incrementalSync.js";
 import { lookupSymbol } from "./lookup.js";
 import { parseTsJsSource } from "./parseTsAst.js";
+import { parseCsharpSource } from "./parseCsharp.js";
 import type { CodeIndexIo } from "./types.js";
 
 function memoryIo(files: Record<string, string>): CodeIndexIo {
@@ -27,9 +28,82 @@ function memoryIo(files: Record<string, string>): CodeIndexIo {
 describe("codeIndex Phase 1", () => {
   it("shouldIndexPath skips node_modules and dist", () => {
     assert.equal(shouldIndexPath("src/order.service.ts"), true);
+    assert.equal(shouldIndexPath("src/App/PersonGetAllQueryHandler.cs"), true);
     assert.equal(shouldIndexPath("node_modules/foo/index.ts"), false);
     assert.equal(shouldIndexPath("dist/app.js"), false);
     assert.equal(shouldIndexPath(".ai-test/index.db"), false);
+  });
+
+  it("parses C# class/handler methods for Approve symbol rank", () => {
+    const src = `
+namespace App.Queries.Person;
+public class PersonGetAllQueryHandler
+{
+    public async Task<List<PersonDto>> Handle(PersonGetAllQuery request, CancellationToken ct)
+    {
+        var term = (request.SearchTerm ?? string.Empty).Trim().ToLower();
+        return people.Where(p => p.FullName.ToLower().Contains(term)).ToList();
+    }
+}
+`;
+    const parsed = parseCsharpSource(
+      "src/App/Queries/Person/PersonGetAllQueryHandler.cs",
+      src
+    );
+    assert.ok(parsed);
+    assert.equal(parsed!.language, "cs");
+    assert.ok(
+      parsed!.symbols.some(
+        (s) => s.name === "PersonGetAllQueryHandler" && s.kind === "class"
+      )
+    );
+    assert.ok(
+      parsed!.symbols.some(
+        (s) => s.name === "Handle" && s.kind === "method"
+      )
+    );
+  });
+
+  it("indexes C# auto-property names (SearchTerm) for Approve bridges", () => {
+    const src = `
+public class ContactSearchQuery {
+  public string? SearchTerm { get; set; }
+  public int Page { get; set; }
+}
+`;
+    const parsed = parseCsharpSource(
+      "src/App/Queries/Contact/ContactSearchQuery.cs",
+      src
+    );
+    assert.ok(parsed);
+    assert.ok(
+      parsed!.symbols.some((s) => s.name === "ContactSearchQuery"),
+      JSON.stringify(parsed!.symbols)
+    );
+    assert.ok(
+      parsed!.symbols.some((s) => s.name === "SearchTerm"),
+      JSON.stringify(parsed!.symbols)
+    );
+  });
+
+  it("syncProjectIndex indexes .cs into symbolIndex", async () => {
+    const files: Record<string, string> = {
+      "src/App/Queries/Person/PersonGetAllQueryHandler.cs": `
+public class PersonGetAllQueryHandler {
+  public Task Handle(PersonGetAllQuery request) {
+    var t = request.SearchTerm.ToLower();
+    return people.Where(p => p.FullName.ToLower().Contains(t));
+  }
+}
+`,
+      "src/app/order.service.ts": `export class OrderService { create() {} }`,
+    };
+    const io = memoryIo(files);
+    const first = await syncProjectIndex("/proj", io, { force: true });
+    assert.ok(first.snapshot.files["src/App/Queries/Person/PersonGetAllQueryHandler.cs"]);
+    const hits = lookupSymbol(first.snapshot, "PersonGetAllQueryHandler");
+    assert.ok(hits.length >= 1, JSON.stringify(hits));
+    assert.match(hits[0]!.pathRel, /PersonGetAllQueryHandler\.cs$/);
   });
 
   it("parses class, methods, imports, exports", () => {
@@ -100,6 +174,95 @@ export class OrderService {
     assert.equal(third.parsed, 1);
     assert.equal(third.reused, 1);
     assert.ok(lookupSymbol(third.snapshot, "update").length >= 1);
+  });
+
+  it("parses C# usings and ctor type refs for related/planner", () => {
+    const src = `
+using System;
+using System.Threading;
+using App.Contracts;
+using Microsoft.Extensions.Logging;
+
+namespace App.Handlers;
+public class CreateOrderHandler
+{
+    private readonly IOrderRepository _repo;
+    private readonly OrderDto _seed;
+    public CreateOrderHandler(IOrderRepository repo, ILogger<CreateOrderHandler> log)
+    {
+        _repo = repo;
+    }
+    public Task Handle(CreateOrderCommand cmd, CancellationToken ct) => Task.CompletedTask;
+}
+`;
+    const parsed = parseCsharpSource(
+      "src/App/Handlers/CreateOrderHandler.cs",
+      src
+    );
+    assert.ok(parsed);
+    assert.ok(
+      parsed!.imports.some((i) => i.from === "App.Contracts"),
+      "keeps project using"
+    );
+    assert.ok(
+      !parsed!.imports.some((i) => /^System\b/.test(i.from)),
+      "skips System usings"
+    );
+    assert.ok(
+      parsed!.imports.some((i) => i.from === "IOrderRepository"),
+      "field/ctor type IOrderRepository"
+    );
+    assert.ok(
+      parsed!.imports.some((i) => i.from === "OrderDto"),
+      "field type OrderDto"
+    );
+    assert.ok(
+      !parsed!.imports.some((i) => i.from === "ILogger"),
+      "skips ILogger BCL-ish"
+    );
+  });
+
+  it("resolves C# type import via symbolIndex to pathRel", () => {
+    const known = new Set([
+      "src/App/Handlers/CreateOrderHandler.cs",
+      "src/App/Contracts/IOrderRepository.cs",
+      "src/App/Dtos/OrderDto.cs",
+    ]);
+    const symbolIndex = {
+      iorderrepository: ["src/App/Contracts/IOrderRepository.cs"],
+      orderdto: ["src/App/Dtos/OrderDto.cs"],
+      createorderhandler: ["src/App/Handlers/CreateOrderHandler.cs"],
+    };
+    assert.equal(
+      resolveImportSpecifier(
+        "src/App/Handlers/CreateOrderHandler.cs",
+        "IOrderRepository",
+        known,
+        { symbolIndex }
+      ),
+      "src/App/Contracts/IOrderRepository.cs"
+    );
+  });
+
+  it("buildDependencyGraph resolves C# types when symbolIndex provided", () => {
+    const known = new Set([
+      "src/App/Handlers/CreateOrderHandler.cs",
+      "src/App/Contracts/IOrderRepository.cs",
+    ]);
+    const symbolIndex = {
+      iorderrepository: ["src/App/Contracts/IOrderRepository.cs"],
+    };
+    const deps = buildDependencyGraph(
+      {
+        "src/App/Handlers/CreateOrderHandler.cs": [
+          { from: "IOrderRepository", names: ["IOrderRepository"], line: 1 },
+        ],
+      },
+      { knownFiles: known, symbolIndex }
+    );
+    assert.deepEqual(deps["src/App/Handlers/CreateOrderHandler.cs"], [
+      "src/App/Contracts/IOrderRepository.cs",
+    ]);
   });
 
   it("buildSymbolIndex and dependency graph", () => {

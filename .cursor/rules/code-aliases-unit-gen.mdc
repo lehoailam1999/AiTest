@@ -1,0 +1,47 @@
+---
+description: Portable Unit Approve grounding — Module → Function → Title from index.db (no product nouns)
+alwaysApply: true
+---
+
+# Unit Approve grounding (every project)
+
+Use this playbook for **any** SUT repo. Never hardcode one product’s domain (Evidence, Order, …) into AITest protocol or shared examples.
+
+## Progressive match (SoT — AITest then sync MD)
+
+```
+Module → Function → Title → index.db (path/symbol) → prefer *Handler/*Service → write path:/code: → sync MD to SUT
+```
+
+| Step | Input | Effect on index.db |
+| --- | --- | --- |
+| 1 | **Module** (Requirement Studio title) | Scope / lock **source-module family** folders (fail-closed if Latin/alias tokens miss all paths; else feature-folder discover) |
+| 2 | **Function** of the TC (`tc.module`) | Rank / discover **files inside that family** (bridges + preferTokens) |
+| 3 | **Title** (+ steps/expected) | Refine symbols/paths **only inside that family**; prefer `*CommandHandler` / `*Service` |
+| 4 | Body-rule (optional) | Confirm excerpt patterns when intent needs it; same-family ties are **not** ambiguity |
+
+Machine keys in sync MD: `requirement:` = Module; `function:` / legacy `module:` = Function.
+
+Soft writeBack must **not** latch Auth/Mail/Notification/signed-URL generators unless Module tokens hit that stem. Wrong **domain** folders are blocked by moduleGate fail-closed + feature-folder discover — not by product denylists.
+
+## Portable vs optional override
+
+| Portable (AITest) | Per-project (SUT) — optional |
+| --- | --- |
+| Progressive Module→Function→Title on `index.db` | `.ai-test/code-aliases.json` nudge only |
+| IT verbs in `GENERIC_VI_*` + `UNIT_INTENT_DEFS` | Manual `path:` / `code:` on one TC |
+| Logic-layer + same-family Handler prefer | `sutMap` / `domainGuards` pins |
+
+**Empty SUT knobs are valid.** `sutMap={}`, `domainGuards=[]`, missing `code-aliases.json` / `unit-intent-rules.json` must still Approve from `index.db`.
+
+## Forbidden
+
+- Product nouns in `viCodeAliases.ts` / protocol
+- Treating same-family Create/Handler/Delete score ties as skip (`ambiguous margin`)
+- Absolute `D:/...` paths in markers
+- Copying another project’s `code-aliases.json`
+- **Agent inventing/filling** SUT `.ai-test/code-aliases.json`, `sutMap`, `domainGuards`, or `unit-intent-rules.json` with product nouns — fix ranking in AITest instead
+
+## After changes
+
+Restart AITest Desktop → Approve again → MD must show `path:` / `code:` (not only `# sut-resolve: skipped`).

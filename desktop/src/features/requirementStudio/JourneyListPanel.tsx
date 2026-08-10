@@ -16,7 +16,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { requirementStudio } from "../../api";
 import type { RequirementStudioWorkspace } from "../../api/types";
@@ -44,6 +44,9 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
   const [createOpen, setCreateOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
+  const [editRow, setEditRow] = useState<RequirementStudioWorkspace | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
@@ -96,6 +99,32 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
       message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const openEdit = (row: RequirementStudioWorkspace) => {
+    setEditRow(row);
+    setEditTitle(row.title || "");
+  };
+
+  const saveEdit = async () => {
+    if (!editRow) return;
+    const next = editTitle.trim();
+    if (!next) {
+      message.warning("Nhập tên Requirement");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      await requirementStudio.updateWorkspace(editRow.id, { title: next });
+      message.success(`Đã cập nhật «${next}»`);
+      setEditRow(null);
+      setEditTitle("");
+      await reload();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -171,11 +200,14 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
     {
       title: "",
       key: "actions",
-      width: 280,
+      width: 340,
       render: (_, row) => (
         <Space wrap>
           <Button type="primary" size="small" onClick={() => onOpenJourney(row.id)}>
             Mở
+          </Button>
+          <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
+            Sửa
           </Button>
           {(row.tcPending ?? 0) > 0 && onOpenReview ? (
             <Button size="small" onClick={() => onOpenReview(row.id)}>
@@ -294,6 +326,31 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
           placeholder="Tên Requirement"
           maxLength={300}
           onPressEnter={() => void createJourney()}
+        />
+      </Modal>
+
+      <Modal
+        title="Sửa Requirement"
+        open={Boolean(editRow)}
+        onCancel={() => {
+          setEditRow(null);
+          setEditTitle("");
+        }}
+        onOk={() => void saveEdit()}
+        confirmLoading={savingEdit}
+        okText="Lưu"
+        cancelText="Huỷ"
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+          Đổi tên Requirement. Tài liệu / phân tích / TC giữ nguyên.
+        </Typography.Paragraph>
+        <Input
+          value={editTitle}
+          onChange={(e) => setEditTitle(e.target.value)}
+          placeholder="Tên Requirement"
+          maxLength={300}
+          onPressEnter={() => void saveEdit()}
         />
       </Modal>
     </div>

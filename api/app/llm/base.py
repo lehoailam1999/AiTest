@@ -135,13 +135,13 @@ class GenerateContext:
 # Ví dụ schema-only — placeholder, KHÔNG phải domain mẫu để copy vào dự án thật.
 _VIETNAMESE_TC_EXAMPLE_UNIT = (
     '{"testCases":['
-    '{"title":"[Tên chức năng trong Phân tích] - [Hàm/method] - [Kết quả kỳ vọng]",'
+    '{"title":"[Tên FEATURES] - [Hành động BE tiếng Việt] - [Kết quả kỳ vọng]",'
     '"type":"Unit","priority":"Cao","severity":"Nặng",'
     '"module":"[Tên FEATURES trong Phân tích]",'
     '"precondition":"Mock dependency theo Phân tích/source (nếu có)",'
     '"steps":"1. Chuẩn bị input + mock\\n2. Gọi đơn vị cần test\\n3. Assert kết quả",'
     '"expectedResult":"Return/exception/state đúng mục Phân tích",'
-    '"testData":"trace: FEATURES/[tên]; input=... (từ VALIDATION/BR)",'
+    '"testData":"trace: BUSINESS_RULES/[id|name]; input=... (1 tín hiệu/TC)",'
     '"automationReady":true}'
     "]}"
 )
@@ -161,7 +161,7 @@ _VIETNAMESE_TC_EXAMPLE_E2E = (
 
 _VIETNAMESE_TC_EXAMPLE = (
     '{"testCases":['
-    '{"title":"[Chức năng] - [Đơn vị logic] - [Kết quả]",'
+    '{"title":"[Chức năng] - [Hành động BE] - [Kết quả]",'
     '"type":"Unit","priority":"Cao","severity":"Nặng",'
     '"module":"[Module trong tài liệu]","precondition":"Mock theo tài liệu",'
     '"steps":"1. Gọi đơn vị cần test\\n2. Assert",'
@@ -270,7 +270,9 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
     eng = (ctx.preferred_engine or "").strip().lower()
     if eng == "unit":
         type_block = (
-            "PHIÊN ENGINE = UNIT: mọi TC type=Unit; không UI/E2E. "
+            "PHIÊN ENGINE = UNIT: mọi TC type=Unit — BACKEND ONLY, portable mọi stack "
+            "(logic/service/handler/validator/domain; tên SUT từ dự án); "
+            "cấm form/popup/wizard/Bước/UI/E2E. "
             "SoT + map 11 tiêu chí + trace → khối «UNIT ← PHÂN TÍCH» trong QUY TẮC HỆ THỐNG.\n"
         )
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
@@ -450,7 +452,10 @@ def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
     eng = (ctx.preferred_engine or "").strip().lower()
     if eng == "unit":
         type_schema = "Unit"
-        type_line = "ENGINE=UNIT: mọi TC type=Unit (hàm/service/API handler — không browser UI)."
+        type_line = (
+            "ENGINE=UNIT: mọi TC type=Unit — BACKEND ONLY, portable "
+            "(đơn vị logic SUT của dự án — cấm form/popup/wizard/Bước/UI)."
+        )
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
     elif eng == "e2e":
         type_schema = "E2E"
@@ -1460,8 +1465,13 @@ def unit_system_prompt(
     project_rules: str = "",
     user_rules: str = "",
 ) -> str:
-    from app.llm.uutgs_rules import uutgs_system_block
+    """
+    System prompt for Unit code Gen (API / CLI adapters).
 
+    When ``project_rules`` is present (Desktop ``.ai-test/unit-conventions.md``),
+    that block is the policy SoT — skip UUTGS to avoid duplicate rules.
+    Without project_rules, fall back to UUTGS + emit constraints.
+    """
     lang = language or "theo mã nguồn được cung cấp"
     fw = normalize_framework(testing_framework or framework, language)
     stack_bits = [f"Language: {lang}", f"Test framework: {fw}"]
@@ -1470,8 +1480,7 @@ def unit_system_prompt(
     if assertion_library.strip():
         stack_bits.append(f"Assertion library: {assertion_library.strip()}")
 
-    base = (
-        f"{uutgs_system_block()}\n\n"
+    emit = (
         "## Emit constraints (this job)\n"
         + "\n".join(f"- {b}" for b in stack_bits)
         + "\n"
@@ -1483,6 +1492,20 @@ def unit_system_prompt(
         f"{_unit_bootstrap_safety_rule(lang)}"
         f"{_unit_csharp_import_rule(lang)}"
     )
+
+    proj = (project_rules or "").strip()
+    if proj:
+        # Desktop authoritative unit-conventions — do not also inject UUTGS.
+        base = (
+            "Unit policy SoT is the Project rules block (unit-conventions). "
+            "Follow it; do not invent conflicting rules.\n\n"
+            f"{emit}"
+        )
+    else:
+        from app.llm.uutgs_rules import uutgs_system_block
+
+        base = f"{uutgs_system_block()}\n\n{emit}"
+
     from app.llm.ai_rules import append_layered_rules
 
     return append_layered_rules(
@@ -1562,7 +1585,7 @@ def ensure_node_test_globals_preamble(code: str, language: str = "", framework: 
 
 
 def unit_user_prompt(req: UnitRequest) -> str:
-    """Data packet only — behavior rules live in UUTGS (system prompt)."""
+    """Data packet — policy lives in system prompt (unit-conventions when sent, else UUTGS)."""
     language = infer_language(req)
     class_hint = req.class_name or guess_class_name(req.source_file_name, req.source_code)
     method_hint = req.method_name or "(infer from source + test case)"
@@ -1591,10 +1614,16 @@ def unit_user_prompt(req: UnitRequest) -> str:
     if req.source_file_name and suggested:
         sut_import = sut_module_specifier(suggested, req.source_file_name)
 
+    policy_hint = (
+        "Follow Project rules (unit-conventions) in the system prompt when present; "
+        "otherwise follow UUTGS. Source under test = behavior SoT; Approved TC = scenario intent.\n\n"
+        if (req.project_rules or "").strip()
+        else "Follow UUTGS in the system prompt. Source under test = behavior SoT; "
+        "Approved TC = scenario intent.\n\n"
+    )
     base = (
         f"Generate a unit test file in {language} for the Approved test case below.\n"
-        "Follow UUTGS in the system prompt. Source under test = behavior SoT; "
-        "Approved TC = scenario intent.\n\n"
+        f"{policy_hint}"
         "## Testing stack\n"
         f"Framework: {test_fw}\n"
         f"Mock: {or_dash(req.mock_framework)}\n"
@@ -1614,7 +1643,7 @@ def unit_user_prompt(req: UnitRequest) -> str:
     if is_likely_app_entrypoint(req.source_file_name, req.source_code):
         base += (
             "\n## Entrypoint / bootstrap SUT\n"
-            "This file looks like an app entrypoint. Per UUTGS §9: do NOT import/execute it; "
+            "This file looks like an app entrypoint. Do NOT import/execute it; "
             "test the extractable unit (pipe/service/handler/validator/DTO) using Related source "
             "when provided; mirror config from the snippet in Arrange.\n"
         )
