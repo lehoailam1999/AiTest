@@ -599,6 +599,23 @@ export const generateE2e = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  /** Phase B — guard-only (no LLM) for Extension-local drafts */
+  codegenGuard: (body: {
+    projectId: string;
+    files: E2EFileDto[];
+    featurePath?: string;
+    locatorContract?: string;
+    executionContext?: string;
+    authHints?: string;
+    authMode?: string;
+    useStorageState?: boolean;
+    title?: string;
+    testData?: string;
+  }) =>
+    authFetch<{ status: string; files: E2EFileDto[] }>("/e2e-codegen-guard", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   artifactsSync: (body: {
     projectId: string;
     projectRoot: string;

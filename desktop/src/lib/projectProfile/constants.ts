@@ -8,6 +8,7 @@ export const PROFILE_REL_PATH = ".ai-test/project.profile.json";
 export const E2E_CONVENTIONS_REL = ".ai-test/e2e-conventions.md";
 export const E2E_PLAYWRIGHT_RUN_REL = ".ai-test/e2e-playwright-run.md";
 export const UNIT_CONVENTIONS_REL = ".ai-test/unit-conventions.md";
+export const TEST_CASES_DIR = ".ai-test/test-cases";
 
 export const DEFAULT_TEST_ROOT = "AItest/E2ETest";
 export const DEFAULT_CANONICAL_STORAGE = "./fixtures/storageState.json";

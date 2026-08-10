@@ -16,6 +16,8 @@ import {
   Typography,
 } from "antd";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { IdeConnectPanel } from "../components/IdeConnectPanel";
+import { CodegenResultPanel } from "../components/CodegenResultPanel";
 import { generateTcUrl } from "../lib/testingJourney";
 import { ROUTES, requirementUrl, activityUrl } from "../lib/productRoutes";
 import {
@@ -2048,6 +2050,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             ) : null
           }
         />
+
+        <IdeConnectPanel />
+        <CodegenResultPanel title="IDE Extension — Apply / Run tree" />
 
         {noApproved ? (
           <Card style={{ textAlign: "center", padding: "48px 24px" }}>

@@ -16,6 +16,7 @@ import {
 } from "../testOutputLayout";
 import { audit } from "../../api";
 import type { E2EFileDto } from "../../api";
+import { ideApplyFiles, isIdeCodegenReady, rememberCodegenResult } from "../ideProtocol";
 
 export type E2eStagedFile = {
   targetRel: string;
@@ -220,8 +221,8 @@ export async function applyE2eStaging(
   projectRoot: string,
   session: E2eStagingSession
 ): Promise<ApplyE2eResult> {
-  if (!isTauri()) {
-    throw new Error("Apply E2E cần Desktop (Tauri).");
+  if (!isTauri() && !isIdeCodegenReady()) {
+    throw new Error("Apply E2E cần Desktop (Tauri) hoặc IDE Extension bridge.");
   }
   if (!session.files.length) {
     throw new Error("Không có file trong staging.");
@@ -231,11 +232,35 @@ export async function applyE2eStaging(
   const backups = await captureE2eBackups(projectRoot, session.files);
 
   try {
-    for (const f of session.files) {
-      const targetRel = assertE2eTarget(f.targetRel);
-      const content = await readTextFile(projectRoot, f.workspaceRel);
-      await writeTextFile(projectRoot, targetRel, content);
-      applied.push(targetRel);
+    // Phase A: prefer IDE Extension apply when bridge is connected.
+    if (isIdeCodegenReady()) {
+      const files: { path: string; content: string; kind: string }[] = [];
+      for (const f of session.files) {
+        const targetRel = assertE2eTarget(f.targetRel);
+        const content = await readTextFile(projectRoot, f.workspaceRel);
+        files.push({ path: targetRel, content, kind: f.kind || "spec" });
+      }
+      const ideResult = await ideApplyFiles({
+        projectId: session.projectId,
+        projectRoot,
+        layout: "e2e",
+        files,
+        packagePrefix: session.packagePrefix || undefined,
+      });
+      rememberCodegenResult(ideResult);
+      for (const g of ideResult.workspaceTree.generatedFiles) {
+        if (g.status === "CREATED" || g.status === "UPDATED") applied.push(g.path);
+        if (g.status === "REJECTED_JAIL" || g.status === "ERROR") {
+          throw new Error(g.error || `IDE Apply failed: ${g.path}`);
+        }
+      }
+    } else {
+      for (const f of session.files) {
+        const targetRel = assertE2eTarget(f.targetRel);
+        const content = await readTextFile(projectRoot, f.workspaceRel);
+        await writeTextFile(projectRoot, targetRel, content);
+        applied.push(targetRel);
+      }
     }
 
     // Audit apply

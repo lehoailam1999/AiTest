@@ -1202,6 +1202,80 @@ async def e2e_sandbox_module_route(request: Request, db: Annotated[Session, Depe
     )
 
 
+@router.post("/e2e-codegen-guard")
+async def e2e_codegen_guard_only_route(request: Request, db: Annotated[Session, Depends(get_db)]):
+    """
+    Phase B helper: run apply_e2e_codegen_guards on Extension-generated files
+    without invoking the LLM. Desktop/Extension posts draft files → guarded files.
+    """
+    body = await request.json()
+    project_id = _uuid(str(body.get("projectId") or ""))
+    if project_id is None:
+        return errors(400, "projectId required")
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.deleted_at.is_(None))
+        .first()
+    )
+    if project is None:
+        return errors(404, "Project not found")
+
+    files_in = body.get("files") or []
+    from app.llm.base import E2EFile
+    from app.services.e2e_codegen_guard import (
+        E2EStrictGateError,
+        apply_e2e_codegen_guards,
+    )
+
+    files: list[E2EFile] = []
+    for item in files_in:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        content = str(item.get("content") or "")
+        if not path:
+            continue
+        files.append(
+            E2EFile(
+                path=path,
+                content=content,
+                kind=str(item.get("kind") or "spec"),
+            )
+        )
+    if not files:
+        return errors(400, "files[] required")
+
+    try:
+        guarded = apply_e2e_codegen_guards(
+            files,
+            feature_path=str(body.get("featurePath") or ""),
+            auth_hints=str(body.get("executionContext") or body.get("authHints") or ""),
+            locator_contract=str(body.get("locatorContract") or ""),
+            auth_mode=str(body.get("authMode") or body.get("mode") or "") or None,
+            use_storage=body.get("useStorageState"),
+            test_case_title=str(body.get("title") or ""),
+            test_data=str(body.get("testData") or ""),
+            strict_gate=bool(body.get("strictGate", True)),
+            enforce_journey=bool(body.get("enforceJourney", True)),
+            enforce_stubs=bool(body.get("enforceStubs", True)),
+        )
+    except E2EStrictGateError as exc:
+        return errors(400, f"{exc.category}: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("e2e-codegen-guard failed")
+        return errors(400, f"e2e-codegen-guard failed: {exc}")
+
+    return ok(
+        {
+            "status": "OK",
+            "files": [
+                {"path": f.path, "content": f.content, "kind": getattr(f, "kind", "spec")}
+                for f in guarded
+            ],
+        }
+    )
+
+
 @router.post("/e2e-artifacts-sync")
 async def e2e_artifacts_sync_route(request: Request, db: Annotated[Session, Depends(get_db)]):
     body = await request.json()

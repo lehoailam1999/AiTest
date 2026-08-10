@@ -1,135 +1,118 @@
-# Kế Hoạch Triển Khai Kiến Trúc: AITest IDE Extension Plugin & API Callback Protocol
+# Kế Hoạch Triển Khai: AITest IDE Extension Protocol (Unit/E2E Codegen)
 
-> **Mục tiêu tối thượng:** Đạt hiệu năng tối đa (Performance) và đầu ra chuẩn xác 100% (Correct & Complete Output) theo kịch bản: **AITest Tool phát lệnh ➔ AITest Extension tại IDE Dự án A tự động thực thi local ➔ Bắn API Callback thu thập dữ liệu báo cáo về AITest UI Dashboard**.  
-> **Tài nguyên có sẵn:** Packages [`packages/ide-protocol`](../packages/ide-protocol) và Plugins [`ide-plugins/vscode`](../ide-plugins/vscode).  
+> **Mục tiêu:** AITest Desktop ra lệnh → Extension trên IDE Dự án A thực thi local (Apply/Run; sau đó Gen) → Callback báo cáo về UI, **giữ nguyên** rule/guard/output SoT hiện tại.  
+> **Tài nguyên:** [`packages/ide-protocol`](../packages/ide-protocol), [`ide-plugins/vscode`](../ide-plugins/vscode), [`desktop/src/lib/ideBridge`](../desktop/src/lib/ideBridge), [`desktop/src/lib/ideProtocol`](../desktop/src/lib/ideProtocol), [`desktop/src/lib/approvedTcSync`](../desktop/src/lib/approvedTcSync).  
 > **Ngày cập nhật:** 2026-08-06  
+> **Đọc kèm:** [`AUTO_RULES_PHASED_IMPLEMENTATION.md`](AUTO_RULES_PHASED_IMPLEMENTATION.md), [`E2E_STABILITY_BEFORE_PERF_PLAN.md`](E2E_STABILITY_BEFORE_PERF_PLAN.md), [`PERF_JOB_BUILDER_WORKER_POOL_PLAN.md`](PERF_JOB_BUILDER_WORKER_POOL_PLAN.md), [`AITEST_SOURCE_A_INTEGRATION_PLAN.md`](AITEST_SOURCE_A_INTEGRATION_PLAN.md).
 
 ---
 
-## 1. Mô Hình Luồng Kiến Trúc Tổng Thể
+## 0. Quyết định kiến trúc (Hybrid theo phase)
+
+| Phase | Ai Gen code | Ai Apply / Run | Guards / Rules | Approved TC `.md` |
+|-------|-------------|----------------|----------------|-------------------|
+| **A** | Desktop → API CLI | Extension FS + runner | API guards + Desktop `projectRules` | — |
+| **B** | Extension Agent (stub) | Extension | Post-guard bắt buộc | Đọc MD bổ sung (chưa Gen) |
+| **C** | — | — | — | ✅ Sync Approved → `.ai-test/test-cases/` |
+
+**Transport:** Extension = WS JSON-RPC server (port **ephemeral**); Desktop = client. Discovery: `~/.aitest/ide-bridge.json`. **Không** hardcode port 5099.
 
 ```mermaid
-flowchart TD
-    subgraph AITestTool ["1. AITest Tool (Control Center & Dashboard UI)"]
-        UI["AITest UI Dashboard (Màn hình chỉ huy & Báo cáo)"]
-        APIServer["Command Server & Callback API Receiver"]
-    end
-
-    subgraph Protocol ["2. Protocol Transport Layer (@aitest/ide-protocol)"]
-        WebSockets["Local WebSocket / IPC API Channel (port 5099)"]
-        DataSchema["Standard JSON-RPC Schema (Commands & Result Callbacks)"]
-    end
-
-    subgraph ProjectAIDE ["3. IDE Dự Án A (Cursor / VSCode của Dự án A)"]
-        Extension["AITest IDE Extension Plugin (ide-plugins/vscode)"]
-        LocalRules[".ai-test/project.profile.json (Bộ Quy tắc Local Dự án A)"]
-        LocalAgent["Cursor AI Local Agent (Tự sinh Code theo Rule)"]
-        LocalRunner["Native Terminal Test Runner (Playwright/Pytest)"]
-    end
-
-    UI -->|Bấm Nút Ra Lệnh| APIServer
-    APIServer -->|1. Bắn Command Payload| WebSockets
-    WebSockets --> DataSchema
-    DataSchema -->|2. Receive Command| Extension
-    Extension --> LocalRules
-    Extension -->|3. Gọi AI Local| LocalAgent
-    LocalAgent -->|4. Ghi File Code Test| Extension
-    Extension -->|5. Chạy Test| LocalRunner
-    LocalRunner -->|6. Thu thập Result, Logs & Ảnh Lỗi| Extension
-    Extension -->|7. Bắn POST Callback API| WebSockets
-    WebSockets -->|8. Cập nhật Real-time| APIServer
-    APIServer --> UI
+flowchart LR
+  subgraph phaseAC [Phase A + C]
+    Approve[Approve TC] --> MD[".ai-test/test-cases/*.md"]
+    UI[Desktop UI]
+    API[API Gen + guards]
+    Ext[IDE Extension]
+    UI -->|HTTP Gen| API
+    API -->|files| UI
+    UI -->|applyFiles / runTests| Ext
+    UI -->|tc.syncApprovedMd| Ext
+    Ext -->|progress / result| UI
+  end
 ```
 
----
-
-## 2. Chi Tiết 4 Thành Phần Kiến Trúc Cốt Lõi
-
-### 📍 Component 1: Giao Thức Protocol Dùng Chung (`packages/ide-protocol`)
-Định nghĩa chuẩn hóa các Schema trao đổi dữ liệu JSON-RPC qua WebSocket/HTTP:
-
-1. **`CommandPayload` (AITest Tool ➔ IDE Extension)**:
-   ```json
-   {
-     "commandId": "cmd-88912",
-     "action": "GENERATE_E2E_BATCH",
-     "projectId": "ProjectA",
-     "projectPath": "D:/Xlab/ProjectA",
-     "testCases": [
-       { "id": "TC-01", "title": "Tạo mới vật chứng", "steps": "...", "expected": "..." }
-     ],
-     "projectRules": "Locator: data-testid, StorageState: .ai-test/auth/storageState.json"
-   }
-   ```
-
-2. **`ResultCallbackPayload` (IDE Extension ➔ AITest Tool)**:
-   ```json
-   {
-     "commandId": "cmd-88912",
-     "status": "COMPLETED",
-     "workspaceTree": {
-       "testRoot": "E2ETest/",
-       "generatedFiles": [
-         { "path": "E2ETest/evidence/create.spec.ts", "size": "1.8 KB", "status": "CREATED" },
-         { "path": ".ai-test/test-cases/evidence.md", "size": "3.2 KB", "status": "UPDATED" }
-       ]
-     },
-     "testRunReport": {
-       "passed": 48,
-       "failed": 2,
-       "durationMs": 45000,
-       "errors": [
-         {
-           "title": "TC-02: Bỏ trống tên vật chứng",
-           "stacktrace": "Error: expect(received).toBe(expected)...",
-           "screenshotPath": "D:/Xlab/ProjectA/test-results/evidence-fail.png"
-         }
-       ]
-     }
-   }
-   ```
+**SoT Gen Phase A:** DB Approved TC. File `.md` là **artifact đồng bộ** (Agent/audit) — không thay grounding/guards.
 
 ---
 
-### 📍 Component 2: AITest IDE Extension Plugin (`ide-plugins/vscode`)
-Được cài đặt trực tiếp trên IDE Cursor / VSCode của Dự án A:
-- Kết nối tới `Local WebSocket Server` của AITest Tool khi mở cửa sổ Dự án A.
-- Đọc bộ quy tắc local tại `.ai-test/project.profile.json`.
-- Kích hoạt tiến trình **Cursor AI Agent ngầm tại Dự án A** để sinh code test Unit/E2E.
-- Ghi trực tiếp file code test và file `.md` vào cây thư mục Dự án A.
-- Bật native terminal thực thi `npx playwright test` hoặc `pytest`.
-- Đọc kết quả file báo cáo (`report.json`, `junit.xml`, screenshots) và bắn **Callback API** về lại AITest Tool.
+## 1. Invariants
+
+1. Desktop authoritative `projectRules` (conventions); empty ≠ legacy meta fallback.
+2. Approved-only Gen (BR-03); chỉ TC Approved mới ghi `.md`.
+3. E2E grounding fail-closed; post-LLM R6/R9; E2E_* allowlist.
+4. Output jail code: `AItest/UnitTest|E2ETest/...`.
+5. TC markdown jail: chỉ `.ai-test/test-cases/**/*.md` (tách với AItest jail).
+6. Auth storageState / auth-seed; Playwright project hoặc shared runner.
+7. Fallback: không bridge → Tauri ghi `.ai-test/`; Apply/Verify fallback như trước.
 
 ---
 
-### 📍 Component 3: AITest Tool Command Server & UI Dashboard
-Màn hình trung tâm dành cho người dùng:
-- Hiển thị nút bấm ra lệnh (Sinh Test Case, Sinh Code, Chạy Test).
-- Lắng nghe sự kiện Callback API từ IDE Extension đẩy về.
-- **Dựng cây thư mục trực quan (File Tree Viewer)** của Dự án A ngay trên UI.
-- Hiển thị trực quan báo cáo Passed/Failed, Console logs và **Ảnh chụp màn hình lỗi (Error Screenshots)**.
+## 2. Protocol methods
+
+| Method | Phase | Status |
+|--------|-------|--------|
+| `aitest/codegen.applyFiles` | A | ✅ |
+| `aitest/codegen.runTests` | A | ✅ |
+| `aitest/codegen.cancel` | A | ✅ |
+| `aitest/codegen.generateUnitBatch` / `generateE2eBatch` | B | ✅ Stub |
+| `aitest/codegen.progress` / `result` | A | ✅ |
+| `aitest/tc.syncApprovedMd` | C | ✅ |
+
+Types: `codegenTypes.ts`, `tcTypes.ts`. Jails: `codegenPathJail.ts`, `tcPathJail.ts`.
 
 ---
 
-### 📍 Component 4: Đảm Bảo Hiệu Năng & Độ Đúng Đắn Đầu Ra (Perf & Correctness)
+## 3. Map file
 
-1. **Hiệu năng Tối Đa (Performance)**:
-   - Zero Cold-start! Mọi thao tác sinh code và chạy test đều diễn ra trực tiếp ngay trong tiến trình môi trường của IDE Dự án A.
-   - Giảm 90% độ trễ truyền dữ liệu qua lại giữa các máy/app.
-
-2. **Đầu Ra Chuẩn Xác 100% (Output Correctness)**:
-   - Extension có quyền truy cập trực tiếp vào Native TypeScript AST Compiler và File System của Dự án A.
-   - Đảm bảo các câu lệnh `import` và vị trí lưu file đúng 100% theo `moduleMap`.
+| Layer | Files |
+|-------|--------|
+| Protocol | `methods.ts`, `tcTypes.ts`, `tcPathJail.ts`, `client.ts`, `codegen.test.ts` |
+| Extension | `tcSyncCommands.ts`, `bridgeServer.ts`, `codegenCommands.ts` |
+| Desktop TC sync | `desktop/src/lib/approvedTcSync/*` |
+| Wire Approve | `ReviewQueuePanel.tsx`, `RequirementsPage.tsx` |
+| Apply/Run | `ideProtocol/*`, `stagingApply.ts`, `applyManager.ts`, `e2eJobRunner.ts` |
+| UI | `CodegenResultPanel.tsx`, `IdeConnectPanel` trên Unit/E2E |
+| API B | `POST /e2e-codegen-guard` |
 
 ---
 
-## 3. Lộ Trình Triển Khai Chi Tiết Theo Từng Phase
+## 4. Checklist
 
-- [ ] **Phase 1: Chuẩn Hóa Schema Protocol (`packages/ide-protocol`)**:
-  - Định nghĩa interface `CommandPayload`, `ResultCallbackPayload`, `WorkspaceTree`.
-- [ ] **Phase 2: Xây Dựng Extension Agent (`ide-plugins/vscode`)**:
-  - Viết listener nhận lệnh, đọc `.ai-test/project.profile.json`, gọi AI local và thực thi runner.
-- [ ] **Phase 3: Xây Dựng Command & Callback API Server (`desktop/src/lib/ideProtocol/`)**:
-  - Tích hợp WebSocket host lắng nghe và bắn lệnh sang Extension.
-- [ ] **Phase 4: Cập Nhật UI Dashboard (File Tree & Screenshots Viewer)**:
-  - Hiển thị cây file Dự án A và ảnh chụp màn hình lỗi real-time.
+- [x] Phase 0–5 — Hybrid A/B Apply/Run/UI/guard-only (xem lịch sử)
+- [x] **Phase 6 / C** — Approved TC → `.ai-test/test-cases/{module}/{testCaseId}.md`
+  - [x] `aitest/tc.syncApprovedMd` + Extension handler + path jail
+  - [x] Desktop render MD + sync IDE ưu tiên / Tauri fallback
+  - [x] Wire sau Approve (Coverage ReviewQueue + Requirements)
+  - [ ] Extension Gen đọc MD làm SoT bổ sung khi Phase B Agent Gen bật (chỉ helper `readApprovedTcMarkdownRel` sẵn)
+
+---
+
+## 5. Phase C — chi tiết
+
+**Đường dẫn:** `.ai-test/test-cases/{moduleSlug}/{testCaseId}.md`
+
+**Nội dung:** YAML frontmatter (`id`, `testCaseId`, `title`, `module`, `type`, …) + Precondition / Steps / Expected / Test Data.
+
+**Khi sync:** sau `POST /testcases/{id}/approve` thành công (single hoặc bulk). Bỏ qua nếu chưa bind project root (best-effort, không chặn Approve).
+
+**Không làm:** thay DB SoT; ghi ngoài `.ai-test/test-cases/`; tự Gen từ MD trong Phase A.
+
+---
+
+## 6. Cách test Phase C
+
+1. Bind project root (Tauri) và/hoặc Connect IDE Extension (folder = cùng root).
+2. Duyệt 1–N TC Approved trên Coverage hoặc Requirements.
+3. Kiểm đĩa: `{root}/.ai-test/test-cases/.../*.md`.
+4. Disconnect IDE → Approve lại vẫn ghi nếu chạy Desktop Tauri.
+
+---
+
+## 7. Việc không làm
+
+- Không thay `/api/jobs` bằng codegen protocol
+- Không bỏ API guards
+- Không hardcode port 5099
+- Không ghi product source ngoài `AItest/`
+- Không coi `.md` TC là SoT Gen Phase A

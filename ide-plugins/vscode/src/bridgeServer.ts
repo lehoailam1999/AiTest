@@ -27,6 +27,12 @@ import {
   type SearchTextParams,
   type SymbolPositionParams,
   type ReadFileParams,
+  type CodegenApplyFilesParams,
+  type CodegenRunTestsParams,
+  type CodegenCancelParams,
+  type CodegenGenerateUnitBatchParams,
+  type CodegenGenerateE2eBatchParams,
+  type TcSyncApprovedMdParams,
 } from "@aitest/ide-protocol/node";
 import {
   buildFocusSnapshot,
@@ -45,6 +51,13 @@ import {
   handleSearchSymbol,
   handleSearchText,
 } from "./ideCommands";
+import {
+  handleCodegenApplyFiles,
+  handleCodegenCancel,
+  handleCodegenGenerateStub,
+  handleCodegenRunTests,
+} from "./codegenCommands";
+import { handleTcSyncApprovedMd } from "./tcSyncCommands";
 
 export type BridgeHandle = {
   port: number;
@@ -129,6 +142,12 @@ export async function startIdeBridgeServer(opts?: {
               IdeMethods.readFile,
               IdeMethods.createTestFile,
               IdeMethods.openFile,
+              IdeMethods.codegenApplyFiles,
+              IdeMethods.codegenRunTests,
+              IdeMethods.codegenCancel,
+              IdeMethods.codegenGenerateUnitBatch,
+              IdeMethods.codegenGenerateE2eBatch,
+              IdeMethods.tcSyncApprovedMd,
             ],
           };
           reply(makeSuccess(msg.id, health));
@@ -250,9 +269,77 @@ export async function startIdeBridgeServer(opts?: {
           reply(
             makeSuccess(msg.id, {
               ok: false,
-              message: "test.run deferred to Desktop RunnerAdapter (P2+)",
+              message: "Use aitest/codegen.runTests for Unit/E2E (codegen protocol)",
             })
           );
+          break;
+        }
+        case IdeMethods.codegenApplyFiles: {
+          const p = msg.params as CodegenApplyFilesParams;
+          if (!p?.commandId || !Array.isArray(p.files)) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "commandId + files required"));
+            break;
+          }
+          const notify = (method: string, params: unknown) => {
+            const body = JSON.stringify(makeNotification(method, params));
+            for (const c of clients) {
+              if (authed.has(c) && c.readyState === WebSocket.OPEN) c.send(body);
+            }
+          };
+          reply(makeSuccess(msg.id, await handleCodegenApplyFiles(p, notify)));
+          break;
+        }
+        case IdeMethods.codegenRunTests: {
+          const p = msg.params as CodegenRunTestsParams;
+          if (!p?.commandId || !p.runner) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "commandId + runner required"));
+            break;
+          }
+          const notify = (method: string, params: unknown) => {
+            const body = JSON.stringify(makeNotification(method, params));
+            for (const c of clients) {
+              if (authed.has(c) && c.readyState === WebSocket.OPEN) c.send(body);
+            }
+          };
+          reply(makeSuccess(msg.id, await handleCodegenRunTests(p, notify)));
+          break;
+        }
+        case IdeMethods.codegenCancel: {
+          const p = (msg.params ?? {}) as CodegenCancelParams;
+          if (!p?.commandId) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "commandId required"));
+            break;
+          }
+          reply(makeSuccess(msg.id, handleCodegenCancel({ ...p, action: "CANCEL" })));
+          break;
+        }
+        case IdeMethods.codegenGenerateUnitBatch: {
+          const p = (msg.params ?? {}) as CodegenGenerateUnitBatchParams;
+          reply(
+            makeSuccess(
+              msg.id,
+              handleCodegenGenerateStub("unit", p?.commandId || "unknown")
+            )
+          );
+          break;
+        }
+        case IdeMethods.codegenGenerateE2eBatch: {
+          const p = (msg.params ?? {}) as CodegenGenerateE2eBatchParams;
+          reply(
+            makeSuccess(
+              msg.id,
+              handleCodegenGenerateStub("e2e", p?.commandId || "unknown")
+            )
+          );
+          break;
+        }
+        case IdeMethods.tcSyncApprovedMd: {
+          const p = msg.params as TcSyncApprovedMdParams;
+          if (!p?.commandId || !Array.isArray(p.files)) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "commandId + files required"));
+            break;
+          }
+          reply(makeSuccess(msg.id, await handleTcSyncApprovedMd(p)));
           break;
         }
         default:

@@ -15,7 +15,29 @@ export type IdeCommand =
   | { type: "ide.searchText"; query: string; glob?: string; maxResults?: number }
   | { type: "ide.readFile"; pathRel: string; startLine?: number; endLine?: number }
   | { type: "ide.goToDefinition"; symbolId?: string; pathRel?: string; line?: number; character?: number }
-  | { type: "ide.findReferences"; symbolId?: string; pathRel?: string; line?: number; character?: number };
+  | { type: "ide.findReferences"; symbolId?: string; pathRel?: string; line?: number; character?: number }
+  | {
+      type: "ide.codegen.applyFiles";
+      projectId: string;
+      projectRoot: string;
+      layout: "unit" | "e2e";
+      files: Array<{ path: string; content?: string; kind?: string }>;
+    }
+  | {
+      type: "ide.codegen.runTests";
+      projectId: string;
+      projectRoot: string;
+      runner: "playwright" | "dotnet" | "jest" | "vitest" | "pytest" | "custom";
+      specs?: string[];
+      env?: Record<string, string>;
+      headed?: boolean;
+    }
+  | {
+      type: "ide.tc.syncApprovedMd";
+      projectId: string;
+      projectRoot: string;
+      files: Array<{ path: string; content: string }>;
+    };
 
 export type IdeCommandResult =
   | { ok: true; data?: unknown }
@@ -110,6 +132,42 @@ export async function dispatchIdeCommand(cmd: IdeCommand): Promise<IdeCommandRes
           pathRel: cmd.pathRel,
           line: cmd.line,
           character: cmd.character,
+        });
+        return { ok: true, data };
+      }
+      case "ide.codegen.applyFiles": {
+        const { ideApplyFiles, rememberCodegenResult } = await import("../ideProtocol");
+        const data = await ideApplyFiles({
+          projectId: cmd.projectId,
+          projectRoot: cmd.projectRoot,
+          layout: cmd.layout,
+          files: cmd.files,
+        });
+        rememberCodegenResult(data);
+        return { ok: true, data };
+      }
+      case "ide.codegen.runTests": {
+        const { ideRunTests, rememberCodegenResult } = await import("../ideProtocol");
+        const data = await ideRunTests({
+          projectId: cmd.projectId,
+          projectRoot: cmd.projectRoot,
+          runner: cmd.runner,
+          specs: cmd.specs,
+          env: cmd.env,
+          headed: cmd.headed,
+        });
+        rememberCodegenResult(data);
+        return { ok: true, data };
+      }
+      case "ide.tc.syncApprovedMd": {
+        const client = getIdeRpcClientOrNull();
+        if (!client?.isConnected) return { ok: false, error: "IDE bridge offline" };
+        const { newCodegenCommandId } = await import("../ideProtocol");
+        const data = await client.tcSyncApprovedMd({
+          commandId: newCodegenCommandId("tc-sync"),
+          projectId: cmd.projectId,
+          projectRoot: cmd.projectRoot,
+          files: cmd.files,
         });
         return { ok: true, data };
       }

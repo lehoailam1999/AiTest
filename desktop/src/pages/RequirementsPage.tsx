@@ -39,7 +39,9 @@ import {
 } from "../components/RequirementTopicsPanel";
 import type { RequirementTopic } from "../api/types";
 import { labelOf, priorityLabel, displayReviewStatus, isTcPendingReview, typeLabel } from "../i18n/labels";
+import { syncApprovedTestCasesMdBestEffort } from "../lib/approvedTcSync";
 import { useProject } from "../state/ProjectContext";
+import { workspace } from "../workspace";
 
 function groupBySource(cases: TestCase[]): Record<string, TestCase[]> {
   const map: Record<string, TestCase[]> = {};
@@ -691,7 +693,28 @@ export default function RequirementsPage() {
               }
               onApprove={(id) =>
                 tcAction(
-                  () => testcases.approve(id),
+                  async () => {
+                    const tc = await testcases.approve(id);
+                    if (project) {
+                      const sync = await syncApprovedTestCasesMdBestEffort({
+                        projectId: project.id,
+                        projectRoot: workspace.getLocalPath(project.id),
+                        cases: [tc],
+                      });
+                      if (sync.ok && sync.written.length) {
+                        message.success(
+                          sync.message || `Đã sync TC → .ai-test/test-cases/`
+                        );
+                      } else if (!sync.ok || sync.via === "skipped") {
+                        message.warning(
+                          sync.errors[0] ||
+                            sync.message ||
+                            "Duyệt OK nhưng chưa ghi .ai-test/test-cases — gắn project root hoặc Connect IDE"
+                        );
+                      }
+                    }
+                    return tc;
+                  },
                   r.id,
                   reviewMode ? undefined : "Đã duyệt",
                   { afterApprove: reviewMode }

@@ -93,6 +93,19 @@ export function IdeConnectPanel({ compact, onFocusApplied }: Props) {
           ) : (
             <Tag>idle</Tag>
           )}
+          {workspaceRoot ? (
+            <Tag
+              color={
+                /aitest$/i.test(workspaceRoot.replace(/\\/g, "/")) ||
+                /\/aitest$/i.test(workspaceRoot.replace(/\\/g, "/"))
+                  ? "orange"
+                  : "blue"
+              }
+              title={workspaceRoot}
+            >
+              WS: {workspaceRoot.replace(/\\/g, "/").split("/").slice(-2).join("/")}
+            </Tag>
+          ) : null}
           <Tag color={ready ? "blue" : "default"}>
             {ready ? "IDE context" : "Local FS fallback"}
           </Tag>

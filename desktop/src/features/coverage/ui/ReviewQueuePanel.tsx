@@ -17,6 +17,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import {
   CheckOutlined,
+  CloudUploadOutlined,
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
@@ -32,6 +33,7 @@ import {
   priorityLabel,
   typeLabel,
 } from "../../../i18n/labels";
+import { syncApprovedTestCasesMdBestEffort } from "../../../lib/approvedTcSync";
 import {
   ENGINE_TOOLTIP,
   TC_TYPE_OPTIONS,
@@ -40,6 +42,7 @@ import {
   resolveTestEngine,
 } from "../../../lib/testEngine";
 import { e2eTestUrl, unitTestUrl } from "../../../lib/productRoutes";
+import { workspace } from "../../../workspace";
 
 type Props = {
   projectId: string;
@@ -179,6 +182,7 @@ function downloadCasesExcel(rows: TestCase[], filenamePrefix = "test-cases") {
  * F4 — Danh sách TC trên Coverage: mọi trạng thái + duyệt hàng loạt + tải Excel.
  */
 export function ReviewQueuePanel({
+  projectId,
   cases,
   moduleFilter,
   engineFilter: engineFilterProp,
@@ -258,24 +262,117 @@ export function ReviewQueuePanel({
     [filtered]
   );
 
+  const filteredApprovedIds = useMemo(
+    () =>
+      filtered
+        .filter((c) => String(c.reviewStatus || "").toLowerCase() === "approved")
+        .map((c) => c.id),
+    [filtered]
+  );
+
+  const selectedApprovedIds = useMemo(
+    () =>
+      selected
+        .map(String)
+        .filter((id) => {
+          const row = cases.find((c) => c.id === id);
+          return String(row?.reviewStatus || "").toLowerCase() === "approved";
+        }),
+    [selected, cases]
+  );
+
   async function bulkApprove(ids: string[]) {
     if (ids.length === 0) return;
     setBusy(true);
     let ok = 0;
     let fail = 0;
+    const approved: TestCase[] = [];
     try {
       for (const id of ids) {
         try {
-          await testcases.approve(id);
+          const tc = await testcases.approve(id);
+          approved.push(tc);
           ok += 1;
         } catch {
           fail += 1;
+        }
+      }
+      if (approved.length) {
+        const sync = await syncApprovedTestCasesMdBestEffort({
+          projectId,
+          projectRoot: workspace.getLocalPath(projectId),
+          cases: approved,
+        });
+        if (sync.ok && sync.written.length) {
+          message.success(sync.message || `Đã sync ${sync.written.length} TC sang source`);
+        } else if (!sync.ok || sync.via === "skipped") {
+          message.warning(
+            sync.errors[0] ||
+              sync.message ||
+              "Duyệt OK nhưng chưa ghi .ai-test/test-cases — gắn project root hoặc Connect IDE"
+          );
         }
       }
       if (fail === 0) message.success(`Đã duyệt ${ok} test case.`);
       else message.warning(`Duyệt: OK ${ok}, lỗi ${fail}.`);
       setSelected([]);
       onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Sync .md for already-Approved TCs — no re-approve. */
+  async function syncApprovedMd(ids: string[]) {
+    const toSync = cases.filter(
+      (c) =>
+        ids.includes(c.id) &&
+        String(c.reviewStatus || "").toLowerCase() === "approved"
+    );
+    if (toSync.length === 0) {
+      message.info(
+        "Không có TC Approved trong lựa chọn. Lọc «Đã duyệt» rồi bấm Sync MD (hoặc Sync từng dòng)."
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      const bound = workspace.getLocalPath(projectId);
+      if (!bound) {
+        message.warning({
+          content:
+            "Chưa gắn mã nguồn trên Desktop — sẽ thử IDE workspace. Nên vào Projects gắn D:\\Xlab\\Forensic\\forensic.",
+          duration: 8,
+        });
+      }
+      const sync = await syncApprovedTestCasesMdBestEffort({
+        projectId,
+        projectRoot: bound,
+        cases: toSync,
+      });
+      if (sync.ok && sync.written.length) {
+        message.success({
+          content:
+            sync.message ||
+            `Đã ghi ${sync.written.length} file → ${(sync.projectRoot || "").replace(/\\/g, "/")}/.ai-test/test-cases/`,
+          duration: 10,
+        });
+        if (sync.warning) message.warning({ content: sync.warning, duration: 10 });
+      } else {
+        message.error({
+          content:
+            sync.warning ||
+            sync.errors[0] ||
+            sync.message ||
+            "Sync thất bại — Projects → gắn Forensic, Connect IDE (WS=Forensic), lọc Đã duyệt → Sync MD.",
+          duration: 14,
+        });
+      }
+    } catch (e) {
+      message.error({
+        content: e instanceof Error ? e.message : String(e),
+        duration: 14,
+      });
     } finally {
       setBusy(false);
     }
@@ -490,6 +587,16 @@ export function ReviewQueuePanel({
                 <Tag color="success" style={{ marginInlineEnd: 0 }}>
                   Đã duyệt
                 </Tag>
+                <Tooltip title="Ghi .md vào .ai-test/test-cases/ (không cần duyệt lại)">
+                  <Button
+                    size="small"
+                    icon={<CloudUploadOutlined />}
+                    loading={busy}
+                    onClick={() => void syncApprovedMd([row.id])}
+                  >
+                    Sync MD
+                  </Button>
+                </Tooltip>
                 <Tooltip title={ENGINE_TOOLTIP}>
                   <Link to={jobUrl}>
                     <Button size="small" type="primary" ghost>
@@ -577,6 +684,30 @@ export function ReviewQueuePanel({
               : ""}{" "}
           ({filteredPendingIds.length})
         </Button>
+        <Tooltip title="Ghi .md Approved vào project/.ai-test/test-cases/ (không duyệt lại)">
+          <Button
+            icon={<CloudUploadOutlined />}
+            disabled={
+              busy ||
+              (selectedApprovedIds.length === 0 && filteredApprovedIds.length === 0)
+            }
+            loading={busy}
+            onClick={() =>
+              void syncApprovedMd(
+                selectedApprovedIds.length > 0
+                  ? selectedApprovedIds
+                  : filteredApprovedIds
+              )
+            }
+          >
+            Sync MD
+            {selectedApprovedIds.length > 0
+              ? ` (${selectedApprovedIds.length})`
+              : filteredApprovedIds.length > 0
+                ? ` (${filteredApprovedIds.length})`
+                : ""}
+          </Button>
+        </Tooltip>
         <Link to="/requirement">
           <Button type="link">Về Requirement Studio →</Button>
         </Link>

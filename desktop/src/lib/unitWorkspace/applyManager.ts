@@ -14,6 +14,7 @@ import {
   ensureAitestDotnetInWorkspace,
   manifestHasAitestCsharpTests,
 } from "./ensureAitestDotnet";
+import { ideApplyFiles, isIdeCodegenReady, rememberCodegenResult } from "../ideProtocol";
 
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"] as const;
 
@@ -128,6 +129,46 @@ async function writeManifestOverlay(
   safeManifest: UnitWorkspaceManifest
 ): Promise<string[]> {
   const applied: string[] = [];
+
+  if (isIdeCodegenReady()) {
+    const files: { path: string; content: string; kind: string }[] = [];
+    for (const f of safeManifest.files) {
+      if (f.op === "delete") continue;
+      const content = await readTextFile(projectRoot, f.workspaceRel);
+      files.push({ path: f.targetRel, content, kind: "unit" });
+    }
+    if (files.length) {
+      const ideResult = await ideApplyFiles({
+        projectId: safeManifest.projectId,
+        projectRoot,
+        layout: "unit",
+        files,
+        packagePrefix: safeManifest.packagePrefix || undefined,
+      });
+      rememberCodegenResult(ideResult);
+      for (const g of ideResult.workspaceTree.generatedFiles) {
+        if (g.status === "CREATED" || g.status === "UPDATED") applied.push(g.path);
+        if (g.status === "REJECTED_JAIL" || g.status === "ERROR") {
+          throw new Error(g.error || `IDE Apply failed: ${g.path}`);
+        }
+      }
+    }
+    for (const f of safeManifest.files) {
+      if (f.op === "delete") {
+        try {
+          await deleteTextFile(projectRoot, f.targetRel);
+          applied.push(f.targetRel);
+        } catch {
+          /* missing ok */
+        }
+      }
+    }
+    if (applied.length === 0) {
+      throw new Error("Apply không ghi được file nào — overlay trống hoặc path lỗi.");
+    }
+    return applied;
+  }
+
   for (const f of safeManifest.files) {
     if (f.op === "delete") {
       try {

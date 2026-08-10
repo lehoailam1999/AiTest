@@ -32,6 +32,7 @@ import {
   resolveFeaturePathSeed,
   lookupModuleMapPath,
 } from "./generateGrounding";
+import { isIdeCodegenReady } from "../ideProtocol";
 import { derivePomScaffoldFromTc } from "./derivePomScaffoldFromTc";
 import {
   assertTcReadyForE2eGen,
@@ -1574,35 +1575,90 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
   let moduleStatus = "FAILED";
 
   try {
-    const mod = await generateE2e.sandboxModule({
-      projectId: opts.projectId,
-      projectRoot: opts.projectRoot,
-      files: allFiles,
-      module: opts.module,
-      targetUrl: env.targetUrl,
-      domSnapshot: domSnapshot || undefined,
-      storageStateRel: env.storageStateRel,
-      seedCommand: env.seedCommand,
-      teardownCommand: env.teardownCommand,
-      maxRetries,
-      writeFile: true,
-      healFailures,
-      headed: showBrowser,
-      playwrightEnv: playwrightEnvFromConfig(env),
-      e2eUsername: env.username,
-      e2ePassword: env.password,
-      healItems: generatedOk.map((g) => ({
-        testCaseId: g.testCaseId,
-        primarySpecPath: g.primarySpecPath,
-        domSnapshot: g.domSnapshot,
-        featurePath: g.featurePath,
-        sourceFileName: g.sourceFileName,
-        sourceCode: g.sourceCode,
-        relatedSources: g.relatedSources,
-        locatorContract: g.locatorContract,
-      })),
-    });
-    moduleStatus = mod.status;
+    // Phase A: prefer IDE Extension runTests when bridge connected.
+    if (isIdeCodegenReady()) {
+      const { ideRunTests, rememberCodegenResult } = await import("../ideProtocol");
+      const specs = generatedOk
+        .map((g) => g.primarySpecPath)
+        .filter(Boolean) as string[];
+      const ideRun = await ideRunTests({
+        projectId: opts.projectId,
+        projectRoot: opts.projectRoot,
+        runner: "playwright",
+        cwd: opts.projectRoot,
+        specs: specs.length ? specs : undefined,
+        env: playwrightEnvFromConfig(env),
+        headed: showBrowser,
+        handlers: {
+          onProgress: (p) => log(`  ide-run: ${p.message || p.phase}\n`),
+        },
+      });
+      rememberCodegenResult(ideRun);
+      moduleStatus =
+        ideRun.status === "COMPLETED"
+          ? "PASSED"
+          : ideRun.status === "PARTIAL"
+            ? "FAILED"
+            : "FAILED";
+      log(`  module-status=${moduleStatus} (via IDE Extension)\n`);
+      if (ideRun.testRunReport.failed > 0 || ideRun.status !== "COMPLETED") {
+        log(`  --- Nguyên nhân Verify FAIL (IDE) ---\n`);
+        for (const err of ideRun.testRunReport.errors) {
+          log(`  ✗ ${err.title || err.testCaseId || "spec"}\n`);
+          log(`    ${(err.stacktrace || "").slice(0, 500)}\n`);
+          if (err.screenshotPath) log(`    screenshot=${err.screenshotPath}\n`);
+        }
+      }
+      // Map results onto rows
+      for (const g of generatedOk) {
+        const idx = rows.findIndex((r) => r.testCaseId === g.testCaseId);
+        const ok = moduleStatus === "PASSED";
+        const next = {
+          testCaseId: g.testCaseId,
+          title: g.title,
+          status: (ok ? "ok" : "fail") as "ok" | "fail",
+          runId: g.runId,
+          files: g.files.length,
+          error: ok
+            ? undefined
+            : ideRun.testRunReport.errors[0]?.stacktrace?.slice(0, 800),
+          failCategory: ok
+            ? undefined
+            : classifyE2eFailure(ideRun.testRunReport.errors[0]?.stacktrace || ""),
+        };
+        if (idx >= 0) rows[idx] = { ...rows[idx], ...next };
+        else rows.push(next);
+      }
+    } else {
+      const mod = await generateE2e.sandboxModule({
+        projectId: opts.projectId,
+        projectRoot: opts.projectRoot,
+        files: allFiles,
+        module: opts.module,
+        targetUrl: env.targetUrl,
+        domSnapshot: domSnapshot || undefined,
+        storageStateRel: env.storageStateRel,
+        seedCommand: env.seedCommand,
+        teardownCommand: env.teardownCommand,
+        maxRetries,
+        writeFile: true,
+        healFailures,
+        headed: showBrowser,
+        playwrightEnv: playwrightEnvFromConfig(env),
+        e2eUsername: env.username,
+        e2ePassword: env.password,
+        healItems: generatedOk.map((g) => ({
+          testCaseId: g.testCaseId,
+          primarySpecPath: g.primarySpecPath,
+          domSnapshot: g.domSnapshot,
+          featurePath: g.featurePath,
+          sourceFileName: g.sourceFileName,
+          sourceCode: g.sourceCode,
+          relatedSources: g.relatedSources,
+          locatorContract: g.locatorContract,
+        })),
+      });
+      moduleStatus = mod.status;
     log(`  module-status=${mod.status}\n`);
     const failSpecs = (mod.specs || []).filter((s) => !s.success);
     if (failSpecs.length > 0 || moduleStatus !== "PASSED") {
@@ -1761,6 +1817,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
         provider: opts.provider,
       });
     }
+    } // end else sandboxModule
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     log(`  verify fail: ${msg}\n`);

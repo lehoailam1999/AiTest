@@ -89,6 +89,8 @@ import { E2eGateBanner } from "./E2eGateBanner";
 import { aiConnectionDisplayLabel } from "../../lib/aiConnectionLabel";
 import { E2ePipelineStrip } from "./E2ePipelineStrip";
 import { E2eResultTabs } from "./E2eResultTabs";
+import { CodegenResultPanel } from "../../components/CodegenResultPanel";
+import { IdeConnectPanel } from "../../components/IdeConnectPanel";
 import {
   E2eBatchConsole,
   type E2eBatchPipelineRow,
@@ -1962,6 +1964,8 @@ export default function E2ETestPage() {
           onGateChange={onGateChange}
         />
 
+        <IdeConnectPanel />
+
         {approved.length > 0 && !approved.some((t) => isE2eTestCaseType(t.type)) ? (
           <Alert
             type="info"
@@ -2579,6 +2583,8 @@ export default function E2ETestPage() {
             Staging: <code>{stagingDirHint(staging.runId)}</code>
           </Typography.Paragraph>
         ) : null}
+
+        <CodegenResultPanel title="IDE Extension — Apply / Run tree" />
 
         <E2eResultTabs
           files={files}
