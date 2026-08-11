@@ -10,6 +10,7 @@ import {
   decideUnitSutGate,
   extractTcSourceMarkers,
   isInterfaceLikePrimaryPath,
+  primaryMatchesMarkers,
   stemOfPath,
   type UnitDomainGuardRule,
 } from "@aitest/ide-protocol";
@@ -58,6 +59,7 @@ async function loadUnitProfileGateKnobs(projectRoot: string): Promise<{
   requireMarkers: boolean | null;
   unitScope: "backend" | "frontend" | "any";
   minAlignment: number;
+  genMode: "strict_spec" | "always_generate";
 }> {
   try {
     const { readTextFile } = await import("../../tauri/bridge");
@@ -68,6 +70,7 @@ async function loadUnitProfileGateKnobs(projectRoot: string): Promise<{
         requireMarkers?: boolean | string[];
         scope?: "backend" | "frontend" | "any";
         minAlignment?: number;
+        genMode?: "strict_spec" | "always_generate";
       };
     };
     const unit = j?.unit;
@@ -87,13 +90,15 @@ async function loadUnitProfileGateKnobs(projectRoot: string): Promise<{
       typeof unit?.minAlignment === "number" && Number.isFinite(unit.minAlignment)
         ? unit.minAlignment
         : 50;
-    return { domainGuards, requireMarkers, unitScope, minAlignment };
+    const genMode = unit?.genMode === "always_generate" ? "always_generate" : "strict_spec";
+    return { domainGuards, requireMarkers, unitScope, minAlignment, genMode };
   } catch {
     return {
       domainGuards: [],
       requireMarkers: true,
       unitScope: "backend",
       minAlignment: 50,
+      genMode: "strict_spec",
     };
   }
 }
@@ -106,6 +111,23 @@ function refuseCodeToDesktop(code: string | undefined): string {
     FAIL_SUT_MISMATCH: "sut_mismatch",
   };
   return map[(code || "").toUpperCase()] || "sut_mismatch";
+}
+
+function canBypassFeatureGapWithAuthoritativeSut(opts: {
+  code?: string;
+  primaryPath: string;
+  sourceExcerpt: string;
+  tcBlob: string;
+}): boolean {
+  if (!/FEATURE_GAP/i.test(opts.code || "")) return false;
+  if (!opts.primaryPath || !opts.sourceExcerpt.trim()) return false;
+  const markers = extractTcSourceMarkers(opts.tcBlob || "");
+  if (!(markers.paths.length > 0 || markers.codes.length > 0)) return false;
+  return primaryMatchesMarkers(opts.primaryPath, markers);
+}
+
+function hasGroundedSourceForGen(primaryPath: string, sourceExcerpt: string): boolean {
+  return Boolean((primaryPath || "").trim() && (sourceExcerpt || "").trim());
 }
 
 export { canTransitionUnitJob, UNIT_JOB_TRANSITIONS };
@@ -146,6 +168,30 @@ function isTransportError(e: unknown): boolean {
 
 function newJobId(tcId: string): string {
   return `ujob-${tcId.slice(0, 8)}-${Date.now().toString(36)}`;
+}
+
+const GAP_FALLBACK_MARKER_RE = /AITEST_FALLBACK_GAP/i;
+
+function buildGapCompanionMarkdown(input: {
+  tc: TestCase;
+  sourceFileName: string;
+  failReason: string;
+  mode: "strict_spec" | "always_generate";
+}): string {
+  const tcCode = input.tc.testCaseId || input.tc.id;
+  return [
+    `# Unit Gen Gap Note — ${tcCode}`,
+    "",
+    `- mode: ${input.mode}`,
+    `- source: ${input.sourceFileName || "unknown-sut"}`,
+    `- fallbackFrom: ${tcCode}`,
+    `- reason: ${input.failReason || "FEATURE_GAP"}`,
+    "",
+    "## TODO",
+    `- Backend behavior missing/incomplete for TC «${input.tc.title}».`,
+    "- Keep test as gap fallback (`test.skip` / trait Gap) until source implements expected behavior.",
+    "",
+  ].join("\n");
 }
 
 async function persist(
@@ -303,36 +349,32 @@ export async function startUnitIdeGenJob(opts: {
       syncIndexIfMissing: true,
     });
     const impl = ctx.implementationPlan;
+    // Planner may mark non-ready for strict spec, but Gen should still continue when
+    // we have grounded TC + source; verify stage will judge spec compliance.
     if (impl && impl.status !== "ready") {
-      const msg =
-        `Implementation Planner: ${impl.status} cho «${tc.testCaseId || tc.title}». ` +
-        `Thêm path: và code: vào Test Data (hoặc .ai-test/code-aliases.json) trỏ đúng production unit, Approve lại, rồi Gen.`;
+      const note =
+        `Implementation Planner non-ready: ${impl.status} — continue generate from TC + source; ` +
+        `spec compliance will be evaluated in Verify.`;
       manifest = {
         ...manifest,
-        status: "gen_failed",
-        timeline: pushTimeline(manifest.timeline || [], "job.gen.failed", msg),
+        timeline: pushTimeline(manifest.timeline || [], "job.gen.progress", note),
       };
       await persist(projectRoot, manifest);
-      recordUnitJobMetric({
-        projectId,
-        contextSource: ctx.contextSource || "implementation-plan",
-        runnerUsed: "IDE_EXTENSION",
-        ideConnected: true,
-        jobId,
-        via: "ide-extension",
-        durationMs: Date.now() - started,
-        failReason: "needs_marker",
-        ok: false,
-      });
-      return { ok: false, error: msg, code: "needs_marker", manifest };
     }
     contextPacket = ctx.packetForApi;
     let primaryRel = (ctx.primaryPath || "").replace(/\\/g, "/");
-    // P0/P1: prefer planner entry / marker path — never I* for suggestedPath
-    const markerPaths = extractTcSourceMarkers(
-      [approvedTcMd, tc.testData].filter(Boolean).join("\n")
+    // MD markers are Approve SoT — prefer over planner entry when MD has path:
+    const mdMarkers = extractTcSourceMarkers(approvedTcMd || "");
+    const markerPaths = (
+      mdMarkers.paths.length
+        ? mdMarkers
+        : extractTcSourceMarkers(
+            [approvedTcMd, tc.testData].filter(Boolean).join("\n")
+          )
     ).paths;
-    if (impl?.entry?.pathRel) {
+    if (mdMarkers.paths[0]) {
+      primaryRel = mdMarkers.paths[0].replace(/\\/g, "/");
+    } else if (impl?.entry?.pathRel) {
       primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
     } else if (markerPaths[0]) {
       primaryRel = markerPaths[0].replace(/\\/g, "/");
@@ -414,7 +456,21 @@ export async function startUnitIdeGenJob(opts: {
       unitScope: knobs.unitScope,
       minAlignment: knobs.minAlignment,
     });
-    if (sutGate.decision === "block") {
+    const groundedForGen = hasGroundedSourceForGen(primaryPath, excerpt);
+    if (
+      sutGate.decision === "block" &&
+      !groundedForGen &&
+      !canBypassFeatureGapWithAuthoritativeSut({
+        code: sutGate.code,
+        primaryPath,
+        sourceExcerpt: excerpt,
+        tcBlob,
+      }) &&
+      !(
+        knobs.genMode === "always_generate" &&
+        /FEATURE_GAP/i.test(String(sutGate.code || ""))
+      )
+    ) {
       const code = sutGate.code || "FAIL_NEEDS_MARKER";
       const msg =
         `${code} — ${sutGate.reason}. ` +
@@ -446,6 +502,18 @@ export async function startUnitIdeGenJob(opts: {
         code: refuseCodeToDesktop(code),
         manifest,
       };
+    }
+    if (sutGate.decision === "block" && groundedForGen) {
+      deps.onProgress?.(
+        `gate soft-bypass ${String(sutGate.code || "FAIL_SUT_GATE")} — generate from TC + source; verify decides mismatch`
+      );
+    }
+    if (
+      sutGate.decision === "block" &&
+      knobs.genMode === "always_generate" &&
+      /FEATURE_GAP/i.test(String(sutGate.code || ""))
+    ) {
+      deps.onProgress?.("fallback mode: FEATURE_GAP → always_generate");
     }
   } catch {
     /* Extension resolves SUT from disk + TC MD — still blocked by Extension Phase 5 gate */
@@ -560,6 +628,7 @@ export async function startUnitIdeGenJob(opts: {
     (ide.perTc || []).find((p) => p.sourceFileName)?.sourceFileName ||
     "";
   const sourceForRewrite = (ideSut || sutSourceFile || "").replace(/\\/g, "/");
+  const fallbackGapUsed = GAP_FALLBACK_MARKER_RE.test(draft?.content || "");
 
   if (
     !(ide.status === "COMPLETED" || ide.status === "PARTIAL") ||
@@ -650,7 +719,45 @@ export async function startUnitIdeGenJob(opts: {
     module: layoutModule,
   });
   manifest = added.manifest;
-  syncWorkspaceRun(manifest, { module: layoutModule, status: "generated" });
+  if (fallbackGapUsed) {
+    const gapRel = writeRel.replace(/\.[^.\/\\]+$/, ".gap.md");
+    try {
+      const gapAdded = await addArtifactToWorkspace({
+        projectRoot,
+        manifest,
+        targetRel: gapRel,
+        content: buildGapCompanionMarkdown({
+          tc,
+          sourceFileName: sourceForRewrite,
+          failReason: "FEATURE_GAP fallback in always_generate mode",
+          mode: "always_generate",
+        }),
+        module: layoutModule,
+      });
+      manifest = {
+        ...gapAdded.manifest,
+        status: "gen_with_gap",
+        failReason: "gen_with_gap: FEATURE_GAP fallback",
+        timeline: pushTimeline(
+          gapAdded.manifest.timeline || [],
+          "job.gen.completed",
+          "fallback companion gap file"
+        ),
+      };
+      await persist(projectRoot, manifest);
+    } catch {
+      manifest = {
+        ...manifest,
+        status: "gen_with_gap",
+        failReason: "gen_with_gap: FEATURE_GAP fallback",
+      };
+      await persist(projectRoot, manifest);
+    }
+  }
+  syncWorkspaceRun(manifest, {
+    module: layoutModule,
+    status: fallbackGapUsed ? "gen_with_gap" : "generated",
+  });
   const perMetrics =
     (ide.perTc || []).find((p) => p.testCaseId === (tc.testCaseId || tc.id))
       ?.metrics ||

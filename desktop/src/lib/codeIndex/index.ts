@@ -24,6 +24,7 @@ export {
   loadIndexSnapshot,
   saveIndexSnapshot,
   parseSnapshotJson,
+  invalidateIndexSnapshotCache,
 } from "./indexStore";
 export { syncProjectIndex } from "./incrementalSync";
 export type { SyncProjectIndexOptions } from "./incrementalSync";

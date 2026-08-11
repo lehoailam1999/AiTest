@@ -1,0 +1,253 @@
+{
+  "module": "Tạo mới vật chứng",
+  "total": 69,
+  "ok": 43,
+  "wrong": 19,
+  "skip": 7,
+  "skipBuckets": {
+    "body-rule": 3,
+    "FEATURE_GAP": 3,
+    "ambiguous": 1
+  },
+  "byFunction": {
+    "Chọn vị trí lưu trữ vật chứng": {
+      "ok": 5,
+      "wrong": 3,
+      "skip": 0
+    },
+    "Khai báo người sở hữu vật chứng": {
+      "ok": 2,
+      "wrong": 1,
+      "skip": 1
+    },
+    "Ghi nhận người sử dụng vật chứng": {
+      "ok": 2,
+      "wrong": 2,
+      "skip": 0
+    },
+    "Tải lên hình ảnh vật chứng": {
+      "ok": 2,
+      "wrong": 0,
+      "skip": 1
+    },
+    "Khai báo thiết bị kỹ thuật số": {
+      "ok": 5,
+      "wrong": 0,
+      "skip": 2
+    },
+    "Tải lên tệp kỹ thuật số của vật chứng": {
+      "ok": 2,
+      "wrong": 0,
+      "skip": 1
+    },
+    "Tạo mới vật chứng": {
+      "ok": 7,
+      "wrong": 1,
+      "skip": 0
+    },
+    "Thực hiện bước tạo mới vật chứng": {
+      "ok": 3,
+      "wrong": 0,
+      "skip": 0
+    },
+    "Chọn hồ sơ vụ án cho vật chứng": {
+      "ok": 4,
+      "wrong": 2,
+      "skip": 0
+    },
+    "Ghi nhận người liên quan gián tiếp": {
+      "ok": 1,
+      "wrong": 2,
+      "skip": 1
+    },
+    "Phân loại vật chứng kỹ thuật số": {
+      "ok": 3,
+      "wrong": 0,
+      "skip": 1
+    },
+    "Nhập mô tả vật chứng (không phải kỹ thuật số)": {
+      "ok": 0,
+      "wrong": 8,
+      "skip": 0
+    },
+    "Hoàn tất quy trình tạo vật chứng": {
+      "ok": 7,
+      "wrong": 0,
+      "skip": 0
+    }
+  },
+  "ms": 686375,
+  "wrongList": [
+    {
+      "tc": "TC-002",
+      "expect": "StorageRoom|AssignEvidence|EvidenceAssign",
+      "code": "AssignAgentFileCommandHandler",
+      "path": "src/Forensic.Application/Commands/Agent/AssignAgentFileCommandHandler.cs",
+      "fn": "Chọn vị trí lưu trữ vật chứng"
+    },
+    {
+      "tc": "TC-005",
+      "expect": "StorageRoom|AssignEvidence|EvidenceAssign",
+      "code": "EvidenceCreateCommandHandler",
+      "path": "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "fn": "Chọn vị trí lưu trữ vật chứng"
+    },
+    {
+      "tc": "TC-007",
+      "expect": "StorageRoom|AssignEvidence|EvidenceAssign",
+      "code": "AssignAgentFileCommandHandler",
+      "path": "src/Forensic.Application/Commands/Agent/AssignAgentFileCommandHandler.cs",
+      "fn": "Chọn vị trí lưu trữ vật chứng"
+    },
+    {
+      "tc": "TC-011",
+      "expect": "CasePerson",
+      "code": "UploadService",
+      "path": "src/Forensic.Infrastructure/Services/UploadService.cs",
+      "fn": "Khai báo người sở hữu vật chứng"
+    },
+    {
+      "tc": "TC-014",
+      "expect": "CasePerson",
+      "code": "BulkAssignAgentFilesCommandHandler",
+      "path": "src/Forensic.Application/Commands/Agent/BulkAssignAgentFilesCommandHandler.cs",
+      "fn": "Ghi nhận người sử dụng vật chứng"
+    },
+    {
+      "tc": "TC-015",
+      "expect": "CasePerson",
+      "code": "UploadService",
+      "path": "src/Forensic.Infrastructure/Services/UploadService.cs",
+      "fn": "Ghi nhận người sử dụng vật chứng"
+    },
+    {
+      "tc": "TC-030",
+      "expect": "EvidenceAssignCase|AssignCase|Case",
+      "code": "EvidenceCreateCommandHandler",
+      "path": "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "fn": "Tạo mới vật chứng"
+    },
+    {
+      "tc": "TC-042",
+      "expect": "EvidenceAssignCase|AssignCase|Case",
+      "code": "EvidenceCreateCommandHandler",
+      "path": "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "fn": "Chọn hồ sơ vụ án cho vật chứng"
+    },
+    {
+      "tc": "TC-046",
+      "expect": "EvidenceAssignCase|AssignCase|Case",
+      "code": "EvidenceCreateCommandHandler",
+      "path": "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "fn": "Chọn hồ sơ vụ án cho vật chứng"
+    },
+    {
+      "tc": "TC-047",
+      "expect": "CasePerson",
+      "code": "UploadSession",
+      "path": "src/Forensic.Domain/Entities/UploadSession.cs",
+      "fn": "Ghi nhận người liên quan gián tiếp"
+    },
+    {
+      "tc": "TC-048",
+      "expect": "CasePerson",
+      "code": "BulkAssignAgentFilesCommandHandler",
+      "path": "src/Forensic.Application/Commands/Agent/BulkAssignAgentFilesCommandHandler.cs",
+      "fn": "Ghi nhận người liên quan gián tiếp"
+    },
+    {
+      "tc": "TC-055",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalFileGetByEvidenceHashQueryHandler",
+      "path": "src/Forensic.Application/Queries/DigitalFile/DigitalFileGetByEvidenceHashQueryHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-056",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "AgentFileSoftDeleteCommandHandler",
+      "path": "src/Forensic.Application/Commands/DigitalFile/AgentFileSoftDeleteCommandHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-057",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalFileGetByEvidenceHashQueryHandler",
+      "path": "src/Forensic.Application/Queries/DigitalFile/DigitalFileGetByEvidenceHashQueryHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-058",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalDeviceDeleteCommandHandler",
+      "path": "src/Forensic.Application/Commands/DigitalDevice/DigitalDeviceDeleteCommandHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-059",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalFileGetByEvidenceHashQueryHandler",
+      "path": "src/Forensic.Application/Queries/DigitalFile/DigitalFileGetByEvidenceHashQueryHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-060",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalDeviceDeleteCommandHandler",
+      "path": "src/Forensic.Application/Commands/DigitalDevice/DigitalDeviceDeleteCommandHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-061",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalFileGetByEvidenceHashQueryHandler",
+      "path": "src/Forensic.Application/Queries/DigitalFile/DigitalFileGetByEvidenceHashQueryHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    },
+    {
+      "tc": "TC-062",
+      "expect": "EvidenceCreate|EvidenceUpdate",
+      "code": "DigitalFileGetByEvidenceHashQueryHandler",
+      "path": "src/Forensic.Application/Queries/DigitalFile/DigitalFileGetByEvidenceHashQueryHandler.cs",
+      "fn": "Nhập mô tả vật chứng (không phải kỹ thuật số)"
+    }
+  ],
+  "skipTop": [
+    {
+      "tc": "TC-010",
+      "skip": "body-rule cross-family weak differential; top3: AssignAgentFileCommandHandler.cs(268,hits=0), BulkAssignAgentFilesCommandHandler.cs(256,hits=Contains), BulkUnas",
+      "fn": "Khai báo người sở hữu vật chứng"
+    },
+    {
+      "tc": "TC-018",
+      "skip": "body-rule required but no pattern hits; top3: EvidencePhysicalImageCreateCommandHandler.cs(330,hits=0), EvidencePhysicalImageDeleteCommand.cs(309,hits=0), Evide",
+      "fn": "Tải lên hình ảnh vật chứng"
+    },
+    {
+      "tc": "TC-025",
+      "skip": "FAIL_FEATURE_GAP — intent «ui_master_create»; unit.scope=backend (no BE writeBack)",
+      "fn": "Khai báo thiết bị kỹ thuật số"
+    },
+    {
+      "tc": "TC-026",
+      "skip": "FAIL_FEATURE_GAP — intent «ui_master_create»; unit.scope=backend (no BE writeBack)",
+      "fn": "Khai báo thiết bị kỹ thuật số"
+    },
+    {
+      "tc": "TC-029",
+      "skip": "body-rule required but no pattern hits; top3: DigitalFileCreateCommandHandler.cs(328,hits=0), ExtractDigitalFileMetadataCommandHandler.cs(314,hits=0), DigitalFi",
+      "fn": "Tải lên tệp kỹ thuật số của vật chứng"
+    },
+    {
+      "tc": "TC-049",
+      "skip": "body-rule ambiguous margin; top3: EvidenceAssignCaseCommandHandler.cs(228,hits=0), AssignEvidenceCommandHandler.cs(228,hits=0), EvidenceUnassignCaseCommandHandl",
+      "fn": "Ghi nhận người liên quan gián tiếp"
+    },
+    {
+      "tc": "TC-054",
+      "skip": "FAIL_FEATURE_GAP — intent «ui_master_create»; unit.scope=backend (no BE writeBack)",
+      "fn": "Phân loại vật chứng kỹ thuật số"
+    }
+  ],
+  "out": "d:\\Xlab\\AITest\\desktop\\scripts\\.tmp-forensic-resolve-eval.json"
+}

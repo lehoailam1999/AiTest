@@ -21,6 +21,7 @@ from app.models import (  # noqa: F401 — register metadata
 )
 from app.routers import (
     agent,
+    agent_pick_unit,
     audit,
     auth,
     connection,
@@ -183,6 +184,7 @@ app.include_router(generate_unit.router)
 app.include_router(generate_api_test.router)
 app.include_router(generate_e2e.router)
 app.include_router(agent.router)
+app.include_router(agent_pick_unit.router)
 app.include_router(resolve_source.router)
 app.include_router(workspace_router)
 app.include_router(integration_router)

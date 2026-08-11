@@ -414,7 +414,9 @@ def _analysis_records_prompt_block(
         "## KẾT QUẢ PHÂN TÍCH ĐÃ LƯU DB (NGUỒN CHÍNH ĐỂ SINH TEST CASE)",
         "Output Phân tích đã persist — bám itemCount>0; [] → bỏ (không invent). "
         + (
-            "Coverage/trace theo khối UNIT ← PHÂN TÍCH trong QUY TẮC HỆ THỐNG."
+            "Unit UNIVERSAL BE: classify BE|FE|BE_FE|UNKNOWN (behavior+outcome). "
+            "PRIMARY: BUSINESS_RULES · VALIDATION · ERROR_HANDLING · ACCEPTANCE (BE only). "
+            "Categories A–I + coverage/trace → khối UNIT ← PHÂN TÍCH."
             if eng == "unit"
             else "Mọi TC truy vết ≥1 mục bên dưới."
         ),
@@ -510,6 +512,7 @@ def _source_scan_prompt_block(
     module_hint: str | None = None,
     char_budget: int = 55_000,
     prefer_ui: bool = False,
+    prefer_logic: bool = False,
 ) -> str:
     """
     Build compact source context from bound workspace root.
@@ -551,17 +554,48 @@ def _source_scan_prompt_block(
         "frontend",
         "web",
     )
+    # Portable logic-layer stems (Unit) — no product nouns
+    logic_bonus_stems = (
+        "handler",
+        "service",
+        "usecase",
+        "use-case",
+        "validator",
+        "command",
+        "application",
+        "domain",
+    )
+    logic_demote_stems = (
+        "clientapp",
+        "client-app",
+        "/components/",
+        "/pages/",
+        "/views/",
+        ".dto.",
+        "/dto/",
+    )
 
     def _ui_bonus(path_l: str) -> int:
         if not prefer_ui:
             return 0
         return sum(1 for h in ui_hints if h in path_l)
 
-    if tokens or prefer_ui:
+    def _logic_bonus(path_l: str) -> int:
+        if not prefer_logic:
+            return 0
+        bonus = sum(2 for h in logic_bonus_stems if h in path_l)
+        demote = sum(2 for h in logic_demote_stems if h in path_l)
+        return bonus - demote
+
+    if tokens or prefer_ui or prefer_logic:
         scored: list[tuple[int, object]] = []
         for f in candidates:
-            path_l = (f.relative_path or "").lower()
-            score = sum(1 for t in tokens if t in path_l) + _ui_bonus(path_l)
+            path_l = (f.relative_path or "").lower().replace("\\", "/")
+            score = (
+                sum(1 for t in tokens if t in path_l)
+                + _ui_bonus(path_l)
+                + _logic_bonus(path_l)
+            )
             scored.append((score, f))
         scored.sort(key=lambda x: (-x[0], x[1].relative_path or ""))
         matched = [f for s, f in scored if s > 0][:max_files]
@@ -602,10 +636,17 @@ def _source_scan_prompt_block(
         total_chars += len(frag)
     if len(blocks) <= 3:
         return ""
-    blocks.append(
-        "Bắt buộc: map test case theo hành vi thực tế trong code (API/validation/state transition), "
-        "không chỉ dựa vào mô tả tổng quát."
-    )
+    if prefer_logic:
+        blocks.append(
+            "Bắt buộc (Unit): chỉ sinh reject/validate/persist khi excerpts có nhánh "
+            "quan sát được (throw/guard/persist/query). "
+            "BR/field chỉ attribute hoặc lớp trình bày — không sinh Unit (ghi gaps nếu cần)."
+        )
+    else:
+        blocks.append(
+            "Bắt buộc: map test case theo hành vi thực tế trong code (API/validation/state transition), "
+            "không chỉ dựa vào mô tả tổng quát."
+        )
     return "\n\n".join(blocks)
 
 
@@ -820,16 +861,19 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         if skip_source_scan:
             source_scan_ctx = ""
             eng_label = (preferred_engine or "").upper() or "TC"
-            force_env = (
-                "AITEST_TC_E2E_FORCE_SOURCE_SCAN"
-                if preferred_engine == "e2e"
-                else "AITEST_TC_UNIT_FORCE_SOURCE_SCAN"
-            )
-            set_job_progress(
-                job_id,
-                f"[hệ thống] Bỏ qua source scan ({eng_label}) — Knowledge freeze đủ feature/rule "
-                f"({force_env}=1 để ép scan)",
-            )
+            if preferred_engine == "e2e":
+                force_env = "AITEST_TC_E2E_FORCE_SOURCE_SCAN"
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] Bỏ qua source scan ({eng_label}) — Knowledge freeze đủ feature/rule "
+                    f"({force_env}=1 để ép scan)",
+                )
+            else:
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] Bỏ qua source scan ({eng_label}) — "
+                    "AITEST_TC_UNIT_SKIP_SOURCE_SCAN=1",
+                )
         else:
             # File scan can read dozens of files — keep event loop free for parallel fan-out.
             source_scan_ctx = await asyncio.to_thread(
@@ -839,6 +883,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                 module_hint=default_module or focus_modules or None,
                 char_budget=scan_budget,
                 prefer_ui=preferred_engine == "e2e",
+                prefer_logic=preferred_engine == "unit",
             )
 
         from app.features.requirement_studio.snapshot_prompt import (

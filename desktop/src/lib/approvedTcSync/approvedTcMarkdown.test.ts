@@ -54,8 +54,8 @@ describe("approvedTcMarkdown", () => {
     assert.match(md, /reviewStatus: Approved/);
   });
 
-  it("includes Module + Function Grounding progressive resolve block", () => {
-    const md = renderApprovedTestCaseMarkdown(sample({ module: "Phân loại VTKT" }), {
+  it("includes Module + Function Grounding progressive resolve block for Unit", () => {
+    const md = renderApprovedTestCaseMarkdown(sample({ type: "Unit", module: "Phân loại VTKT" }), {
       requirementTitle: "Vật chứng",
     });
     assert.match(md, /requirement: Vật chứng/);
@@ -65,18 +65,38 @@ describe("approvedTcMarkdown", () => {
     assert.match(md, /module: Phân loại VTKT/);
     assert.match(md, /\| Module \| Vật chứng \|/);
     assert.match(md, /\| Function \| Phân loại VTKT \|/);
-    assert.match(md, /Module → Function → Title/);
-    assert.match(md, /SUT resolve \(tự động khi Approve\)/);
+    assert.match(md, /Primary SUT below is authoritative for Gen/);
     assert.match(md, /### Resolved SUT/);
-    assert.match(md, /index\/path-index/);
+    assert.match(md, /Module → Function → Title/);
     const g = parseApprovedTcGrounding(md);
     assert.equal(g.requirement, "Vật chứng");
     assert.equal(g.module, "Phân loại VTKT");
   });
 
+  it("includes E2E Grounding block for E2E TC", () => {
+    const md = renderApprovedTestCaseMarkdown(
+      sample({
+        type: "E2E",
+        module: "vật chứng",
+        testData: "path: /admin/evidence\nauthRole: Admin\nlandmark: Danh sách vật chứng",
+      }),
+      { requirementTitle: "Quản lý vật chứng" }
+    );
+    assert.match(md, /## Grounding \(E2E Gen\)/);
+    assert.match(md, /path: \/admin\/evidence/);
+    assert.match(md, /authRole: Admin/);
+    assert.match(md, /landmark: Danh sách vật chứng/);
+    const g = parseApprovedTcGrounding(md);
+    assert.equal(g.requirement, "Quản lý vật chứng");
+    assert.equal(g.module, "vật chứng");
+    assert.equal(g.path, "/admin/evidence");
+    assert.equal(g.authRole, "Admin");
+    assert.equal(g.landmark, "Danh sách vật chứng");
+  });
+
   it("does not fall back Module (requirement) to Function", () => {
     const md = renderApprovedTestCaseMarkdown(
-      sample({ module: "Chọn vị trí lưu trữ vật chứng" })
+      sample({ type: "Unit", module: "Chọn vị trí lưu trữ vật chứng" })
     );
     assert.match(md, /\| Module \| — \|/);
     assert.match(md, /requirement: —/);
@@ -95,3 +115,4 @@ title: validate bắt buộc
     assert.equal(g.module, "Gán vật chứng vào hồ sơ vụ án");
   });
 });
+

@@ -79,7 +79,12 @@ _FEATURE_HEAD = re.compile(
     r"(?i)^(feature|chức năng|module|epic|capability)[\s\-_:.]+\s*(.+)$"
 )
 _FEATURE_HEAD_SIMPLE = re.compile(
-    r"(?i)^(feature|chức năng|module)\b"
+    r"(?i)^(feature|chức năng|module|mô\s*tả\s*chức\s*năng|chi\s*tiết\s*chức\s*năng)\b"
+)
+_NUMBERED_SECTION_HEAD = re.compile(r"^\d+(?:\.\d+)+\s+(.+)$")
+_CAPABILITY_SECTION_HEAD = re.compile(
+    r"(?i)^(?:mô\s*tả\s*(?:chức\s*năng|nghiệp\s*vụ)|"
+    r"chi\s*tiết\s*chức\s*năng|functional\s*description)\b"
 )
 _VALIDATION_HINT = re.compile(
     r"(?i)\b(validation|validate|kiểm tra|định dạng|format|max length|min length|"
@@ -312,19 +317,20 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
         "json_key": "useCases",
         "label": "Luồng nghiệp vụ",
         "instruction": (
-            "Mỗi UC = đúng 1 item Main Success Scenario (Luồng chính) — không nhân bản.\n"
-            "CẤM item riêng cho Exception / Alternate / Luồng phụ / nhánh lỗi "
-            "(→ exceptions / ERROR_HANDLING).\n"
+            "Mỗi UC = đúng 1 item **Main Success Scenario (Luồng chính)** — happy path nghiệp vụ.\n"
+            "CẤM tạo item riêng cho: Exception / Alternate / Luồng phụ / nhánh lỗi / "
+            "luồng validation / kiểm tra field / phủ định "
+            "(→ exceptions hoặc validationRules — KHÔNG vào useCases).\n"
             "Bắt buộc đủ 3 field — steps từ Luồng chính (tách <br>/1.2.3.), "
             "mermaid = flowchart TD happy path từ steps (≥2 node hành động).\n"
-            "1) name: tên UC đúng SRS (≤8 từ), VD «Xem danh sách công việc». "
+            "1) name: tên UC đúng SRS (≤8 từ). "
             "CẤM dump bảng; CẤM Phạm vi/Mục tiêu/file›section; "
-            "CẤM tên chứa Exception Flow / Luồng phụ / Alternate.\n"
+            "CẤM tên chứa Exception/Alt/Luồng phụ/Validation.\n"
             "2) mermaid: CHỈ flowchart TD (không ```): "
-            "([Bắt đầu]) → [hành động]… → ([Kết thúc]); node ≤6 từ; "
-            "CẤM node = hàng bảng «| Mục | Nội dung |».\n"
+            "([Bắt đầu]) → [hành động]… → ([Kết thúc]); node ≤6 từ.\n"
             "3) steps: «1. …\\n2. …» (2–8 dòng) khớp Luồng chính — không paste cả bảng UC.\n"
-            "Không có Luồng chính trong excerpts → useCases: []."
+            "Không có Luồng chính trong excerpts → useCases: []. "
+            "Ít nhưng đúng — chỉ MSS chính, không pad luồng phụ."
         ),
     },
     {
@@ -370,8 +376,9 @@ ANALYSIS_CRITERIA_GUIDE: tuple[dict[str, str], ...] = (
             "- module (khuyến nghị): tên màn/chức năng/FEATURE chứa field "
             "(VD «Đăng nhập», «Thêm todo») — để gom nhóm UI; "
             "SRS không gắn màn → module=\"Chung\".\n"
-            "Xuất ĐỦ mọi field có ràng buộc trong SRS (không bỏ sót hàng bảng). "
-            "Thiếu tên field → không tạo item."
+            "Xuất field có ràng buộc đo được trong SRS (không pad / không tạo useCase từ validation). "
+            "Thiếu tên field → không tạo item. "
+            "CẤM nhân bản thành «luồng kiểm tra / validation flow» trong useCases."
         ),
     },
     {
@@ -459,13 +466,14 @@ I. CẤM PLACEHOLDER / MỤC LỤC / MARKDOWN DUMP: Không tạo item từ:
      kể cả «Mục tiêu (2)» / «1. Mục tiêu»
    - Tiêu đề tài liệu / heading markdown (# ## Software Requirements Specification / SRS)
    - Dump nguyên đoạn markdown SRS vào name hoặc description
-J. PHÂN TẦNG: features = FR/capability (hành vi người dùng, KHÔNG nút/input/field đơn lẻ);
-   apiSummary = method+path|UI entry (màn/route);
-   useCases = Main Success Scenario (mermaid flowchart + steps); executionContexts = WHO (actor/auth/roles) cho scenario;
-   businessRules = policy; validationRules = field;
-   exceptions = lỗi; acceptanceCriteria = AC đo được; constraints = NFR SMART.
-K. CHI TIẾT CỤ THỂ: mỗi feature cần ≥1 tín hiệu kiểm thử (FR-id, path, method, field, status).
-   Heading mục lục / mô tả trống hoặc chung chung → bỏ.
+J. PHÂN TẦNG (đúng bucket — không nhân bản):
+   features = capability nghiệp vụ (gộp FR cùng mục đích);
+   useCases = **chỉ Luồng chính / MSS** (mermaid + steps) — CẤM Exception/Alt/Luồng phụ/validation flow;
+   validationRules = field+rule (KHÔNG là flow); exceptions = lỗi; businessRules = policy;
+   apiSummary = method+path|entry; executionContexts = WHO; acceptanceCriteria = AC đo được;
+   constraints = NFR SMART.
+K. CHI TIẾT: feature cần ≥1 tín hiệu kiểm thử (FR-id/path/field). Mục lục / mô tả trống → bỏ.
+   Chính xác > số lượng — pad luồng phụ/validation = SAI.
 """
 
 
@@ -959,6 +967,18 @@ def _has_concrete_detail(text: str) -> bool:
     return bool(_CONCRETE_DETAIL.search(text or ""))
 
 
+def _feature_desc_is_substantive(desc: str) -> bool:
+    """Portable: keep VN capability when SRS body has measurable detail (no action verb required)."""
+    s = (desc or "").strip()
+    if len(s) < 40:
+        return False
+    if _has_concrete_detail(s):
+        return True
+    if _MEASURABLE_VALIDATION.search(s):
+        return True
+    return bool(re.search(r"\d", s))
+
+
 def _is_valid_acceptance_text(text: str) -> bool:
     s = (text or "").strip()
     if not s or len(s) < 12 or _is_criterion_section_label(s) or _is_markdown_or_srs_dump(s):
@@ -1207,7 +1227,9 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if not _FEATURE_ACTION_HINT.search(name):
                 continue
         elif not (
-            _has_concrete_detail(combined) or _FEATURE_ACTION_HINT.search(name)
+            _has_concrete_detail(combined)
+            or _FEATURE_ACTION_HINT.search(name)
+            or _feature_desc_is_substantive(desc)
         ):
             continue
         # Compact description: keep FR-id + short clause, not essay
@@ -1222,11 +1244,39 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
     from app.features.requirement_studio.flow_mermaid import (
         enrich_use_case_flow_fields,
         is_hollow_use_case,
+        is_non_main_business_flow,
         _META_ANALYSIS_ECHO,
     )
 
     enriched_ucs: list[dict] = []
     hollow_gap_texts: list[str] = []
+    rerouted_non_mss = 0
+    validations_reroute: list[dict] = list(_as_list(payload.get("validationRules")))
+    exceptions_reroute: list[dict] = list(_as_list(payload.get("exceptions")))
+
+    def _reroute_dropped_use_case(uc_name: str, uc_steps: str) -> None:
+        nonlocal rerouted_non_mss
+        if not uc_name and not uc_steps:
+            return
+        rerouted_non_mss += 1
+        blob = uc_steps or uc_name
+        if _EXCEPTION_HINT.search(blob):
+            exceptions_reroute.append({"text": f"{uc_name}: {blob[:400]}"})
+        elif _VALIDATION_HINT.search(blob) or _MEASURABLE_VALIDATION.search(blob):
+            validations_reroute.append(
+                {
+                    "field": uc_name[:80] or "dữ liệu",
+                    "rule": blob[:300],
+                    "module": "Chung",
+                }
+            )
+        elif _RULE_HINT.search(blob):
+            business_extra = _as_list(payload.get("businessRules"))
+            business_extra.append(
+                {"id": f"BR-{len(business_extra) + 1}", "text": f"{uc_name}: {blob[:400]}"}
+            )
+            payload["businessRules"] = business_extra
+
     for uc in use_cases_in:
         if not isinstance(uc, dict):
             continue
@@ -1253,6 +1303,8 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "SRS khai báo Exception Flow / Luồng ngoại lệ nhưng chưa mô tả "
                     "điều kiện kích hoạt và phản hồi lỗi quan sát được."
                 )
+            elif is_non_main_business_flow(name, steps_raw):
+                _reroute_dropped_use_case(name, steps_raw)
             continue
         # Must pass cleaned steps — original uc may still hold markdown table dump
         row = enrich_use_case_flow_fields(
@@ -1268,9 +1320,32 @@ def _sanitize_knowledge_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if not (row.get("steps") or row.get("mermaid")):
             continue
         if is_hollow_use_case(row.get("name"), row.get("steps"), row.get("mermaid")):
+            if is_non_main_business_flow(
+                str(row.get("name") or ""), str(row.get("steps") or "")
+            ):
+                _reroute_dropped_use_case(
+                    str(row.get("name") or ""), str(row.get("steps") or "")
+                )
             continue
         enriched_ucs.append(row)
     payload["useCases"] = _dedupe_list(enriched_ucs, "name")
+    if validations_reroute:
+        payload["validationRules"] = _normalize_validation_items(validations_reroute)
+    if exceptions_reroute:
+        payload["exceptions"] = _dedupe_list(exceptions_reroute, "text")
+    if rerouted_non_mss > 0:
+        hollow_gap_texts.append(
+            f"{rerouted_non_mss} luồng non-MSS/validation đã chuyển sang "
+            "Validation / Xử lý lỗi / Business rules — không nằm trong Luồng nghiệp vụ."
+        )
+    if hollow_gap_texts:
+        gaps_extra = _as_list(payload.get("gaps"))
+        seen_g = {str(g.get("text", "")).lower() for g in gaps_extra if isinstance(g, dict)}
+        for txt in hollow_gap_texts:
+            if txt.lower() not in seen_g:
+                gaps_extra.append({"text": txt[:500]})
+                seen_g.add(txt.lower())
+        payload["gaps"] = _dedupe_list(gaps_extra, "text")[:MAX_GAPS]
 
     # Execution Context — WHO for E2E; only keep rows with a scenario/name ref from SRS.
     exec_in = _as_list(payload.get("executionContexts"))
@@ -1809,6 +1884,48 @@ def build_knowledge_heuristic(
                             "steps": "\n".join(flow_lines[:12])[:800],
                         }
                     )
+                elif body:
+                    features.append({"name": h[:200], "description": body[:400]})
+
+        m_sec = _NUMBERED_SECTION_HEAD.match(h_raw) if h_raw else None
+        if m_sec and body and not _is_criterion_section_label(h_raw):
+            sec_name = m_sec.group(1).strip()[:200]
+            if _FLOW_STEP_HINT.search(body) and not _is_junk_use_case_name(sec_name):
+                steps = _extract_main_flow_steps(body) or _coerce_uc_steps(body)
+                if steps:
+                    _upsert_use_case(use_cases, name=sec_name, steps=steps)
+            elif not _is_junk_feature(sec_name, body):
+                features.append({"name": sec_name, "description": body[:400]})
+
+        if h and _CAPABILITY_SECTION_HEAD.search(h) and body:
+            first_line = next(
+                (ln.strip() for ln in body.splitlines() if ln.strip() and not _is_markdown_table_row(ln.strip())),
+                h,
+            )
+            feat_name = (
+                _parse_numbered_use_case_title(first_line)
+                or _parse_fr_title(first_line)
+                or first_line[:200]
+            )
+            if feat_name and not _is_junk_feature(feat_name, body):
+                features.append({"name": feat_name[:200], "description": body[:400]})
+
+        if h and _VALIDATION_HINT.search(h) and body:
+            for line in body.splitlines():
+                row = line.strip()
+                if not _is_markdown_table_row(row):
+                    continue
+                if re.search(r"(?i)\|\s*(?:trường|field|kiểu|type|bắt buộc)\s*\|", row):
+                    continue
+                cells = [c.strip() for c in row.strip("|").split("|")]
+                if (
+                    len(cells) >= 3
+                    and cells[0]
+                    and not re.match(r"(?i)^(?:trường|field|:[-]+)$", cells[0])
+                    and len(cells[0]) <= 40
+                ):
+                    rule = ", ".join(c for c in cells[1:] if c)[:200]
+                    validations.append({"field": cells[0][:80], "rule": rule})
 
         if h and _USECASE_HEAD.search(h) and not _is_junk_use_case_name(h):
             steps = _extract_main_flow_steps(body) or _coerce_uc_steps(body)
@@ -2191,17 +2308,18 @@ def _chunk_rank_score(heading: str | None, text: str) -> int:
     if _RULE_HINT.search(blob):
         score += 3
     if _VALIDATION_HINT.search(blob):
-        score += 3
+        # Still include for validationRules/businessRules in LLM prompt (below UC/Feature).
+        score += 2
     if _API_RE.search(blob):
         score += 2
     if _ACCEPTANCE_HINT.search(blob):
-        score += 3
-    if _EXCEPTION_HINT.search(blob):
         score += 2
+    if _EXCEPTION_HINT.search(blob):
+        score += 1
     if _AUTH_HINT.search(blob):
         score += 2
     if _FLOW_STEP_HINT.search(blob):
-        score += 2
+        score += 3
     # Prefer denser chunks slightly
     score += min(3, len(body) // 800)
     return score
@@ -2361,17 +2479,19 @@ def chunks_input_hash(
 
 
 def knowledge_enrich_oneshot_system_prompt() -> str:
-    """Single-call enrich system — compact, no full 8k guide dump."""
+    """Single-call enrich system — compact; main-flow-only for useCases."""
     return (
         "You are a requirements analyst preparing Knowledge for QA.\n"
         "Return ONLY one JSON object (no markdown) with keys:\n"
         "- summary (string): 2–5 câu Scope in/out + actor\n"
-        "- features ([{name,description}]): CHỈ capability người dùng (FR); name=động từ+đối tượng; "
-        "description có FR-id — CẤM validation/lỗi/mục lục; CẤM nút/input/field đơn lẻ (→ validationRules)\n"
+        "- features ([{name,description}]): capability nghiệp vụ (gộp FR); name=động từ+đối tượng; "
+        "description có FR-id — CẤM mục lục; field/validation → validationRules (không thành feature)\n"
         "- actors ([{name,description,permissions}])\n"
-        "- useCases ([{name,mermaid,steps}]): từ Luồng chính UC-xx; mermaid=flowchart TD; steps 1.2.\n"
+        "- useCases ([{name,mermaid,steps}]): **CHỈ Luồng chính / MSS** mỗi UC "
+        "(mermaid=flowchart TD + steps 1.2.) — CẤM Exception/Alt/Luồng phụ/validation flow "
+        "(→ exceptions hoặc validationRules)\n"
         "- businessRules ([{id,text}])\n"
-        "- validationRules ([{field,rule,module}])\n"
+        "- validationRules ([{field,rule,module}]): field+rule đo được — KHÔNG tạo useCase từ validation\n"
         "- apiSummary ([{method,path,note}])\n"
         "- exceptions ([{text}])\n"
         "- acceptanceCriteria ([{text}])\n"
@@ -2380,7 +2500,8 @@ def knowledge_enrich_oneshot_system_prompt() -> str:
         "- gaps ([{text}])\n\n"
         f"{ANALYSIS_FIDELITY_RULES.strip()}\n\n"
         "Empty list if absent. Prefer near-verbatim SRS. "
-        "features ≠ useCases ≠ validationRules."
+        "features ≠ useCases ≠ validationRules. "
+        "useCases = main flows only."
     )
 
 
@@ -2399,9 +2520,9 @@ def build_enrich_oneshot_prompt(
     return (
         "Phân tích SRS — 1 lượt, trả về đủ Knowledge JSON.\n"
         f"Files: {files}\n\n"
-        "Ưu tiên: features (FR capability — KHÔNG liệt kê nút/input/field) + useCases (Luồng chính + mermaid).\n"
-        "CẤM nhét mục lục/Phạm vi vào features; CẤM dump bảng markdown vào useCases.steps; "
-        "CẤM 1 widget UI = 1 feature.\n\n"
+        "Ưu tiên: features (capability) + useCases (**chỉ Luồng chính / MSS** + mermaid).\n"
+        "CẤM: mục lục→features; dump bảng→useCases; Exception/Alt/Luồng phụ/validation flow→useCases; "
+        "1 field/widget = 1 feature. Validation → validationRules only.\n\n"
         "DOCUMENT EXCERPTS:\n\n"
         f"{excerpt}\n\n"
         "Return JSON now."

@@ -32,6 +32,7 @@ import {
   isNonProductionUnitPath,
   isPacketSutAligned,
   resolveRelatedSourcesFromDisk,
+  scopedFamilyReresolveFromDisk,
 } from "./unitGenRelatedSources";
 import { getUnitGenEngine, writeUnitGenDebugDump } from "./cursorAgentCliEngine";
 
@@ -93,6 +94,27 @@ function notifyResult(notify: NotifyFn, result: CodegenResultCallback): void {
   notify(IdeNotifications.codegenResult, result);
 }
 
+function canSoftBypassGateForGroundedSource(opts: {
+  code: string;
+  primaryPath?: string;
+  source?: string;
+  markers: { paths: string[]; codes: string[] };
+}): boolean {
+  if (!/FEATURE_GAP|SUT_MISMATCH/i.test(opts.code || "")) return false;
+  if (!opts.primaryPath || !opts.source?.trim()) return false;
+  // Logic-layer SUT with concrete excerpt should be enough to generate.
+  if (isNonProductionUnitPath(opts.primaryPath)) return false;
+  if (isBlockedUnitPrimaryPath(opts.primaryPath, opts.markers)) return false;
+  // If markers exist, prefer consistency; if markers absent, still allow grounded generate.
+  if (
+    (opts.markers.paths.length > 0 || opts.markers.codes.length > 0) &&
+    !primaryMatchesMarkers(opts.primaryPath, opts.markers)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 async function readTextIfExists(abs: string, maxChars = UNIT_GEN_LIMITS.maxConventionsChars): Promise<string> {
   try {
     const raw = await fs.readFile(abs, "utf8");
@@ -108,6 +130,7 @@ async function loadUnitProfileGate(root: string): Promise<{
   requireMarkers: boolean | null;
   unitScope: "backend" | "frontend" | "any";
   minAlignment: number;
+  genMode: "strict_spec" | "always_generate";
   /** When false (default), Extension never fuzzy-resolves SUT from disk. */
   allowDiskReresolve: boolean;
 }> {
@@ -119,6 +142,7 @@ async function loadUnitProfileGate(root: string): Promise<{
         requireMarkers?: boolean | string[];
         scope?: "backend" | "frontend" | "any";
         minAlignment?: number;
+        genMode?: "strict_spec" | "always_generate";
         allowDiskReresolve?: boolean;
       };
     };
@@ -139,12 +163,14 @@ async function loadUnitProfileGate(root: string): Promise<{
       typeof unit?.minAlignment === "number" && Number.isFinite(unit.minAlignment)
         ? unit.minAlignment
         : 50;
+    const genMode = unit?.genMode === "always_generate" ? "always_generate" : "strict_spec";
     const allowDiskReresolve = unit?.allowDiskReresolve === true;
     return {
       domainGuards,
       requireMarkers,
       unitScope,
       minAlignment,
+      genMode,
       allowDiskReresolve,
     };
   } catch {
@@ -153,9 +179,52 @@ async function loadUnitProfileGate(root: string): Promise<{
       requireMarkers: true,
       unitScope: "backend",
       minAlignment: 50,
+      genMode: "strict_spec",
       allowDiskReresolve: false,
     };
   }
+}
+
+function withGapFallbackInstruction(tcMd: string, detail: string): string {
+  const note = [
+    "## AITest Fallback Mode (Always Generate)",
+    "- Output fallback tests only; never fake pass for missing behavior.",
+    "- Use `test.skip` / trait-style marker for missing behavior.",
+    "- Add clear TODO with exact missing backend rule/signal.",
+    "- Prefer closest existing branch assertion from current source.",
+    `- Fallback reason: ${detail}`,
+  ].join("\n");
+  return `${tcMd}\n\n${note}`.trim();
+}
+
+function annotateGapFallbackCode(code: string, testCaseId: string, reason: string): string {
+  const trimmed = (code || "").trim();
+  if (!trimmed) return code;
+  const header = [
+    "// AITEST_FALLBACK_GAP",
+    `// fallbackFrom: ${testCaseId}`,
+    `// reason: ${reason}`,
+    "// mode: always_generate",
+  ].join("\n");
+  if (/^\s*using\s+/m.test(trimmed) || /\.cs$/i.test(testCaseId)) {
+    return `${header}\n${trimmed}`;
+  }
+  return `${header}\n${trimmed}`;
+}
+
+function withSoftBypassDiagnosticInstruction(
+  tcMd: string,
+  input: { code: string; reason: string; primaryPath?: string }
+): string {
+  const note = [
+    "## AITest Source Diagnostic",
+    "- Generation proceeded with soft-bypass (grounded TC + source).",
+    `- Gate code: ${input.code || "UNKNOWN"}`,
+    `- Gate reason: ${input.reason || "n/a"}`,
+    `- SUT: ${input.primaryPath || "unknown-sut"}`,
+    "- If verification fails, treat this as source-behavior gap and fix SUT/rules in source.",
+  ].join("\n");
+  return `${tcMd}\n\n${note}`.trim();
 }
 
 /** Walk `.ai-test/test-cases/**` for `{testCaseId}.md` (business code or UUID). */
@@ -369,7 +438,17 @@ async function genOneItem(
       ));
 
   // Optional legacy disk fuzzy — off by default (Desktop owns resolve).
+  // Scoped family recovery: one shot when packet fails (not full allowDiskReresolve).
   let disk: Awaited<ReturnType<typeof resolveRelatedSourcesFromDisk>> | null = null;
+  let scopedRecoveryUsed = false;
+  const familyAnchors = [
+    ...markers.paths,
+    fromPacket.primaryPath || "",
+    primaryPath || "",
+  ]
+    .map((p) => toRepoRelativePath(root, p))
+    .filter(Boolean);
+
   if (!packetOk && allowDisk) {
     disk = await resolveRelatedSourcesFromDisk(root, {
       title: item.title,
@@ -424,6 +503,26 @@ async function genOneItem(
       primarySource = "disk";
       related = disk.related || related;
     }
+  } else if (!packetOk && !allowDisk) {
+    disk = await scopedFamilyReresolveFromDisk(root, {
+      title: item.title,
+      module: item.module,
+      testCaseId: item.testCaseId,
+      testData: [item.testData, item.steps, item.expectedOutcome]
+        .filter(Boolean)
+        .join("\n"),
+      tcMd: md.content,
+      familyAnchors,
+      codeAliases: paramsCodeAliases,
+    });
+    scopedRecoveryUsed = true;
+    lastAlignScore = disk.alignmentScore;
+    if (disk.primaryPath && disk.source) {
+      primaryPath = toRepoRelativePath(root, disk.primaryPath);
+      source = disk.source;
+      primarySource = "disk";
+      related = disk.related || related;
+    }
   }
 
   if (!packetOk && !primaryPath?.trim()) {
@@ -465,7 +564,43 @@ async function genOneItem(
 
   primaryPath = primaryPath ? toRepoRelativePath(root, primaryPath) : undefined;
 
-  // Hard stop: markers present but primary still mismatches (never Gen I* for path: Foo)
+  // Hard stop: markers present but primary still mismatches — one scoped recovery first
+  if (
+    (markers.paths.length > 0 || markers.codes.length > 0) &&
+    primaryPath &&
+    !primaryMatchesMarkers(primaryPath, markers)
+  ) {
+    if (!scopedRecoveryUsed) {
+      const recovered = await scopedFamilyReresolveFromDisk(root, {
+        title: item.title,
+        module: item.module,
+        testCaseId: item.testCaseId,
+        testData: [item.testData, item.steps, item.expectedOutcome]
+          .filter(Boolean)
+          .join("\n"),
+        tcMd: md.content,
+        familyAnchors: [
+          ...markers.paths,
+          primaryPath,
+          ...familyAnchors,
+        ],
+        codeAliases: paramsCodeAliases,
+      });
+      scopedRecoveryUsed = true;
+      if (
+        recovered.primaryPath &&
+        recovered.source &&
+        primaryMatchesMarkers(recovered.primaryPath, markers)
+      ) {
+        primaryPath = toRepoRelativePath(root, recovered.primaryPath);
+        source = recovered.source;
+        primarySource = "disk";
+        related = recovered.related || related;
+        disk = recovered;
+      }
+    }
+  }
+
   if (
     (markers.paths.length > 0 || markers.codes.length > 0) &&
     primaryPath &&
@@ -541,6 +676,7 @@ async function genOneItem(
         ].map((p) => toRepoRelativePath(root, p)),
         featureTokens: [...markers.codes, ...(item.module || "").split(/\s+/)],
         maxRelated: UNIT_GEN_LIMITS.maxRelatedFiles,
+        preferDtoValidator: true,
       }),
     ]
       .map(normRel)
@@ -625,6 +761,11 @@ async function genOneItem(
       UNIT_GEN_LIMITS.maxRelatedFiles
     );
   };
+  let gapFallbackUsed = false;
+  let gapFallbackReason = "";
+  let softBypassUsed = false;
+  let softBypassReason = "";
+  let softBypassCode = "";
 
   let gate = decideUnitSutGate({
     tcText: tcBlob,
@@ -640,6 +781,83 @@ async function genOneItem(
 
   if (gate.decision === "block") {
     const code = gate.code || "FAIL_NEEDS_MARKER";
+    // One scoped recovery on FEATURE_GAP / SUT_MISMATCH then re-gate
+    if (
+      !scopedRecoveryUsed &&
+      /FEATURE_GAP|SUT_MISMATCH/i.test(code) &&
+      primaryPath
+    ) {
+      const recovered = await scopedFamilyReresolveFromDisk(root, {
+        title: item.title,
+        module: item.module,
+        testCaseId: item.testCaseId,
+        testData: [item.testData, item.steps, item.expectedOutcome]
+          .filter(Boolean)
+          .join("\n"),
+        tcMd: md.content,
+        familyAnchors: [...familyAnchors, primaryPath],
+        codeAliases: paramsCodeAliases,
+      });
+      scopedRecoveryUsed = true;
+      if (
+        recovered.primaryPath &&
+        recovered.source &&
+        recovered.primaryPath.replace(/\\/g, "/") !==
+          primaryPath.replace(/\\/g, "/")
+      ) {
+        primaryPath = toRepoRelativePath(root, recovered.primaryPath);
+        source = recovered.source;
+        primarySource = "disk";
+        related = recovered.related || related;
+        disk = recovered;
+        gate = decideUnitSutGate({
+          tcText: tcBlob,
+          primaryPath,
+          sourceExcerpt: source,
+          codeAliases: paramsCodeAliases,
+          moduleText: [item.module, item.title, md.content.slice(0, 1500)]
+            .filter(Boolean)
+            .join("\n"),
+          domainGuards,
+          requireMarkers: requireMarkers !== false,
+          unitScope,
+          minAlignment,
+        });
+      }
+    }
+  }
+
+  if (gate.decision === "block") {
+    const code = gate.code || "FAIL_NEEDS_MARKER";
+    if (/FEATURE_GAP/i.test(code) && profileGate.genMode === "always_generate") {
+      gapFallbackUsed = true;
+      gapFallbackReason = `${code} — ${gate.reason}`;
+      notifyProgress(notify, {
+        commandId,
+        phase: "generating",
+        current: index,
+        total,
+        message: "fallback mode: FEATURE_GAP → always_generate",
+      });
+    } else if (
+      canSoftBypassGateForGroundedSource({
+        code,
+        primaryPath,
+        source,
+        markers,
+      })
+    ) {
+      softBypassUsed = true;
+      softBypassReason = gate.reason || "";
+      softBypassCode = code;
+      notifyProgress(notify, {
+        commandId,
+        phase: "generating",
+        current: index,
+        total,
+        message: `gate soft-bypass ${code} · SUT=${primaryPath || "unknown"} · ${gate.reason || ""}`,
+      });
+    } else {
     const debugRel = await writeUnitGenDebugDump({
       workspaceRoot: root,
       item,
@@ -680,6 +898,7 @@ async function genOneItem(
         error: code,
       },
     };
+    }
   }
 
   try {
@@ -688,7 +907,15 @@ async function genOneItem(
       workspaceRoot: root,
       conventions,
       projectRules,
-      tcMd: md.content,
+      tcMd: gapFallbackUsed
+        ? withGapFallbackInstruction(md.content, gapFallbackReason || "FEATURE_GAP")
+        : softBypassUsed
+          ? withSoftBypassDiagnosticInstruction(md.content, {
+              code: softBypassCode || "SOFT_BYPASS",
+              reason: softBypassReason,
+              primaryPath,
+            })
+          : md.content,
       tcMdPath: md.path,
       primaryPath,
       source,
@@ -720,12 +947,23 @@ async function genOneItem(
         },
       };
     }
+    const fileOut =
+      gapFallbackUsed && file
+        ? {
+            ...file,
+            content: annotateGapFallbackCode(
+              file.content,
+              item.testCaseId,
+              gapFallbackReason || "FEATURE_GAP"
+            ),
+          }
+        : file;
     return {
-      file,
+      file: fileOut,
       truncated: result.truncated,
       meta: {
-        path: file.path,
-        size: Buffer.byteLength(file.content, "utf8"),
+        path: fileOut.path,
+        size: Buffer.byteLength(fileOut.content, "utf8"),
         status: "CREATED",
       },
       perTc: {

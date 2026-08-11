@@ -11,18 +11,27 @@ import {
   decideBodyRuleWriteBack,
   discoverFeatureFoldersFromIndex,
   expandUnitRelatedPaths,
+  featureFolderSegmentFromPath,
   filterCandidatesByFeatureFolders,
   filterUnitLogicLayerCandidates,
   filterUnitLogicLayerPaths,
   hasStrongWriteBackSignal,
   isAnemicEntityLikePath,
   isSignedUrlOrTokenGeneratePath,
+  matchingProjectAliasTokens,
   orderCandidatesForBodyRuleOpen,
+  pathHitsToken,
+  preferDtoValidatorForHints,
+  applyLayerHintPrimaryPromotion,
   softCrossCuttingDenied,
   tcImpliesBehaviorPrimary,
   UNIT_BODY_RULE,
   uploadIntentPathShapeAdjust,
   queryImpliesUploadIntent,
+  extractOpPreferTokens,
+  functionOpPathShapeAdjust,
+  pathContradictsOpPreferTokens,
+  queryImpliesAssignFilterIntent,
   validateRejectPathShapeAdjust,
   type BodyRuleScoredCandidate,
   type UnitIntent,
@@ -31,18 +40,22 @@ import { resolveImportSpecifier } from "../codeIndex/buildDependencyGraph";
 import type { CodeIndexSnapshot } from "../codeIndex/types";
 import {
   extractTechIdentifierStems,
-  pathHitsToken,
   preferredSymbolFromCodeIndex,
 } from "../approvedTcSync/progressiveSeedFromCodeIndex";
 import {
   extractMatchTokens,
 } from "../projectIntelligence/tcSeedResolver";
-import { matchingProjectAliasTokens } from "../projectIntelligence/viCodeAliases";
-import type { SeedCandidate } from "../projectIntelligence/types";
+import type { ResolvedSeed, SeedCandidate } from "../projectIntelligence/types";
 import { isExcludedFromUnitRetrieve, isUnsuitableUnitPrimary, unitPathBonus } from "../retrieval/rankScore";
 import { retrieveUnitSources } from "../retrieval/unitRetriever";
 import type { RankedFileHit } from "../retrieval/types";
 import type { UnitApproveQuery } from "./buildUnitApproveQuery";
+import type {
+  LlmPickUnitPrimaryInput,
+  LlmPickUnitPrimaryResult,
+  PickFromShortlistFn,
+} from "./llmPickUnitPrimary";
+import { acceptShortlistPick } from "./llmPickUnitPrimary";
 
 export type ReadExcerptFn = (pathRel: string) => Promise<string>;
 
@@ -60,7 +73,27 @@ export type ResolveUnitPrimaryResult = {
   skipReason?: string;
   bodyRuleLog?: string;
   notes: string[];
-  source: "index.db" | "path-index";
+  source: "index.db" | "path-index" | "llm-shortlist";
+};
+
+export type ResolveUnitPrimaryOpts = {
+  codeIndex: CodeIndexSnapshot;
+  query: UnitApproveQuery;
+  readExcerpt?: ReadExcerptFn | null;
+  topK?: number;
+  /** Extra path pool when retrieve shortlist is thin */
+  fallbackPaths?: string[];
+  /**
+   * When deterministic ungated/ambiguous — AI picks path ∈ shortlist only.
+   * Inject mock in tests; Desktop wires llmPickUnitPrimary.
+   */
+  pickFromShortlist?: PickFromShortlistFn | null;
+  /** TC text fields for LLM prompt (optional). */
+  llmPromptFields?: {
+    projectId?: string | null;
+    steps?: string | null;
+    expectedResult?: string | null;
+  } | null;
 };
 
 const MIN_SCORE = 56;
@@ -108,7 +141,41 @@ function discoverCheckCodeFolders(snap: CodeIndexSnapshot): Set<string> {
 }
 
 function shapeBlobForRanking(query: UnitApproveQuery): string {
-  return [query.module, query.title, query.tcBlob].filter(Boolean).join("\n");
+  // Module/Function/Title only — Steps/TestData must not drive path shape
+  return [query.requirementTitle, query.module, query.title]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Function + Title only — Module «tạo mới» must not force Create shape on child TCs. */
+function functionTitleBlob(query: UnitApproveQuery): string {
+  return [query.module, query.title]
+    .filter(Boolean)
+    .join("\n")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+/** Create shape boosts only when Function/Title (or create intent class) imply create — not assign/filter. */
+function queryImpliesCreateShape(query: UnitApproveQuery): boolean {
+  const shapeBlob = shapeBlobForRanking(query);
+  if (queryImpliesAssignFilterIntent(query.intent, shapeBlob)) return false;
+  if (queryImpliesUploadIntent(query.intent, shapeBlob)) return false;
+  const pc = query.intent.primaryClass;
+  const classes = query.intent.classes || [];
+  if (
+    pc === "persist_create" ||
+    pc === "auto_generate_code" ||
+    pc === "validate_reject" ||
+    classes.includes("persist_create") ||
+    classes.includes("auto_generate_code")
+  ) {
+    return true;
+  }
+  return /tao\s*moi|\bcreate\b|them\s*moi|\badd\s*new\b/.test(
+    functionTitleBlob(query)
+  );
 }
 
 /** PascalCase stems from TC text that exist in index symbolIndex (never invent). */
@@ -140,7 +207,8 @@ function rankHitToSeed(
   hit: RankedFileHit,
   query: UnitApproveQuery,
   checkCodeFolders: Set<string>,
-  snap: CodeIndexSnapshot
+  snap: CodeIndexSnapshot,
+  indexPaths: string[]
 ): SeedCandidate {
   let score = hit.rankScore;
   const hits = [...(hit.reasons || [])];
@@ -156,14 +224,18 @@ function rankHitToSeed(
     }
   }
   // Module (Studio) domain tokens — stronger than Function/title prefer
-  for (const t of moduleGateTokens(query).slice(0, 10)) {
+  for (const t of moduleGateTokens(query, indexPaths).slice(0, 10)) {
     if (pathHitsDomainToken(p, t)) {
-      score += 44;
+      score += 56;
       hits.push(`moduleDoc:${t}`);
     }
   }
   // Function tokens — file rank inside Module family
-  for (const t of extractMatchTokens(query.module || "", query.projectAliases).slice(
+  for (const t of extractMatchTokens(
+    query.module || "",
+    query.projectAliases,
+    indexPaths
+  ).slice(
     0,
     10
   )) {
@@ -181,8 +253,11 @@ function rankHitToSeed(
       hits.push(`function:${tok}`);
     }
   }
-  // Prefer/module tokens early — shortlist before body-rule topN open
-  for (const t of query.preferTokens.slice(0, 12)) {
+  // Prefer strong tokens (Module/Title/alias) — not TestData noise
+  const strongPrefer = query.preferTokensStrong?.length
+    ? query.preferTokensStrong
+    : query.preferTokens;
+  for (const t of strongPrefer.slice(0, 12)) {
     const tok = String(t || "").trim();
     if (tok.length < 4) continue;
     if (
@@ -193,7 +268,7 @@ function rankHitToSeed(
       continue;
     }
     if (pathHitsDomainToken(p, tok)) {
-      score += 36;
+      score += 40;
       hits.push(`prefer:${tok}`);
     }
   }
@@ -201,8 +276,8 @@ function rankHitToSeed(
     score -= 55;
     hits.push("shape:demotePersonFamily");
   }
-  const modGate = moduleGateTokens(query);
-  const funcGate = functionGateTokens(query);
+  const modGate = moduleGateTokens(query, indexPaths);
+  const funcGate = functionGateTokens(query, indexPaths);
   const modHit = modGate.some((t) => pathHitsDomainToken(p, t));
   const funcHit = funcGate.some((t) => pathHitsDomainToken(p, t));
   if (modHit && funcHit) {
@@ -218,16 +293,26 @@ function rankHitToSeed(
   }
   const shapeBlob = shapeBlobForRanking(query);
   score += uploadIntentPathShapeAdjust(p, query.intent, shapeBlob);
+  score += functionOpPathShapeAdjust(p, query.intent, shapeBlob);
   score += validateRejectPathShapeAdjust(p, query.intent, shapeBlob);
+  // Op prefer tokens (storage/authz/…) — boost path hits; demote miss when op locked
+  const opPrefer = extractOpPreferTokens(query.intent, shapeBlob);
+  if (opPrefer.length) {
+    const opHits = countPreferTokenHits(p, opPrefer);
+    if (opHits > 0) {
+      score += opHits * 36;
+      hits.push(`opPrefer:${opPrefer.filter((t) => pathHitsDomainToken(p, t)).slice(0, 2).join(",")}`);
+    } else if (pathContradictsOpPreferTokens(p, opPrefer)) {
+      score -= 42;
+      hits.push("opPrefer:miss");
+    }
+  }
   score += unitPathBonus(p);
   const uploadish = queryImpliesUploadIntent(query.intent, shapeBlob);
-  const blob = String(shapeBlob || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
+  const createShape = queryImpliesCreateShape(query);
   if (
     !uploadish &&
-    /tao\s*moi|\bcreate\b|them\s*moi/.test(blob) &&
+    createShape &&
     /Create(Command)?Handler/i.test(p)
   ) {
     score += 16;
@@ -235,7 +320,7 @@ function rankHitToSeed(
   }
   if (
     !uploadish &&
-    /tao\s*moi|\bcreate\b|them\s*moi/.test(blob) &&
+    createShape &&
     /(Update|Delete)(Command)?Handler/i.test(p) &&
     !/Create/i.test(p)
   ) {
@@ -243,6 +328,7 @@ function rankHitToSeed(
     hits.push("shape:demoteUpdateDelete");
   }
   if (
+    createShape &&
     /Create(Command)?Handler/i.test(p) &&
     checkCodeFolders.size > 0 &&
     [...checkCodeFolders].some((seg) => pathHitsToken(p, seg))
@@ -267,7 +353,10 @@ function rankHitToSeed(
  * Function (`query.module`) is not the hard gate (used for file rank / discover).
  * Portable: exclude IT verb noise (Check⊂CheckCode).
  */
-function moduleGateTokens(query: UnitApproveQuery): string[] {
+function moduleGateTokens(
+  query: UnitApproveQuery,
+  indexPaths?: string[]
+): string[] {
   const weak =
     /^(Create|Update|Delete|Reject|Deny|CheckCode|Check|Exists|Unique|Duplicate|Search|VALIDATION|trace|input|Mock|Add|New|Save|Get|List|Query|Command|Handler|Service|Assert|Error|Code|RejectDenyCreate|CreateDenyReject|Assign|Filter|Permission|Authorization|Role|User|Account)$/i;
   // Joined IT verb compounds (CreateAddNew) never hit Latin paths — pollute gate.
@@ -275,7 +364,8 @@ function moduleGateTokens(query: UnitApproveQuery): string[] {
     /^(?:Create|Update|Delete|Add|New|Save|Get|List|Query|Check|Reject|Deny|Edit|Assign|Filter){2,}$/i;
   const fromModuleDoc = extractMatchTokens(
     query.requirementTitle || "",
-    query.projectAliases
+    query.projectAliases,
+    indexPaths
   );
   const aliasDomain = matchingProjectAliasTokens(
     query.requirementTitle || "",
@@ -293,12 +383,19 @@ function moduleGateTokens(query: UnitApproveQuery): string[] {
  * Function gate tokens — TC Function (`query.module`) narrows inside Module family.
  * Portable: exclude IT verb noise; include project alias hits on Function text only.
  */
-function functionGateTokens(query: UnitApproveQuery): string[] {
+function functionGateTokens(
+  query: UnitApproveQuery,
+  indexPaths?: string[]
+): string[] {
   const weak =
     /^(Create|Update|Delete|Reject|Deny|CheckCode|Check|Exists|Unique|Duplicate|Search|VALIDATION|trace|input|Mock|Add|New|Save|Get|List|Query|Command|Handler|Service|Assert|Error|Code|RejectDenyCreate|CreateDenyReject|Assign|Filter|Permission|Authorization|Role|User|Account|Upload|Download)$/i;
   const joinedIt =
     /^(?:Create|Update|Delete|Add|New|Save|Get|List|Query|Check|Reject|Deny|Edit|Assign|Filter|Upload|Download){2,}$/i;
-  const fromFunction = extractMatchTokens(query.module || "", query.projectAliases);
+  const fromFunction = extractMatchTokens(
+    query.module || "",
+    query.projectAliases,
+    indexPaths
+  );
   const aliasFromFunction = matchingProjectAliasTokens(
     query.module || "",
     query.projectAliases
@@ -314,17 +411,28 @@ function functionGateTokens(query: UnitApproveQuery): string[] {
 }
 
 /** Function + Title tokens for feature-folder / file discover inside Module scope. */
-function titleTokensForDiscover(query: UnitApproveQuery): string[] {
-  return uniq([
-    ...extractMatchTokens(query.module || "", query.projectAliases),
-    ...extractMatchTokens(query.title || "", query.projectAliases),
-    ...extractMatchTokens(query.requirementTitle || "", query.projectAliases),
-    ...extractTechIdentifierStems(query.tcBlob),
-    ...(query.preferTokens || []),
-  ]).slice(0, 24);
+function titleTokensForDiscover(
+  query: UnitApproveQuery,
+  indexPaths?: string[]
+): string[] {
+  // Do not pass indexPaths into extractMatchTokens here — index stem expand
+  // pulls CasePersonHandlersTest / PersonHandlersTest and false-fires Person cues.
+  void indexPaths;
+  return uniq(
+    [
+      query.module || "",
+      query.title || "",
+      query.requirementTitle || "",
+      ...extractMatchTokens(query.module || "", query.projectAliases),
+      ...extractMatchTokens(query.title || "", query.projectAliases),
+      ...extractMatchTokens(query.requirementTitle || "", query.projectAliases),
+      ...extractTechIdentifierStems(query.tcBlob),
+      ...(query.preferTokens || []),
+    ].filter((t) => !/Test$/i.test(t) && !/HandlersTest/i.test(t))
+  ).slice(0, 32);
 }
 
-/** Person/auth IT stems — demote when Module text is not about users. */
+/** Person/auth IT stems — demote when Module text is not about users/parties. */
 function moduleImpliesPersonDomain(query: UnitApproveQuery): boolean {
   const blob = [query.requirementTitle, query.module]
     .filter(Boolean)
@@ -332,16 +440,18 @@ function moduleImpliesPersonDomain(query: UnitApproveQuery): boolean {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
-  return /nguoi\s*dung|user|account|login|auth|phan\s*quyen|permission|role/.test(
+  return /nguoi\s*(dung|so\s*huu|su\s*dung|lien\s*quan)|user|account|login|auth|phan\s*quyen|permission|role|\bowner\b|\bperson\b/.test(
     blob
   );
 }
 
 function isPersonFamilyPath(pathRel: string): boolean {
-  return /\/(User|Account|Auth|Authentication|Permission|Role)s?\//i.test(
-    pathRel.replace(/\\/g, "/")
-  ) || /(?:^|\/)(User|Account)[A-Z][A-Za-z]*(Command|Query)?Handler/i.test(
-    pathRel.replace(/\\/g, "/")
+  const p = pathRel.replace(/\\/g, "/");
+  return (
+    /\/(User|Account|Auth|Authentication|Permission|Role)s?\//i.test(p) ||
+    /\/[^/]*Person[^/]*\//i.test(p) ||
+    /(?:^|\/)(User|Account)[A-Z][A-Za-z]*(Command|Query)?Handler/i.test(p) ||
+    /(?:^|\/)\w*Person\w*(Command|Query)?Handler/i.test(p)
   );
 }
 
@@ -383,7 +493,8 @@ function applyFeatureFolderDiscover<T extends { pathRel: string; score: number }
   pathPool: string[],
   query: UnitApproveQuery,
   checkCodeFolders: Set<string>,
-  notes: string[]
+  notes: string[],
+  indexPaths: string[]
 ): {
   candidates: T[];
   familyTokens: string[];
@@ -392,11 +503,11 @@ function applyFeatureFolderDiscover<T extends { pathRel: string; score: number }
 } {
   const discovered = discoverFeatureFoldersFromIndex(codeIndex, pathPool, {
     intent: query.intent,
-    titleTokens: titleTokensForDiscover(query),
+    titleTokens: titleTokensForDiscover(query, indexPaths),
   });
   let featureTokens = [...discovered.featureTokens];
   // Widen with folders that host CheckCode* — uniqueness/create-code and soft create
-  // on VI modules (no Latin gate) lock the same family as EvidenceCheckCode* etc.
+  // on VI modules (no Latin gate) lock the same family as *CheckCode* handlers.
   const blob = query.tcBlob || "";
   const widenCheckCode =
     query.codeFieldCreate ||
@@ -412,6 +523,33 @@ function applyFeatureFolderDiscover<T extends { pathRel: string; score: number }
       }
     }
   }
+  // Multiple CheckCode folders: prefer *Create*Handler hosts; demote *Record$ twins
+  // when title is not a case-dossier flow (portable — no product folder nouns).
+  const discoverBlob = titleTokensForDiscover(query, indexPaths)
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const caseDossierCue =
+    /ho\s*so|vu\s*an|dossier|case\s*record|case\s*file/.test(discoverBlob);
+  if (!caseDossierCue && featureTokens.length > 1) {
+    const pool = [...pathPool, ...indexPaths];
+    const withCreate = featureTokens.filter((t) =>
+      pool.some(
+        (p) =>
+          pathHitsDomainToken(p, t) && /Create(Command)?Handler/i.test(p)
+      )
+    );
+    let next = withCreate.length ? withCreate : featureTokens;
+    const nonRecord = next.filter((t) => !/Record$/i.test(t));
+    if (nonRecord.length && nonRecord.length < next.length) {
+      next = nonRecord;
+      notes.push("demoteRecordFolderVsCreate");
+    }
+    featureTokens = next;
+  }
+  // Drop *.Application host segments mistaken as feature folders from CheckCode widen
+  featureTokens = featureTokens.filter((t) => !/\.Application$/i.test(t));
   if (!featureTokens.length) {
     return { candidates, familyTokens: [], gated: false };
   }
@@ -439,7 +577,8 @@ function relatedFromDeps(
   snap: CodeIndexSnapshot,
   primary: string,
   preferTokens: string[],
-  maxRelated = 4
+  maxRelated = 4,
+  preferDtoValidator = false
 ): string[] {
   const graph = snap.dependencyGraph || {};
   const deps = graph[primary] || [];
@@ -458,28 +597,185 @@ function relatedFromDeps(
       fromGraph.push(resolved);
     }
   }
-  if (fromGraph.length) {
-    return uniq(fromGraph).slice(0, maxRelated);
-  }
-  return expandUnitRelatedPaths({
+  const expanded = expandUnitRelatedPaths({
     entryPathRel: primary,
     allPaths: Object.keys(snap.files || {}),
     featureTokens: preferTokens,
     maxRelated,
+    preferDtoValidator,
   });
+  if (fromGraph.length) {
+    return uniq([...expanded, ...fromGraph]).slice(0, maxRelated);
+  }
+  return expanded;
 }
 
-export type ResolveUnitPrimaryOpts = {
-  codeIndex: CodeIndexSnapshot;
-  query: UnitApproveQuery;
-  readExcerpt?: ReadExcerptFn | null;
-  topK?: number;
-  /** Extra path pool when retrieve shortlist is thin */
-  fallbackPaths?: string[];
-};
+/** VALIDATION / AUTH / layerHint dto|validator|authz → DTO/Validator siblings. */
+function preferDtoValidatorForIntent(
+  intent: UnitIntent,
+  testData?: string | null
+): boolean {
+  return preferDtoValidatorForHints(intent, testData);
+}
+
+function applyLayerHintToWriteBack(
+  codeIndex: CodeIndexSnapshot,
+  query: UnitApproveQuery,
+  seed: SeedCandidate,
+  relatedPaths: string[],
+  symbol: string | null,
+  notes: string[]
+): { seed: SeedCandidate; relatedPaths: string[]; symbol: string | null } {
+  const applied = applyLayerHintPrimaryPromotion({
+    testData: query.testData || null,
+    primaryPath: seed.pathRel,
+    relatedPaths,
+    allPaths: Object.keys(codeIndex.files || {}),
+    featureTokens: query.preferTokensStrong,
+  });
+  if (!applied.promoted) {
+    return { seed, relatedPaths, symbol };
+  }
+  notes.push(`layerHintPromote=${applied.primaryPath.split("/").pop()}`);
+  const nextSym =
+    preferredSymbolFromCodeIndex(
+      codeIndex,
+      applied.primaryPath,
+      query.preferTokensStrong
+    ) ||
+    applied.primaryPath.split("/").pop()?.replace(/\.[^.]+$/, "") ||
+    symbol;
+  return {
+    seed: {
+      ...seed,
+      pathRel: applied.primaryPath,
+      reason: `${seed.reason || "seed"}+layerHint`,
+      hits: [...(seed.hits || []), "layerHint-promote"],
+    },
+    relatedPaths: applied.relatedPaths,
+    symbol: nextSym,
+  };
+}
+
+async function tryLlmShortlistPick(
+  opts: ResolveUnitPrimaryOpts,
+  candidates: SeedCandidate[],
+  notes: string[],
+  skipReason: string,
+  softGateTokens?: string[] | null
+): Promise<ResolveUnitPrimaryResult | null> {
+  const pickFn = opts.pickFromShortlist;
+  if (!pickFn || !candidates.length) return null;
+  // Skip network when deterministic refuse cannot be saved by shortlist pick
+  const skipLower = skipReason.toLowerCase();
+  if (
+    skipLower.includes("no candidates") ||
+    skipLower.startsWith("fail_soft_no_domain")
+  ) {
+    notes.push(`llmPick=skip prior=${skipReason.slice(0, 80)}`);
+    return null;
+  }
+  const shortlist = candidates.slice(0, 8).map((c) => ({
+    pathRel: c.pathRel,
+    code:
+      preferredSymbolFromCodeIndex(opts.codeIndex, c.pathRel, opts.query.preferTokensStrong) ||
+      undefined,
+    score: c.score,
+  }));
+  const input: LlmPickUnitPrimaryInput = {
+    projectId: opts.llmPromptFields?.projectId,
+    requirementTitle: opts.query.requirementTitle,
+    module: opts.query.module,
+    title: opts.query.title,
+    steps: opts.llmPromptFields?.steps,
+    expectedResult: opts.llmPromptFields?.expectedResult,
+    shortlist,
+  };
+  let picked: LlmPickUnitPrimaryResult | null = null;
+  try {
+    picked = await pickFn(input);
+  } catch {
+    picked = null;
+  }
+  if (!picked) {
+    notes.push(`llmPick=refuse prior=${skipReason.slice(0, 80)}`);
+    return null;
+  }
+  const accepted = acceptShortlistPick(
+    {
+      path: picked.pathRel,
+      code: picked.code,
+      confidence: picked.confidence,
+    },
+    shortlist
+  );
+  if (!accepted) {
+    notes.push("llmPick=rejected-not-in-shortlist");
+    return null;
+  }
+  // Same soft infra refuse as deterministic writeBack (Auth/Mail/URL…)
+  const softGate = uniq([
+    ...(softGateTokens || []),
+    ...(opts.query.preferTokensStrong || []),
+    ...matchingProjectAliasTokens(
+      [opts.query.requirementTitle, opts.query.module].filter(Boolean).join(" "),
+      opts.query.projectAliases
+    ),
+  ]);
+  if (softCrossCuttingDenied(accepted.pathRel, softGate)) {
+    notes.push(
+      `llmPick=FAIL_SOFT_CROSS_CUTTING ${accepted.pathRel.split("/").pop()}`
+    );
+    return null;
+  }
+  const seed: SeedCandidate = {
+    pathRel: accepted.pathRel,
+    score: Math.max(80, candidates[0]?.score || 80),
+    hits: [`llm:${accepted.confidence}`],
+    reason: `llm-shortlist conf=${accepted.confidence}`,
+  };
+  notes.push(`llmPick=${accepted.pathRel.split("/").pop()}`);
+  const symbol =
+    accepted.code ||
+    preferredSymbolFromCodeIndex(
+      opts.codeIndex,
+      accepted.pathRel,
+      opts.query.preferTokensStrong
+    );
+  const relatedPaths = relatedFromDeps(
+    opts.codeIndex,
+    accepted.pathRel,
+    opts.query.preferTokensStrong,
+    4,
+    preferDtoValidatorForIntent(opts.query.intent, opts.query.testData)
+  );
+  const finalized = applyLayerHintToWriteBack(
+    opts.codeIndex,
+    opts.query,
+    seed,
+    relatedPaths,
+    symbol,
+    notes
+  );
+  return {
+    writeBack: true,
+    seed: finalized.seed,
+    symbol: finalized.symbol,
+    relatedPaths: finalized.relatedPaths,
+    candidatesTop3: candidates.slice(0, 3).map((c) => ({
+      pathRel: c.pathRel,
+      score: c.score,
+      ruleHits: [],
+    })),
+    bodyRuleLog: `writeBack=yes source=llm-shortlist conf=${accepted.confidence}`,
+    notes,
+    source: "llm-shortlist",
+  };
+}
 
 /**
  * Full Approve resolve: retrieve → rank → (body-rule read) → symbol → related.
+ * Ungated/ambiguous → optional grounded LLM pick among Top-K index paths.
  */
 export async function resolveUnitPrimaryFromIndex(
   opts: ResolveUnitPrimaryOpts
@@ -487,14 +783,22 @@ export async function resolveUnitPrimaryFromIndex(
   const { codeIndex, query, readExcerpt } = opts;
   const notes: string[] = [];
   const topK = opts.topK ?? (query.requiresBodyRule ? 24 : 16);
+  const strongPrefer = query.preferTokensStrong?.length
+    ? query.preferTokensStrong
+    : query.preferTokens;
   // Always scan CheckCode* folders for VI-module family lock; pathPool widen stays opt-in.
   const checkCodeFolders = discoverCheckCodeFolders(codeIndex);
+  const allIndexPaths = Object.keys(codeIndex.files || {});
 
   const retrieved = retrieveUnitSources(codeIndex, query.plan, { topK });
   notes.push(...retrieved.notes);
 
   let pathPool = retrieved.files.map((f) => f.pathRel);
-  if (query.codeFieldCreate && checkCodeFolders.size) {
+  const persistCreate =
+    query.codeFieldCreate ||
+    query.intent.primaryClass === "persist_create" ||
+    (query.intent.classes || []).includes("persist_create");
+  if (persistCreate && checkCodeFolders.size) {
     const all = Object.keys(codeIndex.files || {}).filter(
       (p) => !isExcludedFromUnitRetrieve(p)
     );
@@ -519,7 +823,7 @@ export async function resolveUnitPrimaryFromIndex(
         rankScore: unitPathBonus(p) + 10,
         reasons: ["widen"],
       } satisfies RankedFileHit);
-    const seed = rankHitToSeed(hit, query, checkCodeFolders, codeIndex);
+    const seed = rankHitToSeed(hit, query, checkCodeFolders, codeIndex, allIndexPaths);
     if (seed.score < 8) continue;
     if (isUnsuitableUnitPrimary(seed.pathRel)) continue;
     seeds.push(seed);
@@ -545,9 +849,15 @@ export async function resolveUnitPrimaryFromIndex(
 
   // Progressive Module gate, then Function narrows inside that family.
   let moduleGated = false;
-  let functionGated = false;
-  let familyGateTokens = moduleGateTokens(query);
-  const indexPaths = Object.keys(codeIndex.files || {});
+  let familyGateTokens = moduleGateTokens(query, allIndexPaths);
+  const llmSoftGate = () =>
+    uniq([
+      ...familyGateTokens,
+      ...moduleGateTokens(query, allIndexPaths),
+      ...aliasDomain,
+      ...strongPrefer,
+    ]);
+  const indexPaths = allIndexPaths;
   const hittingGate = gateTokensHittingPaths(familyGateTokens, [
     ...pathPool,
     ...indexPaths,
@@ -563,16 +873,24 @@ export async function resolveUnitPrimaryFromIndex(
         notes.push(`moduleGate=${hittingGate.slice(0, 4).join(",")}`);
       }
     } else {
-      // Alias/Latin tokens present but shortlist miss — try discover before skip
       const locked = applyFeatureFolderDiscover(
         candidates,
         codeIndex,
         pathPool,
         query,
         checkCodeFolders,
-        notes
+        notes,
+        allIndexPaths
       );
       if (locked.skipReason) {
+        const llm = await tryLlmShortlistPick(
+          opts,
+          candidates,
+          notes,
+          locked.skipReason,
+          llmSoftGate()
+        );
+        if (llm) return llm;
         return {
           writeBack: false,
           seed: null,
@@ -593,6 +911,9 @@ export async function resolveUnitPrimaryFromIndex(
         moduleGated = true;
         familyGateTokens = locked.familyTokens;
       } else {
+        const skip = `moduleGate miss — no path hit for «${hittingGate.slice(0, 4).join(",")}»`;
+        const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+        if (llm) return llm;
         return {
           writeBack: false,
           seed: null,
@@ -603,23 +924,31 @@ export async function resolveUnitPrimaryFromIndex(
             score: c.score,
             ruleHits: [],
           })),
-          skipReason: `moduleGate miss — no path hit for «${hittingGate.slice(0, 4).join(",")}»`,
+          skipReason: skip,
           notes,
           source: "index.db",
         };
       }
     }
   } else {
-    // VI Module (no hitting gate) — lock family via Function/Title discover
     const locked = applyFeatureFolderDiscover(
       candidates,
       codeIndex,
       pathPool,
       query,
       checkCodeFolders,
-      notes
+      notes,
+      allIndexPaths
     );
     if (locked.skipReason) {
+      const llm = await tryLlmShortlistPick(
+        opts,
+        candidates,
+        notes,
+        locked.skipReason,
+        llmSoftGate()
+      );
+      if (llm) return llm;
       return {
         writeBack: false,
         seed: null,
@@ -639,9 +968,15 @@ export async function resolveUnitPrimaryFromIndex(
       candidates = locked.candidates;
       moduleGated = true;
       familyGateTokens = locked.familyTokens;
-    } else if (familyGateTokens.length && !hittingGate.length) {
-      // Had VI/module tokens but none hit index and discover empty — fail-closed
-      // (avoid AccountCreate latch on soft Create).
+    } else {
+      // VI Module with no Latin gate and no feature-folder lock — fail-closed
+      // (do not soft-latch Create* / User* / CasePerson*). LLM may still pick.
+      const skip =
+        familyGateTokens.length
+          ? `moduleGate miss — no path hit for «${familyGateTokens.slice(0, 4).join(",")}»`
+          : "FAIL_UNGATED — Module family not locked (no alias/Latin gate / feature-folder)";
+      const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+      if (llm) return llm;
       return {
         writeBack: false,
         seed: null,
@@ -652,7 +987,7 @@ export async function resolveUnitPrimaryFromIndex(
           score: c.score,
           ruleHits: [],
         })),
-        skipReason: `moduleGate miss — no path hit for «${familyGateTokens.slice(0, 4).join(",")}»`,
+        skipReason: skip,
         notes,
         source: "index.db",
       };
@@ -660,7 +995,7 @@ export async function resolveUnitPrimaryFromIndex(
   }
 
   // Function gate — soft narrow when Function/alias tokens hit paths (Module ∩ Function).
-  const funcGateRaw = functionGateTokens(query);
+  const funcGateRaw = functionGateTokens(query, allIndexPaths);
   const funcHitting = gateTokensHittingPaths(funcGateRaw, [
     ...pathPool,
     ...indexPaths,
@@ -669,7 +1004,6 @@ export async function resolveUnitPrimaryFromIndex(
     const funcGated = applyModulePreferGate(candidates, funcHitting);
     if (!funcGated.miss && funcGated.candidates.length) {
       candidates = funcGated.candidates;
-      functionGated = funcGated.gated;
       if (funcGated.gated) {
         notes.push(`functionGate=${funcHitting.slice(0, 4).join(",")}`);
       }
@@ -697,37 +1031,114 @@ export async function resolveUnitPrimaryFromIndex(
       notes.push("demotePersonFamily");
     }
   }
+  candidates = candidates
+    .slice()
+    .sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
 
-  if (readExcerpt && (intent.requiresBodyRule || intent.codePatterns.length > 0)) {
+  // Prefer *CommandHandler over anemic *Command DTOs inside locked family
+  if (moduleGated) {
+    candidates = candidates
+      .map((c) => {
+        let score = c.score;
+        if (/CommandHandler\.(cs|ts|js)$/i.test(c.pathRel)) score += 36;
+        else if (
+          /Command\.(cs|ts|js)$/i.test(c.pathRel) &&
+          !/Handler/i.test(c.pathRel)
+        ) {
+          score -= 20;
+        }
+        if (
+          /Unassign|SoftDelete|DeleteCommand/i.test(c.pathRel) &&
+          !/huy|xoa|unassign|delete|remove/i.test(
+            [query.title, query.module].join("\n")
+          )
+        ) {
+          score -= 25;
+        }
+        return score === c.score ? c : { ...c, score, hits: [...(c.hits || []), "shape:handlerPrefer"] };
+      })
+      .sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
+  }
+
+  // Skip body-rule I/O when family locked + clear CreateHandler margin (persist soft create)
+  const skipBodyRule =
+    moduleGated &&
+    !intent.requiresBodyRule &&
+    !query.codeFieldCreate &&
+    queryImpliesCreateShape(query) &&
+    (() => {
+      const best = candidates[0];
+      const second = candidates[1];
+      if (!best || !/Create(Command)?Handler/i.test(best.pathRel)) return false;
+      if (!second) return true;
+      return (
+        best.score - second.score >= SOFT_MARGIN ||
+        best.score >= second.score * SOFT_RATIO
+      );
+    })();
+  if (skipBodyRule) {
+    notes.push("skipBodyRule=lockedCreateMargin");
+  }
+
+  if (
+    readExcerpt &&
+    !skipBodyRule &&
+    (intent.requiresBodyRule || intent.codePatterns.length > 0)
+  ) {
     const open = orderCandidatesForBodyRuleOpen(
       candidates,
       intent,
       UNIT_BODY_RULE.topN
     );
-    const rescored: BodyRuleScoredCandidate[] = [];
-    for (const c of open) {
-      let excerpt = "";
-      try {
-        excerpt = clipBodyExcerpt(await readExcerpt(c.pathRel));
-      } catch {
-        excerpt = "";
+    // Parallel excerpt reads
+    const excerpts = await Promise.all(
+      open.map(async (c) => {
+        try {
+          return clipBodyExcerpt(await readExcerpt(c.pathRel));
+        } catch {
+          return "";
+        }
+      })
+    );
+    const rescored: BodyRuleScoredCandidate[] = open.map((c, i) => {
+      const scored = applyBodyRuleToCandidate(
+        c,
+        excerpts[i] || "",
+        intent,
+        query.tcBlob,
+        { preferTokens: strongPrefer }
+      );
+      // Demote ultra-generic ruleHits when they are the only hits (cross-domain latch)
+      const onlyGeneric =
+        scored.ruleHits.length > 0 &&
+        scored.ruleHits.every((h) =>
+          /isnullorwhitespace|isnullorempty|isempty|throw|badrequest|validate|exists/i.test(
+            h
+          )
+        );
+      if (onlyGeneric && moduleGated) {
+        // Keep mild boost inside locked family only
+        scored.score = Math.max(
+          scored.baseScore,
+          scored.baseScore + Math.min(12, scored.ruleHits.length * 4)
+        );
+      } else if (onlyGeneric && !moduleGated) {
+        scored.score = scored.baseScore;
+        scored.ruleHits = [];
       }
-      const scored = applyBodyRuleToCandidate(c, excerpt, intent, query.tcBlob, {
-        preferTokens: query.preferTokens,
-      });
-      const preferHits = countPreferTokenHits(scored.pathRel, query.preferTokens);
+      const preferHits = countPreferTokenHits(scored.pathRel, strongPrefer);
       if (preferHits > 0) {
         scored.score += preferHits * 40;
         scored.hits = uniq([
           ...(scored.hits || []),
-          ...query.preferTokens
+          ...strongPrefer
             .filter((t) => pathHitsDomainToken(scored.pathRel, t))
             .slice(0, 3)
             .map((t) => `prefer:${t}`),
         ]);
       }
-      rescored.push(scored);
-    }
+      return scored;
+    });
     rescored.sort(
       (a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel)
     );
@@ -741,7 +1152,7 @@ export async function resolveUnitPrimaryFromIndex(
         };
     let decision = decideBodyRuleWriteBack(rescored, intent, {
       ...marginOpts,
-      preferTokens: query.preferTokens,
+      preferTokens: strongPrefer,
     });
     let seed = decision.seed;
 
@@ -758,7 +1169,9 @@ export async function resolveUnitPrimaryFromIndex(
     if (
       seed &&
       tcImpliesBehaviorPrimary(query.tcBlob) &&
-      isAnemicEntityLikePath(seed.pathRel)
+      isAnemicEntityLikePath(seed.pathRel) &&
+      // layerHint dto|validator — DTO/Validator IS the enforce site
+      !preferDtoValidatorForHints(intent, query.testData)
     ) {
       const next = collapseBodyRuleContenders(rescored).find(
         (c) =>
@@ -794,13 +1207,22 @@ export async function resolveUnitPrimaryFromIndex(
           ? best.score >= second.score * SOFT_RATIO
           : true;
         if (!second || margin >= SOFT_MARGIN || ratioOk) {
-          if (
-            moduleGated ||
+          // Soft writeBack: Module-gated AND domain/prefer signal (no ungated Create latch)
+          if (!moduleGated) {
+            decision = {
+              writeBack: false,
+              seed: null,
+              skipReason:
+                "FAIL_UNGATED — soft writeBack needs Module/feature-folder lock",
+              candidatesTop3: decision.candidatesTop3,
+            };
+            seed = null;
+          } else if (
             hasStrongWriteBackSignal({
               pathRel: best.pathRel,
               ruleHits: best.ruleHits,
               hits: best.hits,
-              preferTokens: query.preferTokens,
+              preferTokens: strongPrefer,
             })
           ) {
             seed = best;
@@ -823,35 +1245,121 @@ export async function resolveUnitPrimaryFromIndex(
       }
     }
 
-    // P0.1 — soft (!requiresBodyRule) writeBack needs domain/prefer/phrase signal
-    // moduleGated (alias/VI discover family lock) counts as domain signal.
-    if (decision.writeBack && seed && !intent.requiresBodyRule) {
-      if (
-        !moduleGated &&
-        !hasStrongWriteBackSignal({
-          pathRel: seed.pathRel,
-          ruleHits: seed.ruleHits,
-          hits: seed.hits,
-          preferTokens: query.preferTokens,
-        })
-      ) {
-        decision = {
-          writeBack: false,
-          seed: null,
-          skipReason:
-            "FAIL_SOFT_NO_DOMAIN — soft writeBack needs prefer/phrase/alias (not throw/BadRequest/Create alone)",
-          candidatesTop3: decision.candidatesTop3,
-        };
-        seed = null;
+    // Body-rule miss but progressive Module→Function→Title already locked a Handler:
+    // same-family CreateHandler + preferTokens (Image/…) → soft writeBack (portable).
+    if (
+      (!decision.writeBack || !seed) &&
+      intent.requiresBodyRule &&
+      moduleGated &&
+      /no pattern hits/i.test(decision.skipReason || "")
+    ) {
+      const collapsed = collapseBodyRuleContenders(rescored).filter(
+        (c) =>
+          !isAnemicEntityLikePath(c.pathRel) &&
+          !isUnsuitableUnitPrimary(c.pathRel)
+      );
+      const best = collapsed[0];
+      const second = collapsed[1];
+      if (best && best.score >= MIN_SCORE && /Handler/i.test(best.pathRel)) {
+        const famBest = featureFolderSegmentFromPath(best.pathRel);
+        const famSecond = second
+          ? featureFolderSegmentFromPath(second.pathRel)
+          : null;
+        const sameFamily =
+          Boolean(famBest) &&
+          (!second ||
+            (Boolean(famSecond) &&
+              famBest!.toLowerCase() === famSecond!.toLowerCase()));
+        const preferOk = hasStrongWriteBackSignal({
+          pathRel: best.pathRel,
+          ruleHits: best.ruleHits,
+          hits: best.hits,
+          preferTokens: strongPrefer,
+        });
+        const preferDiff =
+          countPreferTokenHits(best.pathRel, strongPrefer) -
+          (second
+            ? countPreferTokenHits(second.pathRel, strongPrefer)
+            : 0);
+        if (
+          preferOk &&
+          (sameFamily || preferDiff > 0) &&
+          !pathContradictsOpPreferTokens(
+            best.pathRel,
+            extractOpPreferTokens(intent, shapeBlobForRanking(query))
+          )
+        ) {
+          seed = best;
+          decision = {
+            writeBack: true,
+            seed: best,
+            candidatesTop3: decision.candidatesTop3,
+          };
+          notes.push("bodyRuleMissSameFamilyPrefer");
+        } else if (
+          pathContradictsOpPreferTokens(
+            best.pathRel,
+            extractOpPreferTokens(intent, shapeBlobForRanking(query))
+          )
+        ) {
+          notes.push("bodyRuleMissOpContradict");
+        }
       }
     }
 
-    // Soft deny Account/Auth/Jwt/Mail/Permission unless module/family hits same stem
+    // Op-token latch: Title/Function storage|authz must hit path — refuse AssignCase on storage TCs
+    if (decision.writeBack && seed) {
+      const opPrefer = extractOpPreferTokens(
+        intent,
+        shapeBlobForRanking(query)
+      );
+      if (pathContradictsOpPreferTokens(seed.pathRel, opPrefer)) {
+        const alt = collapseBodyRuleContenders(rescored).find(
+          (c) =>
+            c.score >= MIN_SCORE &&
+            !pathContradictsOpPreferTokens(c.pathRel, opPrefer) &&
+            !isAnemicEntityLikePath(c.pathRel) &&
+            !isUnsuitableUnitPrimary(c.pathRel)
+        );
+        if (alt) {
+          seed = alt;
+          decision = {
+            writeBack: true,
+            seed: alt,
+            candidatesTop3: decision.candidatesTop3,
+          };
+          notes.push("opPreferRerankBody");
+        } else {
+          decision = {
+            writeBack: false,
+            seed: null,
+            skipReason: `FAIL_OP_CONTRADICT — path misses op tokens «${opPrefer.slice(0, 4).join(",")}»`,
+            candidatesTop3: decision.candidatesTop3,
+          };
+          seed = null;
+          notes.push("opPreferContradict");
+        }
+      }
+    }
+
+    // Soft writeBack must stay Module-gated (alias/VI discover family lock)
+    if (decision.writeBack && seed && !intent.requiresBodyRule && !moduleGated) {
+      decision = {
+        writeBack: false,
+        seed: null,
+        skipReason:
+          "FAIL_UNGATED — soft writeBack needs Module/feature-folder lock",
+        candidatesTop3: decision.candidatesTop3,
+      };
+      seed = null;
+    }
+
     if (decision.writeBack && seed && !intent.requiresBodyRule) {
       const softGate = uniq([
         ...familyGateTokens,
-        ...moduleGateTokens(query),
+        ...moduleGateTokens(query, allIndexPaths),
         ...aliasDomain,
+        ...strongPrefer,
       ]);
       if (softCrossCuttingDenied(seed.pathRel, softGate)) {
         decision = {
@@ -866,14 +1374,17 @@ export async function resolveUnitPrimaryFromIndex(
     }
 
     if (!decision.writeBack || !seed) {
+      const skip = decision.skipReason || "body-rule / margin fail-closed";
+      const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+      if (llm) return llm;
       return {
         writeBack: false,
         seed: null,
         symbol: null,
         relatedPaths: [],
         candidatesTop3: decision.candidatesTop3,
-        skipReason: decision.skipReason || "body-rule / margin fail-closed",
-        bodyRuleLog: `writeBack=no skip=${decision.skipReason || "-"}${signalsNote} intent=${intent.primaryClass || "-"}`,
+        skipReason: skip,
+        bodyRuleLog: `writeBack=no skip=${skip}${signalsNote} intent=${intent.primaryClass || "-"}`,
         notes,
         source: "index.db",
       };
@@ -882,29 +1393,42 @@ export async function resolveUnitPrimaryFromIndex(
     const symbol = preferredSymbolFromCodeIndex(
       codeIndex,
       seed.pathRel,
-      [...query.preferTokens, ...(seed.ruleHits || [])]
+      [...strongPrefer, ...(seed.ruleHits || [])]
     );
     const relatedPaths = relatedFromDeps(
       codeIndex,
       seed.pathRel,
-      query.preferTokens
+      strongPrefer,
+      4,
+      preferDtoValidatorForIntent(intent, query.testData)
+    );
+    const finalized = applyLayerHintToWriteBack(
+      codeIndex,
+      query,
+      seed as SeedCandidate,
+      relatedPaths,
+      symbol,
+      notes
     );
     return {
       writeBack: true,
-      seed,
-      symbol,
-      relatedPaths,
+      seed: finalized.seed as ResolvedSeed,
+      symbol: finalized.symbol,
+      relatedPaths: finalized.relatedPaths,
       candidatesTop3: decision.candidatesTop3,
-      bodyRuleLog: `writeBack=yes score=${seed.score} ruleHits=${(seed.ruleHits || []).join(",")} intent=${intent.primaryClass || "-"}${signalsNote}`,
+      bodyRuleLog: `writeBack=yes score=${finalized.seed.score} ruleHits=${(seed.ruleHits || []).join(",")} intent=${intent.primaryClass || "-"}${signalsNote}`,
       notes,
       source: "index.db",
     };
   }
 
-  // No excerpt reader: soft pick from ranked seeds
+  // No excerpt reader (or skipped body-rule): soft pick from ranked seeds — Module-gated only
   const best = candidates[0];
   const second = candidates[1];
   if (!best || best.score < MIN_SCORE) {
+    const skip = "score below min without body excerpt";
+    const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+    if (llm) return llm;
     return {
       writeBack: false,
       seed: null,
@@ -915,12 +1439,15 @@ export async function resolveUnitPrimaryFromIndex(
         score: c.score,
         ruleHits: [],
       })),
-      skipReason: "score below min without body excerpt",
+      skipReason: skip,
       notes,
       source: "index.db",
     };
   }
-  if (intent.requiresBodyRule) {
+  if (intent.requiresBodyRule && !skipBodyRule) {
+    const skip = "body-rule required but no readExcerpt";
+    const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+    if (llm) return llm;
     return {
       writeBack: false,
       seed: null,
@@ -931,7 +1458,7 @@ export async function resolveUnitPrimaryFromIndex(
         score: c.score,
         ruleHits: [],
       })),
-      skipReason: "body-rule required but no readExcerpt",
+      skipReason: skip,
       notes,
       source: "index.db",
     };
@@ -939,30 +1466,47 @@ export async function resolveUnitPrimaryFromIndex(
   if (second) {
     const margin = best.score - second.score;
     if (margin < SOFT_MARGIN && best.score < second.score * SOFT_RATIO) {
-      return {
-        writeBack: false,
-        seed: null,
-        symbol: null,
-        relatedPaths: [],
-        candidatesTop3: candidates.slice(0, 3).map((c) => ({
-          pathRel: c.pathRel,
-          score: c.score,
-          ruleHits: [],
-        })),
-        skipReason: "ambiguous margin without body-rule",
-        notes,
-        source: "index.db",
-      };
+      const famBest = featureFolderSegmentFromPath(best.pathRel);
+      const famSecond = featureFolderSegmentFromPath(second.pathRel);
+      const sameFamily =
+        moduleGated &&
+        Boolean(famBest) &&
+        Boolean(famSecond) &&
+        famBest!.toLowerCase() === famSecond!.toLowerCase();
+      if (sameFamily) {
+        notes.push(`sameFamilyTie=${famBest}`);
+      } else {
+        const skip = "ambiguous margin without body-rule";
+        const llm = await tryLlmShortlistPick(
+          opts,
+          candidates,
+          notes,
+          skip,
+          llmSoftGate()
+        );
+        if (llm) return llm;
+        return {
+          writeBack: false,
+          seed: null,
+          symbol: null,
+          relatedPaths: [],
+          candidatesTop3: candidates.slice(0, 3).map((c) => ({
+            pathRel: c.pathRel,
+            score: c.score,
+            ruleHits: [],
+          })),
+          skipReason: skip,
+          notes,
+          source: "index.db",
+        };
+      }
     }
   }
-  if (
-    !hasStrongWriteBackSignal({
-      pathRel: best.pathRel,
-      ruleHits: [],
-      hits: best.hits,
-      preferTokens: query.preferTokens,
-    })
-  ) {
+  if (!moduleGated) {
+    const skip =
+      "FAIL_UNGATED — soft writeBack needs Module/feature-folder lock";
+    const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+    if (llm) return llm;
     return {
       writeBack: false,
       seed: null,
@@ -973,18 +1517,22 @@ export async function resolveUnitPrimaryFromIndex(
         score: c.score,
         ruleHits: [],
       })),
-      skipReason:
-        "FAIL_SOFT_NO_DOMAIN — soft writeBack needs prefer/phrase/alias on path",
+      skipReason: skip,
       notes,
       source: "index.db",
     };
   }
   const softGate = uniq([
     ...familyGateTokens,
-    ...moduleGateTokens(query),
+    ...moduleGateTokens(query, allIndexPaths),
     ...aliasDomain,
+    ...strongPrefer,
   ]);
   if (softCrossCuttingDenied(best.pathRel, softGate)) {
+    const skip =
+      "FAIL_SOFT_CROSS_CUTTING — refused Auth/Mail/Notification/signed-URL primary (infra soft lock)";
+    const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+    if (llm) return llm;
     return {
       writeBack: false,
       seed: null,
@@ -995,8 +1543,74 @@ export async function resolveUnitPrimaryFromIndex(
         score: c.score,
         ruleHits: [],
       })),
-      skipReason:
-        "FAIL_SOFT_CROSS_CUTTING — refused Auth/Mail/Notification/signed-URL primary (infra soft lock)",
+      skipReason: skip,
+      notes,
+      source: "index.db",
+    };
+  }
+  const opPreferNoBody = extractOpPreferTokens(
+    intent,
+    shapeBlobForRanking(query)
+  );
+  if (pathContradictsOpPreferTokens(best.pathRel, opPreferNoBody)) {
+    // Prefer next candidate that hits op tokens inside family
+    const opHit = candidates.find(
+      (c) =>
+        c.score >= MIN_SCORE &&
+        !pathContradictsOpPreferTokens(c.pathRel, opPreferNoBody) &&
+        !isUnsuitableUnitPrimary(c.pathRel)
+    );
+    if (opHit) {
+      notes.push("opPreferRerank");
+      const symbolOp = preferredSymbolFromCodeIndex(
+        codeIndex,
+        opHit.pathRel,
+        [...strongPrefer, ...opPreferNoBody]
+      );
+      const relatedOp = relatedFromDeps(
+        codeIndex,
+        opHit.pathRel,
+        strongPrefer,
+        4,
+        preferDtoValidatorForIntent(intent, query.testData)
+      );
+      const finalizedOp = applyLayerHintToWriteBack(
+        codeIndex,
+        query,
+        opHit as SeedCandidate,
+        relatedOp,
+        symbolOp,
+        notes
+      );
+      return {
+        writeBack: true,
+        seed: finalizedOp.seed as ResolvedSeed,
+        symbol: finalizedOp.symbol,
+        relatedPaths: finalizedOp.relatedPaths,
+        candidatesTop3: candidates.slice(0, 3).map((c) => ({
+          pathRel: c.pathRel,
+          score: c.score,
+          ruleHits: [],
+        })),
+        bodyRuleLog: `writeBack=yes opPreferRerank intent=${intent.primaryClass || "-"}`,
+        notes,
+        source: "index.db",
+      };
+    }
+    const skip = `FAIL_OP_CONTRADICT — path misses op tokens «${opPreferNoBody.slice(0, 4).join(",")}»`;
+    const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
+    if (llm) return llm;
+    return {
+      writeBack: false,
+      seed: null,
+      symbol: null,
+      relatedPaths: [],
+      candidatesTop3: candidates.slice(0, 3).map((c) => ({
+        pathRel: c.pathRel,
+        score: c.score,
+        ruleHits: [],
+      })),
+      skipReason: skip,
       notes,
       source: "index.db",
     };
@@ -1004,18 +1618,28 @@ export async function resolveUnitPrimaryFromIndex(
   const symbol = preferredSymbolFromCodeIndex(
     codeIndex,
     best.pathRel,
-    query.preferTokens
+    strongPrefer
   );
   const relatedPaths = relatedFromDeps(
     codeIndex,
     best.pathRel,
-    query.preferTokens
+    strongPrefer,
+    4,
+    preferDtoValidatorForIntent(intent, query.testData)
+  );
+  const finalized = applyLayerHintToWriteBack(
+    codeIndex,
+    query,
+    best,
+    relatedPaths,
+    symbol,
+    notes
   );
   return {
     writeBack: true,
-    seed: best,
-    symbol,
-    relatedPaths,
+    seed: finalized.seed,
+    symbol: finalized.symbol,
+    relatedPaths: finalized.relatedPaths,
     candidatesTop3: candidates.slice(0, 3).map((c) => ({
       pathRel: c.pathRel,
       score: c.score,

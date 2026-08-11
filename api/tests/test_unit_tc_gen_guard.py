@@ -45,6 +45,28 @@ def test_drops_chuyen_buoc():
     assert r.code == "FAIL_UI_WIZARD"
 
 
+def test_drops_dieu_huong_buoc():
+    r = decide_unit_tc_draft(
+        title="Điều hướng bước tạo vật chứng - Đã hoàn tất giai đoạn thông tin - Cho phép sang giai đoạn tài liệu",
+        steps="1. Đánh dấu hoàn tất giai đoạn\n2. Assert được điều hướng bước tiếp",
+        expected_result="Cho phép sang giai đoạn tài liệu",
+        test_data="trace: FEATURES/FR-1",
+    )
+    assert r.decision == "drop"
+    assert r.code == "FAIL_UI_WIZARD"
+
+
+def test_drops_chuyen_giai_doan():
+    r = decide_unit_tc_draft(
+        title="Tạo mới - Từ chối chuyển giai đoạn khi thông tin chưa hoàn tất - Không cho phép tiếp tục",
+        steps="1. Chuẩn bị input thiếu\n2. Gọi đơn vị kiểm tra điều kiện chuyển giai đoạn\n3. Assert từ chối",
+        expected_result="Từ chối chuyển sang giai đoạn tài liệu liên quan",
+        test_data="trace: BUSINESS_RULES/BR-1",
+    )
+    assert r.decision == "drop"
+    assert r.code == "FAIL_UI_WIZARD"
+
+
 def test_drops_ui_verbs():
     r = decide_unit_tc_draft(
         title="Đăng nhập - Login - OK",
@@ -65,6 +87,47 @@ def test_drops_enable_disable_ui():
     )
     assert r.decision == "drop"
     assert r.code == "FAIL_UI_ENABLE"
+
+
+def test_drops_invent_http_without_source_signal():
+    r = decide_unit_tc_draft(
+        title="Tạo đơn - Từ chối khi thiếu mã",
+        module="Tạo đơn",
+        steps="1. Gọi Handle\n2. Assert HTTP 400",
+        expected_result="Trả về status 400",
+        test_data="trace: VALIDATION/V1",
+    )
+    assert r.decision == "drop"
+    assert r.code == "FAIL_NO_SOURCE_SIGNAL"
+
+
+def test_drops_invent_http_when_only_ir_markers():
+    """SRS IR markers alone must not excuse invented HTTP codes."""
+    r = decide_unit_tc_draft(
+        title="Tạo đơn - Từ chối khi thiếu mã",
+        module="Tạo đơn",
+        steps="1. Thực hiện tạo mới\n2. Assert HTTP 400",
+        expected_result="Trả về status 400",
+        test_data=(
+            "trace: VALIDATION_DATA/VAL-1\n"
+            "primaryBucket: VALIDATION_DATA\n"
+            "behaviorId: VAL-1-B01\n"
+            "target.constraint: required"
+        ),
+    )
+    assert r.decision == "drop"
+    assert r.code == "FAIL_NO_SOURCE_SIGNAL"
+
+
+def test_keeps_invent_shape_when_layer_hint_present():
+    r = decide_unit_tc_draft(
+        title="Tạo đơn - Từ chối khi thiếu mã",
+        module="Tạo đơn",
+        steps="1. Gọi Handle\n2. Assert ValidationException",
+        expected_result="Ném ValidationException",
+        test_data="trace: VALIDATION/V1\nlayerHint: dto\nsourceSignal: Required",
+    )
+    assert r.decision == "keep"
 
 
 def test_sanitize_strips_latin_class_method():

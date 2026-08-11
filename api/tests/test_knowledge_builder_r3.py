@@ -471,3 +471,43 @@ def test_normalize_splits_mixed_lines_into_separate_criteria():
     assert out["acceptanceCriteria"]
 
 
+def test_heuristic_vn_validation_table_and_capability_portable():
+    """SRS VN: bảng validation + mô tả chức năng — không hardcode domain."""
+    pairs = [
+        (
+            "3.2 Tạo mới bản ghi",
+            "Mô tả: người dùng nhập thông tin và lưu bản ghi mới vào hệ thống.",
+        ),
+        (
+            "Validation dữ liệu",
+            "| Tên | String | Có | Độ dài 3–100 |\n| Mã | String | Có | Duy nhất |",
+        ),
+        (
+            "Chức năng: Quản lý danh mục",
+            "Cho phép xem danh sách và tìm kiếm theo từ khóa trong phạm vi hệ thống.",
+        ),
+    ]
+    raw = build_knowledge_heuristic(pairs, file_names=["srs-vn.md"])
+    assert len(raw["features"]) >= 1
+    assert len(raw["validationRules"]) >= 1
+    out = normalize_knowledge_payload(raw)
+    assert len(out["features"]) >= 1 or len(out["validationRules"]) >= 1
+    assert out["summary"]
+
+
+def test_feature_kept_with_substantive_vn_desc_without_action_verb():
+    raw = {
+        "features": [
+            {
+                "name": "Quản lý hồ sơ",
+                "description": (
+                    "Hệ thống lưu trữ thông tin hồ sơ gồm mã, tên, ngày tạo; "
+                    "mã là duy nhất; tên bắt buộc từ 3 đến 100 ký tự."
+                ),
+            }
+        ],
+    }
+    out = normalize_knowledge_payload(raw)
+    assert len(out["features"]) == 1
+    assert out["features"][0]["name"] == "Quản lý hồ sơ"
+

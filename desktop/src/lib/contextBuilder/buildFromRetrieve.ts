@@ -162,7 +162,8 @@ export async function buildIndexBackedContext(
         }
       },
       maxLayers: Math.min(
-        UNIT_GEN_LIMITS.maxRelatedFiles,
+        // Reserve 1 slot for nearest existing test (test-sample) under maxRelatedFiles=4
+        Math.max(1, UNIT_GEN_LIMITS.maxRelatedFiles - 1),
         budget.maxRelatedFiles || UNIT_GEN_LIMITS.maxRelatedFiles
       ),
     });
@@ -217,9 +218,16 @@ export async function buildIndexBackedContext(
     return r.replace(/^\/+/, "");
   };
 
+  const maxPacketFiles = UNIT_GEN_LIMITS.maxRelatedFiles;
   for (let i = 0; i < ranked.length; i++) {
     const hit = ranked[i];
-    if (packetFiles.length > 0 && packetFiles.length > budget.maxRelatedFiles) break;
+    if (packetFiles.length >= maxPacketFiles) break;
+    // Leave room for one test-sample when planner found existing tests
+    const reserveSample =
+      !isE2e &&
+      (implementationPlan?.existingTests?.length || 0) > 0 &&
+      packetFiles.length >= maxPacketFiles - 1;
+    if (reserveSample) break;
     let raw = "";
     const pathRel = toRel(hit.pathRel);
     try {
@@ -249,6 +257,45 @@ export async function buildIndexBackedContext(
       primaryContent = text;
     } else {
       relatedSources.push({ path: pathRel, content: text });
+    }
+  }
+
+  // Nearest existing test → style sample (1 slot under maxRelatedFiles)
+  if (
+    !isE2e &&
+    implementationPlan?.existingTests?.length &&
+    packetFiles.length < maxPacketFiles
+  ) {
+    const sampleRel = toRel(implementationPlan.existingTests[0]!);
+    if (
+      sampleRel &&
+      !packetFiles.some(
+        (f) => f.pathRel.toLowerCase() === sampleRel.toLowerCase()
+      )
+    ) {
+      try {
+        const raw = await input.io.readFile(input.projectRoot, sampleRel);
+        const { text, truncated: wasTrunc } = trimChars(
+          raw,
+          budget.maxRelatedChars
+        );
+        if (wasTrunc) truncated.push(sampleRel);
+        if (total + text.length <= budget.maxTotalChars || packetFiles.length <= 1) {
+          total += text.length;
+          packetFiles.push({
+            pathRel: sampleRel,
+            role: "test-sample",
+            content: text,
+            why: "existing-test-style",
+          });
+          relatedSources.push({ path: sampleRel, content: text });
+          notes.push(`test-sample=${sampleRel}`);
+        } else {
+          truncated.push(`omitted-sample:${sampleRel}`);
+        }
+      } catch {
+        truncated.push(sampleRel);
+      }
     }
   }
 

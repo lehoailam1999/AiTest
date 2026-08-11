@@ -7,7 +7,7 @@ alwaysApply: false
 # Rule Index (governance)
 
 > **Cursor/agent đọc file này** khi sửa rule, prompt inject, hoặc retrieval.  
-> Chi tiết audit Phase 0: [`docs/RULE_INDEX_PLAN.md`](../../docs/RULE_INDEX_PLAN.md) · inventory: [`docs/rule_inventory.csv`](../../docs/rule_inventory.csv)
+> Tài liệu hệ thống: [`docs/SYSTEM_MASTER_DOCUMENTATION.md`](../../docs/SYSTEM_MASTER_DOCUMENTATION.md)
 
 ## Phân tầng SoT (đích)
 
@@ -16,9 +16,9 @@ alwaysApply: false
 | **Registry (Phase 1–2)** | `api/app/rules/` | `rule_registry.yaml` + loader (UUTGS/E2ECG/analysis/tc_gen wired) |
 | **Runtime inject (hiện tại)** | `api/app/llm/*_rules.py`, `knowledge_builder.py` | Đang full-block inject |
 | **Cursor pointer** | `.cursor/rules/*.mdc` | Không copy full UUTGS/E2ECG — chỉ map + link |
-| **Docs** | `docs/AI_TEST_RULES.md`, `docs/rule_*.csv` | Team + audit |
+| **Docs** | `docs/SYSTEM_MASTER_DOCUMENTATION.md` | Spec hệ thống tổng hợp |
 
-**Không** duplicate essay rule trong `.mdc`. Sửa nội dung rule → registry (Phase 1) hoặc file Python SoT tương ứng + **cập nhật `docs/rule_inventory.csv`**.
+**Không** duplicate essay rule trong `.mdc`. Sửa nội dung rule → registry (Phase 1) hoặc file Python SoT tương ứng + **cập nhật `api/app/rules/rule_registry.yaml`**.
 
 ## Chức năng → profile (selective retrieve — Phase 2+)
 
@@ -56,9 +56,8 @@ Runtime guard (không LLM prompt): `e2e_codegen_guard.py`, `failure_taxonomy.py`
 
 ## Checklist khi thêm/sửa rule
 
-1. Gắn `domain` + `tags` (xem taxonomy trong `RULE_INDEX_PLAN.md` §3).
-2. Cập nhật hàng tương ứng trong `docs/rule_inventory.csv`.
-3. Nếu đổi inject path → cập nhật `docs/rule_flow_matrix.csv`.
-4. Chạy test liên quan (`test_uutgs_rules`, `test_e2e_codegen_rules`, `test_analysis_rules`, …).
-5. Phase 1+: mirror vào `api/app/rules/rule_registry.yaml` trước khi xóa text khỏi `*_rules.py`.
-6. Khi bật selective, kiểm tra log `ids`/`chars` theo từng job để xác nhận profile đúng domain.
+1. Gắn `domain` + `tags` trong `api/app/rules/rule_registry.yaml`.
+2. Nếu đổi inject path → cập nhật profile tương ứng trong `api/app/rules/profiles.py`.
+3. Chạy test liên quan (`test_uutgs_rules`, `test_e2e_codegen_rules`, `test_analysis_rules`, …).
+4. Phase 1+: mirror vào `api/app/rules/rule_registry.yaml` trước khi xóa text khỏi `*_rules.py`.
+5. Khi bật selective, kiểm tra log `ids`/`chars` theo từng job để xác nhận profile đúng domain.

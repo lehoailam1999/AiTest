@@ -118,6 +118,15 @@ public interface IItemRepository { }
 namespace App.Commands;
 public class CreateItemCommand { public string Name { get; set; } }
 `,
+      "tests/App/Handlers/CreateItemHandlerTests.cs": `
+using Xunit;
+namespace App.Handlers.Tests;
+public class CreateItemHandlerTests
+{
+    [Fact]
+    public void Handle_ok() { }
+}
+`,
     };
     const io = memoryIo(files);
     const { snapshot } = await syncProjectIndex("/proj-cs-plan", io);
@@ -149,6 +158,10 @@ public class CreateItemCommand { public string Name { get; set; } }
     assert.ok(
       plan.layers.some((l) => l.pathRel.includes("IItemRepository")),
       "related includes IItemRepository from C# type graph"
+    );
+    assert.ok(
+      plan.existingTests.some((p) => /CreateItemHandlerTests\.cs$/i.test(p)),
+      JSON.stringify(plan.existingTests)
     );
   });
 

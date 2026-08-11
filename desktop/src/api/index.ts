@@ -273,6 +273,24 @@ export const agentApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  pickUnitPrimary: (body: {
+    projectId: string;
+    requirementTitle?: string;
+    module?: string;
+    title?: string;
+    steps?: string;
+    expectedResult?: string;
+    candidates: Array<{ path: string; code?: string; score?: number }>;
+  }) =>
+    authFetch<{
+      path?: string | null;
+      code?: string | null;
+      confidence?: number | null;
+      source?: string;
+    }>("/agent/pick-unit-primary", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };
 
 export const generateApiTest = {

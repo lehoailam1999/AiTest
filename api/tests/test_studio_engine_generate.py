@@ -77,7 +77,7 @@ def test_compact_rules_when_engine_locked():
     full = get_tc_generation_rules()
     assert "QUY TẮC CHUNG E2E" in compact_e2e
     assert "OUTPUT COMPLETENESS" not in compact_e2e  # SoT only
-    assert "QUY TẮC CHUNG (BẮT BUỘC)" in compact_unit
+    assert "QUY TẮC CHUNG UNIT (BẮT BUỘC" in compact_unit
     assert len(compact_e2e) < len(compact_unit)
     assert len(compact_e2e) < len(full)
     assert len(compact_unit) < len(full)
@@ -90,7 +90,7 @@ def test_tc_gen_selective_mode_uses_registry_profiles(monkeypatch):
     monkeypatch.setenv("AITEST_RULE_RETRIEVE_TCGEN", "1")
     unit = get_tc_generation_rules(preferred_engine="unit", speed="fast")
     e2e = get_tc_generation_rules(preferred_engine="e2e", speed="fast")
-    assert "QUY TẮC CHUNG (SPEED)" in unit
+    assert "QUY TẮC CHUNG UNIT (SPEED" in unit
     assert "QUY TẮC CHUNG E2E (SPEED" in e2e
 
 

@@ -46,4 +46,33 @@ describe("forcePacketPrimary", () => {
       "no absolute pathRel"
     );
   });
+
+  it("preserves test-sample role when forcing primary", async () => {
+    const packet = basePacket([
+      {
+        pathRel: "src/App/Handlers/CreateItemHandler.cs",
+        role: "primary",
+        content: "public class CreateItemHandler {}",
+      },
+      {
+        pathRel: "src/App/Contracts/IItemRepository.cs",
+        role: "dependency",
+        content: "public interface IItemRepository {}",
+      },
+      {
+        pathRel: "tests/CreateItemHandlerTests.cs",
+        role: "test-sample",
+        content: "public class CreateItemHandlerTests { }",
+      },
+    ]);
+    const out = await forcePacketPrimary({
+      packet,
+      primaryRel: "src/App/Handlers/CreateItemHandler.cs",
+      projectRoot: "D:/proj",
+    });
+    assert.equal(out.files[0]?.role, "primary");
+    const sample = out.files.find((f) => f.role === "test-sample");
+    assert.ok(sample, JSON.stringify(out.files.map((f) => f.role)));
+    assert.match(sample!.pathRel, /CreateItemHandlerTests/);
+  });
 });

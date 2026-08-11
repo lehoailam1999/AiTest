@@ -106,6 +106,79 @@ public class PersonGetAllQueryHandler {
     assert.match(hits[0]!.pathRel, /PersonGetAllQueryHandler\.cs$/);
   });
 
+  it("indexes C# Handler + Dto + Validator symbols for Unit related expand", async () => {
+    const files: Record<string, string> = {
+      "src/App/Commands/Widget/WidgetCreateCommandHandler.cs": `
+public class WidgetCreateCommandHandler {
+  public Task Handle(WidgetCreateCommand request) { return Task.CompletedTask; }
+}
+`,
+      "src/App/Commands/Widget/WidgetCreateCommand.cs": `
+public class WidgetCreateCommand {
+  public string Name { get; set; }
+}
+`,
+      "src/App/Dtos/WidgetCreateDto.cs": `
+public class WidgetCreateDto {
+  [Required]
+  public string Name { get; set; }
+}
+`,
+      "src/App/Validators/WidgetCreateCommandValidator.cs": `
+public class WidgetCreateCommandValidator {
+  public WidgetCreateCommandValidator() {}
+}
+`,
+    };
+    const io = memoryIo(files);
+    const synced = await syncProjectIndex("/proj", io, { force: true });
+    for (const name of [
+      "WidgetCreateCommandHandler",
+      "WidgetCreateCommand",
+      "WidgetCreateDto",
+      "WidgetCreateCommandValidator",
+    ]) {
+      const hits = lookupSymbol(synced.snapshot, name);
+      assert.ok(hits.length >= 1, `missing symbol ${name}: ${JSON.stringify(hits)}`);
+    }
+  });
+
+  it("syncProjectIndex indexes C# Handler + Dto + Validator symbols", async () => {
+    const files: Record<string, string> = {
+      "src/App/Commands/Widget/WidgetCreateCommandHandler.cs": `
+public class WidgetCreateCommandHandler {
+  public Task Handle(WidgetCreateCommand request) { return Task.CompletedTask; }
+}
+`,
+      "src/App/Commands/Widget/WidgetCreateCommand.cs": `
+public class WidgetCreateCommand {
+  [Required] public string Name { get; set; }
+}
+`,
+      "src/App/Dtos/WidgetCreateDto.cs": `
+public class WidgetCreateDto {
+  public string Name { get; set; }
+}
+`,
+      "src/App/Validators/WidgetCreateValidator.cs": `
+public class WidgetCreateValidator {
+  public void Validate(WidgetCreateDto dto) {}
+}
+`,
+    };
+    const io = memoryIo(files);
+    const first = await syncProjectIndex("/proj", io, { force: true });
+    for (const name of [
+      "WidgetCreateCommandHandler",
+      "WidgetCreateCommand",
+      "WidgetCreateDto",
+      "WidgetCreateValidator",
+    ]) {
+      const hits = lookupSymbol(first.snapshot, name);
+      assert.ok(hits.length >= 1, name + " " + JSON.stringify(hits));
+    }
+  });
+
   it("parses class, methods, imports, exports", () => {
     const src = `
 import { Payment } from "./payment.service";

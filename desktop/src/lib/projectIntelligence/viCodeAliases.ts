@@ -1,39 +1,13 @@
 /**
- * Khớp TC/module tiếng Việt ↔ tên file Latin — không gắn cứng domain dự án.
- * Expansion SoT: @aitest/ide-protocol (Desktop + Extension share).
- *
- * Nguồn token (ưu tiên cao → thấp):
- * 1. Gợi ý tường minh: code: / path: / alias:
- * 2. Alias project.meta.codeAliases
- * 3. Động từ IT chung (protocol)
- * 4. Bỏ dấu + PascalCase từ chuỗi VI (extractMatchTokens)
+ * Desktop helpers for VI ↔ code token expansion.
+ * Logic SoT: @aitest/ide-protocol — this file only adds parseCodeHintsFromText.
  */
 export {
-  GENERIC_VI_WORD_ALIASES,
-  GENERIC_VI_PHRASE_ALIASES,
-  mergeCodeAliasMaps,
+  expandCodeMatchTokens,
   expandVietnameseToCodeTokens,
   matchingProjectAliasTokens,
-  normalizeAliasKey,
-  extractUnitIntent,
-  unitIntentBlob,
-  UNIT_INTENT_DEFS,
-  isWeakUnitClientPath,
-  isBlockedUnitPrimaryPath,
-  isDeniedUnitPrimaryPath,
-  isPreferredLogicLayerPath,
-  filterUnitLogicLayerPaths,
-  filterUnitLogicLayerCandidates,
-  UNIT_BODY_RULE,
-  findBodyRuleHits,
-  decideBodyRuleWriteBack,
-  expandUnitRelatedPaths,
-  formatRelatedMarkerLines,
   type CodeAliasMap,
-  type UnitIntent,
-  type UnitIntentClass,
-  type UnitIntentTcLike,
-  type ExtractUnitIntentOpts,
+  type ExpandCodeTokensOpts,
 } from "@aitest/ide-protocol";
 
 /**

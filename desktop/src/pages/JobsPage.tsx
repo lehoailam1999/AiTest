@@ -41,6 +41,7 @@ const statusColor: Record<string, string> = {
   pass: "success",
   applied: "blue",
   generated: "processing",
+  gen_with_gap: "warning",
   verifying: "processing",
   draft: "default",
   discarded: "default",
@@ -118,7 +119,12 @@ export default function JobsPage() {
     const hasActive =
       items.some((j) => ACTIVE.has(j.status)) ||
       campaigns.some((c) => c.status === "Running") ||
-      unitRuns.some((r) => r.status === "verifying" || r.status === "generated") ||
+      unitRuns.some(
+        (r) =>
+          r.status === "verifying" ||
+          r.status === "generated" ||
+          r.status === "gen_with_gap"
+      ) ||
       e2eRuns.some((r) => r.status === "verifying" || r.status === "generated");
     if (timer.current) {
       window.clearTimeout(timer.current);

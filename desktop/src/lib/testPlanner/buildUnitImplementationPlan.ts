@@ -169,9 +169,12 @@ function findExistingTests(
   const hits: string[] = [];
   for (const p of Object.keys(snapshot.files)) {
     const low = p.toLowerCase();
-    if (!/\.(test|spec)\./i.test(low) && !/\/unittest\//i.test(low) && !/\/__tests__\//i.test(low)) {
-      continue;
-    }
+    const isTestPath =
+      /\.(test|spec)\./i.test(low) ||
+      /\/unittest\//i.test(low) ||
+      /\/__tests__\//i.test(low) ||
+      /tests?\.cs$/i.test(low);
+    if (!isTestPath) continue;
     const base = (p.split("/").pop() || "").toLowerCase();
     if (
       (stem.length >= 3 && base.includes(stem)) ||

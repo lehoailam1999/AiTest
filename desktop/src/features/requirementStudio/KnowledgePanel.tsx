@@ -188,6 +188,10 @@ export default function KnowledgePanel({
   const missingCritical = READINESS_KEYS.filter(
     (r) => r.key !== "gaps" && sectionCount(payload, r.key) === 0
   );
+  const readinessBucketsEmpty =
+    READINESS_KEYS.filter((r) => r.key !== "gaps").every(
+      (r) => sectionCount(payload, r.key) === 0
+    ) && gapCount > 0;
 
   return (
     <div className={`knowledge-panel knowledge-panel--split${loading ? " is-loading" : ""}`}>
@@ -207,6 +211,15 @@ export default function KnowledgePanel({
           showIcon
           title="Phân tích AI không hoàn tất — đang dùng bản heuristic"
           description={knowledge.enrichError}
+        />
+      ) : null}
+      {readinessBucketsEmpty ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          showIcon
+          title="Phân tích đã chạy nhưng SRS chưa map đầy đủ vào bucket"
+          description="Xem mục Thiếu sót — một số nội dung có thể nằm ở Validation / Xử lý lỗi thay vì Luồng nghiệp vụ."
         />
       ) : null}
       <div className="knowledge-toolbar">

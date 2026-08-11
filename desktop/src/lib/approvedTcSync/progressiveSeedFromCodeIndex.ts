@@ -1,7 +1,7 @@
 /**
  * Progressive Unit seed helpers from `.ai-test/index.db` (legacy / fallback).
  * Approve primary path is now `unitResolve` (Query → retrieveUnitSources → rank).
- * Keep pathHitsToken / preferredSymbol / extractTechIdentifierStems for shared ranking.
+ * Keep preferredSymbol / extractTechIdentifierStems for shared ranking.
  */
 import {
   extractUnitIntent,
@@ -11,6 +11,7 @@ import {
   isSignedUrlOrTokenGeneratePath,
   isWeakPathBridgePattern,
   matchingProjectAliasTokens,
+  pathHitsToken,
   UNIT_INTENT_DEFS,
 } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
@@ -54,19 +55,7 @@ export function extractTechIdentifierStems(raw: string): string[] {
   return uniq(out);
 }
 
-/** Short tokens (≤3) must match a path segment — avoid activate⊃vat / chung⊃c. */
-export function pathHitsToken(pathRel: string, token: string): boolean {
-  const low = pathRel.replace(/\\/g, "/").toLowerCase();
-  const tl = token.toLowerCase();
-  if (tl.length < 2) return false;
-  const parts = low.split(/[^a-z0-9]+/).filter(Boolean);
-  if (tl.length <= 3) {
-    return parts.some((p) => p === tl);
-  }
-  if (low.includes(tl)) return true;
-  // Reverse include only for meaningful segments (never "c" ⊂ "chung")
-  return parts.some((p) => p.includes(tl) || (p.length >= 4 && tl.includes(p)));
-}
+export { pathHitsToken };
 
 function symbolHitsToken(
   snap: CodeIndexSnapshot,
@@ -402,19 +391,37 @@ export function preferredSymbolFromCodeIndex(
 ): string | null {
   const symbols = snap.symbolsByFile[pathRel] || [];
   if (!symbols.length) return null;
-  const prefer = preferTokens.map((t) => t.toLowerCase());
+
+  const implScore = (s: {
+    name: string;
+    kind: string;
+    exported?: boolean;
+  }): number => {
+    const n = s.name || "";
+    if (/CommandHandler$|QueryHandler$/i.test(n)) return 100;
+    if (/Handler$/i.test(n)) return 90;
+    if (/Service$|UseCase$/i.test(n)) return 80;
+    if (s.kind === "interface" || /^I[A-Z]/.test(n)) return 10;
+    if (/(Command|Query|Dto|Request|Response)$/i.test(n) && !/Handler/i.test(n))
+      return 20;
+    if (s.kind === "class" && s.exported) return 55;
+    if (s.kind === "class") return 45;
+    if (s.kind === "function" && s.exported) return 40;
+    return 30;
+  };
+
+  const prefer = preferTokens.map((t) => t.toLowerCase()).filter(Boolean);
   for (const t of prefer) {
-    const hit = symbols.find(
+    const matches = symbols.filter(
       (s) =>
         (s.kind === "class" || s.kind === "function" || s.kind === "interface") &&
         (s.name.toLowerCase() === t || s.name.toLowerCase().includes(t))
     );
-    if (hit) return hit.name;
+    if (matches.length) {
+      matches.sort((a, b) => implScore(b) - implScore(a));
+      return matches[0]!.name;
+    }
   }
-  const exportedClass = symbols.find((s) => s.kind === "class" && s.exported);
-  if (exportedClass) return exportedClass.name;
-  const anyClass = symbols.find((s) => s.kind === "class");
-  if (anyClass) return anyClass.name;
-  const fn = symbols.find((s) => s.kind === "function" && s.exported);
-  return fn?.name || symbols[0]?.name || null;
+  const ranked = [...symbols].sort((a, b) => implScore(b) - implScore(a));
+  return ranked[0]?.name || null;
 }

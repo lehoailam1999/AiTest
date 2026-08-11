@@ -59,6 +59,11 @@ export type UnitProfile = {
   scope?: "backend" | "frontend" | "any";
   /** Absolute Gen floor (default 50). alignment &lt; this → never call CLI. */
   minAlignment?: number;
+  /**
+   * strict_spec (default): missing behavior/feature gap blocks Gen.
+   * always_generate: allow fallback generation with gap skeleton/note.
+   */
+  genMode?: "strict_spec" | "always_generate";
   /** Require path:/code: markers before Gen. Array form = require those keys. */
   requireMarkers?: boolean | string[];
   /**

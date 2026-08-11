@@ -186,7 +186,13 @@ export function buildCoverageBoard(input: {
     const st = (run.status || "").toLowerCase();
     if (st === "applied") b.codeApplied += 1;
     else if (st === "pass" || st === "verified") b.codeVerified += 1;
-    else if (st === "generated" || st === "ok" || st === "running") b.codeStaged += 1;
+    else if (
+      st === "generated" ||
+      st === "gen_with_gap" ||
+      st === "ok" ||
+      st === "running"
+    )
+      b.codeStaged += 1;
   }
 
   const runStatus = projectRunStatus(input.executions);

@@ -165,7 +165,8 @@ export async function buildGenerateContext(
   const testCase: TestCase = approvedMd
     ? {
         ...input.testCase,
-        testData: [input.testCase.testData, approvedMd].filter(Boolean).join("\n\n"),
+        // MD first — Approve SoT on disk wins over stale DB auto-markers
+        testData: [approvedMd, input.testCase.testData].filter(Boolean).join("\n\n"),
       }
     : input.testCase;
 

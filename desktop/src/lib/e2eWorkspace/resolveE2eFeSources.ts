@@ -2,7 +2,7 @@
  * Resolve FE template/component files for E2E Generate so locators match real HTML attrs
  * (data-cy, id, formControlName, …) instead of invented labels from TC wording alone.
  *
- * KEEP_AS_FALLBACK (docs/CODEGEN_LEGACY_CLEANUP.md):
+ * KEEP_AS_FALLBACK (legacy codegen cleanup — see resolveE2eFeSources):
  * Phase 3–4 primary path is Code Index → retrieveE2eSources → contextBuilder.
  * This module remains when index is missing/empty; do not delete until index FE KPI is solid.
  *

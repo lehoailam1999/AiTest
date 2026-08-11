@@ -20,6 +20,9 @@ import {
   isAnemicEntityLikePath,
   matchingProjectAliasTokens,
   orderCandidatesForBodyRuleOpen,
+  preferDtoValidatorForHints,
+  applyLayerHintPrimaryPromotion,
+  parseUnitLayerHint,
   resolveSutMapPin,
   softCrossCuttingDenied,
   tcImpliesBehaviorPrimary,
@@ -44,9 +47,13 @@ import { isUnsuitableUnitPrimary } from "../retrieval/rankScore";
 import { sourceExtensionsForLanguage } from "../stackHints";
 import {
   buildUnitApproveQuery,
+  llmPickUnitPrimary,
+  LLM_PICK_RETRY_TIMEOUT_MS,
   resolveUnitPrimaryFromIndex,
   snapshotFromPaths,
+  type PickFromShortlistFn,
 } from "../unitResolve";
+import { isUnitTestCaseType } from "../testEngine";
 import {
   preferredSymbolFromCodeIndex,
   resolveSeedsFromCodeIndex,
@@ -103,7 +110,7 @@ export type UnitMarkerEnrichResult = {
   candidatesTop3?: Array<{
     pathRel: string;
     score: number;
-    baseScore: number;
+    baseScore?: number;
     ruleHits: string[];
   }>;
   writeBack?: boolean;
@@ -161,6 +168,21 @@ export function hasManualUnitSourceMarkers(
   const markers = extractTcSourceMarkers(td);
   if (!markers.paths.length && !markers.codes.length) return false;
   if (AUTO_ENRICHED_RE.test(td)) return false;
+  return true;
+}
+
+/** Approved Unit TC has both path: and code: (manual or auto-enriched). */
+export function hasUnitPathCodeMarkers(
+  testData: string | null | undefined
+): boolean {
+  const markers = extractTcSourceMarkers(testData || "");
+  return markers.paths.length > 0 && markers.codes.length > 0;
+}
+
+function shouldEnrichUnitTc(tc: TestCase): boolean {
+  if (String(tc.reviewStatus || "").toLowerCase() !== "approved") return false;
+  if (!isUnitTestCaseType(tc.type)) return false;
+  if (hasManualUnitSourceMarkers(tc.testData)) return false;
   return true;
 }
 
@@ -250,18 +272,19 @@ async function rescoreWithBodyRules(
     UNIT_BODY_RULE.topN
   );
 
-  const out: BodyRuleScoredCandidate[] = [];
-  for (const c of top) {
-    let excerpt = "";
-    try {
-      excerpt = clipBodyExcerpt(await readExcerpt(c.pathRel));
-    } catch {
-      excerpt = "";
-    }
-    out.push(
-      applyBodyRuleToCandidate(c, excerpt, intent, tcText, { preferTokens })
-    );
-  }
+  const out: BodyRuleScoredCandidate[] = await Promise.all(
+    top.map(async (c) => {
+      let excerpt = "";
+      try {
+        excerpt = clipBodyExcerpt(await readExcerpt(c.pathRel));
+      } catch {
+        excerpt = "";
+      }
+      return applyBodyRuleToCandidate(c, excerpt, intent, tcText, {
+        preferTokens,
+      });
+    })
+  );
   out.sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
   return out;
 }
@@ -406,7 +429,8 @@ function relatedPathsForSeed(
   entryPathRel: string,
   index: ProjectFileIndex,
   codeIndex: CodeIndexSnapshot | null | undefined,
-  featureTokens: string[]
+  featureTokens: string[],
+  preferDtoValidator = false
 ): string[] {
   const fromDb = codeIndex ? Object.keys(codeIndex.files || {}) : [];
   const fromIndex = index.files.map((f) => f.pathRel);
@@ -415,7 +439,66 @@ function relatedPathsForSeed(
     entryPathRel: entryPathRel.replace(/\\/g, "/"),
     allPaths,
     featureTokens,
+    preferDtoValidator,
   });
+}
+
+function preferDtoValidatorForIntent(
+  intent: UnitIntent,
+  testData?: string | null
+): boolean {
+  return preferDtoValidatorForHints(intent, testData);
+}
+
+function allPathsForRelated(
+  index: ProjectFileIndex,
+  codeIndex: CodeIndexSnapshot | null | undefined
+): string[] {
+  const fromDb = codeIndex ? Object.keys(codeIndex.files || {}) : [];
+  const fromIndex = index.files.map((f) => f.pathRel);
+  return [...new Set([...fromDb, ...fromIndex].map((p) => p.replace(/\\/g, "/")))];
+}
+
+function promoteSeedForLayerHint(
+  seed: SeedCandidate,
+  relatedPaths: string[],
+  testData: string | null | undefined,
+  index: ProjectFileIndex,
+  codeIndex: CodeIndexSnapshot | null | undefined,
+  featureTokens: string[],
+  symbolFromPath: (pathRel: string) => string | null
+): {
+  seed: SeedCandidate;
+  relatedPaths: string[];
+  symbol: string | null;
+  promoted: boolean;
+} {
+  const applied = applyLayerHintPrimaryPromotion({
+    testData,
+    primaryPath: seed.pathRel,
+    relatedPaths,
+    allPaths: allPathsForRelated(index, codeIndex),
+    featureTokens,
+  });
+  if (!applied.promoted) {
+    return {
+      seed,
+      relatedPaths,
+      symbol: symbolFromPath(seed.pathRel),
+      promoted: false,
+    };
+  }
+  return {
+    seed: {
+      ...seed,
+      pathRel: applied.primaryPath,
+      reason: `${seed.reason || "seed"}+layerHint`,
+      hits: [...(seed.hits || []), "layerHint-promote"],
+    },
+    relatedPaths: applied.relatedPaths,
+    symbol: symbolFromPath(applied.primaryPath),
+    promoted: true,
+  };
 }
 
 function prepareTcForEnrich(tc: TestCase): TestCase {
@@ -574,23 +657,32 @@ export function enrichTcTestDataFromIndex(
       })),
     };
   }
-  const sym =
-    source === "index.db" && opts?.codeIndex
-      ? preferredSymbolFromCodeIndex(opts.codeIndex, seed.pathRel, preferTokens)
-      : null;
-  const relatedPaths = relatedPathsForSeed(
+  const relatedPaths0 = relatedPathsForSeed(
     seed.pathRel,
     index,
     opts?.codeIndex,
-    preferTokens
+    preferTokens,
+    preferDtoValidatorForIntent(intent, tcForResolve.testData)
+  );
+  const promoted = promoteSeedForLayerHint(
+    seed,
+    relatedPaths0,
+    tcForResolve.testData,
+    index,
+    opts?.codeIndex,
+    preferTokens,
+    (pathRel) =>
+      source === "index.db" && opts?.codeIndex
+        ? preferredSymbolFromCodeIndex(opts.codeIndex, pathRel, preferTokens)
+        : null
   );
   return enrichTestDataWithUnitMarkers(
     tcForResolve.testData,
-    seed,
+    promoted.seed,
     source === "index.db" ? "index.db" : "ProjectFileIndex",
     opts?.projectRoot,
-    sym,
-    relatedPaths
+    promoted.symbol,
+    promoted.relatedPaths
   );
 }
 
@@ -603,9 +695,11 @@ export async function enrichTcTestDataFromIndexAsync(
   index: ProjectFileIndex,
   opts?: SeedResolveOptions & {
     projectRoot?: string | null;
+    projectId?: string | null;
     codeIndex?: CodeIndexSnapshot | null;
     readExcerpt?: ReadSourceExcerpt | null;
     enrichProfile?: UnitEnrichProfileKnobs | null;
+    pickFromShortlist?: PickFromShortlistFn | null;
   }
 ): Promise<UnitMarkerEnrichResult> {
   const rawTd = (tc.testData || "").trim();
@@ -703,6 +797,10 @@ export async function enrichTcTestDataFromIndexAsync(
         ],
         featureTokens: preferTokens,
         maxRelated: 4,
+        preferDtoValidator: preferDtoValidatorForIntent(
+          intent,
+          tcForResolve.testData
+        ),
       }).filter((p) => {
         const g = applyProfileDomainGuards({
           moduleText: [tc.module, tc.title].filter(Boolean).join("\n"),
@@ -749,9 +847,20 @@ export async function enrichTcTestDataFromIndexAsync(
     const resolved = await resolveUnitPrimaryFromIndex({
       codeIndex: codeIndexSnap,
       query,
-      readExcerpt: opts?.readExcerpt || null,
+      readExcerpt: opts?.readExcerpt
+        ? async (p: string): Promise<string> => {
+            const text = await opts.readExcerpt!(p);
+            return text || "";
+          }
+        : null,
       topK: intent.requiresBodyRule ? 24 : 16,
       fallbackPaths: index.files.map((f) => f.pathRel),
+      pickFromShortlist: opts?.pickFromShortlist ?? null,
+      llmPromptFields: {
+        projectId: opts?.projectId || null,
+        steps: tc.steps,
+        expectedResult: tc.expectedResult,
+      },
     });
 
     if (resolved.writeBack && resolved.seed) {
@@ -781,22 +890,45 @@ export async function enrichTcTestDataFromIndexAsync(
         moduleText,
         profile?.domainGuards
       ).map((c) => c.pathRel);
-      const hit = enrichTestDataWithUnitMarkers(
-        tcForResolve.testData,
+      const promoted = promoteSeedForLayerHint(
         {
           pathRel: seed.pathRel,
           score: seed.score,
           reason: seed.reason || "unitResolve",
+          hits: seed.hits,
           ruleHits: seed.ruleHits,
+        },
+        relatedPaths,
+        tcForResolve.testData,
+        index,
+        opts?.codeIndex,
+        preferTokens,
+        (pathRel) =>
+          opts?.codeIndex
+            ? preferredSymbolFromCodeIndex(opts.codeIndex, pathRel, preferTokens)
+            : null
+      );
+      relatedPaths = filterCandidatesByDomainGuards(
+        promoted.relatedPaths.map((pathRel) => ({ pathRel })),
+        moduleText,
+        profile?.domainGuards
+      ).map((c) => c.pathRel);
+      const hit = enrichTestDataWithUnitMarkers(
+        tcForResolve.testData,
+        {
+          pathRel: promoted.seed.pathRel,
+          score: promoted.seed.score,
+          reason: promoted.seed.reason || "unitResolve",
+          ruleHits: promoted.seed.ruleHits,
         },
         "index.db",
         opts?.projectRoot,
-        resolved.symbol,
+        promoted.symbol || resolved.symbol,
         relatedPaths
       );
       return {
         ...hit,
-        ruleHits: seed.ruleHits || [],
+        ruleHits: promoted.seed.ruleHits || seed.ruleHits || [],
         relatedPaths: hit.relatedPaths,
         candidatesTop3: resolved.candidatesTop3,
         writeBack: true,
@@ -1120,40 +1252,54 @@ export async function enrichTcTestDataFromIndexAsync(
         bodyRuleLog,
       };
     }
-    const sym =
-      source === "index.db" && opts?.codeIndex
-        ? preferredSymbolFromCodeIndex(opts.codeIndex, seed.pathRel, [
-            ...preferTokens,
-            ...(seed.ruleHits || []),
-          ])
-        : null;
     let relatedPaths = relatedPathsForSeed(
       seed.pathRel,
       index,
       opts?.codeIndex,
-      [...preferTokens, ...(seed.ruleHits || [])]
+      [...preferTokens, ...(seed.ruleHits || [])],
+      preferDtoValidatorForIntent(intent, tcForResolve.testData)
     );
     relatedPaths = filterCandidatesByDomainGuards(
       relatedPaths.map((pathRel) => ({ pathRel })),
       moduleText,
       profile?.domainGuards
     ).map((c) => c.pathRel);
+    const promoted = promoteSeedForLayerHint(
+      seed,
+      relatedPaths,
+      tcForResolve.testData,
+      index,
+      opts?.codeIndex,
+      [...preferTokens, ...(seed.ruleHits || [])],
+      (pathRel) =>
+        source === "index.db" && opts?.codeIndex
+          ? preferredSymbolFromCodeIndex(opts.codeIndex, pathRel, [
+              ...preferTokens,
+              ...(seed.ruleHits || []),
+            ])
+          : null
+    );
+    relatedPaths = filterCandidatesByDomainGuards(
+      promoted.relatedPaths.map((pathRel) => ({ pathRel })),
+      moduleText,
+      profile?.domainGuards
+    ).map((c) => c.pathRel);
     const hit = enrichTestDataWithUnitMarkers(
       tcForResolve.testData,
       {
-        pathRel: seed.pathRel,
-        score: seed.score,
-        reason: seed.reason || "seed",
-        ruleHits: seed.ruleHits,
+        pathRel: promoted.seed.pathRel,
+        score: promoted.seed.score,
+        reason: promoted.seed.reason || "seed",
+        ruleHits: promoted.seed.ruleHits,
       },
       source === "index.db" ? "index.db" : "ProjectFileIndex",
       opts?.projectRoot,
-      sym,
+      promoted.symbol,
       relatedPaths
     );
     return {
       ...hit,
-      ruleHits: "ruleHits" in seed ? seed.ruleHits : [],
+      ruleHits: "ruleHits" in promoted.seed ? promoted.seed.ruleHits : [],
       relatedPaths: hit.relatedPaths,
       candidatesTop3: decision.candidatesTop3,
       writeBack: true,
@@ -1223,6 +1369,8 @@ export type EnrichApprovedCasesResult = {
   cases: TestCase[];
   enrichedCount: number;
   skippedAmbiguous: number;
+  /** TCs that gained path:/code: on sequential retry after batch wave */
+  retryEnrichedCount?: number;
   indexFileCount: number;
   usedCodeIndex: boolean;
   /** Optional body-rule logs (one line per TC that ran body scoring). */
@@ -1238,32 +1386,95 @@ function resolveReqTitle(tc: TestCase, opts: EnrichApprovedCasesOpts): string {
   );
 }
 
+function makePickFromShortlist(
+  projectId: string,
+  pickTimeoutMs?: number
+): PickFromShortlistFn {
+  return (input) =>
+    llmPickUnitPrimary({
+      ...input,
+      projectId,
+      pickTimeoutMs,
+    });
+}
+
+type EnrichOneHit = {
+  idx: number;
+  tc: TestCase;
+  enriched: boolean;
+  bodyRuleLog?: string;
+};
+
+async function enrichOneApprovedUnitCase(
+  tc: TestCase,
+  idx: number,
+  ctx: {
+    pathIndex: ProjectFileIndex;
+    opts: EnrichApprovedCasesOpts;
+    aliases: CodeAliasMap | null | undefined;
+    enrichProfile: UnitEnrichProfileKnobs;
+    codeIndex: CodeIndexSnapshot | null;
+    readExcerpt: ReadSourceExcerpt | null;
+    pickFromShortlist: PickFromShortlistFn | null;
+  }
+): Promise<EnrichOneHit> {
+  if (!shouldEnrichUnitTc(tc)) {
+    return { idx, tc, enriched: false };
+  }
+  const hit = await enrichTcTestDataFromIndexAsync(tc, ctx.pathIndex, {
+    projectAliases: ctx.aliases,
+    requirementTitle: resolveReqTitle(tc, ctx.opts),
+    limit: 8,
+    projectRoot: ctx.opts.projectRoot,
+    projectId: ctx.opts.projectId,
+    codeIndex: ctx.codeIndex,
+    readExcerpt: ctx.readExcerpt,
+    enrichProfile: ctx.enrichProfile,
+    unitScope: ctx.enrichProfile.scope,
+    pickFromShortlist: ctx.pickFromShortlist,
+  });
+  if (!hit.enriched) {
+    return {
+      idx,
+      tc: { ...tc, testData: hit.testData || tc.testData },
+      enriched: false,
+      bodyRuleLog: hit.bodyRuleLog,
+    };
+  }
+  return {
+    idx,
+    tc: { ...tc, testData: hit.testData },
+    enriched: true,
+    bodyRuleLog: hit.bodyRuleLog,
+  };
+}
+
 /**
  * Clone Approved TCs with Test Data enriched from index.db / path index when confident.
  */
 export async function enrichApprovedCasesWithUnitMarkers(
   opts: EnrichApprovedCasesOpts
 ): Promise<EnrichApprovedCasesResult> {
-  const paths =
-    opts.allSourcePaths?.length
-      ? opts.allSourcePaths
-          .map((p) => toRepoRelativePath(p, opts.projectRoot))
-          .filter(Boolean)
-      : await listUnitIndexSourcePaths(opts.projectRoot);
-
   const codeIndex = await loadProjectCodeIndex(opts.projectRoot);
   const usedCodeIndex = Boolean(codeIndex && Object.keys(codeIndex.files).length);
 
-  // Prefer path list from index.db when present (TS/JS); else listSourceFiles
-  const indexPaths =
+  // Prefer paths from index.db — skip full repo listSourceFiles when index present
+  const paths =
     usedCodeIndex && codeIndex
       ? Object.keys(codeIndex.files)
-      : paths;
-  if (!indexPaths.length && !paths.length) {
+      : opts.allSourcePaths?.length
+        ? opts.allSourcePaths
+            .map((p) => toRepoRelativePath(p, opts.projectRoot))
+            .filter(Boolean)
+        : await listUnitIndexSourcePaths(opts.projectRoot);
+
+  const indexPaths = paths;
+  if (!indexPaths.length) {
     return {
       cases: opts.cases,
       enrichedCount: 0,
       skippedAmbiguous: 0,
+      retryEnrichedCount: 0,
       indexFileCount: 0,
       usedCodeIndex: false,
     };
@@ -1274,7 +1485,7 @@ export async function enrichApprovedCasesWithUnitMarkers(
   const enrichProfile = await loadUnitEnrichProfileKnobs(opts.projectRoot);
   const pathIndex = buildProjectIndexCached(
     opts.projectId || "local",
-    paths.length ? paths : indexPaths
+    indexPaths
   );
 
   const readExcerpt: ReadSourceExcerpt | null = isTauri()
@@ -1287,43 +1498,74 @@ export async function enrichApprovedCasesWithUnitMarkers(
       }
     : null;
 
+  const pickFromShortlist: PickFromShortlistFn | null = opts.projectId
+    ? makePickFromShortlist(opts.projectId)
+    : null;
+
+  const enrichCtx = {
+    pathIndex,
+    opts,
+    aliases,
+    enrichProfile,
+    codeIndex,
+    readExcerpt,
+    pickFromShortlist,
+  };
+
+  const CONCURRENCY = 6;
+  const work = opts.cases.map((tc, idx) => ({ tc, idx }));
+  const results: EnrichOneHit[] = [];
+
+  for (let i = 0; i < work.length; i += CONCURRENCY) {
+    const chunk = work.slice(i, i + CONCURRENCY);
+    const chunkHits = await Promise.all(
+      chunk.map(({ tc, idx }) => enrichOneApprovedUnitCase(tc, idx, enrichCtx))
+    );
+    results.push(...chunkHits);
+  }
+
+  // Sequential retry — bulk Approve often misses path:/code: when LLM picks time out under load.
+  let retryEnrichedCount = 0;
+  const retryPick = opts.projectId
+    ? makePickFromShortlist(opts.projectId, LLM_PICK_RETRY_TIMEOUT_MS)
+    : null;
+  const retryCtx = { ...enrichCtx, pickFromShortlist: retryPick };
+
+  for (const r of results) {
+    const original = opts.cases[r.idx];
+    if (!shouldEnrichUnitTc(original)) continue;
+    if (r.enriched && hasUnitPathCodeMarkers(r.tc.testData)) continue;
+    const retry = await enrichOneApprovedUnitCase(r.tc, r.idx, retryCtx);
+    if (retry.enriched && hasUnitPathCodeMarkers(retry.tc.testData)) {
+      r.tc = retry.tc;
+      r.enriched = true;
+      r.bodyRuleLog = retry.bodyRuleLog;
+      retryEnrichedCount += 1;
+    } else if (!hasUnitPathCodeMarkers(r.tc.testData) && retry.tc.testData) {
+      r.tc = retry.tc;
+      r.bodyRuleLog = retry.bodyRuleLog || r.bodyRuleLog;
+    }
+  }
+
+  results.sort((a, b) => a.idx - b.idx);
   let enrichedCount = 0;
   let skippedAmbiguous = 0;
   const bodyRuleLogs: string[] = [];
   const cases: TestCase[] = [];
-  for (const tc of opts.cases) {
-    if (String(tc.reviewStatus || "").toLowerCase() !== "approved") {
-      cases.push(tc);
-      continue;
-    }
-    if (hasManualUnitSourceMarkers(tc.testData)) {
-      cases.push(tc);
-      continue;
-    }
-    const hit = await enrichTcTestDataFromIndexAsync(tc, pathIndex, {
-      projectAliases: aliases,
-      requirementTitle: resolveReqTitle(tc, opts),
-      limit: 8,
-      projectRoot: opts.projectRoot,
-      codeIndex,
-      readExcerpt,
-      enrichProfile,
-      unitScope: enrichProfile.scope,
-    });
-    if (hit.bodyRuleLog) bodyRuleLogs.push(`${tc.testCaseId}: ${hit.bodyRuleLog}`);
-    if (!hit.enriched) {
-      skippedAmbiguous += 1;
-      cases.push({ ...tc, testData: hit.testData || tc.testData });
-      continue;
-    }
-    enrichedCount += 1;
-    cases.push({ ...tc, testData: hit.testData });
+  for (const r of results) {
+    cases.push(r.tc);
+    const original = opts.cases[r.idx];
+    if (!shouldEnrichUnitTc(original)) continue;
+    if (r.bodyRuleLog) bodyRuleLogs.push(`${r.tc.testCaseId}: ${r.bodyRuleLog}`);
+    if (r.enriched) enrichedCount += 1;
+    else skippedAmbiguous += 1;
   }
 
   return {
     cases,
     enrichedCount,
     skippedAmbiguous,
+    retryEnrichedCount,
     indexFileCount: usedCodeIndex
       ? Object.keys(codeIndex!.files).length
       : pathIndex.files.length,

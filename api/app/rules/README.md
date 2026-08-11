@@ -3,9 +3,8 @@
 Rule registry is now wired across Unit/E2E/Analysis/TC-gen with selective retrieval gates.
 
 - Governance: `.cursor/rules/rule-index.mdc`
-- Plan: `docs/RULE_INDEX_PLAN.md`
-- Inventory: `docs/rule_inventory.csv`
-- Flow matrix: `docs/rule_flow_matrix.csv`
+- System spec: `docs/SYSTEM_MASTER_DOCUMENTATION.md`
+- Registry: `api/app/rules/rule_registry.yaml`
 
 Available now:
 

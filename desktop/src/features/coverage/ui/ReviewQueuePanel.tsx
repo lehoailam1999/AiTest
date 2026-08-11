@@ -31,12 +31,27 @@ import {
   typeLabel,
 } from "../../../i18n/labels";
 import { syncApprovedTestCasesMdBestEffort } from "../../../lib/approvedTcSync";
+import { normalizeFunctionLabel } from "../../../lib/normalizeFunctionLabel";
 import {
   ENGINE_TOOLTIP,
   TC_TYPE_OPTIONS,
   resolveTestEngine,
 } from "../../../lib/testEngine";
 import { workspace } from "../../../workspace";
+
+const UNASSIGNED_FUNCTION = "(Chưa gán Function)";
+
+function functionLabel(raw: string | null | undefined): string {
+  const n = normalizeFunctionLabel(raw);
+  return n || UNASSIGNED_FUNCTION;
+}
+
+function functionLabelsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  const na = normalizeFunctionLabel(a).toLowerCase();
+  const nb = normalizeFunctionLabel(b).toLowerCase();
+  return Boolean(na && nb && na === nb);
+}
 
 type Props = {
   projectId: string;
@@ -206,8 +221,19 @@ export function ReviewQueuePanel({
   const [form] = Form.useForm<EditForm>();
 
   useEffect(() => {
-    if (moduleFilter) setModuleSel(moduleFilter);
-  }, [moduleFilter]);
+    if (!moduleFilter) return;
+    const want = functionLabel(moduleFilter);
+    // URL ?module= sometimes carries Requirement title — not a Function label
+    if (
+      workspaceTitle &&
+      (functionLabelsMatch(want, workspaceTitle) ||
+        functionLabelsMatch(moduleFilter, workspaceTitle))
+    ) {
+      setModuleSel("__all__");
+      return;
+    }
+    setModuleSel(want === UNASSIGNED_FUNCTION ? "__all__" : want);
+  }, [moduleFilter, workspaceTitle]);
 
   useEffect(() => {
     if (!workspaceId) {
@@ -244,10 +270,17 @@ export function ReviewQueuePanel({
   const modules = useMemo(() => {
     const s = new Set<string>();
     for (const c of cases) {
-      s.add((c.module || "").trim() || "(Chưa gán chức năng)");
+      s.add(functionLabel(c.module));
     }
     return [...s].sort((a, b) => a.localeCompare(b, "vi"));
   }, [cases]);
+
+  // Drop stale Function filter when options change (e.g. after module cleared / scope shrink)
+  useEffect(() => {
+    if (moduleSel === "__all__") return;
+    const stillThere = modules.some((m) => functionLabelsMatch(m, moduleSel));
+    if (!stillThere) setModuleSel("__all__");
+  }, [modules, moduleSel]);
 
   const filtered = useMemo(() => {
     return cases.filter((c) => {
@@ -257,13 +290,13 @@ export function ReviewQueuePanel({
         const eng = resolveTestEngine(c.type);
         if (engineSel === "e2e") {
           if (eng !== "e2e") return false;
-        } else if (eng === "e2e") {
-          return false;
+        } else if (engineSel === "unit") {
+          // Unit filter = non-E2E (includes API / Functional → unit)
+          if (eng === "e2e") return false;
         }
       }
       if (moduleSel === "__all__") return true;
-      const m = (c.module || "").trim() || "(Chưa gán chức năng)";
-      return m === moduleSel || m.toLowerCase() === moduleSel.toLowerCase();
+      return functionLabelsMatch(functionLabel(c.module), moduleSel);
     });
   }, [cases, moduleSel, statusSel, engineSel]);
 
@@ -291,15 +324,30 @@ export function ReviewQueuePanel({
     let fail = 0;
     const approved: TestCase[] = [];
     try {
-      for (const id of ids) {
-        try {
-          const tc = await testcases.approve(id);
-          approved.push(tc);
-          ok += 1;
-        } catch {
-          fail += 1;
+      const APPROVE_CONCURRENCY = 6;
+      for (let i = 0; i < ids.length; i += APPROVE_CONCURRENCY) {
+        const chunk = ids.slice(i, i + APPROVE_CONCURRENCY);
+        const hits = await Promise.all(
+          chunk.map(async (id) => {
+            try {
+              return { ok: true as const, tc: await testcases.approve(id) };
+            } catch {
+              return { ok: false as const };
+            }
+          })
+        );
+        for (const h of hits) {
+          if (h.ok) {
+            approved.push(h.tc);
+            ok += 1;
+          } else {
+            fail += 1;
+          }
         }
       }
+      // Refresh status immediately — do not wait for MD/enrich sync (can take minutes)
+      setSelected([]);
+      onChanged();
       if (approved.length) {
         const sync = await syncApprovedTestCasesMdBestEffort({
           projectId,
@@ -321,12 +369,12 @@ export function ReviewQueuePanel({
         } else if (fail === 0) {
           message.success(`Đã duyệt ${ok} test case.`);
         }
+        // Sync may have written path:/code: back to DB — refresh once more
+        onChanged();
       } else if (fail === 0) {
         message.success(`Đã duyệt ${ok} test case.`);
       }
       if (fail > 0) message.warning(`Duyệt: OK ${ok}, lỗi ${fail}.`);
-      setSelected([]);
-      onChanged();
     } finally {
       setBusy(false);
     }

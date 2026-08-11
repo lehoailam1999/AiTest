@@ -31,8 +31,9 @@ describe("unit conventions SoT (protocol)", () => {
 });
 
 describe("unit job state machine", () => {
-  it("allows generating → generated / gen_failed / discarded", () => {
+  it("allows generating → generated / gen_with_gap / gen_failed / discarded", () => {
     assert.equal(canTransitionUnitJob("generating", "generated"), true);
+    assert.equal(canTransitionUnitJob("generating", "gen_with_gap"), true);
     assert.equal(canTransitionUnitJob("generating", "gen_failed"), true);
     assert.equal(canTransitionUnitJob("generating", "discarded"), true);
     assert.equal(canTransitionUnitJob("generating", "applied"), false);
@@ -47,6 +48,7 @@ describe("unit job state machine", () => {
       "draft",
       "generating",
       "generated",
+      "gen_with_gap",
       "gen_failed",
       "verifying",
       "pass",

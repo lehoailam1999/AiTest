@@ -72,14 +72,25 @@ export async function forcePacketPrimary(
     content = content.slice(0, maxChars) + "\n/* …truncated… */";
   }
 
-  const rest: ContextPacketFile[] = packet.files
+  const maxTotal = UNIT_GEN_LIMITS.maxRelatedFiles;
+  const normalized = packet.files
     .map((f) => ({
       ...f,
       pathRel: toRepoRel(projectRoot, f.pathRel),
-      role: "dependency" as const,
     }))
-    .filter((f) => f.pathRel && f.pathRel.toLowerCase() !== want.toLowerCase())
-    .slice(0, UNIT_GEN_LIMITS.maxRelatedFiles);
+    .filter(
+      (f) => f.pathRel && f.pathRel.toLowerCase() !== want.toLowerCase()
+    );
+
+  const samples = normalized
+    .filter((f) => f.role === "test-sample")
+    .slice(0, 1)
+    .map((f) => ({ ...f, role: "test-sample" as const }));
+  const depSlots = Math.max(0, maxTotal - 1 - samples.length);
+  const rest: ContextPacketFile[] = normalized
+    .filter((f) => f.role !== "test-sample")
+    .map((f) => ({ ...f, role: "dependency" as const }))
+    .slice(0, depSlots);
 
   const primary: ContextPacketFile = {
     pathRel: want,
@@ -100,6 +111,6 @@ export async function forcePacketPrimary(
       pathRel: want,
       symbol,
     },
-    files: [primary, ...rest],
+    files: [primary, ...rest, ...samples],
   };
 }

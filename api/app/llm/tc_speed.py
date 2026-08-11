@@ -104,16 +104,18 @@ def knowledge_enough_skip_source_scan(
     """
     Skip workspace file scan when freeze Knowledge already has enough signals.
 
-    - E2E: UI/AC/rule signals (override AITEST_TC_E2E_FORCE_SOURCE_SCAN=1)
-    - Unit: FEATURES + VALIDATION/BR signals (override AITEST_TC_UNIT_FORCE_SOURCE_SCAN=1)
+    - E2E: UI/AC/rule signals (override AITEST_TC_E2E_FORCE_SOURCE_SCAN=1 to always scan)
+    - Unit: **never** skip for "Knowledge đủ" — Unit TCs must see Handler/Service excerpts.
+      Opt out of scan only with AITEST_TC_UNIT_SKIP_SOURCE_SCAN=1.
     """
     eng = (preferred_engine or "").strip().lower()
     if eng == "e2e":
         if _env_truthy("AITEST_TC_E2E_FORCE_SOURCE_SCAN"):
             return False
     elif eng == "unit":
-        if _env_truthy("AITEST_TC_UNIT_FORCE_SOURCE_SCAN"):
-            return False
+        # Unit must ground reject/validate/persist on real SUT excerpts.
+        # Skip only when explicitly opted out (debug / no workspace).
+        return _env_truthy("AITEST_TC_UNIT_SKIP_SOURCE_SCAN")
     else:
         return False
 
@@ -141,14 +143,7 @@ def knowledge_enough_skip_source_scan(
         )
         return modules >= 1 and signals >= 3
 
-    # Unit: features + validation/business/AC/api are enough to skip SUT scan
-    signals = (
-        _len("validationRules")
-        + _len("businessRules")
-        + _len("apiSummary")
-        + _len("acceptanceCriteria")
-    )
-    return modules >= 1 and signals >= 2
+    return False
 
 
 def resolve_fanout_batch_size(*, is_cursor: bool) -> int:

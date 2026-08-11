@@ -270,7 +270,7 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
       .waitForResponse(
         (r) => {
           if (r.request().method() === 'GET') return false;
-          return /auth|login|signin|session|token|users?\/sign|authenticate/i.test(r.url());
+          return /auth|login|signin|session|token|users?\\/sign|authenticate/i.test(r.url());
         },
         { timeout: 30000 },
       )
@@ -325,7 +325,7 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
   try {
     await expect(passwordField()).toBeHidden({ timeout: 30000 });
   } catch {
-    const leftLoginUrl = !/\/login\/?$/i.test(page.url());
+    const leftLoginUrl = !/\\/login\\/?$/i.test(page.url());
     if (!leftLoginUrl) {
       if (await tryRegisterAndRelogin()) {
         await expect(passwordField()).toBeHidden({ timeout: 30000 });

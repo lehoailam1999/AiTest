@@ -514,7 +514,8 @@ export class CursorAgentCliEngine implements UnitGenEngine {
       throw new Error(
         isUnitGenRefuseOutput(code)
           ? `${refuse} — model refused (SUT=${ctx.primaryPath}). ` +
-              `Thêm path:/code: vào Test Data trỏ đúng production unit, Approve lại, rồi Gen.` +
+              `SUT hiện tại không có nhánh khớp TC (sai lớp / thiếu enforce). ` +
+              `Sửa path:/code: (hoặc layerHint: dto|validator) rồi Approve lại, rồi Gen.` +
               hint
           : "Empty unit test from AI CLI" + hint
       );

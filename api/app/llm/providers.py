@@ -38,7 +38,15 @@ class Provider:
     async def verify(self, api_key: str) -> None:
         raise NotImplementedError
 
-    async def chat(self, api_key: str, system: str, user: str) -> str:
+    async def chat(
+        self,
+        api_key: str,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         raise NotImplementedError
 
     async def generate(
@@ -80,7 +88,15 @@ class OpenAI(Provider):
         if res.status_code >= 400:
             raise LLMError(f"openai verify HTTP {res.status_code}: {truncate(res.text, 200)}")
 
-    async def chat(self, api_key: str, system: str, user: str) -> str:
+    async def chat(
+        self,
+        api_key: str,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         body = {
             "model": self.model,
             "messages": [
@@ -89,9 +105,9 @@ class OpenAI(Provider):
             ],
             "temperature": 0.2,
             # TC JSON với nhiều case dễ vượt 4k — tránh Unterminated string
-            "max_tokens": 16384,
+            "max_tokens": max_tokens if max_tokens is not None else 16384,
         }
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=timeout if timeout is not None else 180) as client:
             res = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -129,14 +145,22 @@ class Anthropic(Provider):
         if res.status_code >= 500 or res.status_code == 404:
             raise LLMError(f"anthropic verify HTTP {res.status_code}: {truncate(res.text, 200)}")
 
-    async def chat(self, api_key: str, system: str, user: str) -> str:
+    async def chat(
+        self,
+        api_key: str,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         body = {
             "model": self.model,
-            "max_tokens": 16384,
+            "max_tokens": max_tokens if max_tokens is not None else 16384,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         }
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=timeout if timeout is not None else 180) as client:
             res = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
@@ -166,7 +190,15 @@ class Gemini(Provider):
         if res.status_code >= 400:
             raise LLMError(f"gemini verify HTTP {res.status_code}: {truncate(res.text, 200)}")
 
-    async def chat(self, api_key: str, system: str, user: str) -> str:
+    async def chat(
+        self,
+        api_key: str,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}"
             f":generateContent?key={api_key}"
@@ -177,10 +209,10 @@ class Gemini(Provider):
             ],
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 16384,
+                "maxOutputTokens": max_tokens if max_tokens is not None else 16384,
             },
         }
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=timeout if timeout is not None else 180) as client:
             res = await client.post(url, json=body)
         if res.status_code >= 400:
             raise LLMError(f"gemini chat HTTP {res.status_code}: {truncate(res.text, 400)}")
@@ -234,7 +266,15 @@ class Ollama(Provider):
         if err:
             raise LLMError(f"ollama: {err}")
 
-    async def chat(self, api_key: str, system: str, user: str) -> str:
+    async def chat(
+        self,
+        api_key: str,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         body = {
             "model": self.model_name(),
             "messages": [
@@ -242,9 +282,12 @@ class Ollama(Provider):
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "options": {"temperature": 0.2, "num_predict": 16384},
+            "options": {
+                "temperature": 0.2,
+                "num_predict": max_tokens if max_tokens is not None else 16384,
+            },
         }
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=timeout if timeout is not None else 180) as client:
             res = await client.post(f"{self.base()}/api/chat", json=body)
         if res.status_code >= 400:
             raise LLMError(f"ollama chat HTTP {res.status_code}: {truncate(res.text, 400)}")
@@ -306,12 +349,22 @@ class Antigravity(Provider):
             )
         await self._gemini().verify(api_key)
 
-    async def chat(self, api_key: str, system: str, user: str) -> str:
+    async def chat(
+        self,
+        api_key: str,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         base = self.openai_compat_base()
         if not base:
             if not (api_key or "").strip():
                 raise LLMError("antigravity: thiếu Google API Key")
-            return await self._gemini().chat(api_key, system, user)
+            return await self._gemini().chat(
+                api_key, system, user, max_tokens=max_tokens, timeout=timeout
+            )
 
         headers = {}
         if api_key:
@@ -323,11 +376,11 @@ class Antigravity(Provider):
                 {"role": "user", "content": user},
             ],
             "temperature": 0.2,
-            "max_tokens": 16384,
+            "max_tokens": max_tokens if max_tokens is not None else 16384,
         }
         url = f"{base}/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(timeout=timeout if timeout is not None else 180) as client:
                 res = await client.post(url, headers=headers, json=body)
         except httpx.HTTPError as exc:
             raise LLMError(f"antigravity chat failed at {base}: {exc}") from exc

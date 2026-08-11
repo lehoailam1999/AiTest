@@ -5,38 +5,40 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
-# IT chung VI→EN — không gắn domain dự án (mirror FE viCodeAliases).
-_GENERIC_VI_WORDS: dict[str, list[str]] = {
-    "tao": ["Create", "Add", "New"],
-    "moi": ["Create", "New"],
-    "sua": ["Edit", "Update"],
-    "xoa": ["Delete", "Remove"],
-    "xem": ["View", "Get", "Detail"],
-    "tim": ["Search", "Find", "Query"],
-    "kiem": ["Search", "Check"],
-    "dang": ["Auth"],
-    "nhap": ["Login", "Input", "Import"],
-    "xuat": ["Export"],
-    "luu": ["Save"],
-    "gui": ["Send", "Submit"],
-    "duyet": ["Approve", "Review"],
-    "api": ["Api", "Controller"],
-    "todo": ["Todo", "Task"],
-    "auth": ["Auth", "Login"],
-    "user": ["User", "Account"],
-}
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_VI_IT_ALIASES_JSON = (
+    _REPO_ROOT
+    / "packages"
+    / "ide-protocol"
+    / "src"
+    / "defaults"
+    / "vi-it-aliases.json"
+)
 
-_GENERIC_VI_PHRASES: dict[str, list[str]] = {
-    "dang nhap": ["Login", "Auth", "SignIn"],
-    "dang ky": ["Register", "SignUp"],
-    "quen mat khau": ["ForgotPassword", "ResetPassword"],
-    "phan quyen": ["Permission", "Role"],
-    "nguoi dung": ["User", "Account"],
-    "tim kiem": ["Search", "Query", "Filter"],
-    "quan ly": ["Manage", "Manager", "Service"],
-}
+
+@lru_cache(maxsize=1)
+def _load_vi_it_aliases() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Shared SoT with @aitest/ide-protocol defaults/vi-it-aliases.json."""
+    try:
+        raw = json.loads(_VI_IT_ALIASES_JSON.read_text(encoding="utf-8"))
+        words = raw.get("words") or {}
+        phrases = raw.get("phrases") or {}
+        if isinstance(words, dict) and isinstance(phrases, dict):
+            return words, phrases
+    except (OSError, json.JSONDecodeError):
+        pass
+    # Fallback if monorepo layout differs
+    return (
+        {"tao": ["Create", "Add", "New"], "tim": ["Search", "Find", "Query"]},
+        {"dang nhap": ["Login", "Auth", "SignIn"], "tim kiem": ["Search", "Query"]},
+    )
+
+
+_GENERIC_VI_WORDS, _GENERIC_VI_PHRASES = _load_vi_it_aliases()
 
 _STOP = {
     "the", "and", "for", "with", "from", "that", "this", "when", "then",

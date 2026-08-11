@@ -108,8 +108,13 @@ export async function assertTcReadyForUnitGen(opts: {
     });
   }
   const md = await probeApprovedTcMd(root, opts.tc);
-  const markerBlob = [md?.content || "", opts.tc.testData || ""].join("\n");
-  const hasMarkers = hasUnitSourceMarkers(markerBlob);
+  // MD markers win when present; else fall back to DB Test Data
+  const mdHas = hasUnitSourceMarkers(md?.content || "");
+  const dbHas = hasUnitSourceMarkers(opts.tc.testData || "");
+  const hasMarkers = mdHas || dbHas;
+  const markerBlob = mdHas
+    ? md?.content || ""
+    : [md?.content || "", opts.tc.testData || ""].join("\n");
   const skipped = isUnitSutResolveSkipped(markerBlob) && !hasMarkers;
   return decideUnitGenGate({
     isTauri: true,

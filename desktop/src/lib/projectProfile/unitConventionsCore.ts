@@ -18,6 +18,7 @@ export function renderUnitConventionsMd(profile: ProjectProfile): string {
     `Test frameworks: ${unit?.testFrameworks?.join(", ") || "(detect from project)"}`
   );
   lines.push(`Unit scope: ${unit?.scope || "backend"}`);
+  lines.push(`Gen mode: ${unit?.genMode || "strict_spec"}`);
   lines.push(`Min alignment: ${unit?.minAlignment ?? 50}`);
   lines.push(
     `Disk re-resolve (Extension): ${unit?.allowDiskReresolve === true ? "on" : "off (default)"}`

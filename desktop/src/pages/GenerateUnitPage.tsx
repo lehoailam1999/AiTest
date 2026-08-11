@@ -285,6 +285,41 @@ function guessClassFromCode(code: string, fileName: string): string {
   return base || "Target";
 }
 
+function normalizeUnitGenErrorForUi(errMsg: string): string {
+  const msg = (errMsg || "").trim();
+
+  // Phase 5 gates: require path:/code: before CLI. User-facing: must be explicit.
+  if (
+    /FAIL_NEEDS_MARKER|needs_marker/i.test(msg) ||
+    /\bpath\s*:\s*\+?\s*code\s*:/i.test(msg) ||
+    /chưa có path\s*:\s*\+?\s*code\s*:/i.test(msg)
+  ) {
+    return "Không tìm thấy path và code liên quan";
+  }
+
+  if (/FAIL_FEATURE_GAP|feature_gap/i.test(msg)) {
+    return "Thiếu backend feature / gap (FEATURE_GAP)";
+  }
+
+  if (/FAIL_SUT_MISMATCH|sut_mismatch/i.test(msg)) {
+    return "SUT không khớp intent (FAIL_SUT_MISMATCH)";
+  }
+
+  if (/FAIL_DOMAIN_GUARD|domain_guard/i.test(msg)) {
+    return "Bị chặn theo domain guard (DOMAIN_GUARD)";
+  }
+
+  if (/FAIL_NEEDS_SOURCE/i.test(msg)) {
+    return "Chưa có đủ thông tin nguồn để sinh code";
+  }
+
+  if (/timeout|timed out/i.test(msg)) {
+    return "Lỗi timeout — AI/CLI quá lâu (thử lại/giảm batch)";
+  }
+
+  return msg || "Sinh unit thất bại";
+}
+
 type BatchRow = BatchPipelineRow;
 
 export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: boolean }) {
@@ -1366,6 +1401,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             }
           } catch (e) {
             const errMsg = e instanceof Error ? e.message : "Lỗi";
+            const uiErr = normalizeUnitGenErrorForUi(errMsg);
             const stack = e instanceof Error && e.stack ? `\n\n${e.stack}` : "";
             const logBody = `${new Date().toISOString()} · Generate FAIL · ${tc.testCaseId}\n${tc.title}\n\n${errMsg}${stack}`;
             let errorLogRel: string | undefined;
@@ -1385,7 +1421,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               testCaseId: tc.testCaseId,
               title: tc.title,
               status: "fail",
-              error: errMsg,
+              error: uiErr,
               errorDetail: logBody,
               errorLogRel,
               ...snap,
@@ -1536,6 +1572,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
             }
           } catch (e) {
             const errMsg = e instanceof Error ? e.message : "Lỗi";
+            const uiErr = normalizeUnitGenErrorForUi(errMsg);
             const stack = e instanceof Error && e.stack ? `\n\n${e.stack}` : "";
             const logBody = `${new Date().toISOString()} · Generate FAIL · ${tc.testCaseId}\n${tc.title}\n\n${errMsg}${stack}`;
             let errorLogRel: string | undefined;
@@ -1555,7 +1592,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               testCaseId: tc.testCaseId,
               title: tc.title,
               status: "fail",
-              error: errMsg,
+              error: uiErr,
               errorDetail: logBody,
               errorLogRel,
               ...snap,
@@ -1708,7 +1745,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         });
         message.destroy("unit-gen");
         if (!out.ok) {
-          message.error(out.error);
+          message.error(normalizeUnitGenErrorForUi(out.error));
           return;
         }
         setResult({
@@ -1742,7 +1779,9 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         focusVerifyConsole();
       } catch (e) {
         message.destroy("unit-gen");
-        message.error(e instanceof Error ? e.message : "Sinh unit thất bại");
+        message.error(
+          e instanceof Error ? normalizeUnitGenErrorForUi(e.message) : "Sinh unit thất bại"
+        );
       } finally {
         setBusy(false);
       }
@@ -2080,7 +2119,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           },
         });
         if (!out.ok) {
-          message.error(out.error);
+          message.error(normalizeUnitGenErrorForUi(out.error));
           throw new Error(out.error);
         }
         const nextPreviews = await loadWorkspacePreviews(localPath, out.manifest);

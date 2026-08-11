@@ -1,6 +1,25 @@
 import { CODE_INDEX_REL_PATH, CODE_INDEX_SCHEMA } from "./constants";
 import type { CodeIndexIo, CodeIndexSnapshot } from "./types";
 
+/** In-memory cache — Approve/enrich often reloads the same JSON snapshot. */
+const INDEX_SNAP_CACHE = new Map<string, { snap: CodeIndexSnapshot; at: number }>();
+const INDEX_CACHE_TTL_MS = 90_000;
+
+function cacheKey(projectRoot: string, relPath: string): string {
+  return `${projectRoot.replace(/\\/g, "/").toLowerCase()}::${relPath.replace(/\\/g, "/")}`;
+}
+
+export function invalidateIndexSnapshotCache(
+  projectRoot?: string,
+  relPath: string = CODE_INDEX_REL_PATH
+): void {
+  if (!projectRoot) {
+    INDEX_SNAP_CACHE.clear();
+    return;
+  }
+  INDEX_SNAP_CACHE.delete(cacheKey(projectRoot, relPath));
+}
+
 export function emptySnapshot(now = new Date().toISOString()): CodeIndexSnapshot {
   return {
     meta: {
@@ -41,6 +60,11 @@ export async function loadIndexSnapshot(
   io: CodeIndexIo,
   relPath: string = CODE_INDEX_REL_PATH
 ): Promise<CodeIndexSnapshot | null> {
+  const key = cacheKey(projectRoot, relPath);
+  const cached = INDEX_SNAP_CACHE.get(key);
+  if (cached && Date.now() - cached.at < INDEX_CACHE_TTL_MS) {
+    return cached.snap;
+  }
   try {
     let raw: string | null = null;
     if (io.readFileOptional) {
@@ -53,7 +77,11 @@ export async function loadIndexSnapshot(
       }
     }
     if (!raw?.trim()) return null;
-    return parseSnapshotJson(raw);
+    const snap = parseSnapshotJson(raw);
+    if (snap) {
+      INDEX_SNAP_CACHE.set(key, { snap, at: Date.now() });
+    }
+    return snap;
   } catch {
     return null;
   }
@@ -66,5 +94,6 @@ export async function saveIndexSnapshot(
   relPath: string = CODE_INDEX_REL_PATH
 ): Promise<string> {
   await io.writeFile(projectRoot, relPath, serializeSnapshot(snap));
+  invalidateIndexSnapshotCache(projectRoot, relPath);
   return relPath;
 }

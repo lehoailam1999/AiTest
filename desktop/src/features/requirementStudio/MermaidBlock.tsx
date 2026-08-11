@@ -17,6 +17,7 @@ type MermaidApi = typeof import("mermaid").default;
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 2.5;
 const STEP = 0.25;
+const DEFAULT_SCALE = MIN_SCALE;
 
 let mermaidImport: Promise<MermaidApi> | null = null;
 
@@ -63,7 +64,7 @@ export default function MermaidBlock({ chart }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const reactId = useId().replace(/:/g, "");
   const [error, setError] = useState<string | null>(null);
-  const [scale, setScale] = useState(1);
+  const [scale, setScale] = useState(DEFAULT_SCALE);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,7 +107,7 @@ export default function MermaidBlock({ chart }: Props) {
     setScale((s) => Math.max(MIN_SCALE, Math.round((s - STEP) * 100) / 100));
   const zoomIn = () =>
     setScale((s) => Math.min(MAX_SCALE, Math.round((s + STEP) * 100) / 100));
-  const zoomReset = () => setScale(1);
+  const zoomReset = () => setScale(DEFAULT_SCALE);
 
   return (
     <div className="knowledge-mermaid-card">

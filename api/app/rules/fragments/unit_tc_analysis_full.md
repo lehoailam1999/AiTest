@@ -1,27 +1,86 @@
-## UNIT ← PHÂN TÍCH (ISTQB / ISO 29119-3) — nguồn #1 duy nhất
-Knowledge / Freeze / DB = SoT. SRS+source chỉ bổ sung tín hiệu đã có — không invent.
-Mỗi TC: `trace: TYPE/id|name` (1 tín hiệu/1 TC). Bucket [] → bỏ. Alias: ACTORS≡ACTORS_PERMISSIONS · NFR≡NFR_CONSTRAINTS · FLOWS≡BUSINESS_FLOWS.
-Portable: không domain/framework sản phẩm — SUT từ Phân tích + source.
+## UNIT ← PHÂN TÍCH — UNIVERSAL Backend TC IR (ISTQB / ISO 29119-3)
 
-BACKEND only (mọi stack): business · service|use-case|handler · validation · domain · utility · authz · error · mock port/repo/gateway.
-CQRS→Handler/Service · MVC→service (không thin controller) · Nest/TS BE→service/pipe (không FE).
-Mock port — không Unit ORM/SQL trừ Knowledge nói rõ. `path:`/`code:` khuyến khích; Approve bổ sung. Cấm absolute/kebab SUT.
-Symbol Latin chỉ trong `path:`/`code:` (Approve/index) — **cấm** ghi Class.Method vào title.
+**Phase = Test Case IR từ Knowledge/Freeze/DB.** Portable mọi tài liệu.  
+**Không** cần source code để sinh TC. Source Retrieval + `path:`/`code:` = pha sau (Approve).
 
-Cấm (→ E2E/bỏ): form/popup/modal/wizard/Bước N/Step N/page/component/chuyển bước/enable-UI · click/fill/navigate/toast · ClientApp/`*.component.*`/`*.page.*`/spa shell · thin HTTP client khi BR/validation · bootstrap · API smoke HTTP-200-only.
+Knowledge/Freeze = SoT. **Không invent** BR / limit / permission / HTTP / exception / class / method.
 
-Coverage gate (itemCount>0 → ≥1 TC BE; thiếu lớp có tín hiệu = FAIL):
-- SUMMARY_SCOPE: không TC
-- FEATURES: ≥1 happy handler/service; UI-only → E2E
-- ACTORS+EXECUTION_CONTEXT: authz service/handler allow(+deny)
-- BUSINESS_FLOWS: logic → Unit; wizard/UI → E2E
-- BUSINESS_RULES: mỗi BR ≥1; Decision Table = 1 tổ hợp/TC; fail-branch → negative
-- VALIDATION_DATA: mỗi field+rule → EP (+BVA) trên input BE
-- API_UI: → handler/service (không status-only); UI màn → E2E
-- ERROR_HANDLING: mỗi lỗi BE → ≥1 negative
-- ACCEPTANCE: AC không-UI only
-- NFR: chỉ đo được unit BE
-- GAPS: cấm pad/invent
+---
 
-Cấm: bịa · gộp nhiều tín hiệu/TC · type≠Unit · steps UI · pad GAPS.
-Title: `[Feature] - [Hành động BE tiếng Việt] - [Kết quả]` — **cấm** Class.Method / Handler / Service Latin trong title.
+### 0. Pipeline (không trộn pha)
+
+```text
+Knowledge PRIMARY buckets → Atomic Backend Behavior → Unit TC IR → Approve → Source Retrieval → Codegen
+```
+
+Generator **bảo toàn** `primaryBucket` từ Phân tích (BUSINESS_RULES | VALIDATION_DATA | ERROR_HANDLING | ACCEPTANCE).  
+**Cấm** invent/rename/chuyển bucket.
+
+---
+
+### 1. Sáu gate (thứ tự)
+
+**Rule 1 — Behavior Decomposition**  
+Multi-behavior / multi-constraint → atomic BE **trước** Scope Gate (1 TC = 1 behavior).
+
+**Rule 2 — Backend Outcome Gate (SRS-only)**  
+Phân loại theo **outcome BE quan sát được trong Knowledge**, không theo keyword UI bề mặt.  
+**Cấm** suy “không có BE” chỉ vì SRS viết từ góc UI.  
+Ví dụ: «chỉ hiển thị vụ án được tham gia» → BE filter/authz (IN). «Nút mở File Explorer» → OUT.  
+**IN** khi Knowledge mô tả constraint/decision/persist/reject/return/authz/state/calc/side-effect.  
+**Không** bắt buộc source excerpt để IN.  
+Sau classify: **IN** | **OUT** | **MIXED** (chỉ nhánh BE) | **UNKNOWN**.
+
+**Rule 3 — UNKNOWN vs OUT**  
+- UI-only chắc chắn → **OUT**  
+- Có khả năng BE nhưng Knowledge **thiếu/cắt** → **UNKNOWN** (+ `unknownBehaviors`) — **cấm** UNKNOWN→OUT để giảm TC  
+- Source excerpt (nếu có) chỉ **optional confirm** — thiếu excerpt ≠ OUT
+
+**Rule 4 — Conflict Gate**  
+Req mâu thuẫn → `conflicts` / GAPS. **Cấm** tự resolve / invent.
+
+**Rule 5 — Implementation-free IR**  
+TC mô tả **WHAT** phải test — **không** HOW (class/method/handler/repo/DTO/ORM/HTTP/exception/mock lib).  
+`layerHint` / `sourceSignal` = **null** trừ khi Knowledge/excerpt **nói rõ**. **Cấm** suy `maxLength→dto`, `duplicate→repository`.
+
+**Rule 6 — Coverage / Gap Detection**  
+Sau classify: inventory tín hiệu IN (đặc biệt VALIDATION_DATA + FILE_DATA_SECURITY) ↔ TC.  
+Mỗi IN → ≥1 TC **hoặc** gap. Cấm dừng sớm chỉ happy-path/BR.  
+Output `coverage` + `gaps` + `unknownBehaviors` + `conflicts`.
+
+---
+
+### 2. PRIMARY (itemCount>0 → đánh giá; 0 TC hợp lệ nếu toàn OUT)
+
+1. BUSINESS_RULES — decision/constraint/authz/state/calc BE  
+2. VALIDATION_DATA — chỉ chiều criterion hỗ trợ (required/null/empty/blank/min/max/len/format/type/pattern/allowed/combo/duplicate/invalid-ref); EP/BVA khi có biên  
+3. ERROR_HANDLING — reject/fail/recover/fallback **có trong** Knowledge  
+4. ACCEPTANCE — AC outcome BE; UI-only AC → OUT  
+
+Categories gắn thêm (A–I) khi hữu ích: Logic · Validation · Authz · Integrity · State · Server-processing · Error · Dependency · File/security.
+
+---
+
+### 3. Atomic + behaviorId + scenario
+
+`behaviorId` = `<requirementId>-B<seq>` (vd. `BR-25-B04`) — 1 behavior / 1 TC.  
+Scenario chỉ khi relevant: POSITIVE|NEGATIVE|BOUNDARY|NULL|EMPTY|BLANK|DUPLICATE|NOT_FOUND|AUTHORIZATION|INVALID_STATE|DEPENDENCY_FAILURE — **không** blind matrix.  
+Dedup cùng BE across buckets → một TC, gộp `requirementIds`.
+
+---
+
+### 4. Output contract (JSON only)
+
+Root: `testCases`, `coverage` (per PRIMARY: total/covered/missing), `gaps`, `unknownBehaviors`, `conflicts`.
+
+Mỗi TC tối thiểu: `title`, `type=Unit`, `primaryBucket`, `scenario`, `trace.{requirementIds,behaviorId}`, `preconditions`, `testData.{input,target,existingState}`, `steps.{prepare,execute}`, `expectedResult.{type,observable,description}`, `testDataHints.{layerHint,sourceSignal}` (null nếu không biết), `status` READY_FOR_CODEGEN|NOT_READY.
+
+Title VN: `[Feature] - [Hành động BE] - [Kết quả]` — **cấm** Class.Method.  
+Steps/expected: ngôn ngữ nghiệp vụ BE — không class/repo/HTTP invent.
+
+---
+
+### 5. File / incomplete
+
+File: chỉ chiều Knowledge nêu (format/size/…). Size chưa số → dùng «configured maximum» — **cấm** invent số.  
+SRS cắt/TBD → `unknownBehaviors`, không TC phần thiếu.

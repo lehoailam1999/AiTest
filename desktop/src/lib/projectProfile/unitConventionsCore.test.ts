@@ -4,13 +4,16 @@ import { renderUnitConventionsMd, UNIT_CONVENTIONS_CORE } from "./unitConvention
 import { createEmptyProfile } from "./loadSaveProfile.ts";
 
 describe("unitConventionsCore", () => {
-  it("core rules cover Approve MD, layout jail, SUT grounding, ownership", () => {
+  it("core rules cover Gen MD, layout jail, provided-SUT grounding, ownership", () => {
     assert.match(UNIT_CONVENTIONS_CORE, /\.ai-test\/test-cases/);
     assert.match(UNIT_CONVENTIONS_CORE, /AItest\/UnitTest/);
-    assert.match(UNIT_CONVENTIONS_CORE, /source under test|SUT/i);
+    assert.match(UNIT_CONVENTIONS_CORE, /primary SUT|authoritative/i);
     assert.match(UNIT_CONVENTIONS_CORE, /fail/i);
     assert.match(UNIT_CONVENTIONS_CORE, /Ownership/i);
     assert.match(UNIT_CONVENTIONS_CORE, /allowDiskReresolve/);
+    assert.match(UNIT_CONVENTIONS_CORE, /Prefer generate/i);
+    assert.match(UNIT_CONVENTIONS_CORE, /FAIL_FEATURE_GAP/);
+    assert.doesNotMatch(UNIT_CONVENTIONS_CORE, /Approve pipeline|FAIL_UNGATED|pick-unit-primary/i);
   });
 
   it("renderUnitConventionsMd includes core + framework hint", () => {

@@ -1,6 +1,0 @@
-{
-  "_comment": "SCHEMA ONLY — copy to SUT repo as .ai-test/code-aliases.json. Replace keys/values by discovering tokens from THAT repo's .ai-test/index.db (path/symbol stems). Empty object {} is valid until you add entries. Do not paste another product's nouns.",
-  "_example_do_not_ship": {
-    "<module or requirement phrase>": ["<SymbolOrPathTokenFromIndex>"]
-  }
-}

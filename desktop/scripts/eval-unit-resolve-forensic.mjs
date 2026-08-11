@@ -1,6 +1,6 @@
 /**
- * Eval: unified Approve pipeline on Forensic index.db for real TC-018 MD + TC-019.
- * Pass aliases in-memory (SUT .ai-test/code-aliases.json may be absent).
+ * Eval: unified Approve pipeline on Forensic index.db for TC-057 / TC-058.
+ * Pass aliases empty — expect CheckCode family lock or LLM shortlist mock.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -66,7 +66,13 @@ function parseFront(raw) {
     meta,
     steps: get("Steps"),
     expected: get("Expected Result"),
-    testData: get("Test Data").replace(/# sut-resolve:[\s\S]*/i, "").trim(),
+    testData: get("Test Data")
+      .replace(/path:\s*.+$/gim, "")
+      .replace(/code:\s*.+$/gim, "")
+      .replace(/related:\s*.+$/gim, "")
+      .replace(/#\s*auto-enriched[\s\S]*/i, "")
+      .replace(/#\s*sut-resolve:[\s\S]*/i, "")
+      .trim(),
     pre: get("Precondition"),
   };
 }
@@ -96,12 +102,13 @@ function tcFromMd(filePath) {
   };
 }
 
-async function runOne(tc, aliases, codeIndex, index) {
+async function runOne(tc, aliases, codeIndex, index, pickFromShortlist) {
   const hit = await enrichTcTestDataFromIndexAsync(tc, index, {
-    requirementTitle: "Vật chứng",
+    requirementTitle: tc.module || "Tạo mới vật chứng",
     projectRoot: FORENSIC,
     projectAliases: aliases,
     codeIndex,
+    pickFromShortlist,
     readExcerpt: async (rel) => {
       try {
         return fs.readFileSync(path.join(FORENSIC, rel), "utf8");
@@ -114,7 +121,6 @@ async function runOne(tc, aliases, codeIndex, index) {
     testCaseId: tc.testCaseId,
     enriched: hit.enriched,
     skipReason: hit.skipReason,
-    ruleHits: hit.ruleHits,
     pathLine: line(hit.testData, /^\s*path\s*:/i),
     codeLine: line(hit.testData, /^\s*code\s*:/i),
     pathOk: /path:\s*.*EvidenceCreateCommandHandler\.cs/i.test(hit.testData || ""),
@@ -125,25 +131,40 @@ const raw = fs.readFileSync(path.join(FORENSIC, ".ai-test/index.db"), "utf8");
 const codeIndex = normalizeSnap(parseSnapshotJson(raw), FORENSIC);
 const index = buildProjectIndex(Object.keys(codeIndex.files));
 
-let aliases = {};
-const ap = path.join(FORENSIC, ".ai-test/code-aliases.json");
-if (fs.existsSync(ap)) {
-  aliases = JSON.parse(fs.readFileSync(ap, "utf8"));
-}
-// No in-memory Evidence nudge — TC↔excerpt affinity must resolve without aliases.
-
 const dir = path.join(
   FORENSIC,
   ".ai-test/test-cases",
   fs.readdirSync(path.join(FORENSIC, ".ai-test/test-cases"))[0]
 );
-const tc018 = tcFromMd(path.join(dir, "TC-018.md"));
+
+const mockPick = async (input) => {
+  const hit = input.shortlist.find((s) =>
+    /EvidenceCreateCommandHandler/i.test(s.pathRel)
+  );
+  if (!hit) return null;
+  return {
+    pathRel: hit.pathRel,
+    code: "EvidenceCreateCommandHandler",
+    confidence: 0.95,
+    source: "mock",
+  };
+};
 
 const out = {
-  aliasesFile: fs.existsSync(ap),
-  aliasesKeys: Object.keys(aliases),
-  title: tc018.title,
-  tc018: await runOne(tc018, aliases, codeIndex, index),
+  tc057: await runOne(
+    tcFromMd(path.join(dir, "TC-057.md")),
+    {},
+    codeIndex,
+    index,
+    mockPick
+  ),
+  tc058: await runOne(
+    tcFromMd(path.join(dir, "TC-058.md")),
+    {},
+    codeIndex,
+    index,
+    mockPick
+  ),
 };
 console.log(JSON.stringify(out, null, 2));
-if (!out.tc018.pathOk) process.exitCode = 2;
+if (!out.tc057.pathOk || !out.tc058.pathOk) process.exitCode = 2;

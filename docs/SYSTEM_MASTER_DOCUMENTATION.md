@@ -93,10 +93,10 @@ AITest/
 ├── desktop/                  # React + Tauri Desktop
 ├── ide-plugins/vscode/       # AITest IDE Bridge extension
 ├── packages/ide-protocol/    # Shared protocol + Unit conventions/guards
-└── docs/                     # Spec & plans
+└── docs/                     # System spec (SoT)
 ```
 
-Chi tiết protocol Unit: [`AITEST_IDE_EXTENSION_PROTOCOL_PLAN.md`](./AITEST_IDE_EXTENSION_PROTOCOL_PLAN.md).
+Chi tiết protocol Unit: `packages/ide-protocol/` + `ide-plugins/vscode/` (bridge JSON-RPC, capabilities, path jail).
 
 ---
 
@@ -299,7 +299,7 @@ Playwright **TypeScript** + POM. Desktop gọi từng bước độc lập (khô
 **Guards sau LLM:** Auth → Feature entry → Act; fail-closed stubs; không invent route/role/credential.
 
 > Rule runtime E2E: **single SoT** tại `api/app/llm/e2e_codegen_rules.py` (E2ECG).  
-> `docs/AI_TEST_RULES.md` là pointer/tài liệu team.
+> Taxonomy lỗi E2E: `api/app/services/failure_taxonomy.py`.
 
 ### 5.2 Layout E2E (SoT)
 

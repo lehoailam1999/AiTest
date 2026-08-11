@@ -5,8 +5,9 @@ import type { UnitWorkspaceStatus } from "./types";
 
 export const UNIT_JOB_TRANSITIONS: Record<UnitWorkspaceStatus, UnitWorkspaceStatus[]> = {
   draft: ["generating", "discarded"],
-  generating: ["generated", "gen_failed", "discarded"],
+  generating: ["generated", "gen_with_gap", "gen_failed", "discarded"],
   generated: ["verifying", "discarded"],
+  gen_with_gap: ["verifying", "discarded"],
   gen_failed: ["generating", "discarded"],
   verifying: ["pass", "fail"],
   pass: ["applied", "verifying"],

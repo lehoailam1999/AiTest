@@ -3,6 +3,7 @@
  * Renderer-safe: chỉ dùng Tauri writeTextFile (+ IDE). Không import node:fs.
  */
 import { parseBridgeDiscoveryJson } from "@aitest/ide-protocol";
+import { testcases } from "../../api";
 import type { TestCase } from "../../api/types";
 import { isTauri, readIdeBridgeDiscovery, writeTextFile } from "../../tauri/bridge";
 import { getIdeRpcClientOrNull, useIdeBridgeSession } from "../ideBridge/session";
@@ -12,12 +13,14 @@ import {
   type ApprovedTcMdFile,
 } from "./approvedTcMarkdown";
 import { enrichApprovedCasesWithUnitMarkers } from "./enrichUnitMarkersFromIndex";
+import { enrichApprovedCasesWithE2eMarkers } from "./enrichE2eMarkersFromIndex";
 import { mergeRequirementTitleFillGap } from "./requirementTitleFillGap";
 import { buildRequirementTitleByCaseKey } from "./resolveRequirementTitles";
 
 export {
   parseApprovedTcGrounding,
   renderUnitGroundingBlock,
+  renderE2eGroundingBlock,
   buildApprovedTcMarkdownFiles,
   approvedTcMarkdownRelPath,
   renderApprovedTestCaseMarkdown,
@@ -30,9 +33,18 @@ export {
   enrichTestDataWithUnitMarkers,
   enrichTcTestDataFromIndex,
   enrichTcTestDataFromIndexAsync,
+  hasUnitPathCodeMarkers,
   pickConfidentUnitSeed,
   UNIT_AUTO_MARKER,
 } from "./enrichUnitMarkersFromIndex";
+
+export {
+  enrichApprovedCasesWithE2eMarkers,
+  enrichTcTestDataWithE2eMarkers,
+  inferE2eRoutePath,
+  hasManualE2eSourceMarkers,
+  stripAutoEnrichedE2eMarkers,
+} from "./enrichE2eMarkersFromIndex";
 
 export { buildRequirementTitleByCaseKey } from "./resolveRequirementTitles";
 export { mergeRequirementTitleFillGap } from "./requirementTitleFillGap";
@@ -46,7 +58,49 @@ export type SyncApprovedTcMdResult = {
   message?: string;
   projectRoot?: string;
   warning?: string;
+  /** How many TCs had enriched testData written back to API DB */
+  dbSyncedCount?: number;
 };
+
+/**
+ * Best-effort: push enriched path:/code:/related: back to DB so Gen packet ≠ stale Test Data.
+ */
+async function persistEnrichedTestDataToDb(
+  original: TestCase[],
+  enriched: TestCase[]
+): Promise<number> {
+  const byId = new Map(original.map((c) => [c.id, c]));
+  const toSync = enriched.filter((tc) => {
+    const prev = byId.get(tc.id);
+    const nextTd = String(tc.testData || "").trim();
+    const prevTd = String(prev?.testData || "").trim();
+    return Boolean(nextTd && nextTd !== prevTd);
+  });
+  if (!toSync.length) return 0;
+
+  let n = 0;
+  const CONCURRENCY = 4;
+  for (let i = 0; i < toSync.length; i += CONCURRENCY) {
+    const chunk = toSync.slice(i, i + CONCURRENCY);
+    const hits = await Promise.all(
+      chunk.map(async (tc) => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            await testcases.update(tc.id, { testData: tc.testData });
+            return true;
+          } catch {
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 350));
+            }
+          }
+        }
+        return false;
+      })
+    );
+    n += hits.filter(Boolean).length;
+  }
+  return n;
+}
 
 function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -245,11 +299,11 @@ export async function syncApprovedTestCasesMd(opts: {
       ? ` · requirement ${reqResolved}/${approved.length}`
       : ` · requirement thiếu (gắn sourceId hoặc Approve từ trang Requirement)`;
 
-  // Auto path:/code: from ProjectFileIndex when seed is confident (fail-closed).
+  // Auto path:/code: (Unit) & path:/authRole: (E2E) when seed is confident.
   let casesToWrite = approved;
   let enrichNote = "";
   try {
-    const enriched = await enrichApprovedCasesWithUnitMarkers({
+    const enrichedUnit = await enrichApprovedCasesWithUnitMarkers({
       projectId: opts.projectId,
       projectRoot: root,
       cases: approved,
@@ -258,13 +312,24 @@ export async function syncApprovedTestCasesMd(opts: {
       codeAliases: opts.codeAliases,
       allSourcePaths: opts.allSourcePaths,
     });
-    casesToWrite = enriched.cases;
-    if (enriched.enrichedCount > 0) {
-      const via = enriched.usedCodeIndex ? "index.db" : "path-index";
-      enrichNote = ` · auto path:/code: ${enriched.enrichedCount}/${approved.length} via ${via} (${enriched.indexFileCount} files)`;
-    } else if (enriched.indexFileCount > 0) {
-      const via = enriched.usedCodeIndex ? "index.db" : "path-index";
-      enrichNote = ` · ${via} ${enriched.indexFileCount} files (chưa đủ tin cậy để auto-marker)`;
+    casesToWrite = enrichedUnit.cases;
+
+    const enrichedE2e = await enrichApprovedCasesWithE2eMarkers({
+      cases: casesToWrite,
+    });
+    casesToWrite = enrichedE2e.cases;
+
+    const totalEnriched = enrichedUnit.enrichedCount + enrichedE2e.enrichedCount;
+    if (totalEnriched > 0) {
+      const via = enrichedUnit.usedCodeIndex ? "index.db" : "path-index";
+      const retryNote =
+        (enrichedUnit.retryEnrichedCount || 0) > 0
+          ? `, retry:${enrichedUnit.retryEnrichedCount}`
+          : "";
+      enrichNote = ` · auto-enrich: ${totalEnriched}/${approved.length} (Unit:${enrichedUnit.enrichedCount}, E2E:${enrichedE2e.enrichedCount}${retryNote}) via ${via}`;
+    } else if (enrichedUnit.indexFileCount > 0) {
+      const via = enrichedUnit.usedCodeIndex ? "index.db" : "path-index";
+      enrichNote = ` · ${via} ${enrichedUnit.indexFileCount} files (chưa đủ tin cậy để auto-marker)`;
     }
   } catch {
     /* enrich optional — still sync MD */
@@ -276,10 +341,14 @@ export async function syncApprovedTestCasesMd(opts: {
     requirementTitleByCaseKey,
   });
 
+
   // 1) Tauri disk first (renderer-safe)
   if (isTauri()) {
     const disk = await writeViaTauri(root, files);
     if (disk.written.length > 0) {
+      const dbSyncedCount = await persistEnrichedTestDataToDb(approved, casesToWrite);
+      const dbNote =
+        dbSyncedCount > 0 ? ` · DB markers ${dbSyncedCount}` : "";
       const client = getIdeRpcClientOrNull();
       if (client?.isConnected) {
         try {
@@ -296,7 +365,8 @@ export async function syncApprovedTestCasesMd(opts: {
         errors: disk.errors,
         projectRoot: root,
         warning,
-        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/${enrichNote}`,
+        dbSyncedCount,
+        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/${enrichNote}${dbNote}`,
       };
     }
     // Tauri failed — try IDE
@@ -305,10 +375,17 @@ export async function syncApprovedTestCasesMd(opts: {
       try {
         const ide = await writeViaIde(opts.projectId, root, files);
         if (ide.written.length) {
+          const dbSyncedCount = await persistEnrichedTestDataToDb(
+            approved,
+            casesToWrite
+          );
           return {
             ...ide,
+            dbSyncedCount,
             warning,
-            message: `${ide.message || ""}${enrichNote}`.trim(),
+            message: `${ide.message || ""}${enrichNote}${
+              dbSyncedCount > 0 ? ` · DB markers ${dbSyncedCount}` : ""
+            }`.trim(),
           };
         }
         return {
@@ -352,6 +429,20 @@ export async function syncApprovedTestCasesMd(opts: {
   if (client?.isConnected) {
     try {
       const ide = await writeViaIde(opts.projectId, root, files);
+      if (ide.written.length) {
+        const dbSyncedCount = await persistEnrichedTestDataToDb(
+          approved,
+          casesToWrite
+        );
+        return {
+          ...ide,
+          dbSyncedCount,
+          warning,
+          message: `${ide.message || ""}${enrichNote}${
+            dbSyncedCount > 0 ? ` · DB markers ${dbSyncedCount}` : ""
+          }`.trim(),
+        };
+      }
       return {
         ...ide,
         warning,

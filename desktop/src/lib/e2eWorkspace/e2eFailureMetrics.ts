@@ -1,7 +1,7 @@
 /**
  * Phase 4/6 — classify Verify failures and aggregate pass/% by error type.
  * Project-agnostic heuristics from Playwright / guard / auth excerpts.
- * Phase 6 maps categories → AI_TEST_RULES taxonomy.
+ * Phase 6 maps categories → E2eStandardTaxonomy (failure_taxonomy.py).
  */
 
 export type E2eFailCategory =
@@ -16,7 +16,7 @@ export type E2eFailCategory =
   | "execution_gate"
   | "other";
 
-/** docs/AI_TEST_RULES.md standard names (+ S3 AuthRequired) */
+/** E2E standard taxonomy names (+ S3 AuthRequired) — see failure_taxonomy.py */
 export type E2eStandardTaxonomy =
   | "ContextMissing"
   | "AuthRequired"
@@ -132,6 +132,12 @@ export type E2eMetricRow = {
   failCategory?: E2eFailCategory;
 };
 
+/** Aggregated row — pass rows use literal `"pass"` for category/taxonomy. */
+export type E2eMetricResultRow = Omit<E2eMetricRow, "failCategory"> & {
+  failCategory: E2eFailCategory | "pass";
+  standardTaxonomy: E2eStandardTaxonomy | "pass";
+};
+
 export type E2eRunMetrics = {
   total: number;
   passed: number;
@@ -145,12 +151,7 @@ export type E2eRunMetrics = {
   suiteSharePct: Partial<Record<E2eFailCategory, number>>;
   /** Phase 6 — AI_TEST_RULES taxonomy counts among failures */
   failByStandardTaxonomy: Partial<Record<E2eStandardTaxonomy, number>>;
-  rows: Array<
-    E2eMetricRow & {
-      failCategory: E2eFailCategory | "pass";
-      standardTaxonomy: E2eStandardTaxonomy | "pass";
-    }
-  >;
+  rows: E2eMetricResultRow[];
   summaryLine: string;
 };
 

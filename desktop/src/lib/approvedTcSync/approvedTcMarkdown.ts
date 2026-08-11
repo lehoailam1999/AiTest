@@ -10,6 +10,7 @@
 import { AI_TEST_CASES_DIR, assertSafeAiTestCasesRel, extractTcSourceMarkers } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import { TEST_CASES_DIR } from "../projectProfile/constants";
+import { deriveAuthContextFromTestCase } from "../e2eWorkspace/deriveAuthContextFromTc";
 
 function slugSeg(raw: string, fallback: string): string {
   const s = (raw || "")
@@ -38,12 +39,12 @@ function yamlEscape(v: string): string {
 }
 
 export type ApprovedTcMdRenderOpts = {
-  /** Owning Module title (Requirement Studio) — scopes Unit SUT before Function/Title */
+  /** Owning Module title (Requirement Studio) — scopes Unit SUT / E2E before Function/Title */
   requirementTitle?: string | null;
 };
 
 /**
- * Progressive grounding block — Extension/Desktop Unit resolve reads this.
+ * Progressive grounding block — Extension/Desktop Unit & E2E resolve reads this.
  * Order: markers → Module (requirement) → Function (module) → title.
  * Machine keys: `requirement:` = Module; `function:` / `module:` = Function.
  */
@@ -51,6 +52,11 @@ export function parseApprovedTcGrounding(md: string | null | undefined): {
   requirement: string;
   module: string;
   title: string;
+  path?: string;
+  featurePath?: string;
+  authRole?: string;
+  authRequired?: boolean;
+  landmark?: string;
 } {
   const text = md || "";
   const fm = (key: string) => {
@@ -63,6 +69,7 @@ export function parseApprovedTcGrounding(md: string | null | undefined): {
     );
     return (m?.[1] || "").trim();
   };
+  const authReqRaw = block("authRequired") || fm("authRequired");
   return {
     // Module (Studio) — prefer requirement:; legacy never used module: for this
     requirement: block("requirement") || fm("requirement"),
@@ -74,6 +81,11 @@ export function parseApprovedTcGrounding(md: string | null | undefined): {
       block("module") ||
       fm("module"),
     title: block("title") || fm("title"),
+    path: block("path") || fm("path") || undefined,
+    featurePath: block("featurePath") || fm("featurePath") || undefined,
+    authRole: block("authRole") || fm("authRole") || undefined,
+    authRequired: authReqRaw ? authReqRaw.toLowerCase() === "true" : undefined,
+    landmark: block("landmark") || fm("landmark") || undefined,
   };
 }
 
@@ -113,10 +125,64 @@ export function renderUnitGroundingBlock(
     `function: ${fn}`,
     `title: ${title}`,
     "",
-    "SUT resolve (tự động khi Approve): Module → Function → Title → index/path-index → body-rule.",
-    "(`requirement` = Module / tài liệu Studio; `function`/`module` = Function / chức năng TC.)",
-    "Module khoanh vùng source-module trên index; Function + Title xếp file/symbol trong vùng đó.",
-    "Kết quả ghi vào Test Data (`path:` / `code:` / optional `related:`) khi đủ tin cậy — không hardcode trong template.",
+    "(`requirement` = Module; `function`/`module` = Function.) Primary SUT below is authoritative for Gen — do not re-resolve.",
+    "",
+    ...resolvedLines,
+    "",
+  ].join("\n");
+}
+
+export function renderE2eGroundingBlock(
+  tc: Pick<TestCase, "title" | "module" | "precondition" | "steps" | "testData">,
+  requirementTitle?: string | null
+): string {
+  const modDoc = (requirementTitle || "").trim() || "—";
+  const fn = (tc.module || "").trim() || "—";
+  const title = (tc.title || "").trim() || "—";
+  const auth = deriveAuthContextFromTestCase(tc);
+  const td = tc.testData || "";
+  const pathMatch = td.match(/(?:path|featurePath|route|url)\s*[:=]\s*([^\n;,|]+)/i);
+  const landmarkMatch = td.match(/landmark\s*[:=]\s*([^\n;,|]+)/i);
+  const path = pathMatch?.[1]?.trim() || "";
+  const landmark = landmarkMatch?.[1]?.trim() || "";
+  const skip =
+    td.match(/^\s*#\s*e2e-grounding:\s*skipped\s*—\s*(.+)$/im)?.[1]?.trim() || "";
+
+  const resolvedLines: string[] = ["### Resolved E2E Route & Auth", ""];
+  if (path) {
+    resolvedLines.push(`path: ${path}`);
+  }
+  if (landmark) {
+    resolvedLines.push(`landmark: ${landmark}`);
+  }
+  if (auth.role) {
+    resolvedLines.push(`authRole: ${auth.role}`);
+  }
+  if (auth.roles.length > 1) {
+    resolvedLines.push(`roles: ${auth.roles.join(", ")}`);
+  }
+  const isAuthReq = auth.executionContext.includes("authRequired=true");
+  resolvedLines.push(`authRequired: ${isAuthReq ? "true" : "false"}`);
+  if (auth.roleSource) {
+    resolvedLines.push(`roleSource: ${auth.roleSource}`);
+  }
+  if (!path && !landmark && !auth.role && skip) {
+    resolvedLines.push(`_(unresolved)_ ${skip}`);
+  } else if (!path && !landmark && !auth.role) {
+    resolvedLines.push(
+      "_(unresolved)_ — Approve chưa có path/featurePath từ Output hoặc Auth context."
+    );
+  }
+
+  return [
+    "## Grounding (E2E Gen)",
+    "",
+    `requirement: ${modDoc}`,
+    `module: ${fn}`,
+    `function: ${fn}`,
+    `title: ${title}`,
+    "",
+    "(`requirement` = Module; `function`/`module` = Function.) E2E route path & auth context below are authoritative for Codegen.",
     "",
     ...resolvedLines,
     "",
@@ -129,6 +195,11 @@ export function renderApprovedTestCaseMarkdown(
 ): string {
   const requirementTitle =
     (opts?.requirementTitle || "").trim() || "";
+  const tcType = (tc.type || "").trim().toUpperCase();
+  const isE2e = ["E2E", "E2E_UI", "UI"].includes(tcType);
+  const groundingBlock = isE2e
+    ? renderE2eGroundingBlock(tc, requirementTitle)
+    : renderUnitGroundingBlock(tc, requirementTitle);
 
   const lines: string[] = [
     "---",
@@ -158,7 +229,7 @@ export function renderApprovedTestCaseMarkdown(
     `| Severity | ${tc.severity} |`,
     `| Review | ${tc.reviewStatus} |`,
     "",
-    renderUnitGroundingBlock(tc, requirementTitle).trimEnd(),
+    groundingBlock.trimEnd(),
     "",
     "## Precondition",
     "",
@@ -176,13 +247,17 @@ export function renderApprovedTestCaseMarkdown(
   if ((tc.testData || "").trim()) {
     lines.push("## Test Data", "", (tc.testData || "").trim(), "");
   }
+  const groundingTag = isE2e
+    ? "<!-- aitest:e2e-grounding — Route path + auth context for E2E Codegen -->"
+    : "<!-- aitest:unit-grounding — Module (requirement) → Function (module) → title for SUT resolve -->";
   lines.push(
     "<!-- aitest:approved-tc-artifact — SoT Gen vẫn là DB Approved; file này đồng bộ cho Agent/IDE -->",
-    "<!-- aitest:unit-grounding — Module (requirement) → Function (module) → title for SUT resolve -->",
+    groundingTag,
     ""
   );
   return lines.join("\n");
 }
+
 
 export type ApprovedTcMdFile = { path: string; content: string; testCaseId: string };
 

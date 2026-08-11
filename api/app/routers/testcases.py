@@ -33,6 +33,55 @@ def _uuid(value: str) -> uuid.UUID | None:
         return None
 
 
+def apply_testcase_patch(tc: TestCase, body: dict) -> bool:
+    """
+    Partial PUT: only keys present in body are written.
+    Returns True when substantive content changed (demotes Approved → Draft).
+    testData-only (Approve marker sync) does NOT clear module or demote review.
+    """
+    content_changed = False
+    if "title" in body and body.get("title"):
+        tc.title = body["title"]
+        content_changed = True
+    if "module" in body:
+        tc.module = body.get("module")
+        content_changed = True
+    if "priority" in body and body.get("priority"):
+        tc.priority = priority_vi(body["priority"])
+        content_changed = True
+    if "severity" in body and body.get("severity"):
+        tc.severity = severity_vi(body["severity"])
+        content_changed = True
+    if "type" in body and body.get("type"):
+        tc.type = type_vi(body["type"])
+        content_changed = True
+    if "precondition" in body:
+        tc.precondition = body.get("precondition")
+        content_changed = True
+    if "steps" in body and body.get("steps"):
+        tc.steps = body["steps"]
+        content_changed = True
+    if "expectedResult" in body and body.get("expectedResult"):
+        tc.expected_result = body["expectedResult"]
+        content_changed = True
+    if "actualResult" in body:
+        tc.actual_result = body.get("actualResult")
+    if "testData" in body:
+        tc.test_data = body.get("testData")
+    if "automationReady" in body:
+        tc.automation_ready = bool(body.get("automationReady"))
+        content_changed = True
+    if "executionStatus" in body and body.get("executionStatus"):
+        tc.execution_status = body["executionStatus"]
+
+    if content_changed and tc.review_status in (C.REVIEW_APPROVED, C.REVIEW_REJECTED):
+        tc.review_status = C.REVIEW_DRAFT
+        tc.reviewed_by = None
+        tc.reviewed_at = None
+        tc.review_comment = None
+    return content_changed
+
+
 @router.get("/testcases")
 def list_testcases(request: Request, db: Annotated[Session, Depends(get_db)]):
     page_number, size = page_params(
@@ -202,30 +251,10 @@ async def update_testcase(tc_id: str, request: Request, db: Annotated[Session, D
     if tc is None:
         return errors(404, "not found")
     body = await request.json()
-    if body.get("title"):
-        tc.title = body["title"]
-    tc.module = body.get("module")
-    if body.get("priority"):
-        tc.priority = priority_vi(body["priority"])
-    if body.get("severity"):
-        tc.severity = severity_vi(body["severity"])
-    if body.get("type"):
-        tc.type = type_vi(body["type"])
-    tc.precondition = body.get("precondition")
-    if body.get("steps"):
-        tc.steps = body["steps"]
-    if body.get("expectedResult"):
-        tc.expected_result = body["expectedResult"]
-    tc.actual_result = body.get("actualResult")
-    tc.test_data = body.get("testData")
-    tc.automation_ready = bool(body.get("automationReady", False))
-    if body.get("executionStatus"):
-        tc.execution_status = body["executionStatus"]
-    if tc.review_status in (C.REVIEW_APPROVED, C.REVIEW_REJECTED):
-        tc.review_status = C.REVIEW_DRAFT
-        tc.reviewed_by = None
-        tc.reviewed_at = None
-        tc.review_comment = None
+    if not isinstance(body, dict):
+        return errors(400, "invalid body")
+
+    apply_testcase_patch(tc, body)
     db.commit()
     db.refresh(tc)
     return ok(testcase_dto(tc))

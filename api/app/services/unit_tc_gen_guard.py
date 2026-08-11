@@ -1,9 +1,8 @@
 """
 Post-gen guard for Unit TC drafts (preferred_engine=unit).
 
-Clear UI/wizard violations → drop from persist.
+Drop presentation / interaction-only drafts (portable heuristics — no product nouns).
 Strip Latin Class.Method segments from title (SUT = Approve path:/code: only).
-Portable — no product nouns.
 """
 
 from __future__ import annotations
@@ -14,19 +13,23 @@ from typing import Any, Literal
 
 Decision = Literal["keep", "drop"]
 
-# Wizard / multi-step UI as Unit
+# Multi-step / wizard / screen navigation as Unit (presentation flow)
 _WIZARD_RE = re.compile(
     r"(?i)("
     r"\bwizard\b|\bpopup\b|\bmodal\b|\bdialog\b|"
     r"\bform\b|\bdropdown\b|\btoast\b|"
     r"bước\s*\d+|\d+\s*bước|hai\s*bước|step\s*\d+|\d+\s*steps?|"
-    r"chuyển\s*bước|quay\s*lại\s*bước|"
-    r"màn\s*hình|\bpage\b|\bcomponent\b|"
-    r"theo\s+\d+\s*bước|quy\s*trình\s+[^\n]{0,40}\d+\s*bước"
+    r"chuyển\s*bước|quay\s*lại\s*bước|điều\s*hướng\s*bước|"
+    r"chuyển\s*giai\s*đoạn|sang\s*giai\s*đoạn|hoàn\s*tất\s*giai\s*đoạn|"
+    r"giai\s*đoạn\s+(thông\s*tin|tài\s*liệu|tiếp)|"
+    r"màn\s*hình|\bpage\b|\bcomponent\b|\bscreen\b|"
+    r"theo\s+\d+\s*bước|quy\s*trình\s+[^\n]{0,40}\d+\s*bước|"
+    r"checkmark|tick\s*display|green\s*check|"
+    r"hiển\s*thị\s*(dấu\s*)?(tick|check)|bố\s*cục|layout"
     r")"
 )
 
-# UI interaction verbs
+# Interaction verbs (presentation layer)
 _UI_VERB_RE = re.compile(
     r"(?i)\b("
     r"click|điền|nhập\s+vào\s+ô|fill\b|navigate|toast|"
@@ -35,7 +38,7 @@ _UI_VERB_RE = re.compile(
     r")\b"
 )
 
-# Enable/disable UI control (presentation state)
+# Enable/disable control (presentation state)
 _UI_ENABLE_RE = re.compile(
     r"(?i)("
     r"\benable\b|\bdisable\b|"
@@ -43,6 +46,18 @@ _UI_ENABLE_RE = re.compile(
     r"trạng\s*thái\s+enable|"
     r"dropdown\s+(enable|disable)"
     r")"
+)
+
+# Invented HTTP / MaxLength without source grounding signal
+_INVENT_HTTP_RE = re.compile(
+    r"(?i)\b(HTTP\s*[:=]?\s*)?(status\s*)?(code\s*)?(400|401|403|404|409|422|500)\b|"
+    r"\bMaxLength\s*\(\s*\d+\s*\)|\bStringLength\s*\(\s*\d+"
+)
+
+# Exempt invent-HTTP/MaxLength(digits) only with retrieval/hint grounding — not mere IR markers
+# (trace/behaviorId/primaryBucket alone = SRS IR; vẫn cấm invent HTTP status / MaxLength(n)).
+_SOURCE_SIGNAL_RE = re.compile(
+    r"(?i)\blayerHint\s*:|\bsourceSignal\s*:|\bpath\s*:|\bcode\s*:"
 )
 
 # Middle segment: Feature - Class.Method - Result → strip Class.Method
@@ -84,7 +99,7 @@ def decide_unit_tc_draft(
     test_data: str | None = None,
     type: str | None = None,  # noqa: A002 — draft field name
 ) -> UnitTcGuardResult:
-    """Fail-closed for clear UI/wizard Unit drafts."""
+    """Fail-closed for clear presentation/interaction Unit drafts."""
     text = _blob(title, module, steps, expected_result, test_data)
 
     if _WIZARD_RE.search(text):
@@ -93,6 +108,9 @@ def decide_unit_tc_draft(
         return UnitTcGuardResult("drop", "FAIL_UI_VERBS")
     if _UI_ENABLE_RE.search(text):
         return UnitTcGuardResult("drop", "FAIL_UI_ENABLE")
+    # Invented HTTP/MaxLength without path/layerHint/sourceSignal grounding
+    if _INVENT_HTTP_RE.search(text) and not _SOURCE_SIGNAL_RE.search(test_data or ""):
+        return UnitTcGuardResult("drop", "FAIL_NO_SOURCE_SIGNAL")
     return UnitTcGuardResult("keep")
 
 

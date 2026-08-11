@@ -19,7 +19,7 @@ export type DeriveAuthContextOptions = {
   analysisActors?: string[] | null;
 };
 
-const AUTH_ROLE_RE = /(?:authRole|auth_role|role)\s*[:=]\s*([^\n;,|]+)/i;
+const AUTH_ROLE_RE = /(?:authRole|auth_role|role|quyền|vai\s*trò)\s*[:=]?\s*([A-Za-z0-9_-]+)/i;
 const AUTH_REQ_RE =
   /(?:authRequired|auth_required|cần\s*đăng\s*nhập)\s*[:=]\s*(true|false|yes|no|1|0)/i;
 const ROLES_RE = /(?:roles|multiRoleRoles)\s*[:=]\s*([^\n]+)/i;

@@ -82,13 +82,13 @@ QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
 # (engine overlay + unit_tc_analysis / e2e_tc_analysis carry SoT detail).
 # Keep thin — do NOT restate bucket map / trace / completeness here.
 _LEGACY_COMPACT_SHARED_TC_RULES = """\
-QUY TẮC CHUNG UNIT (BẮT BUỘC — BACKEND ONLY, PORTABLE):
-1. Bám Knowledge/Freeze — không domain/framework mẫu; bucket rỗng → không invent.
-2. module = Feature; title VN `[Feature] - [Hành động BE] - [Kết quả]` — cấm Class.Method Latin · cấm form/popup/wizard/Bước/UI.
-3. Steps: Arrange mock port → Act gọi SUT backend → Assert return/exception/side-effect (không click/fill).
-4. Mỗi tín hiệu backend độc lập → ≥1 TC (BR/VALIDATION/ERROR/authz); không gộp; không pad UI-only.
-5. Không gộp Unit+E2E. UI/wizard/form → không sinh trong phiên Unit. priority/severity thang Việt.
-6. Self-check: còn FEATURES/BR/VALIDATION/ERROR/(authz) chưa cover → bổ sung; đủ → dừng.
+QUY TẮC CHUNG UNIT (BẮT BUỘC — BACKEND ONLY, PORTABLE, SRS-ONLY):
+1. Bám Knowledge/Freeze — PRIMARY từ Phân tích (không đổi bucket); 6 gate IR; scope IN|OUT|MIXED|UNKNOWN.
+2. module = Feature; title VN `[Feature] - [Hành động BE] - [Kết quả]` — cấm Class.Method Latin.
+3. Steps = prepare/execute nghiệp vụ BE (không class/repo/HTTP invent). path/code = pha Approve.
+4. 1 behaviorId / 1 TC; dedup cùng BE; coverage/gaps/unknown; cấm dừng sớm bỏ VALIDATION/FILE.
+5. Không gộp Unit+E2E. OUT/presentation-only → không sinh. priority/severity thang Việt.
+6. Self-check: còn IN chưa cover → TC hoặc gap; đủ → dừng.
 """
 
 # E2E-only shared — SoT (e2e_tc_analysis_rules) owns coverage/trace/completeness/lock.
@@ -102,11 +102,11 @@ QUY TẮC CHUNG E2E (format):
 
 # Fan-out / speed=fast — shorter shared block (engine overlay + SPEED MODE addon carry detail).
 _LEGACY_SPEED_SHARED_TC_RULES = """\
-QUY TẮC CHUNG UNIT (SPEED — BACKEND ONLY, PORTABLE):
-1. Bám Knowledge/Freeze — không invent bucket rỗng; không gắn stack/domain mẫu.
-2. module = Feature; title VN `[Feature]-[Hành động BE]-[Kết quả]` (cấm Class.Method Latin · cấm form/popup/Bước/UI).
-3. Steps/expected = mock → gọi SUT backend → assert return/exception; thiếu → [Giả định].
-4. Không gộp Unit+E2E; không sinh TC UI. Ưu tiên cover BR+VALIDATION+ERROR trước pad FEATURES.
+QUY TẮC CHUNG UNIT (SPEED — BACKEND ONLY, PORTABLE, SRS-ONLY):
+1. Knowledge PRIMARY giữ nguyên; 6 gate IR (SRS-only); IN|OUT|MIXED|UNKNOWN; cấm invent / UNKNOWN→OUT / dừng sớm.
+2. module = Feature; title VN `[Feature]-[Hành động BE]-[Kết quả]` (cấm Class.Method Latin).
+3. Steps/expected = prepare→execute nghiệp vụ BE; thiếu → [Giả định]. Không bắt buộc source.
+4. Không gộp Unit+E2E; không presentation-only. Cover PRIMARY + coverage gaps trước pad FEATURES.
 5. Tôn trọng SPEED MODE — nhánh backend chính; priority/severity thang Việt.
 """
 
@@ -232,34 +232,37 @@ def engine_generation_rules(
         if fast:
             parts = [
                 "=== PHIÊN SINH UNIT (SPEED) ===",
-                "1. type=`Unit` only — **backend logic** mọi stack; SUT Latin từ Phân tích/source — cấm invent class VI.",
-                "2. Steps: Arrange mock port → Act gọi SUT BE → Assert return/exception/side-effect.",
-                "3. Cấm: form/popup/wizard/Bước/chuyển bước/enable-UI/page/component · ClientApp/`*.component.*` + bootstrap.",
+                "1. type=`Unit` only — **Backend TC IR từ Knowledge** (SRS-only; không bắt buộc source).",
+                "2. PRIMARY từ Phân tích — không đổi bucket. OUT→bỏ · MIXED→nhánh BE · UNKNOWN→unknownBehaviors · coverage/gaps bắt buộc.",
+                "3. Steps: prepare/execute nghiệp vụ BE — cấm class/method/HTTP invent. path/code = Approve sau.",
+                "4. 1 behaviorId / 1 TC; Coverage: VALIDATION_DATA + FILE security IN phải có TC hoặc gap — cấm dừng sớm happy-path.",
+                "5. Title VN hành vi BE quan sát được — không mô tả UI presentation.",
             ]
             if cap:
                 parts.append(
-                    f"4. Trần mềm ≤{cap} TC/module: cover hết BR+VALIDATION+ERROR/(authz) trước; "
-                    "FEATURES happy tối thiểu 1 — không cắt lớp có tín hiệu."
+                    f"6. Trần mềm ≤{cap} TC/module: cover hết BR+VALIDATION+ERROR+AC(BE) trước; "
+                    "FEATURES happy tối thiểu 0–1 — không cắt PRIMARY có tín hiệu."
                 )
             else:
                 parts.append(
-                    "4. Cover đủ BR/VALIDATION/ERROR/(authz) có trong Phân tích trước pad FEATURES."
+                    "6. Cover đủ PRIMARY (BR/VALIDATION/ERROR/AC-BE) trước pad FEATURES."
                 )
             if focus_modules.strip():
-                parts.append(f"5. Focus module: {focus_modules.strip()}.")
+                parts.append(f"7. Focus module: {focus_modules.strip()}.")
             return append_unit_tc_from_analysis_rules("\n".join(parts), speed=True)
 
         parts = [
             "=== PHIÊN SINH UNIT ===",
-            "1. type=`Unit` only — BACKEND ONLY; không E2E/wizard/Bước N/enable-UI.",
-            "2. Steps: mock port → gọi SUT → assert return/exception (không click/fill).",
-            "3. Expected khớp Phân tích; SUT Latin Handler/Service — cấm invent class VI · "
-            "cấm ClientApp/`*.component.*`; API→handler (không HTTP-200-only).",
-            "4. testData: `trace:` bắt buộc; `path:`/`code:` khuyến khích — Approve bổ sung.",
-            "5. Thiếu SUT production → không bịa class; UI-only → bỏ (E2E).",
+            "1. type=`Unit` only — Backend TC IR (SRS-only). 6 gate rồi scope atomic IN|OUT|MIXED|UNKNOWN.",
+            "2. PRIMARY buckets từ Phân tích (giữ nguyên) — chi tiết khối UNIT ← PHÂN TÍCH.",
+            "3. Steps prepare/execute nghiệp vụ; expected observable BE — không class/repo/HTTP invent.",
+            "4. Coverage/Gap + Conflict: inventory IN↔TC; unknownBehaviors khi thiếu Knowledge; layerHint=null trừ Knowledge nói rõ.",
+            "5. Output JSON: testCases + coverage + gaps + unknownBehaviors + conflicts; mỗi TC có behaviorId + primaryBucket.",
+            "6. path:/code: thuộc Approve/Retrieval — không yêu cầu ở pha sinh TC.",
+            "7. OUT/UNKNOWN → không sinh Unit TC; MIXED → chỉ nhánh BE; cấm UNKNOWN→OUT; cấm dừng sớm bỏ validation/file.",
         ]
         if focus_modules.strip():
-            parts.append(f"7. Focus module (khớp FEATURES): {focus_modules.strip()}.")
+            parts.append(f"8. Focus module (khớp FEATURES): {focus_modules.strip()}.")
         return append_unit_tc_from_analysis_rules("\n".join(parts), speed=False)
 
     from app.llm.e2e_tc_analysis_rules import append_e2e_tc_from_analysis_rules

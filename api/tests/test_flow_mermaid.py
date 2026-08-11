@@ -83,13 +83,29 @@ def test_hollow_exception_flow_dropped():
     assert is_non_main_business_flow("UC-02 Exception Flow", "1. Fail\n2. Show error")
     assert is_non_main_business_flow("Luồng phụ đăng nhập", "1. A\n2. B")
     assert is_non_main_business_flow("Alternate flow cancel", "1. Cancel")
+    assert is_non_main_business_flow(
+        "Luồng kiểm tra dữ liệu đăng nhập", "1. Kiểm tra email\n2. Kiểm tra mật khẩu"
+    )
+    assert is_non_main_business_flow("Validation flow email", "1. Empty\n2. Reject")
     assert is_hollow_use_case(
         "UC-02 Exception Flow",
         "1. Nhập sai\n2. Hiện lỗi",
     )
     assert is_hollow_use_case("Luồng phụ đăng nhập", "1. Mở popup\n2. Đóng")
+    assert is_hollow_use_case(
+        "Luồng validation", "1. Kiểm tra field\n2. Hiện lỗi format"
+    )
     assert not is_non_main_business_flow("Đăng nhập", "1. Mở form\n2. Submit")
     assert not is_hollow_use_case("Đăng nhập", "1. Mở form\n2. Nhập email\n3. Submit")
+
+
+def test_mss_with_validation_step_mid_flow_not_hollow():
+    from app.features.requirement_studio.flow_mermaid import is_hollow_use_case
+
+    assert not is_hollow_use_case(
+        "Tạo mới bản ghi",
+        "1. Nhập thông tin\n2. Kiểm tra ràng buộc dữ liệu\n3. Lưu bản ghi",
+    )
 
 
 def test_normalize_drops_non_main_alt_and_exception_named_ucs():
@@ -105,6 +121,10 @@ def test_normalize_drops_non_main_alt_and_exception_named_ucs():
                     "steps": "1. Mở link\n2. Nhập email",
                 },
                 {
+                    "name": "Luồng kiểm tra dữ liệu",
+                    "steps": "1. Validate email\n2. Validate password",
+                },
+                {
                     "name": "Đăng nhập",
                     "steps": "1. Mở form\n2. Nhập email\n3. Submit",
                 },
@@ -113,6 +133,23 @@ def test_normalize_drops_non_main_alt_and_exception_named_ucs():
     )
     names = [u["name"] for u in payload["useCases"]]
     assert names == ["Đăng nhập"]
+    assert len(payload["validationRules"]) >= 1
+
+
+def test_normalize_reroutes_non_mss_validation_flow():
+    payload = normalize_knowledge_payload(
+        {
+            "useCases": [
+                {
+                    "name": "Luồng validation email",
+                    "steps": "1. Validate định dạng email\n2. Hiện lỗi format",
+                },
+            ],
+        }
+    )
+    assert payload["useCases"] == []
+    assert len(payload["validationRules"]) >= 1
+    assert any("non-MSS" in g.get("text", "") for g in payload["gaps"])
 
 
 def test_normalize_drops_hollow_exception_flow_uc_and_shortens_gap():

@@ -2,7 +2,7 @@
 
 Bounded repair loops classify the error, then send a slim repair packet
 (error excerpt + failing file + Top-K deps). Standard E2E names match
-docs/AI_TEST_RULES.md (+ AuthRequired for S3 auth/login-wall).
+failure_taxonomy.py / E2ECG (+ AuthRequired for S3 auth/login-wall).
 """
 
 from __future__ import annotations

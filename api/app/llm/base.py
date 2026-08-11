@@ -136,14 +136,21 @@ class GenerateContext:
 _VIETNAMESE_TC_EXAMPLE_UNIT = (
     '{"testCases":['
     '{"title":"[Tên FEATURES] - [Hành động BE tiếng Việt] - [Kết quả kỳ vọng]",'
-    '"type":"Unit","priority":"Cao","severity":"Nặng",'
+    '"type":"Unit","primaryBucket":"VALIDATION_DATA","scenario":"BOUNDARY",'
     '"module":"[Tên FEATURES trong Phân tích]",'
-    '"precondition":"Mock dependency theo Phân tích/source (nếu có)",'
-    '"steps":"1. Chuẩn bị input + mock\\n2. Gọi đơn vị cần test\\n3. Assert kết quả",'
-    '"expectedResult":"Return/exception/state đúng mục Phân tích",'
-    '"testData":"trace: BUSINESS_RULES/[id|name]; input=... (1 tín hiệu/TC)",'
-    '"automationReady":true}'
-    "]}"
+    '"trace":{"requirementIds":["VAL-1"],"behaviorId":"VAL-1-B01"},'
+    '"preconditions":[],'
+    '"steps":{"prepare":["Chuẩn bị input theo ràng buộc Knowledge"],'
+    '"execute":["Thực hiện thao tác backend cần kiểm tra"]},'
+    '"expectedResult":{"type":"REJECT","observable":"create/update",'
+    '"description":"Kết quả backend đúng Knowledge"},'
+    '"testData":{"input":{},"target":{"field":"…","constraint":"…","boundary":"","value":""},'
+    '"existingState":{}},'
+    '"testDataHints":{"layerHint":null,"sourceSignal":null},'
+    '"status":"READY_FOR_CODEGEN","priority":"Cao","severity":"Nặng","automationReady":true}'
+    "],"
+    '"coverage":{"VALIDATION_DATA":{"totalBehaviors":1,"coveredBehaviors":1,"missingBehaviors":0}},'
+    '"gaps":[],"unknownBehaviors":[],"conflicts":[]}'
 )
 
 _VIETNAMESE_TC_EXAMPLE_E2E = (
@@ -271,9 +278,10 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
     if eng == "unit":
         type_block = (
             "PHIÊN ENGINE = UNIT: mọi TC type=Unit — BACKEND ONLY, portable mọi stack "
-            "(logic/service/handler/validator/domain; tên SUT từ dự án); "
-            "cấm form/popup/wizard/Bước/UI/E2E. "
-            "SoT + map 11 tiêu chí + trace → khối «UNIT ← PHÂN TÍCH» trong QUY TẮC HỆ THỐNG.\n"
+            "(logic/service/handler/validator/domain; tên SUT từ dự án). "
+            "SoT = UNIVERSAL Backend Relevance: PRIMARY 4 (BR/VALIDATION/ERROR/AC) + "
+            "scope IN|OUT|MIXED|UNKNOWN + categories A–I "
+            "→ khối «UNIT ← PHÂN TÍCH» trong QUY TẮC HỆ THỐNG.\n"
         )
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
         type_schema = "Unit"
@@ -454,7 +462,7 @@ def tc_seed_prompt(ctx: GenerateContext | None = None) -> str:
         type_schema = "Unit"
         type_line = (
             "ENGINE=UNIT: mọi TC type=Unit — BACKEND ONLY, portable "
-            "(đơn vị logic SUT của dự án — cấm form/popup/wizard/Bước/UI)."
+            "(đơn vị logic SUT của dự án — outcome backend quan sát được)."
         )
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
     elif eng == "e2e":
@@ -987,29 +995,35 @@ def parse_test_cases_json(raw: str) -> list[TestCaseDraft]:
             raise ValueError("LLM returned no valid test cases")
 
     def _draft_from_obj(tc: dict) -> TestCaseDraft | None:
-        title = coerce_tc_text(tc.get("title"))
-        steps = coerce_tc_text(tc.get("steps"))
+        from app.llm.unit_tc_ir import flatten_unit_tc_ir
+
+        flat = flatten_unit_tc_ir(tc) if isinstance(tc, dict) else {}
+        src = flat if flat else tc
+        title = coerce_tc_text(src.get("title"))
+        steps = coerce_tc_text(src.get("steps"))
         expected = coerce_tc_text(
-            tc.get("expectedResult") or tc.get("expected_result") or tc.get("expected")
+            src.get("expectedResult") or src.get("expected_result") or src.get("expected")
         )
         if not title or not steps or not expected:
             return None
-        pre = coerce_tc_text(tc.get("precondition")) or None
-        module = coerce_tc_text(tc.get("module")) or None
+        pre = coerce_tc_text(src.get("precondition")) or None
+        module = coerce_tc_text(src.get("module")) or None
         test_data = (
-            coerce_tc_text(tc.get("testData") or tc.get("test_data")) or None
+            coerce_tc_text(src.get("testData") or src.get("test_data")) or None
         )
         return TestCaseDraft(
             title=title,
             steps=steps,
             expected_result=expected,
-            type=type_vi(tc.get("type")),
-            priority=priority_vi(tc.get("priority")),
-            severity=severity_vi(tc.get("severity")),
+            type=type_vi(src.get("type")),
+            priority=priority_vi(src.get("priority")),
+            severity=severity_vi(src.get("severity")),
             module=module,
             precondition=pre,
             test_data=test_data,
-            automation_ready=bool(tc.get("automationReady", tc.get("automation_ready", False))),
+            automation_ready=bool(
+                src.get("automationReady", src.get("automation_ready", False))
+            ),
         )
 
     out: list[TestCaseDraft] = []

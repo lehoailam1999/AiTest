@@ -3,9 +3,11 @@ import { describe, it } from "node:test";
 import type { TestCase } from "../../api/types";
 import { buildProjectIndex } from "../projectIntelligence/projectIndex.js";
 import {
+  enrichApprovedCasesWithUnitMarkers,
   enrichTcTestDataFromIndex,
   enrichTcTestDataFromIndexAsync,
   enrichTestDataWithUnitMarkers,
+  hasUnitPathCodeMarkers,
   pickConfidentUnitSeed,
   stripAutoEnrichedMarkers,
   symbolCodeFromPathRel,
@@ -796,5 +798,64 @@ describe("enrichUnitMarkersFromIndex", () => {
       !/AccountSave/i.test(pathLine),
       `must not latch AccountSave: ${JSON.stringify(hit)}`
     );
+  });
+
+  it("batch enrich assigns distinct path/code per Unit TC (not shared marker)", async () => {
+    const paths = [
+      "src/Evidence/Classification/DigitalEvidenceClassificationForm.ts",
+      "src/Storage/Services/StorageRoomService.cs",
+      "src/Account/AccountGetAllQueryHandler.cs",
+    ];
+    const aliases = {
+      "vat chung ky thuat so": ["DigitalEvidence", "Classification"],
+      "phan loai": ["Classification", "DigitalEvidence"],
+      "vi tri luu tru": ["Storage", "StorageRoom"],
+      "gan vi tri": ["Storage", "AssignSlot"],
+    };
+    const tcA = sample({
+      id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      testCaseId: "TC-BATCH-A",
+      title: "Phân loại vật chứng kỹ thuật số - Checked mặc định",
+      module: "Phân loại vật chứng kỹ thuật số",
+      testData: "trace: UC-classify",
+    });
+    const tcB = sample({
+      id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      testCaseId: "TC-BATCH-B",
+      title: "Gán vị trí lưu trữ cho vật chứng",
+      module: "Gán vị trí lưu trữ",
+      testData: "trace: UC-storage",
+    });
+    const tcE2e = sample({
+      id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      testCaseId: "TC-BATCH-E2E",
+      type: "E2E",
+      title: "Màn hình tạo mới",
+      module: "Phân loại vật chứng kỹ thuật số",
+    });
+    const res = await enrichApprovedCasesWithUnitMarkers({
+      projectId: "p1",
+      projectRoot: "/proj",
+      allSourcePaths: paths,
+      codeAliases: aliases,
+      requirementTitleByCaseKey: {
+        [tcA.id]: "Phân loại vật chứng kỹ thuật số",
+        [tcA.testCaseId]: "Phân loại vật chứng kỹ thuật số",
+        [tcB.id]: "Gán vị trí lưu trữ",
+        [tcB.testCaseId]: "Gán vị trí lưu trữ",
+      },
+      cases: [tcA, tcB, tcE2e],
+    });
+    assert.equal(res.cases.length, 3);
+    const a = res.cases[0].testData || "";
+    const b = res.cases[1].testData || "";
+    const e2e = res.cases[2].testData || "";
+    assert.equal(hasUnitPathCodeMarkers(a), true, a);
+    assert.equal(hasUnitPathCodeMarkers(b), true, b);
+    assert.notEqual(a, b, "each TC must keep its own path/code block");
+    assert.ok(/DigitalEvidenceClassificationForm/i.test(a), a);
+    assert.ok(/StorageRoomService/i.test(b), b);
+    assert.equal(hasUnitPathCodeMarkers(e2e), false);
+    assert.ok(res.enrichedCount >= 2, JSON.stringify(res));
   });
 });

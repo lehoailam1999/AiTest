@@ -12,6 +12,7 @@ export type UnitWorkspaceStatus =
   | "draft"
   | "generating"
   | "generated"
+  | "gen_with_gap"
   | "gen_failed"
   | "verifying"
   | "pass"

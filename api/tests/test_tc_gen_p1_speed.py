@@ -52,15 +52,17 @@ def test_knowledge_enough_skip_source_scan():
         }
     }
     assert knowledge_enough_skip_source_scan(rich, "e2e") is True
-    # Unit: features + validation/business/api signals (≥2)
-    assert knowledge_enough_skip_source_scan(rich, "unit") is True
+    # Unit: never skip just because Knowledge is rich
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AITEST_TC_UNIT_SKIP_SOURCE_SCAN", None)
+        assert knowledge_enough_skip_source_scan(rich, "unit") is False
     thin = {"knowledge": {"features": [{"name": "X"}]}}
     assert knowledge_enough_skip_source_scan(thin, "e2e") is False
     assert knowledge_enough_skip_source_scan(thin, "unit") is False
     with mock.patch.dict(os.environ, {"AITEST_TC_E2E_FORCE_SOURCE_SCAN": "1"}, clear=False):
         assert knowledge_enough_skip_source_scan(rich, "e2e") is False
-    with mock.patch.dict(os.environ, {"AITEST_TC_UNIT_FORCE_SOURCE_SCAN": "1"}, clear=False):
-        assert knowledge_enough_skip_source_scan(rich, "unit") is False
+    with mock.patch.dict(os.environ, {"AITEST_TC_UNIT_SKIP_SOURCE_SCAN": "1"}, clear=False):
+        assert knowledge_enough_skip_source_scan(rich, "unit") is True
 
 
 def test_slim_rules_when_speed_fast():

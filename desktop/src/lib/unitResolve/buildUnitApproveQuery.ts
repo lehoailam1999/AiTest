@@ -3,6 +3,7 @@
  * No product nouns; domain tokens only from projectAliases / tech stems.
  */
 import {
+  extractOpPreferTokens,
   extractUnitIntent,
   filterStrongRankTokens,
   matchingProjectAliasTokens,
@@ -29,7 +30,14 @@ export type UnitApproveQuery = {
   /** create + mã/code / auto_generate — widen CheckCode feature folders */
   codeFieldCreate: boolean;
   tcBlob: string;
+  /** Raw Test Data — layerHint / sourceSignal for DTO|Validator promote */
+  testData: string;
   preferTokens: string[];
+  /**
+   * Prefer tokens from Module/Function/Title (+ aliases) only —
+   * soft writeBack / domain signal; excludes Steps/TestData noise.
+   */
+  preferTokensStrong: string[];
   /** Bridge to Gen retrieveUnitSources */
   plan: TestPlan;
 };
@@ -80,12 +88,14 @@ export function buildUnitApproveQuery(
       projectAliases,
       requirementTitle,
       uiFromTitleModuleOnly: true,
+      cuesFromGroundingOnly: true,
     });
 
   const aliasDomain = matchingProjectAliasTokens(
     [requirementTitle, tc.module, tc.title].filter(Boolean).join(" "),
     projectAliases
   );
+  // Soft tech stems only — must not drive intent class (path SoT = Module/Function/Title)
   const techStems = extractTechIdentifierStems(
     [tc.testData || "", tc.expectedResult || "", tc.precondition || ""].join("\n")
   );
@@ -98,22 +108,14 @@ export function buildUnitApproveQuery(
   const keywords = filterStrongRankTokens(
     uniq([
       ...aliasDomain,
-      ...techStems,
       ...classFeats,
       ...titleModTokens.filter((t) => t.length >= 4),
+      ...techStems,
     ])
   ).slice(0, 32);
 
-  const tcBlob = [
-    tc.title,
-    tc.module,
-    tc.steps,
-    tc.expectedResult,
-    tc.precondition,
-    tc.testData,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  // Grounding blob only — Steps/TestData must not flip create vs state_enable shape
+  const tcBlob = [requirementTitle, tc.title, tc.module].filter(Boolean).join("\n");
   const blobNorm = stripBlob(tcBlob);
   const createCue = /tao\s*moi|\bcreate\b|them\s*moi/.test(blobNorm);
   const codeFieldCreate =
@@ -130,11 +132,23 @@ export function buildUnitApproveQuery(
     (createCue ? "create" : "") ||
     "handle";
 
-  const preferTokens = uniq([
+  // Op tokens from Function/Title (storage/authz/assign) — soft writeBack must hit these.
+  const groundingBlob = [requirementTitle, tc.module, tc.title]
+    .filter(Boolean)
+    .join("\n");
+  const opPrefer = extractOpPreferTokens(intent, groundingBlob);
+
+  // Module/Function/Title (+ aliases) — domain latch. Tech stems from Test Data rank softer.
+  const preferTokensStrong = uniq([
     ...aliasDomain,
+    ...filterStrongRankTokens(titleModTokens),
+    ...classFeats,
+    ...opPrefer,
+  ]);
+  const preferTokens = uniq([
+    ...preferTokensStrong,
     ...techStems,
     ...intent.featureTokens,
-    ...titleModTokens,
   ]);
 
   const plan: TestPlan = {
@@ -162,7 +176,9 @@ export function buildUnitApproveQuery(
     requiresBodyRule: intent.requiresBodyRule,
     codeFieldCreate,
     tcBlob,
+    testData: String(tc.testData || "").trim(),
     preferTokens,
+    preferTokensStrong,
     plan,
   };
 }

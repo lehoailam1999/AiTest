@@ -8,12 +8,16 @@ import {
   UNIT_GEN_LIMITS,
   PATH_RANK_STOP,
   codeMatchesPathStem,
+  entryFeatureKeys,
+  extractOpPreferTokens,
   extractTcSourceMarkers,
+  extractUnitIntent,
   expandUnitRelatedPaths,
   filterUnitLogicLayerCandidates,
   isBlockedUnitPrimaryPath,
   isSutAlignedEnough,
   isWeakUnitClientPath,
+  pathContradictsOpPreferTokens,
   pathsMatchMarker,
   promoteImplementationPrimary,
   isInterfaceLikePrimaryPath,
@@ -521,4 +525,117 @@ export function isPacketSutAligned(
     sourceExcerpt: source,
     codeAliases,
   });
+}
+
+/**
+ * Accept disk re-resolve only inside marker/packet family + optional op-token hit.
+ * Portable fail-closed — not full allowDiskReresolve.
+ */
+export function acceptScopedFamilyPrimary(opts: {
+  candidatePath: string;
+  familyAnchors: string[];
+  opTokens?: string[] | null;
+}): boolean {
+  const cand = (opts.candidatePath || "").replace(/\\/g, "/");
+  if (!cand || isNonProductionUnitPath(cand)) return false;
+  const anchors = (opts.familyAnchors || [])
+    .map((p) => p.replace(/\\/g, "/"))
+    .filter(Boolean);
+  const op = (opts.opTokens || []).filter((t) => String(t || "").trim().length >= 4);
+  const opOk = !op.length || !pathContradictsOpPreferTokens(cand, op);
+
+  if (!anchors.length) return opOk;
+
+  const weakKey =
+    /^(create|update|delete|assign|attach|link|filter|handler|command|query|service|request|response|dto)$/i;
+  const strongKeys = (pathRel: string) =>
+    entryFeatureKeys(pathRel).filter((k) => k.length >= 4 && !weakKey.test(k));
+
+  const candKeys = new Set(strongKeys(cand));
+  for (const a of anchors) {
+    const aKeys = strongKeys(a);
+    if (aKeys.some((k) => candKeys.has(k))) {
+      return opOk;
+    }
+    const aParts = a.split("/").filter(Boolean);
+    const cParts = cand.split("/").filter(Boolean);
+    for (let i = 0; i < Math.min(aParts.length, cParts.length) - 1; i++) {
+      const seg = aParts[i]!;
+      if (
+        seg.length >= 4 &&
+        !/^(src|app|application|commands|queries|handlers|services|domain|infrastructure)$/i.test(
+          seg
+        ) &&
+        cParts.some((p) => p.toLowerCase() === seg.toLowerCase())
+      ) {
+        return opOk;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * One-shot scoped re-resolve (module/family lock) — used when packet/marker fail
+ * FEATURE_GAP / SUT_MISMATCH without enabling global allowDiskReresolve.
+ */
+export async function scopedFamilyReresolveFromDisk(
+  root: string,
+  opts: {
+    title?: string;
+    module?: string;
+    testCaseId?: string;
+    testData?: string;
+    tcMd?: string;
+    familyAnchors?: string[];
+    codeAliases?: CodeAliasMap | null;
+  }
+): Promise<ResolveRelatedResult> {
+  const disk = await resolveRelatedSourcesFromDisk(root, {
+    title: opts.title,
+    module: opts.module,
+    testCaseId: opts.testCaseId,
+    testData: opts.testData,
+    tcMd: opts.tcMd,
+    codeAliases: opts.codeAliases,
+  });
+  if (!disk.primaryPath || !disk.source) return { candidates: disk.candidates };
+
+  const blob = [opts.tcMd, opts.title, opts.module].filter(Boolean).join("\n");
+  const intent = extractUnitIntent({
+    title: opts.title,
+    module: opts.module,
+    testData: opts.testData,
+  });
+  const opTokens = extractOpPreferTokens(intent, blob);
+  const anchors = opts.familyAnchors || [];
+
+  const tryAccept = (rel: string) =>
+    acceptScopedFamilyPrimary({
+      candidatePath: rel,
+      familyAnchors: anchors,
+      opTokens,
+    });
+
+  if (tryAccept(disk.primaryPath)) {
+    return disk;
+  }
+
+  for (const rel of disk.candidates || []) {
+    if (!tryAccept(rel)) continue;
+    try {
+      const abs = path.join(root, rel);
+      let body = await fs.readFile(abs, "utf8");
+      const maxChars = UNIT_GEN_LIMITS.maxExcerptChars;
+      if (body.length > maxChars) body = body.slice(0, maxChars) + "\n/* …truncated… */";
+      return {
+        ...disk,
+        primaryPath: rel,
+        source: body,
+      };
+    } catch {
+      /* next */
+    }
+  }
+  return { candidates: disk.candidates };
 }

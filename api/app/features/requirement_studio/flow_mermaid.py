@@ -52,19 +52,38 @@ _HOLLOW_FLOW_NAME = re.compile(
     r"exception\s+flows?(?:\s*\([^)]*\))?|"
     r"alternate\s+flows?|alternative\s+flows?|error\s+flows?|"
     r"luồng\s+phụ|"
-    r"nhánh\s+lỗi|nhánh\s+ngoại\s+lệ"
+    r"nhánh\s+lỗi|nhánh\s+ngoại\s+lệ|"
+    r"validation\s+flows?|luồng\s+validation|"
+    r"luồng\s+kiểm\s+tra(?:\s+dữ\s+liệu|\s+hợp\s+lệ)?|"
+    r"negative\s+flows?|luồng\s+phủ\s+định"
     r")\.?\s*$"
 )
-# Substring reject: "UC-02 Exception Flow", "Luồng phụ đăng nhập", etc.
-_NON_MAIN_FLOW_HINT = re.compile(
+# Substring reject on UC **names** — Exception / Alt / validation-only flows (MSS-only).
+_NON_MAIN_FLOW_NAME_HINT = re.compile(
     r"(?i)(?:"
     r"luồng\s+ngoại\s+lệ|"
     r"exception\s+flows?|"
     r"alternate\s+flows?|alternative\s+flows?|"
     r"error\s+flows?|alt\s+flows?|"
     r"luồng\s+phụ|"
-    r"nhánh\s+lỗi|nhánh\s+ngoại\s+lệ"
+    r"nhánh\s+lỗi|nhánh\s+ngoại\s+lệ|"
+    r"negative\s+flows?|luồng\s+phủ\s+định|"
+    r"validation\s+flows?|luồng\s+validation|"
+    r"luồng\s+kiểm\s+tra(?:\s+dữ\s+liệu|\s+hợp\s+lệ)?|"
+    r"luồng\s+nhập\s+liệu|field[\s_-]*validation|"
+    r"happy[\s_-]*path\s+validation"
     r")"
+)
+# First-step reject — only explicit non-MSS **section** titles (not generic "kiểm tra" in MSS).
+_NON_MAIN_FIRST_STEP_HINT = re.compile(
+    r"(?i)^(?:"
+    r"luồng\s+ngoại\s+lệ(?:\s*\([^)]*\))?|"
+    r"exception\s+flows?|"
+    r"alternate\s+flows?|alternative\s+flows?|"
+    r"luồng\s+phụ|"
+    r"luồng\s+validation|validation\s+flows?|"
+    r"luồng\s+kiểm\s+tra\s+dữ\s+liệu"
+    r")\.?\s*$"
 )
 _META_ANALYSIS_ECHO = re.compile(
     r"(?i)(?:"
@@ -104,9 +123,9 @@ def is_non_main_business_flow(
     n = (name or "").strip()
     if not n:
         return False
-    if _HOLLOW_FLOW_NAME.match(n) or _NON_MAIN_FLOW_HINT.search(n):
+    if _HOLLOW_FLOW_NAME.match(n) or _NON_MAIN_FLOW_NAME_HINT.search(n):
         return True
-    # First step line only — avoid rejecting MSS that mention "lỗi" mid-flow narrative
+    # First step line only — reject explicit non-MSS section titles, not generic actions.
     first = ""
     for ln in (steps or "").splitlines():
         t = ln.strip()
@@ -114,7 +133,7 @@ def is_non_main_business_flow(
             first = re.sub(r"^\d+[.)]\s*", "", t)
             break
     if first and (
-        _HOLLOW_FLOW_NAME.match(first) or _NON_MAIN_FLOW_HINT.search(first)
+        _HOLLOW_FLOW_NAME.match(first) or _NON_MAIN_FIRST_STEP_HINT.match(first)
     ):
         return True
     return False
@@ -149,7 +168,8 @@ def is_hollow_use_case(
         only = labels[0]
         if (
             _HOLLOW_FLOW_NAME.match(only)
-            or _NON_MAIN_FLOW_HINT.search(only)
+            or _NON_MAIN_FLOW_NAME_HINT.search(only)
+            or _NON_MAIN_FIRST_STEP_HINT.match(only)
             or _META_ANALYSIS_ECHO.search(only)
         ):
             return True

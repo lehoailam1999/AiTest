@@ -9,7 +9,7 @@ import type { TestCase } from "../../api/types";
 import { normalizeFunctionLabel } from "../normalizeFunctionLabel";
 import { isExcludedFromUnitRetrieve } from "../retrieval/rankScore";
 import {
-  expandVietnameseToCodeTokens,
+  expandCodeMatchTokens,
   parseCodeHintsFromText,
   type CodeAliasMap,
 } from "./viCodeAliases";
@@ -129,10 +129,11 @@ function uniq(xs: string[]): string[] {
   return out;
 }
 
-/** Tách token từ chuỗi (Latin + bỏ dấu VN + CamelCase + alias dự án). */
+/** Tách token từ chuỗi (Latin + bỏ dấu VN + CamelCase + alias + optional index stems). */
 export function extractMatchTokens(
   raw: string,
-  projectAliases?: CodeAliasMap | null
+  projectAliases?: CodeAliasMap | null,
+  indexPaths?: string[] | null
 ): string[] {
   const text = normalizeFunctionLabel(raw);
   if (!text) return [];
@@ -154,7 +155,9 @@ export function extractMatchTokens(
     out.push(words.join("_"));
     out.push(words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(""));
   }
-  out.push(...expandVietnameseToCodeTokens(text, projectAliases));
+  out.push(
+    ...expandCodeMatchTokens(text, { projectAliases, indexPaths })
+  );
   return uniq(out);
 }
 

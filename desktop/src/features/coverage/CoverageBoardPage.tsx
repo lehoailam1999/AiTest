@@ -58,6 +58,7 @@ export default function CoverageBoardPage() {
     hasSnapshot: false,
   });
   const [journeySnapIds, setJourneySnapIds] = useState<Set<string>>(new Set());
+  const [journeySnapsReady, setJourneySnapsReady] = useState(false);
 
   const [reviewEpoch, setReviewEpoch] = useState(0);
 
@@ -69,9 +70,11 @@ export default function CoverageBoardPage() {
   useEffect(() => {
     if (!workspaceId) {
       setJourneySnapIds(new Set());
+      setJourneySnapsReady(true);
       return;
     }
     let cancelled = false;
+    setJourneySnapsReady(false);
     (async () => {
       try {
         const res = await requirementStudio.listSnapshots(workspaceId);
@@ -80,6 +83,8 @@ export default function CoverageBoardPage() {
         }
       } catch {
         if (!cancelled) setJourneySnapIds(new Set());
+      } finally {
+        if (!cancelled) setJourneySnapsReady(true);
       }
     })();
     return () => {
@@ -252,12 +257,34 @@ export default function CoverageBoardPage() {
                 </Typography.Title>
               </div>
             </div>
-            {allCases.length === 0 ? (
+            {!journeySnapsReady || loading ? (
+              <ReviewQueuePanel
+                key={`review-loading-${workspaceId}`}
+                projectId={project.id}
+                cases={[]}
+                moduleFilter={reviewModule}
+                engineFilter={reviewEngine}
+                workspaceId={workspaceId}
+                loading
+                onChanged={() => {
+                  invalidate();
+                  void refresh();
+                }}
+              />
+            ) : journeyCases.length === 0 ? (
               <Alert
                 type="info"
                 showIcon
-                title="Chưa có test case trong project"
-                description="Sinh TC Unit hoặc E2E từ tài liệu + Phân tích trước."
+                title={
+                  allCases.length === 0
+                    ? "Chưa có test case trong project"
+                    : "Chưa có test case thuộc Requirement này"
+                }
+                description={
+                  allCases.length === 0
+                    ? "Sinh TC Unit hoặc E2E từ tài liệu + Phân tích trước."
+                    : "TC của Requirement khác không hiện ở đây. Sinh TC từ Freeze của Requirement này, rồi duyệt."
+                }
                 action={
                   <Button type="primary" onClick={() => setStudioFocus("freeze")}>
                     Sang Sinh test case
@@ -268,7 +295,7 @@ export default function CoverageBoardPage() {
               <ReviewQueuePanel
                 key={`review-${workspaceId}-${reviewEngine ?? "all"}-${reviewEpoch}`}
                 projectId={project.id}
-                cases={allCases}
+                cases={journeyCases}
                 moduleFilter={reviewModule}
                 engineFilter={reviewEngine}
                 workspaceId={workspaceId}

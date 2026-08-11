@@ -40,8 +40,23 @@ import {
 import type { RequirementTopic } from "../api/types";
 import { labelOf, priorityLabel, displayReviewStatus, isTcPendingReview, typeLabel } from "../i18n/labels";
 import { syncApprovedTestCasesMdBestEffort } from "../lib/approvedTcSync";
+import { normalizeFunctionLabel } from "../lib/normalizeFunctionLabel";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
+
+const UNASSIGNED_FUNCTION = "(Chưa gán Function)";
+
+function functionLabelOf(raw: string | null | undefined): string {
+  const n = normalizeFunctionLabel(raw);
+  return n || UNASSIGNED_FUNCTION;
+}
+
+function functionLabelsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  const na = normalizeFunctionLabel(a).toLowerCase();
+  const nb = normalizeFunctionLabel(b).toLowerCase();
+  return Boolean(na && nb && na === nb);
+}
 
 function groupBySource(cases: TestCase[]): Record<string, TestCase[]> {
   const map: Record<string, TestCase[]> = {};
@@ -695,7 +710,9 @@ export default function RequirementsPage() {
                 tcAction(
                   async () => {
                     const tc = await testcases.approve(id);
-                    if (project) {
+                    // Refresh status first; MD sync runs after (can be slow)
+                    void (async () => {
+                      if (!project) return;
                       const sync = await syncApprovedTestCasesMdBestEffort({
                         projectId: project.id,
                         projectRoot: workspace.getLocalPath(project.id),
@@ -713,7 +730,8 @@ export default function RequirementsPage() {
                             "Duyệt OK nhưng chưa ghi .ai-test/test-cases — gắn project root hoặc Connect IDE"
                         );
                       }
-                    }
+                      void refreshReqCases(r.id);
+                    })();
                     return tc;
                   },
                   r.id,
@@ -851,17 +869,28 @@ function RequirementPanel({
 
   const needsReview = (t: TestCase) => t.needsReview ?? t.isStale;
 
-  const moduleLabel = (t: TestCase) => (t.module || "").trim() || "(Chưa gán module)";
+  const moduleLabel = (t: TestCase) => functionLabelOf(t.module);
 
   const [moduleFilter, setModuleFilter] = useState<string>(() => {
     if (!initialModuleFilter) return "__all__";
-    return initialModuleFilter;
+    const want = functionLabelOf(initialModuleFilter);
+    return want === UNASSIGNED_FUNCTION ? "__all__" : want;
   });
   const [tcView, setTcView] = useState<"flat" | "group">("group");
 
   useEffect(() => {
-    if (initialModuleFilter) setModuleFilter(initialModuleFilter);
-  }, [initialModuleFilter]);
+    if (!initialModuleFilter) return;
+    const want = functionLabelOf(initialModuleFilter);
+    // Deep-link module= sometimes is Requirement title, not Function
+    if (
+      functionLabelsMatch(want, req.title) ||
+      functionLabelsMatch(initialModuleFilter, req.title)
+    ) {
+      setModuleFilter("__all__");
+      return;
+    }
+    setModuleFilter(want === UNASSIGNED_FUNCTION ? "__all__" : want);
+  }, [initialModuleFilter, req.title]);
 
   const moduleOptions = useMemo(() => {
     const set = new Set<string>();
@@ -869,21 +898,19 @@ function RequirementPanel({
     return [...set].sort((a, b) => a.localeCompare(b, "vi"));
   }, [cases]);
 
+  useEffect(() => {
+    if (moduleFilter === "__all__") return;
+    const stillThere = moduleOptions.some((m) => functionLabelsMatch(m, moduleFilter));
+    if (!stillThere) setModuleFilter("__all__");
+  }, [moduleOptions, moduleFilter]);
+
   const filteredCases = useMemo(() => {
     let list = cases;
     if (moduleFilter !== "__all__") {
-      list = list.filter((c) => {
-        const lab = moduleLabel(c);
-        return (
-          lab === moduleFilter ||
-          lab.toLowerCase() === moduleFilter.toLowerCase()
-        );
-      });
+      list = list.filter((c) => functionLabelsMatch(moduleLabel(c), moduleFilter));
     }
     if (reviewOnly) {
-      list = list.filter(
-        (c) => isTcPendingReview(c.reviewStatus)
-      );
+      list = list.filter((c) => isTcPendingReview(c.reviewStatus));
     }
     return list;
   }, [cases, moduleFilter, reviewOnly]);
@@ -942,14 +969,29 @@ function RequirementPanel({
 
   const tcColumns: ColumnsType<TestCase> = [
     { title: "ID", dataIndex: "testCaseId", key: "code", width: 90 },
-    { title: "Tiêu đề", dataIndex: "title", key: "title", width: 100 },
+    { title: "Tiêu đề", dataIndex: "title", key: "title", width: 160, ellipsis: true },
     {
-      title: "Module / chủ đề",
+      title: "Module",
+      key: "requirementModule",
+      width: 140,
+      ellipsis: true,
+      render: () =>
+        req.title ? (
+          <Tag color="geekblue" title={req.title}>
+            {req.title}
+          </Tag>
+        ) : (
+          <Typography.Text type="secondary">—</Typography.Text>
+        ),
+    },
+    {
+      title: "Function",
       dataIndex: "module",
       key: "module",
-      width: 140,
+      width: 160,
+      ellipsis: true,
       render: (v: string | null | undefined) =>
-        v ? <Tag>{v}</Tag> : <Typography.Text type="secondary">—</Typography.Text>,
+        v ? <Tag title={v}>{v}</Tag> : <Typography.Text type="secondary">—</Typography.Text>,
     },
     {
       title: "Phiên bản",
@@ -1099,7 +1141,7 @@ function RequirementPanel({
             value={moduleFilter}
             onChange={setModuleFilter}
             options={[
-              { value: "__all__", label: "Tất cả module" },
+              { value: "__all__", label: "Tất cả Function" },
               ...moduleOptions.map((m) => ({ value: m, label: m })),
             ]}
           />
@@ -1108,7 +1150,7 @@ function RequirementPanel({
             value={tcView}
             onChange={(e) => setTcView(e.target.value as "flat" | "group")}
           >
-            <Radio.Button value="group">Theo module</Radio.Button>
+            <Radio.Button value="group">Theo Function</Radio.Button>
             <Radio.Button value="flat">Danh sách</Radio.Button>
           </Radio.Group>
         </Space>
@@ -1134,7 +1176,7 @@ function RequirementPanel({
           }
         />
       ) : filteredCases.length === 0 ? (
-        <Alert type="info" showIcon title="Không có test case trong module đã chọn." />
+        <Alert type="info" showIcon title="Không có test case trong Function đã chọn." />
       ) : tcView === "group" && groupedCases.length > 1 ? (
         <Collapse
           size="small"
@@ -1173,8 +1215,8 @@ function RequirementPanel({
           >
             <Input />
           </Form.Item>
-          <Form.Item name="module" label="Module">
-            <Input placeholder="Tên chức năng / module" />
+          <Form.Item name="module" label="Function">
+            <Input placeholder="Tên Function (feature / TC.module)" />
           </Form.Item>
           <Form.Item name="type" label="Loại (engine)">
             <Select options={[...TC_TYPE_OPTIONS]} />
