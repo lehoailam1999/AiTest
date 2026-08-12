@@ -91,13 +91,11 @@ QUY TẮC CHUNG UNIT (BẮT BUỘC — BACKEND ONLY, PORTABLE, SRS-ONLY):
 6. Self-check: còn IN chưa cover → TC hoặc gap; đủ → dừng.
 """
 
-# E2E-only shared — SoT (e2e_tc_analysis_rules) owns coverage/trace/completeness/lock.
-# Do NOT restate Scenario/Workflow/BR/gate here (avoids triple with SoT + overlay).
+# E2E-only shared — thin pointer. SoT = e2e_tc_analysis_rules (coverage/trace/dedup/criteria).
 _LEGACY_E2E_COMPACT_SHARED_TC_RULES = """\
-QUY TẮC CHUNG E2E (format):
-1. module = tên FEATURES; title tiếng Việt [Chức năng] - [Hành động] - [Kết quả].
-2. precondition / testData / steps / expectedResult cụ thể; thiếu → [Giả định] / [Thiếu Output].
-3. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
+QUY TẮC CHUNG E2E (format — SoT xem e2e_tc_analysis_rules):
+1. module = tên FEATURES; title VN [Chức năng] - [Hành động] - [Kết quả].
+2. priority: Thấp|Trung bình|Cao|Nghiêm trọng · severity: Nhẹ|Nặng|Nghiêm trọng.
 """
 
 # Fan-out / speed=fast — shorter shared block (engine overlay + SPEED MODE addon carry detail).
@@ -111,10 +109,9 @@ QUY TẮC CHUNG UNIT (SPEED — BACKEND ONLY, PORTABLE, SRS-ONLY):
 """
 
 _LEGACY_E2E_SPEED_SHARED_TC_RULES = """\
-QUY TẮC CHUNG E2E (SPEED format — gọn prompt, đủ cover):
+QUY TẮC CHUNG E2E (SPEED — SoT xem e2e_tc_analysis_rules):
 1. module = FEATURES; title VN [Chức năng]-[Hành động]-[Kết quả].
-2. Steps/expected/precondition/testData cụ thể; thiếu → [Giả định].
-3. Cover đủ tín hiệu Output; cấm TC thừa/trùng — không trần số TC cố định.
+2. priority/severity thang Việt. Thiếu info → [Giả định].
 """
 
 DEFAULT_TC_GENERATION_RULES = get_rule_text(
@@ -255,7 +252,7 @@ def engine_generation_rules(
             "=== PHIÊN SINH UNIT ===",
             "1. type=`Unit` only — Backend TC IR (SRS-only). 6 gate rồi scope atomic IN|OUT|MIXED|UNKNOWN.",
             "2. PRIMARY buckets từ Phân tích (giữ nguyên) — chi tiết khối UNIT ← PHÂN TÍCH.",
-            "3. Steps prepare/execute nghiệp vụ; expected observable BE — không class/repo/HTTP invent.",
+            "3. Steps prepare/execute nghiệp vụ; expected observable BE — không class/repo/HTTP invent; không test entrypoint/bootstrap (main.ts/Program).",
             "4. Coverage/Gap + Conflict: inventory IN↔TC; unknownBehaviors khi thiếu Knowledge; layerHint=null trừ Knowledge nói rõ.",
             "5. Output JSON: testCases + coverage + gaps + unknownBehaviors + conflicts; mỗi TC có behaviorId + primaryBucket.",
             "6. path:/code: thuộc Approve/Retrieval — không yêu cầu ở pha sinh TC.",
@@ -286,11 +283,13 @@ def engine_generation_rules(
             )
         if target_url.strip():
             parts.append(
-                f"4. TARGET URL: baseURL trong precondition/testData: {target_url.strip()}"
+                f"4. BASE URL (env only): ghi `baseURL: {target_url.strip()}` trong testData — "
+                "**không** dùng làm `path:`/`featurePath:`/`url:` route."
             )
         else:
             parts.append(
-                "4. TARGET URL: path/màn từ Output hoặc tên màn + [Giả định]."
+                "4. BASE URL: chưa có — chỉ ghi AbsolutePath `path:`/`featurePath:` từ Output; "
+                "thiếu → null/[Thiếu Context]. Cấm invent route từ tên module."
             )
         if auth_hint.strip():
             parts.append(f"5. AUTH HINT: {auth_hint.strip()}")
@@ -317,11 +316,13 @@ def engine_generation_rules(
     ]
     if target_url.strip():
         parts.append(
-            f"4. TARGET URL: baseURL trong precondition/testData: {target_url.strip()}"
+            f"4. BASE URL (env only): ghi `baseURL: {target_url.strip()}` trong testData — "
+            "**không** dùng làm `path:`/`featurePath:`/`url:` route."
         )
     else:
         parts.append(
-            "4. TARGET URL: chưa có baseURL job — dùng path/màn từ Output; thiếu → [Giả định]."
+            "4. BASE URL: chưa có — chỉ AbsolutePath `path:`/`featurePath:` từ Output; "
+            "thiếu → null/[Thiếu Context]. Cấm invent route từ tên module."
         )
     if auth_hint.strip():
         parts.append(
@@ -334,8 +335,9 @@ def engine_generation_rules(
         )
     parts.append(
         "6. FEATURE PATH (E2E_GROUNDING): mọi TC post-login / không PUBLIC → "
-        "`testData` có `path: /…` hoặc `featurePath: /…` từ FLOWS|API_UI|FEATURES "
-        "(không invent). Tuỳ chọn `landmark:` nhãn màn. Login/Logout/PUBLIC: miễn."
+        "`testData` có `path: /…` hoặc `featurePath: /…` AbsolutePath ASCII từ FLOWS|API_UI|FEATURES "
+        "(không invent; không slug module VN). Tuỳ chọn `landmark:` nhãn màn. Login/Logout/PUBLIC: miễn. "
+        "Cấm malware/toast invent nếu Output không nói; wizard → steps concrete."
     )
     if focus_modules.strip():
         parts.append(f"7. FOCUS MODULES (khớp FEATURES): {focus_modules.strip()}")

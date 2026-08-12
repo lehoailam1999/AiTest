@@ -19,7 +19,8 @@ export type DeriveAuthContextOptions = {
   analysisActors?: string[] | null;
 };
 
-const AUTH_ROLE_RE = /(?:authRole|auth_role|role|quyền|vai\s*trò)\s*[:=]?\s*([A-Za-z0-9_-]+)/i;
+const AUTH_ROLE_RE =
+  /(?:authRole|auth_role)\s*[:=]\s*([A-Za-z0-9_-]+)|\brole\s*[:=]\s*([A-Za-z0-9_-]+)|(?:logged\s+in\s+as|với\s+quyền)\s+([A-Za-z0-9_-]+)/i;
 const AUTH_REQ_RE =
   /(?:authRequired|auth_required|cần\s*đăng\s*nhập)\s*[:=]\s*(true|false|yes|no|1|0)/i;
 const ROLES_RE = /(?:roles|multiRoleRoles)\s*[:=]\s*([^\n]+)/i;
@@ -28,6 +29,7 @@ function cleanRoleSlug(raw: string | null | undefined): string {
   const s = (raw || "").trim().replace(/^["']|["']$/g, "");
   if (!s) return "";
   if (/thi[eế]u\s*context|tbd|n\/a|todo|null|undefined/i.test(s)) return "";
+  if (/^(role|actor|user|auth)$/i.test(s)) return "";
   return s;
 }
 
@@ -47,7 +49,7 @@ export function deriveAuthContextFromTestCase(
 
   const parts: string[] = [];
   const roleM = AUTH_ROLE_RE.exec(blob);
-  let role = cleanRoleSlug(roleM?.[1]);
+  let role = cleanRoleSlug(roleM?.[1] || roleM?.[2] || roleM?.[3]);
   let roleSource: AuthContextFromTc["roleSource"] | undefined = role
     ? "tc"
     : undefined;

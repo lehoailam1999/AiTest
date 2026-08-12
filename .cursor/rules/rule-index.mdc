@@ -48,9 +48,8 @@ Globs `api/app/rules/**` và `desktop/src/lib/ruleIndex/**` đã có scaffold �
 | Sinh TC Unit | [`unit-tc-from-analysis.mdc`](unit-tc-from-analysis.mdc) | `unit_tc_analysis_rules.py`, `tc_generation_rules.py` |
 | Sinh TC E2E | [`e2e-tc-from-analysis.mdc`](e2e-tc-from-analysis.mdc) | `e2e_tc_analysis_rules.py`, `tc_generation_rules.py` |
 | Unit codegen | [`uutgs-unit-codegen.mdc`](uutgs-unit-codegen.mdc) | `uutgs_rules.py` |
-| E2E codegen | [`e2e-codegen.mdc`](e2e-codegen.mdc) | `e2e_codegen_rules.py` |
+| E2E codegen | [`e2e-codegen.mdc`](e2e-codegen.mdc) | `e2e_codegen_rules.py` (+ thin `e2e_journey_rules.py`) |
 | E2E grounding | [`e2e-grounding.mdc`](e2e-grounding.mdc) | `e2e_grounding_rules.py` |
-| E2E journey | [`e2e-feature-journey.mdc`](e2e-feature-journey.mdc) | `e2e_journey_rules.py` (thin) |
 
 Runtime guard (không LLM prompt): `e2e_codegen_guard.py`, `failure_taxonomy.py`, `desktop/.../assertTcReadyForE2eGen.ts`.
 

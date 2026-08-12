@@ -48,6 +48,7 @@ import { suggestWorkspaceVerifyCommands } from "../../lib/stackHints";
 import type { ProjectMeta, StackInspect, TestCase } from "../../api/types";
 import { isTauri, readTextFile } from "../../tauri/bridge";
 import { labelOf, priorityLabel, typeLabel } from "../../i18n/labels";
+import { unitJobMetricByJobId } from "../../lib/unitJobMetrics";
 
 /** Queue notes for batch Generate list (Ghi chú column). */
 export const BATCH_NOTE_WAITING = "Đang chờ…";
@@ -125,6 +126,8 @@ export type BatchPipelineRow = {
   /** Generate ok/fail — queue rows use fail + queue note in `error`. */
   status: "ok" | "fail";
   error?: string;
+  /** Unit jobId (Gen → Verify correlation id) for performance / diagnostics. */
+  unitJobId?: string | null;
   /** Full generate/verify error body for «Chi tiết lỗi» (may be longer than Ghi chú). */
   errorDetail?: string;
   /** Relative path under project root where error log was saved (e.g. …/logs/error.log). */
@@ -220,6 +223,17 @@ export function BatchRunConsole({
     row: BatchPipelineRow;
     body: string;
   } | null>(null);
+
+  const unitPerfMap = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof unitJobMetricByJobId>>();
+    for (const r of rows) {
+      const id = (r.unitJobId || "").trim();
+      if (!id) continue;
+      if (map.has(id)) continue;
+      map.set(id, unitJobMetricByJobId(id));
+    }
+    return map;
+  }, [rows]);
 
   const visible = useMemo(() => {
     if (filter === "unverified") {
@@ -1141,7 +1155,9 @@ export function BatchRunConsole({
         pagination={false}
         rowKey="key"
         dataSource={visible}
-        scroll={{ x: 900 }}
+        // Avoid fixed horizontal scroll width that can overflow the page layout.
+        // Let AntD calculate based on content.
+        scroll={{ x: "max-content" }}
         columns={[
           { title: "TC", dataIndex: "testCaseId", width: 90 },
           { title: "Tiêu đề", dataIndex: "title", ellipsis: true },
@@ -1202,10 +1218,27 @@ export function BatchRunConsole({
                 return <Typography.Text type="secondary">{BATCH_NOTE_WAITING}</Typography.Text>;
               }
               if (r.status === "ok" && !r.error) {
+                const perf = r.unitJobId ? unitPerfMap.get(r.unitJobId) ?? null : null;
                 return (
-                  <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
-                    {r.workspaceRunId?.slice(0, 8) ?? "staging"}
-                  </Typography.Text>
+                  <Space size={0} wrap>
+                    <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
+                      {r.workspaceRunId?.slice(0, 8) ?? "staging"}
+                    </Typography.Text>
+                    {perf?.cliTimeMs != null ? (
+                      <Tag color="blue" style={{ fontSize: 11 }}>
+                        cli {perf.cliTimeMs}ms
+                      </Tag>
+                    ) : null}
+                    {perf?.promptChars != null ? (
+                      <Tag style={{ fontSize: 11 }}>prompt {perf.promptChars}</Tag>
+                    ) : null}
+                    {perf?.contextSize != null ? (
+                      <Tag style={{ fontSize: 11 }}>ctx {perf.contextSize}</Tag>
+                    ) : null}
+                    {perf?.retrievedFiles != null ? (
+                      <Tag style={{ fontSize: 11 }}>files {perf.retrievedFiles}</Tag>
+                    ) : null}
+                  </Space>
                 );
               }
               return v;

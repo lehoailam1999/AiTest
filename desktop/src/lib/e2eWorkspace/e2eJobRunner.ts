@@ -5,7 +5,7 @@
 import { generateE2e, type E2EFileDto } from "../../api";
 import type { TestCase } from "../../api/types";
 import { createAsyncMutex, runPool } from "../runPool";
-import { isTauri, readTextFile } from "../../tauri/bridge";
+import { isTauri, readTextFile, writeTextFile } from "../../tauri/bridge";
 import { buildE2EEnvConfig, buildE2EEnvWithProfile, playwrightEnvFromConfig } from "./env";
 import { prepareVerifySession } from "./verifyProfilePrep";
 import type { ProjectProfile } from "../projectProfile/types.js";
@@ -43,10 +43,10 @@ import {
   profileGateWarningsForE2eGen,
 } from "./assertTcReadyForE2eGen";
 import {
-  buildE2eRouteCatalog,
   matchFeaturePathFromCatalog,
   type E2eRouteCatalog,
 } from "./e2eRouteCatalog";
+import { loadOrBuildE2eRouteCatalog } from "./e2eRouteCatalogCache";
 import {
   createInspectDomCache,
   inspectCacheKey,
@@ -642,19 +642,28 @@ export async function generateE2eForTestCase(opts: {
   const profile = opts.projectProfile || null;
   const moduleMap = profile?.moduleMap || {};
   const moduleKey = (tc.module || "").trim();
-  const moduleMapPath = lookupModuleMapPath(moduleKey, moduleMap) || "";
-  const tcMarkerPath =
+  const moduleMapPath =
+    lookupModuleMapPath(moduleKey, moduleMap) ||
+    lookupModuleMapPath(opts.requirementTitle, moduleMap) ||
+    lookupModuleMapPath(tc.title, moduleMap) ||
+    "";
+  const tcMarkerRaw =
     deriveFeaturePathFromTc({
       title: tc.title,
       precondition: tc.precondition,
       testData: tc.testData,
       steps: tc.steps,
     }) || undefined;
+  const tcMarkerPath = isUsableFeaturePath(tcMarkerRaw) ? tcMarkerRaw : undefined;
+  if (tcMarkerRaw && !tcMarkerPath) {
+    log(`  TC path marker ignored (unusable)=${tcMarkerRaw}\n`);
+  }
   let featurePath = resolveFeaturePathSeed({
     explicitFeaturePath: opts.featurePath,
     testCase: tc,
     moduleMap,
     phase5FeaturePathHint,
+    requirementTitle: opts.requirementTitle,
   });
   if (moduleMapPath && isUsableFeaturePath(moduleMapPath) && !tcMarkerPath) {
     log(`  featurePath(from moduleMap[${moduleKey}])=${moduleMapPath}\n`);
@@ -662,6 +671,11 @@ export async function generateE2eForTestCase(opts: {
   if (featurePath && !isUsableFeaturePath(featurePath)) {
     log(`  featurePath ignored (placeholder/invalid)=${featurePath}\n`);
     featurePath = undefined;
+  }
+  // If TC marker was unusable (VN slug / localhost), prefer moduleMap explicitly.
+  if (!featurePath && moduleMapPath && isUsableFeaturePath(moduleMapPath)) {
+    featurePath = moduleMapPath;
+    log(`  featurePath(from moduleMap after bad TC marker)=${moduleMapPath}\n`);
   }
   // Catalog before FE route snippets — avoid FE path-shape overfitting.
   let catalogMatched = false;
@@ -707,8 +721,6 @@ export async function generateE2eForTestCase(opts: {
       log(`  featurePath(from FE routerLink)=${featurePath}\n`);
     }
   }
-  if (featurePath) log(`  featurePath=${featurePath}\n`);
-  else log(`  featurePath=(none yet — guard may bake from Spec comments)\n`);
   const loginTc = isLikelyLoginTestCase(tc);
   const publicTc = isLikelyPublicTestCase(tc);
   const hasFeHooks = hasFeGroundingHooks(sourceCode, relatedSources);
@@ -727,6 +739,10 @@ export async function generateE2eForTestCase(opts: {
           : undefined;
   if (featurePath && inferredPathSource) {
     log(`  featurePath source=${inferredPathSource} value=${featurePath}\n`);
+  } else if (featurePath) {
+    log(`  featurePath=${featurePath}\n`);
+  } else {
+    log(`  featurePath=(none yet — guard may bake from Spec comments)\n`);
   }
   if (featurePath && !hasPathMarker(tc) && inferredPathSource) {
     log(
@@ -772,6 +788,8 @@ export async function generateE2eForTestCase(opts: {
     );
   }
   let domSnapshot = inspectPerTc ? "" : opts.domSnapshot || "";
+  /** Inspect hit login wall and DOM was cleared — do not send pomScaffold stubs to CLI */
+  let inspectClearedForLoginWall = false;
 
   if (inspectPerTc) {
     const cache = opts.inspectCache || createInspectDomCache();
@@ -845,6 +863,7 @@ export async function generateE2eForTestCase(opts: {
                 : "Chạy Auth Discover / nhập E2E_USERNAME+PASSWORD, hoặc đảm bảo FE seed có data-cy (sibling .html).")
           );
         }
+        inspectClearedForLoginWall = true;
         log(
           hasAuth
             ? "  inspect: Gen chỉ dựa FE hooks (DOM cleared) — Verify cần auth đúng để pass\n"
@@ -902,20 +921,30 @@ export async function generateE2eForTestCase(opts: {
         "hoặc bổ sung `path: /…` + FE có routerLink."
     );
   }
-  // Soft scaffold only when FE hooks exist — avoid inventing verbs from TC prose alone
-  const pomScaffold = hasFeHooks
-    ? derivePomScaffoldFromTc({
-        testCase: tc,
-        featurePath,
-      })
-    : "";
+  // Soft scaffold only when Inspect returned feature DOM — otherwise CLI invents
+  // selectOption/submitForm stubs from TC prose (staging becomes unreadable).
+  const pomScaffold =
+    hasFeHooks &&
+    !inspectClearedForLoginWall &&
+    Boolean((domSnapshot || "").trim())
+      ? derivePomScaffoldFromTc({
+          testCase: tc,
+          featurePath,
+        })
+      : "";
   log(
     `  locator-contract: hooks=${hasFeHooks ? "yes" : "no"} ` +
       `grounded=${locatorContractHasGrounding(locatorContract) ? "yes" : "no"} ` +
       `chars=${locatorContract.length}\n`
   );
   log(
-    `  pom-scaffold: ${pomScaffold ? `chars=${pomScaffold.length}` : "skipped (no FE hooks)"}\n`
+    `  pom-scaffold: ${
+      pomScaffold
+        ? `chars=${pomScaffold.length}`
+        : inspectClearedForLoginWall
+          ? "skipped (login-wall DOM cleared — use TC+FE only)"
+          : "skipped (no FE hooks / empty DOM)"
+    }\n`
   );
 
   syncE2eWorkspaceRun({
@@ -1126,15 +1155,31 @@ export async function generateE2eBatch(opts: {
 
   let routeCatalog: E2eRouteCatalog | undefined;
   try {
-    const { paths, fromCache } = await feListCache.getPaths(opts.projectRoot);
-    routeCatalog = await buildE2eRouteCatalog({
-      paths,
-      readFile: async (pathRel) =>
-        readTextFile(opts.projectRoot, pathRel.replace(/\\/g, "/")),
+    const { paths, fromCache: pathListCache } = await feListCache.getPaths(
+      opts.projectRoot
+    );
+    const loaded = await loadOrBuildE2eRouteCatalog({
+      allSourcePaths: paths,
+      io: {
+        listSourcePaths: async () => paths,
+        readText: (pathRel) =>
+          readTextFile(opts.projectRoot, pathRel.replace(/\\/g, "/")),
+        writeText: async (pathRel, content) => {
+          await writeTextFile(
+            opts.projectRoot,
+            pathRel.replace(/\\/g, "/"),
+            content
+          );
+        },
+      },
     });
+    routeCatalog = loaded.catalog;
     log(
-      `  route-catalog: ${routeCatalog.routes.length} routes from ${routeCatalog.sources.length} files` +
-        `${fromCache ? " (path list cache)" : ""}\n`
+      `  route-catalog: ${routeCatalog.routes.length} routes` +
+        (loaded.fromCache
+          ? " (disk cache)"
+          : ` from ${loaded.routingFileCount} routing files`) +
+        `${pathListCache ? " · path-list cache" : ""}\n`
     );
   } catch (e) {
     log(`  route-catalog warn: ${String(e)}\n`);

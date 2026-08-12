@@ -22,10 +22,10 @@ function norm(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
 }
 
-/** Probe Approved TC MD under .ai-test/test-cases/{module}/{code}.md (or walk). */
+/** Probe Approved TC MD under .ai-test/test-cases/{UnitTest|E2ETest}/{module}/{code}.md (or walk). */
 export async function probeApprovedTcMd(
   projectRoot: string,
-  tc: Pick<TestCase, "id" | "testCaseId" | "module">
+  tc: Pick<TestCase, "id" | "testCaseId" | "module" | "type">
 ): Promise<{ path: string; content: string } | null> {
   if (!projectRoot || !isTauri()) return null;
   const codes = [
@@ -75,7 +75,7 @@ export async function assertTcReadyForUnitGen(opts: {
   projectRoot: string | null | undefined;
   tc: Pick<
     TestCase,
-    "id" | "testCaseId" | "module" | "title" | "testData"
+    "id" | "testCaseId" | "module" | "title" | "testData" | "type"
   >;
 }): Promise<UnitGenGateResult> {
   const label = opts.tc.testCaseId || opts.tc.title;

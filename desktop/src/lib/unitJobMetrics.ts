@@ -426,6 +426,45 @@ export function clearUnitJobMetrics(projectId?: string | null): void {
 
 
 
+/** Lấy metric gần nhất cho project (ưu tiên bản ghi có phase metrics). */
+export function latestUnitJobMetric(projectId?: string | null): UnitJobMetricEvent | null {
+
+  const pid = (projectId || "").trim();
+
+  const events = readAll().filter((e) => !pid || e.projectId === pid);
+
+  if (!events.length) return null;
+
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+
+    const e = events[i]!;
+
+    if (
+      typeof e.cliTimeMs === "number" ||
+      typeof e.promptChars === "number" ||
+      typeof e.contextSize === "number" ||
+      typeof e.retrievedFiles === "number"
+    ) {
+      return e;
+    }
+
+  }
+
+  return events[events.length - 1] ?? null;
+
+}
+
+/** Get metric by unit jobId (Gen → Verify correlation). */
+export function unitJobMetricByJobId(
+  unitJobId?: string | null
+): UnitJobMetricEvent | null {
+  const id = (unitJobId || "").trim();
+  if (!id) return null;
+  const events = readAll().filter((e) => e.jobId === id);
+  if (!events.length) return null;
+  return events[events.length - 1] ?? null;
+}
+
 /** Nhãn hiển thị thân thiện (U0 copy). */
 
 export function labelContextSource(source?: string | null): string {

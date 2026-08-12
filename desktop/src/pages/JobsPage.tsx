@@ -24,6 +24,7 @@ import type {
 } from "../api/types";
 import { jobStatusLabel, labelOf } from "../i18n/labels";
 import { activityUrl, e2eTestUrl, ROUTES, unitTestUrl } from "../lib/productRoutes";
+import { latestUnitJobMetric } from "../lib/unitJobMetrics";
 import { useProject } from "../state/ProjectContext";
 
 const ACTIVE = new Set(["Queued", "PendingWorker", "Running", "Pending"]);
@@ -214,6 +215,10 @@ export default function JobsPage() {
   const latestSummary = detail?.verifies[0]
     ? parseSummary(detail.verifies[0].summaryJson)
     : null;
+  const latestUnitMetric =
+    detail?.run?.testType === "unit" && project
+      ? latestUnitJobMetric(project.id)
+      : null;
 
   function buildRunColumns(
     board: "unit-jobs" | "e2e-jobs"
@@ -643,6 +648,24 @@ export default function JobsPage() {
                   "—"
                 )}
               </Descriptions.Item>
+              {latestUnitMetric ? (
+                <Descriptions.Item label="Gen perf (local)">
+                  <Space wrap>
+                    {typeof latestUnitMetric.cliTimeMs === "number" ? (
+                      <Tag color="blue">cli {latestUnitMetric.cliTimeMs}ms</Tag>
+                    ) : null}
+                    {typeof latestUnitMetric.promptChars === "number" ? (
+                      <Tag>prompt {latestUnitMetric.promptChars}</Tag>
+                    ) : null}
+                    {typeof latestUnitMetric.contextSize === "number" ? (
+                      <Tag>context {latestUnitMetric.contextSize}</Tag>
+                    ) : null}
+                    {typeof latestUnitMetric.retrievedFiles === "number" ? (
+                      <Tag>files {latestUnitMetric.retrievedFiles}</Tag>
+                    ) : null}
+                  </Space>
+                </Descriptions.Item>
+              ) : null}
             </Descriptions>
 
             {detail.verifies[0] ? (

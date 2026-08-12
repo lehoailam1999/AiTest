@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
@@ -35,6 +36,12 @@ from app.services.ai_service import (
     generate_test_cases_for_connection,
 )
 from app.services.unit_tc_gen_guard import filter_unit_tc_drafts
+from app.services.unit_tc_primary_coverage import (
+    build_primary_inventory,
+    coverage_summary,
+    format_primary_miss_block,
+    missing_primary_signals,
+)
 from app.services.requirement_content import (
     change_summary_from_description,
     content_meta_from_description,
@@ -682,6 +689,224 @@ def _resolve_fan_out_titles(
     return titles
 
 
+def _module_has_any_draft(module_title: str, drafts: list) -> bool:
+    scope = (module_title or "").strip()
+    if not scope:
+        return True
+    scope_ascii = _module_ascii_key(scope)
+    for d in drafts or []:
+        mod = str(getattr(d, "module", "") or "").strip()
+        if not mod:
+            continue
+        if tc_matches_module_scope(mod, scope) or tc_matches_module_scope(scope, mod):
+            return True
+        if _module_ascii_key(mod) == scope_ascii:
+            return True
+    return False
+
+
+def _module_ascii_key(raw: str) -> str:
+    t = unicodedata.normalize("NFD", raw or "")
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+    t = t.replace("đ", "d").replace("Đ", "D")
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]+", " ", t.lower())).strip()
+
+
+def _missing_modules_for_retry(expected_modules: list[str], drafts: list) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in expected_modules or []:
+        title = str(raw or "").strip()
+        if not title:
+            continue
+        key = _module_ascii_key(normalize_function_label(title) or title)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _module_has_any_draft(title, drafts):
+            out.append(title)
+    return out
+
+
+def _knowledge_from_snap_bundle(bundle: dict | None) -> dict:
+    if not isinstance(bundle, dict):
+        return {}
+    if bundle.get("schema") == "freeze-bundle-v1":
+        kw = bundle.get("knowledge")
+        return kw if isinstance(kw, dict) else {}
+    return bundle
+
+
+async def _retry_unit_primary_coverage(
+    *,
+    db: Session,
+    job_id: uuid.UUID,
+    conn: AiBackendConnection,
+    api_key: str | None,
+    title: str,
+    content: str,
+    ctx,
+    preferred_engine: str | None,
+    snap_bundle: dict | None,
+    drafts: list,
+    existing_keys: set[str],
+    project_id: uuid.UUID,
+    source_id: uuid.UUID | None,
+    snap_id: uuid.UUID | None,
+    default_module: str | None,
+    doc_hash: str | None,
+    doc_version: int,
+    saved_total: list[int],
+    on_progress,
+    warm_key: str,
+    is_cursor: bool,
+    cursor_hidden: bool,
+    fan_errors: list[str],
+) -> None:
+    """After Unit TC gen: retry CLI for Knowledge PRIMARY still missing markers."""
+    from app.services.job_progress import set_job_progress
+
+    if (preferred_engine or "").strip().lower() != "unit":
+        return
+    kw = _knowledge_from_snap_bundle(snap_bundle)
+    inventory = build_primary_inventory(kw)
+    if not inventory:
+        return
+    missing = missing_primary_signals(inventory, drafts)
+    if not missing:
+        set_job_progress(
+            job_id,
+            f"[primary-cover] đủ {len(inventory)} tín hiệu PRIMARY (BR/VAL/ERR/AC)",
+        )
+        return
+
+    summary = coverage_summary(inventory, missing)
+    max_rounds = 2
+    batch_size = 10
+    try:
+        max_rounds = max(
+            1,
+            min(4, int(os.environ.get("AITEST_TC_UNIT_PRIMARY_RETRY_ROUNDS", "2"))),
+        )
+    except ValueError:
+        max_rounds = 2
+    try:
+        batch_size = max(
+            4,
+            min(20, int(os.environ.get("AITEST_TC_UNIT_PRIMARY_RETRY_BATCH", "10"))),
+        )
+    except ValueError:
+        batch_size = 10
+
+    set_job_progress(
+        job_id,
+        f"[primary-cover] thiếu {summary['missing']}/{summary['inventory']} PRIMARY "
+        f"(BR={summary['perBucket']['BUSINESS_RULES']['missing']} "
+        f"VAL={summary['perBucket']['VALIDATION_DATA']['missing']} "
+        f"ERR={summary['perBucket']['ERROR_HANDLING']['missing']} "
+        f"AC={summary['perBucket']['ACCEPTANCE']['missing']}) → retry…",
+    )
+
+    from app.llm.base import GenerateContext
+
+    for round_i in range(1, max_rounds + 1):
+        missing = missing_primary_signals(inventory, drafts)
+        if not missing:
+            break
+        chunk = missing[:batch_size]
+        miss_block = format_primary_miss_block(chunk, limit=batch_size)
+        # Keep Knowledge head + miss block (avoid huge re-send)
+        base = (content or "").strip()
+        if len(base) > 10_000:
+            base = base[:9_980] + "\n...[truncated]"
+        fill_content = f"{base}\n\n{miss_block}".strip()
+        fill_ctx = GenerateContext(
+            mode=ctx.mode,
+            content_version=ctx.content_version,
+            change_summary=ctx.change_summary,
+            existing_cases=ctx.existing_cases,
+            source_context=ctx.source_context,
+            topic_scope=(
+                "BỔ SUNG Unit TC cho PRIMARY còn thiếu (anti-miss).\n"
+                "Chỉ cover các id trong khối «PRIMARY coverage gap».\n"
+                "Mỗi TC: type=Unit, primaryBucket đúng, trace.requirementIds chứa id."
+            ),
+            scope_topic_notes=ctx.scope_topic_notes,
+            requirement_description=ctx.requirement_description,
+            custom_rules=ctx.custom_rules,
+            project_rules=ctx.project_rules,
+            user_rules=ctx.user_rules,
+            feature_titles=list(ctx.feature_titles or [])[:8],
+            preferred_engine="unit",
+            speed_mode="full",
+            max_tc_per_module=None,
+        )
+        set_job_progress(
+            job_id,
+            f"[primary-cover] round {round_i}/{max_rounds}: "
+            f"sinh bổ sung {len(chunk)} tín hiệu…",
+        )
+        try:
+            part, _meta = await generate_test_cases_for_connection(
+                conn,
+                title,
+                fill_content,
+                fill_ctx,
+                api_key=api_key,
+                on_progress=on_progress,
+                prefer_oneshot=True,
+                session_topic_key=f"{warm_key}-primary-{round_i}",
+                create_chat=cursor_hidden if is_cursor else False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            fan_errors.append(f"primary-cover round {round_i}: {exc}")
+            set_job_progress(job_id, f"[primary-cover] round {round_i} lỗi: {exc}")
+            break
+        if not part:
+            set_job_progress(job_id, f"[primary-cover] round {round_i}: CLI trả 0 TC")
+            break
+        n = _persist_generated_drafts(
+            db,
+            project_id=project_id,
+            job_id=job_id,
+            source_id=source_id,
+            snap_id=snap_id,
+            drafts=part,
+            existing_keys=existing_keys,
+            default_module=default_module,
+            preferred_engine="unit",
+            doc_hash=doc_hash,
+            doc_version=doc_version,
+        )
+        saved_total[0] += n
+        drafts.extend(part)
+        set_job_progress(
+            job_id,
+            f"[primary-cover] round {round_i}: +{len(part)} TC (lưu {n})",
+        )
+
+    remain = missing_primary_signals(inventory, drafts)
+    summary2 = coverage_summary(inventory, remain)
+    if remain:
+        sample = ", ".join(f"{s.req_id}" for s in remain[:8])
+        fan_errors.append(
+            "primary-coverage-miss: "
+            + sample
+            + ("…" if len(remain) > 8 else "")
+        )
+        set_job_progress(
+            job_id,
+            f"[primary-cover] còn thiếu {summary2['missing']}/{summary2['inventory']}: "
+            + sample
+            + ("…" if len(remain) > 8 else ""),
+        )
+    else:
+        set_job_progress(
+            job_id,
+            f"[primary-cover] đủ {summary2['inventory']} tín hiệu PRIMARY sau retry",
+        )
+
+
 async def process_generate_job(job_id: uuid.UUID) -> None:
     """Async worker — generate test cases from requirement source.
 
@@ -1259,7 +1484,12 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     except ValueError:
                         concurrency = 4
                     # Slimmer per-module budgets (module-scoped freeze slice)
-                    content_soft_max = 12_000
+                    # Per-module budgets — Unit full keeps more PRIMARY in slice
+                    content_soft_max = (
+                        16_000
+                        if preferred_engine == "unit" and speed_mode == "full"
+                        else 12_000
+                    )
                     source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
                     analysis_soft_max = 6_000
                 else:
@@ -1269,7 +1499,11 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         )
                     except ValueError:
                         concurrency = 3
-                    content_soft_max = 12_000
+                    content_soft_max = (
+                        16_000
+                        if preferred_engine == "unit" and speed_mode == "full"
+                        else 12_000
+                    )
                     source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
                     analysis_soft_max = 6_000
 
@@ -1411,6 +1645,11 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             create_chat=cursor_hidden if is_cursor else False,
                         )
                         title_map = {t.lower(): t for t in feat_titles}
+                        title_norm_map = {
+                            normalize_function_label(t).lower(): t
+                            for t in feat_titles
+                            if normalize_function_label(t)
+                        }
                         for d in part:
                             if not d.module:
                                 d.module = feat_titles[0]
@@ -1418,6 +1657,10 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                                 key = str(d.module).strip().lower()
                                 if key in title_map:
                                     d.module = title_map[key]
+                                    continue
+                                key_norm = normalize_function_label(str(d.module)).lower()
+                                if key_norm and key_norm in title_norm_map:
+                                    d.module = title_norm_map[key_norm]
                         await _persist_module_drafts(label, part)
                         set_job_progress(
                             job_id,
@@ -1516,6 +1759,81 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         clear_job_progress(job_id)
                         return
                     # pause requested but nothing left pending → fall through to complete
+
+                if preferred_engine == "unit":
+                    missing_mods = _missing_modules_for_retry(titles_for_fan, drafts)
+                    if missing_mods:
+                        retry_cap = 6
+                        try:
+                            retry_cap = max(
+                                1,
+                                min(
+                                    12,
+                                    int(
+                                        os.environ.get(
+                                            "AITEST_TC_UNIT_MISSING_RETRY_MAX", "6"
+                                        )
+                                    ),
+                                ),
+                            )
+                        except ValueError:
+                            retry_cap = 6
+                        retry_mods = missing_mods[:retry_cap]
+                        set_job_progress(
+                            job_id,
+                            f"[anti-miss] thiếu {len(missing_mods)} module chưa có TC "
+                            f"→ retry nhẹ {len(retry_mods)} module: "
+                            f"{', '.join(retry_mods[:6])}{'…' if len(retry_mods) > 6 else ''}",
+                        )
+                        retry_base = total
+                        for r_idx, mod in enumerate(retry_mods, 1):
+                            await _run_claimed(retry_base + r_idx, [mod])
+                        remain_missing = _missing_modules_for_retry(titles_for_fan, drafts)
+                        if remain_missing:
+                            fan_errors.append(
+                                "coverage-miss: "
+                                + ", ".join(remain_missing[:8])
+                                + ("…" if len(remain_missing) > 8 else "")
+                            )
+                            set_job_progress(
+                                job_id,
+                                "[anti-miss] còn module chưa map TC sau retry: "
+                                + ", ".join(remain_missing[:6])
+                                + ("…" if len(remain_missing) > 6 else ""),
+                            )
+                        else:
+                            set_job_progress(
+                                job_id,
+                                "[anti-miss] retry hoàn tất — đã phủ đủ module fan-out",
+                            )
+
+                await _retry_unit_primary_coverage(
+                    db=db,
+                    job_id=job_id,
+                    conn=conn,
+                    api_key=api_key,
+                    title=title,
+                    content=content,
+                    ctx=ctx,
+                    preferred_engine=preferred_engine,
+                    snap_bundle=snap_bundle
+                    if snap_bundle is not None
+                    else snap_bundle_early,
+                    drafts=drafts,
+                    existing_keys=existing_keys,
+                    project_id=job.project_id,
+                    source_id=job.source_id,
+                    snap_id=snap_id,
+                    default_module=default_module,
+                    doc_hash=doc_hash,
+                    doc_version=doc_version,
+                    saved_total=saved_total,
+                    on_progress=_cli_progress,
+                    warm_key=f"tc-job-{job_id}",
+                    is_cursor=is_cursor,
+                    cursor_hidden=cursor_hidden,
+                    fan_errors=fan_errors,
+                )
 
                 set_job_progress(
                     job_id,
@@ -1619,6 +1937,40 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
             )
             saved_total[0] += n
         persist_ms = elapsed_ms(t_persist)
+
+        if preferred_engine == "unit" and not used_fanout:
+            from app.features.requirement_studio.snapshot_prompt import parse_json_field as _pj
+
+            await _retry_unit_primary_coverage(
+                db=db,
+                job_id=job_id,
+                conn=conn,
+                api_key=api_key,
+                title=title,
+                content=content,
+                ctx=ctx,
+                preferred_engine=preferred_engine,
+                snap_bundle=snap_bundle_early
+                if snap_bundle_early is not None
+                else (_pj(snap.payload_json) if snap else None),
+                drafts=drafts,
+                existing_keys=existing_keys,
+                project_id=job.project_id,
+                source_id=job.source_id,
+                snap_id=snap_id,
+                default_module=default_module,
+                doc_hash=doc_hash,
+                doc_version=doc_version,
+                saved_total=saved_total,
+                on_progress=_cli_progress,
+                warm_key=f"tc-job-{job_id}",
+                is_cursor=connection_is_cursor_cli(conn),
+                cursor_hidden=bool(
+                    connection_is_cursor_cli(conn) and cursor_tc_hidden_chat_enabled()
+                ),
+                fan_errors=fan_errors,
+            )
+
         total_ms = elapsed_ms(t0)
         provider = str(runner_meta.get("runnerUsed") or "unknown")
         logger.info(

@@ -60,12 +60,67 @@ async function checkSharedAitestPlaywright(): Promise<boolean> {
   }
 }
 
+function pkgDeclaresPlaywright(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    return Boolean(
+      parsed?.dependencies?.["@playwright/test"] ||
+        parsed?.devDependencies?.["@playwright/test"]
+    );
+  } catch {
+    return /@playwright\/test/.test(raw);
+  }
+}
+
+/** Infer package root from playwright.config.* when profile.packageRoot is empty. */
+async function inferPlaywrightPackageRoot(
+  projectRoot: string,
+  io: ProfileIo
+): Promise<string> {
+  try {
+    const files = await io.listFiles(projectRoot, [".ts", ".js", ".mjs", ".json"]);
+    const configs = files
+      .map(norm)
+      .filter(
+        (f) =>
+          /playwright\.config\.(ts|js|mjs)$/i.test(f) &&
+          !f.includes("/.ai-test/staging/") &&
+          !f.includes("/node_modules/")
+      )
+      .sort(
+        (a, b) =>
+          a.split("/").length - b.split("/").length || a.localeCompare(b)
+      );
+    for (const cfg of configs) {
+      const idx = cfg.lastIndexOf("/");
+      const dir = idx >= 0 ? cfg.slice(0, idx) : "";
+      if (dir === undefined) continue;
+      // root config → dir ""
+      const pkgRel = dir ? `${dir}/package.json` : "package.json";
+      const nmRel = dir
+        ? `${dir}/node_modules/@playwright/test/package.json`
+        : "node_modules/@playwright/test/package.json";
+      const pkg = await io.readFileOptional(projectRoot, pkgRel);
+      if (pkgDeclaresPlaywright(pkg)) return dir;
+      if (await io.fileExists(projectRoot, nmRel)) return dir;
+    }
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
 async function checkPlaywrightInstalled(
   projectRoot: string,
   packageRoot: string,
   io: ProfileIo
 ): Promise<"project" | "aitest-shared" | "none"> {
-  const prefix = packageRoot ? `${norm(packageRoot)}/` : "";
+  const resolvedRoot = packageRoot || (await inferPlaywrightPackageRoot(projectRoot, io));
+  const prefix = resolvedRoot ? `${norm(resolvedRoot)}/` : "";
   const candidates = [
     `${prefix}node_modules/@playwright/test/package.json`,
     "node_modules/@playwright/test/package.json",
@@ -73,40 +128,27 @@ async function checkPlaywrightInstalled(
   for (const rel of candidates) {
     if (await io.fileExists(projectRoot, rel)) return "project";
   }
-  const files = await io.listFiles(projectRoot);
-  if (files.some((f) => norm(f).includes("node_modules/@playwright/test/"))) {
-    return "project";
-  }
-  // Monorepo/workspace: package may be declared at packageRoot even when node_modules
-  // is not listed by file provider (or uses non-standard linker).
-  const checkPkg = (raw: string | null): boolean => {
-    if (!raw) return false;
-    try {
-      const parsed = JSON.parse(raw) as {
-        dependencies?: Record<string, string>;
-        devDependencies?: Record<string, string>;
-      };
-      return Boolean(
-        parsed?.dependencies?.["@playwright/test"] ||
-          parsed?.devDependencies?.["@playwright/test"]
-      );
-    } catch {
-      return false;
-    }
-  };
   const pkgJsonPath = `${prefix}package.json`;
-  if (checkPkg(await io.readFileOptional(projectRoot, pkgJsonPath))) {
-    return "project";
-  }
-  // Monorepo fallback: scan package.json files for declared @playwright/test.
-  const pkgFiles = files
-    .map((f) => norm(f))
-    .filter((f) => /(?:^|\/)package\.json$/i.test(f))
-    .slice(0, 80);
-  for (const rel of pkgFiles) {
-    if (checkPkg(await io.readFileOptional(projectRoot, rel))) {
+  if (pkgDeclaresPlaywright(await io.readFileOptional(projectRoot, pkgJsonPath))) {
+    // Declared — treat as project if node_modules present OR shared can run
+    if (
+      await io.fileExists(
+        projectRoot,
+        `${prefix}node_modules/@playwright/test/package.json`
+      )
+    ) {
       return "project";
     }
+  }
+  // API authoritative check (sees nested test/*/node_modules + shared runner)
+  try {
+    const { e2e } = await import("../../api");
+    const st = await e2e.playwrightCheck({ projectRoot });
+    if (st?.ok && (st.source === "project" || st.source === "aitest")) {
+      return st.source === "aitest" ? "aitest-shared" : "project";
+    }
+  } catch {
+    /* ignore */
   }
   if (await checkSharedAitestPlaywright()) return "aitest-shared";
   return "none";
@@ -123,13 +165,32 @@ export async function resolveProfileForVerify(
   const authStrategy =
     profile?.auth?.strategy ||
     (ui.useStorageState ? "storageState" : "uiLogin");
-  const packageRoot = pw?.packageRoot ?? "";
+  let packageRoot = (pw?.packageRoot ?? "").trim();
+  if (!packageRoot) {
+    packageRoot = await inferPlaywrightPackageRoot(projectRoot, profileIo);
+  }
   const playwrightSource = await checkPlaywrightInstalled(
     projectRoot,
     packageRoot,
     profileIo
   );
   const playwrightInstalled = playwrightSource !== "none";
+  // Prefer API-reported package root when local profile left it empty
+  if (!packageRoot && playwrightInstalled) {
+    try {
+      const { e2e } = await import("../../api");
+      const st = await e2e.playwrightCheck({ projectRoot });
+      if (st?.packageRoot && st.source === "project") {
+        const abs = String(st.packageRoot).replace(/\\/g, "/");
+        const rootAbs = projectRoot.replace(/\\/g, "/").replace(/\/$/, "");
+        if (abs.toLowerCase().startsWith(rootAbs.toLowerCase())) {
+          packageRoot = abs.slice(rootAbs.length).replace(/^\//, "");
+        }
+      }
+    } catch {
+      /* keep inferred */
+    }
+  }
 
   const discoverDirs = pw?.storageState?.discoverDirs ?? [".ai-test/auth"];
   const canonicalRel = pw?.storageState?.canonicalRel ?? "./fixtures/storageState.json";

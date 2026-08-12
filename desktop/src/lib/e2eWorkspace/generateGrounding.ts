@@ -65,6 +65,8 @@ export function resolveFeaturePathSeed(opts: {
   };
   moduleMap?: Record<string, string>;
   phase5FeaturePathHint?: string;
+  /** Requirement Studio title — secondary moduleMap key */
+  requirementTitle?: string | null;
 }): string | undefined {
   const tc = opts.testCase || {};
   const tcMarkerPath =
@@ -74,10 +76,15 @@ export function resolveFeaturePathSeed(opts: {
       testData: tc.testData || undefined,
       steps: tc.steps || undefined,
     }) || undefined;
-  const moduleMapPath = lookupModuleMapPath(tc.module, opts.moduleMap);
+  // Unusable TC markers (VN slug, localhost origin) must not poison — fall through to moduleMap.
+  const usableMarker = isUsableFeaturePath(tcMarkerPath) ? tcMarkerPath : undefined;
+  const moduleMapPath =
+    lookupModuleMapPath(tc.module, opts.moduleMap) ||
+    lookupModuleMapPath(opts.requirementTitle, opts.moduleMap) ||
+    lookupModuleMapPath(tc.title, opts.moduleMap);
   const picked =
     (isUsableFeaturePath(opts.explicitFeaturePath) ? opts.explicitFeaturePath!.trim() : undefined) ||
-    (isUsableFeaturePath(tcMarkerPath) ? tcMarkerPath : undefined) ||
+    usableMarker ||
     (isUsableFeaturePath(moduleMapPath) ? moduleMapPath : undefined) ||
     (isUsableFeaturePath(opts.phase5FeaturePathHint) ? opts.phase5FeaturePathHint!.trim() : undefined) ||
     undefined;

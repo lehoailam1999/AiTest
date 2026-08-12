@@ -47,6 +47,11 @@ export type { UnitGenEngine, UnitGenEngineCtx, UnitGenEngineResult } from "./uni
 type NotifyFn = (method: string, params: unknown) => void;
 
 const cancelledIds = new Set<string>();
+const PERF_MAX_RELATED_FILES = 3;
+const PERF_MAX_RELATED_CHARS_EACH = Math.max(
+  2000,
+  Math.floor(UNIT_GEN_LIMITS.maxExcerptChars * 0.5)
+);
 
 export function markUnitGenCancelled(commandId: string): void {
   cancelledIds.add(commandId);
@@ -59,7 +64,7 @@ function normRel(p: string): string {
 async function readSourceExcerpt(
   root: string,
   rel: string,
-  maxChars = UNIT_GEN_LIMITS.maxExcerptChars
+  maxChars: number = UNIT_GEN_LIMITS.maxExcerptChars
 ): Promise<string | null> {
   try {
     const abs = path.join(root, rel);
@@ -271,6 +276,7 @@ async function genOneItem(
   index: number,
   total: number,
   paramsCodeAliases: Record<string, string[]> | null | undefined,
+  mdCache: Map<string, { path: string; content: string } | null>,
   runPrompt?: (
     prompt: string,
     timeoutMs: number,
@@ -300,14 +306,19 @@ async function genOneItem(
     };
   }
 
-  const md = await findApprovedTcMarkdown(root, item.testCaseId);
+  const cacheKey = (item.testCaseId || "").trim();
+  let md = mdCache.get(cacheKey);
+  if (md === undefined) {
+    md = await findApprovedTcMarkdown(root, item.testCaseId);
+    mdCache.set(cacheKey, md ?? null);
+  }
   if (!md?.content?.trim()) {
     return {
       perTc: {
         testCaseId: item.testCaseId,
         genOk: false,
         error:
-          `Missing Approved TC markdown for «${item.testCaseId}» under .ai-test/test-cases/. ` +
+          `Missing Approved TC markdown for «${item.testCaseId}» under .ai-test/test-cases/UnitTest/. ` +
           `Duyệt TC trong AITest (Approve ghi MD) trước khi Gen Unit.`,
       },
       meta: {
@@ -465,6 +476,7 @@ async function genOneItem(
     lastAlignScore = disk.alignmentScore;
     if (disk.primaryPath && disk.source) {
       const rel = toRepoRelativePath(root, disk.primaryPath);
+      const alignScore = disk.alignmentScore;
       if (isNonProductionUnitPath(rel)) {
         const debugRel = await writeUnitGenDebugDump({
           workspaceRoot: root,
@@ -475,10 +487,10 @@ async function genOneItem(
           blockedReason: `Non-production SUT «${rel}»`,
           domainGuard: "skip",
           resolvedSut: rel,
-          alignmentScore: disk.alignmentScore,
+          alignmentScore: alignScore,
           candidatesTop3: (disk.candidates || []).slice(0, 3).map((p) => ({
             path: p,
-            score: disk.alignmentScore,
+            score: alignScore,
             reason: "candidate",
           })),
         });
@@ -675,7 +687,7 @@ async function genOneItem(
           primaryPath || "",
         ].map((p) => toRepoRelativePath(root, p)),
         featureTokens: [...markers.codes, ...(item.module || "").split(/\s+/)],
-        maxRelated: UNIT_GEN_LIMITS.maxRelatedFiles,
+        maxRelated: PERF_MAX_RELATED_FILES,
         preferDtoValidator: true,
       }),
     ]
@@ -683,13 +695,13 @@ async function genOneItem(
       .filter((p) => p && p !== primaryPath);
     const uniqRelated = [...new Set(relatedRels)].slice(
       0,
-      UNIT_GEN_LIMITS.maxRelatedFiles
+      PERF_MAX_RELATED_FILES
     );
     if (uniqRelated.length) {
       const merged = await formatRelatedBlocks(
         root,
         uniqRelated,
-        UNIT_GEN_LIMITS.maxExcerptChars
+        PERF_MAX_RELATED_CHARS_EACH
       );
       if (merged.trim()) related = merged;
     } else if (allowDisk && disk?.related?.trim()) {
@@ -1053,6 +1065,7 @@ export async function handleCodegenGenerateUnitBatch(
   const generatedFiles: CodegenGeneratedFileMeta[] = [];
   const perTc: CodegenPerTcResult[] = [];
   let anyTruncated = false;
+  const mdCache = new Map<string, { path: string; content: string } | null>();
 
   let i = 0;
   try {
@@ -1069,6 +1082,7 @@ export async function handleCodegenGenerateUnitBatch(
         i,
         params.items.length,
         params.codeAliases,
+        mdCache,
         runPrompt
       );
       perTc.push(one.perTc);

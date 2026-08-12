@@ -30,6 +30,21 @@ function unitGenDebugEnabled(): boolean {
   return v !== "0" && v !== "false" && v !== "off";
 }
 
+/** Full prompt dump is heavy I/O — off by default unless explicitly enabled. */
+function unitGenPromptDumpEnabled(): boolean {
+  const v = (process.env.AITEST_UNIT_GEN_DEBUG_PROMPT || "0").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "on";
+}
+
+function adaptiveUnitGenTimeoutMs(prompt: string): number {
+  const base = UNIT_GEN_LIMITS.genTimeoutMs;
+  const chars = (prompt || "").length;
+  // Keep short prompts snappy while preserving headroom for very large contexts.
+  if (chars <= 12_000) return Math.max(90_000, Math.floor(base * 0.5));
+  if (chars <= 24_000) return Math.max(120_000, Math.floor(base * 0.75));
+  return base;
+}
+
 function safeTcDebugId(testCaseId: string): string {
   return (testCaseId || "unknown").replace(/[^\w.-]+/g, "_").slice(0, 96) || "unknown";
 }
@@ -62,6 +77,7 @@ export async function writeUnitGenDebugDump(opts: {
   intentClasses?: string[];
   minAlignment?: number;
   ruleHits?: string[];
+  includePrompt?: boolean;
 }): Promise<string | null> {
   if (!unitGenDebugEnabled()) return null;
   const dir = path.join(opts.workspaceRoot, ".ai-test", "logs", "unit-gen-debug");
@@ -103,7 +119,8 @@ export async function writeUnitGenDebugDump(opts: {
     "",
   ];
   const bodyParts = [...header];
-  if (opts.gateDecision === "gen" && opts.prompt?.trim()) {
+  const includePrompt = opts.includePrompt === true && unitGenPromptDumpEnabled();
+  if (opts.gateDecision === "gen" && includePrompt && opts.prompt?.trim()) {
     bodyParts.push(
       "## Full prompt sent to AI CLI",
       "",
@@ -486,21 +503,23 @@ export class CursorAgentCliEngine implements UnitGenEngine {
       gateDecision: "gen",
       domainGuard: "pass",
       resolvedSut: ctx.primaryPath || "unresolved",
+      includePrompt: false,
     });
     if (debugRel) {
       ctx.onProgress?.(`debug dump → ${debugRel}`);
     }
     const cliStarted = Date.now();
+    const timeoutMs = adaptiveUnitGenTimeoutMs(prompt);
     const raw = ctx.runPrompt
       ? await ctx.runPrompt(
           prompt,
-          UNIT_GEN_LIMITS.genTimeoutMs,
+          timeoutMs,
           (s) => ctx.onProgress?.(s)
         )
       : await runCursorAgentOneshot(
           prompt,
           ctx.workspaceRoot,
-          UNIT_GEN_LIMITS.genTimeoutMs,
+          timeoutMs,
           (s) => ctx.onProgress?.(s)
         );
     const cliTimeMs = Date.now() - cliStarted;

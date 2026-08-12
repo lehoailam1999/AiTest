@@ -1,11 +1,11 @@
 /**
- * Phase C — sync Approved TC markdown into project `.ai-test/test-cases/`.
+ * Phase C — sync Approved TC markdown into project `.ai-test/test-cases/{UnitTest|E2ETest}/`.
  * Renderer-safe: chỉ dùng Tauri writeTextFile (+ IDE). Không import node:fs.
  */
 import { parseBridgeDiscoveryJson } from "@aitest/ide-protocol";
 import { testcases } from "../../api";
 import type { TestCase } from "../../api/types";
-import { isTauri, readIdeBridgeDiscovery, writeTextFile } from "../../tauri/bridge";
+import { isTauri, listSourceFiles, readIdeBridgeDiscovery, readTextFile, writeTextFile } from "../../tauri/bridge";
 import { getIdeRpcClientOrNull, useIdeBridgeSession } from "../ideBridge/session";
 import { newCodegenCommandId } from "../ideProtocol/codegenCommands";
 import {
@@ -16,6 +16,10 @@ import { enrichApprovedCasesWithUnitMarkers } from "./enrichUnitMarkersFromIndex
 import { enrichApprovedCasesWithE2eMarkers } from "./enrichE2eMarkersFromIndex";
 import { mergeRequirementTitleFillGap } from "./requirementTitleFillGap";
 import { buildRequirementTitleByCaseKey } from "./resolveRequirementTitles";
+import { createTauriProfileIo } from "../projectProfile/tauriIo";
+import { loadGenerateGroundingProfile } from "../e2eWorkspace/generateGrounding";
+import { loadOrBuildE2eRouteCatalog } from "../e2eWorkspace/e2eRouteCatalogCache";
+import type { E2eRouteCatalog } from "../e2eWorkspace/e2eRouteCatalog";
 
 export {
   parseApprovedTcGrounding,
@@ -23,6 +27,7 @@ export {
   renderE2eGroundingBlock,
   buildApprovedTcMarkdownFiles,
   approvedTcMarkdownRelPath,
+  approvedTcKindFolder,
   renderApprovedTestCaseMarkdown,
   type ApprovedTcMdFile,
   type ApprovedTcMdRenderOpts,
@@ -229,7 +234,7 @@ async function writeViaIde(
     written,
     errors,
     projectRoot: root,
-    message: `Đã ghi ${written.length} TC → ${root}/.ai-test/test-cases/ (IDE)`,
+    message: `Đã ghi ${written.length} TC → ${root}/.ai-test/test-cases/{UnitTest|E2ETest}/ (IDE)`,
   };
 }
 
@@ -302,6 +307,50 @@ export async function syncApprovedTestCasesMd(opts: {
   // Auto path:/code: (Unit) & path:/authRole: (E2E) when seed is confident.
   let casesToWrite = approved;
   let enrichNote = "";
+  let e2eModuleMap: Record<string, string> = {};
+  let e2eFallbackRole: string | null = null;
+  let e2eRouteCatalog: E2eRouteCatalog | null = null;
+  let catalogNote = "";
+  try {
+    if (isTauri() && root) {
+      const { projectProfile } = await loadGenerateGroundingProfile(
+        root,
+        createTauriProfileIo()
+      );
+      e2eModuleMap = projectProfile?.moduleMap || {};
+      e2eFallbackRole =
+        (projectProfile?.auth?.roles || []).find((r) => (r || "").trim())?.trim() ||
+        null;
+
+      // One catalog build/cache hit per Approve batch — routing files only (≤40).
+      const hasE2e = approved.some((tc) => {
+        const t = (tc.type || "").trim().toUpperCase();
+        return t === "E2E" || t === "E2E_UI" || t === "UI";
+      });
+      if (hasE2e) {
+        try {
+          const loaded = await loadOrBuildE2eRouteCatalog({
+            allSourcePaths: opts.allSourcePaths,
+            io: {
+              listSourcePaths: () =>
+                listSourceFiles(root, [".ts", ".tsx", ".js", ".jsx", ".html"]),
+              readText: (pathRel) => readTextFile(root, pathRel.replace(/\\/g, "/")),
+              writeText: (pathRel, content) =>
+                writeTextFile(root, pathRel.replace(/\\/g, "/"), content).then(() => undefined),
+            },
+          });
+          e2eRouteCatalog = loaded.catalog;
+          catalogNote = loaded.fromCache
+            ? `, routes:${loaded.catalog.routes.length}(cache)`
+            : `, routes:${loaded.catalog.routes.length}(scan:${loaded.routingFileCount})`;
+        } catch {
+          /* catalog optional */
+        }
+      }
+    }
+  } catch {
+    /* profile optional */
+  }
   try {
     const enrichedUnit = await enrichApprovedCasesWithUnitMarkers({
       projectId: opts.projectId,
@@ -316,6 +365,11 @@ export async function syncApprovedTestCasesMd(opts: {
 
     const enrichedE2e = await enrichApprovedCasesWithE2eMarkers({
       cases: casesToWrite,
+      moduleMap: e2eModuleMap,
+      fallbackRole: e2eFallbackRole,
+      requirementTitle: opts.requirementTitle,
+      requirementTitleByCaseKey,
+      routeCatalog: e2eRouteCatalog,
     });
     casesToWrite = enrichedE2e.cases;
 
@@ -326,10 +380,15 @@ export async function syncApprovedTestCasesMd(opts: {
         (enrichedUnit.retryEnrichedCount || 0) > 0
           ? `, retry:${enrichedUnit.retryEnrichedCount}`
           : "";
-      enrichNote = ` · auto-enrich: ${totalEnriched}/${approved.length} (Unit:${enrichedUnit.enrichedCount}, E2E:${enrichedE2e.enrichedCount}${retryNote}) via ${via}`;
+      const mapNote = Object.keys(e2eModuleMap).length
+        ? `, moduleMap:${Object.keys(e2eModuleMap).length}`
+        : "";
+      enrichNote = ` · auto-enrich: ${totalEnriched}/${approved.length} (Unit:${enrichedUnit.enrichedCount}, E2E:${enrichedE2e.enrichedCount}${retryNote}${mapNote}${catalogNote}) via ${via}`;
     } else if (enrichedUnit.indexFileCount > 0) {
       const via = enrichedUnit.usedCodeIndex ? "index.db" : "path-index";
-      enrichNote = ` · ${via} ${enrichedUnit.indexFileCount} files (chưa đủ tin cậy để auto-marker)`;
+      enrichNote = ` · ${via} ${enrichedUnit.indexFileCount} files (chưa đủ tin cậy để auto-marker)${catalogNote}`;
+    } else if (catalogNote) {
+      enrichNote = ` · e2e-catalog${catalogNote}`;
     }
   } catch {
     /* enrich optional — still sync MD */
@@ -339,6 +398,7 @@ export async function syncApprovedTestCasesMd(opts: {
   const files = buildApprovedTcMarkdownFiles(casesToWrite, {
     requirementTitle: opts.requirementTitle,
     requirementTitleByCaseKey,
+    fallbackRole: e2eFallbackRole,
   });
 
 
@@ -366,7 +426,7 @@ export async function syncApprovedTestCasesMd(opts: {
         projectRoot: root,
         warning,
         dbSyncedCount,
-        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/${enrichNote}${dbNote}`,
+        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/{UnitTest|E2ETest}/${enrichNote}${dbNote}`,
       };
     }
     // Tauri failed — try IDE

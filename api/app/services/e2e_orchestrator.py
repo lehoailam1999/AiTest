@@ -422,6 +422,9 @@ def find_playwright_package_root(project_root: str) -> Path | None:
                 "web",
                 "src",
                 "services",
+                "test",
+                "tests",
+                "e2e",
             }:
                 try:
                     for sub in child.iterdir():
@@ -611,9 +614,31 @@ def check_playwright_ready(project_root: str) -> PlaywrightCheck:
             listed = False
     if not listed and not has_package:
         try:
+            nest_names = {
+                "apps",
+                "packages",
+                "frontend",
+                "client",
+                "web",
+                "src",
+                "services",
+                "test",
+                "tests",
+                "e2e",
+            }
+            scan_dirs: list[Path] = []
             for child in root.iterdir():
                 if not child.is_dir() or child.name in _SKIP_DIR_NAMES:
                     continue
+                scan_dirs.append(child)
+                if child.name.lower() in nest_names:
+                    try:
+                        for sub in child.iterdir():
+                            if sub.is_dir() and sub.name not in _SKIP_DIR_NAMES:
+                                scan_dirs.append(sub)
+                    except OSError:
+                        pass
+            for child in scan_dirs:
                 pj = child / "package.json"
                 if not pj.is_file():
                     continue

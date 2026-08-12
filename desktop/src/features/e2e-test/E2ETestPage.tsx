@@ -53,8 +53,6 @@ import {
   verifyE2eForTestCase,
   verifyE2eModuleBatch,
   generateE2eForTestCase,
-  runE2eSmokeJob,
-  type SmokeJobReport,
   type E2eGenItem,
 } from "../../lib/e2eWorkspace";
 import {
@@ -330,7 +328,6 @@ export default function E2ETestPage() {
   const [batchGenItems, setBatchGenItems] = useState<E2eGenItem[]>([]);
   /** Phase 4 — last Verify/Heal metrics */
   const [verifyMetrics, setVerifyMetrics] = useState<E2eRunMetrics | null>(null);
-  const [smokeReport, setSmokeReport] = useState<SmokeJobReport | null>(null);
   const [stagingPreviewPath, setStagingPreviewPath] = useState<string | null>(null);
   const [singleRunId, setSingleRunId] = useState<string | null>(null);
   const [singlePrimarySpec, setSinglePrimarySpec] = useState<string>("");
@@ -1109,113 +1106,6 @@ export default function E2ETestPage() {
         setBusy(false);
         setBatchProgress(null);
       }
-    }
-  }
-
-  /** S5 — Smoke 10 TC: sequential Gen + taxonomy + Verify ≤3 Spec + G1–G7 report */
-  async function runStepSmoke() {
-    if (!project?.id || !localPath) {
-      message.warning("Cần project + root");
-      return;
-    }
-    if (!aiReady) {
-      message.warning("AI chưa Ready");
-      return;
-    }
-    const pool =
-      selectedBatchReq && batchCandidates.length > 0
-        ? batchCandidates
-        : approved.filter((t) => isE2eTestCaseType(t.type));
-    if (pool.length === 0) {
-      message.warning("Chưa có TC E2E Approved để smoke");
-      return;
-    }
-    const batchModule = selectedBatchReq
-      ? resolveBatchModuleFolder(pool, selectedBatchReq.title)
-      : resolveBatchModuleFolder(pool, pool[0]?.module || "E2E");
-
-    const control = batchControlRef.current;
-    control.start();
-    setBusy(true);
-    setSmokeReport(null);
-    setVerifyMetrics(null);
-    setBatchProgress({ current: 0, total: Math.min(10, pool.length), label: "S5 Smoke…" });
-    setActivePhase("generate");
-    setResultTab("log");
-    setRun((r) => setPhaseRunning(r, "generate"));
-    pushPhaseLog("generate", `→ S5 Smoke E2E Job · pool=${pool.length}\n`);
-
-    try {
-      const t0 = performance.now();
-      const result = await runE2eSmokeJob({
-        projectId: project.id,
-        projectRoot: localPath,
-        testCases: pool,
-        targetUrl,
-        module: batchModule,
-        requirementTitle: selectedBatchReq?.title,
-        provider: conn?.provider,
-        smokeSize: 10,
-        verifyMax: 3,
-        runVerify: true,
-        useStorageState,
-        username: e2eUsername,
-        password: e2ePassword,
-        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
-        defaultAuthRole: authDiscovery?.defaultRole || undefined,
-        usePlaywrightInspect,
-        skipAuthSeed: Boolean(pickDiscoveredStorageStateRel(authDiscovery)),
-        showBrowser,
-        authDiscovery,
-        waitIfPaused: async () => {
-          await control.waitIfPaused();
-        },
-        onProgress: (p) => {
-          setActivePhase(p.phase === "verify" ? "headless" : "generate");
-          setBatchProgress({
-            current: p.current,
-            total: p.total,
-            label: p.label,
-          });
-        },
-        onLog: (line) => pushPhaseLog("generate", line),
-      });
-
-      setSmokeReport(result.report);
-      setBatchSelected(result.smokeCases.map((t) => t.id));
-      setBatchGenItems(result.genItems);
-      setFiles(result.files);
-      setBatchResults(
-        mapGenToPipeline(result.smokeCases, result.rows, result.genItems)
-      );
-      const ms = Math.round(performance.now() - t0);
-      pushPhaseLog("generate", result.report.reportText + "\n");
-      setRun((r) =>
-        finishPhase(r, "generate", {
-          status: result.report.taxonomy.genOk > 0 ? "finish" : "error",
-          durationMs: ms,
-        })
-      );
-      if (result.report.readyForPerfPlan) {
-        message.success(
-          `Smoke OK · G1–G6 PASS · Gen ${result.report.taxonomy.genOk}/${result.report.taxonomy.total}`
-        );
-      } else {
-        message.warning(
-          `Smoke xong · Gen ${result.report.taxonomy.genOk}/${result.report.taxonomy.total} — xem gate FAIL trong log`
-        );
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      pushPhaseLog("generate", `S5 Smoke ERROR: ${msg}\n`);
-      message.error(msg);
-      setRun((r) =>
-        finishPhase(r, "generate", { status: "error", durationMs: 0 })
-      );
-    } finally {
-      control.reset();
-      setBusy(false);
-      setBatchProgress(null);
     }
   }
 
@@ -2264,42 +2154,6 @@ export default function E2ETestPage() {
                 />
               )}
 
-              {smokeReport ? (
-                <Alert
-                  type={smokeReport.readyForPerfPlan ? "success" : "warning"}
-                  showIcon
-                  style={{ marginTop: 12 }}
-                  title={
-                    smokeReport.readyForPerfPlan
-                      ? `S5 Smoke · G1–G6 PASS · Gen ${smokeReport.taxonomy.genOk}/${smokeReport.taxonomy.total}`
-                      : `S5 Smoke · Gen ${smokeReport.taxonomy.genOk}/${smokeReport.taxonomy.total} — chưa đủ gate`
-                  }
-                  description={
-                    <Space orientation="vertical" size={4} style={{ width: "100%" }}>
-                      <Typography.Text style={{ fontSize: 12 }}>
-                        {smokeReport.taxonomy.summaryLine}
-                      </Typography.Text>
-                      <Space wrap size={[6, 6]}>
-                        {smokeReport.gates.map((g) => (
-                          <Tag
-                            key={g.id}
-                            color={
-                              !g.measured ? "default" : g.pass ? "success" : "error"
-                            }
-                            title={g.detail}
-                          >
-                            {g.id} {!g.measured ? "—" : g.pass ? "PASS" : "FAIL"}
-                          </Tag>
-                        ))}
-                      </Space>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        Chi tiết trong tab Log. G1–G6 PASS → mới mở Performance plan.
-                      </Typography.Text>
-                    </Space>
-                  }
-                />
-              ) : null}
-
               {batchProgress ? (
                 <>
                   <Progress
@@ -2335,19 +2189,6 @@ export default function E2ETestPage() {
                   }}
                 >
                   ⚡ Chạy E2E Job · Tất cả TC E2E trong Requirement ({batchCandidates.length} TC)
-                </Button>
-                <Button
-                  size="large"
-                  disabled={
-                    !aiReady ||
-                    !localPath ||
-                    batchStatus === "paused" ||
-                    (busy && batchStatus === "running") ||
-                    (selectedBatchReq ? batchCandidates.length === 0 : approved.length === 0)
-                  }
-                  onClick={() => void runStepSmoke()}
-                >
-                  S5 Smoke · 10 TC + taxonomy + Verify
                 </Button>
                 {batchStatus === "running" ? (
                   <Button icon={<PauseCircleOutlined />} onClick={() => pauseE2eBatch()}>

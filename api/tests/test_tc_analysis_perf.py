@@ -84,11 +84,11 @@ def test_resolve_fanout_batch_size_default_2():
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_FANOUT_BATCH_MODULES", None)
         os.environ.pop("AITEST_TC_FANOUT_BATCH_MODULES_CURSOR", None)
-        assert resolve_fanout_batch_size(is_cursor=False) == 2
-        assert resolve_fanout_batch_size(is_cursor=True) == 2
+        assert resolve_fanout_batch_size(is_cursor=False) == 3
+        assert resolve_fanout_batch_size(is_cursor=True) == 3
         os.environ["AITEST_TC_FANOUT_BATCH_MODULES_CURSOR"] = "3"
         assert resolve_fanout_batch_size(is_cursor=True) == 3
         os.environ["AITEST_TC_FANOUT_BATCH_MODULES"] = "1"
         assert resolve_fanout_batch_size(is_cursor=False) == 1
         os.environ["AITEST_TC_FANOUT_BATCH_MODULES_CURSOR"] = "99"
-        assert resolve_fanout_batch_size(is_cursor=True) == 3
+        assert resolve_fanout_batch_size(is_cursor=True) == 4

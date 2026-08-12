@@ -55,10 +55,12 @@ _LEGACY_E2E_CODEGEN_SPEC = """\
    login alone is not enough.
 
 ## II. Implementation Mapping (TC intent → code via Source)
-7. WORKFLOW: Map every numbered TC Step → `test.step`; order = Auth → Feature entry →
-   Arrange → Act → Assert. Step indexes MUST be continuous `0..N` (never restart at 1
-   after Arrange). Guard renumbers after Auth/Feature inject. Phase 2 guard FAILS
-   codegen if Auth/Entry/Act missing or reordered.
+7. WORKFLOW (TC-literal): Map every numbered TC Step → `test.step` with the **same wording**.
+   Order = Auth → Feature entry → open create/modal when precondition says popup →
+   Arrange → Act → Assert. Do NOT invent upload/select/submit steps absent from TC.
+   Step indexes MUST be continuous `0..N` (never restart at 1 after Arrange).
+   Guard renumbers after Auth/Feature inject. Phase 2 guard FAILS codegen if
+   Auth/Entry/Act missing or reordered.
 8. UI REVERSE: Routes/menus/forms from FE source (routerLink, Routes, templates) —
    never invent `/admin/...`.
 9. ELEMENT DISCOVERY: Fields/buttons from DOM snapshot + FE attrs only.
@@ -84,16 +86,18 @@ _LEGACY_E2E_CODEGEN_SPEC = """\
 15. CONVENTION: AItest/E2ETest/{Req}/{TC}/specs + config; POM/auth/shim under
     AItest/E2ETest/_shared/; reuse existing _shared/pages/*.page.ts, fixtures and helpers
     first. Only create new helper/page when reuse is impossible with explicit reason.
-16. SELF-CHECK: no invented route/role/credential · DOM/FE locators · no empty POM stubs ·
-    no expect(await expect*) · Rules 18–19.
+16. SELF-CHECK: no invented route/role/credential · DOM/FE locators · **no Phase-3
+    ungrounded throw stubs** (they abort Playwright mid-run / close browser before
+    later TC steps) · no expect(await expect*) · Rules 18–19.
 17. NO DUPLICATE: one path per page/spec/config; overwrite same path — no hash twins.
 18. RUNNABLE: test(/describe; *.spec.ts+*.page.ts; import ExactClass = export class;
     `new ExactClass(page)` never static; Spec+POM one shot; one canonical spec; FE labels.
 19. ACT/ARRANGE (all projects): ground in this FE+DOM/Spec args — no app hardcode.
     Prefer E2E_FEATURE_PATH deep-link (gotoFeature ≠ auto-Create); menu no-op if
-    shell/dialog visible; Create via openCreate* + modal before fill; fill/select/
-    open*Combobox via getByRole|Label|testid from DOM/FE; wizard Next from Spec/DOM.
-    Spec passes values; unpack object asserts. Guard heal = safety net only.
+    shell/dialog visible; Create via openCreate* + modal before fill when precondition
+    requires popup; fill/select/open*Combobox via getByRole|Label|testid from DOM/FE;
+    wizard Next from Spec/DOM. Spec passes values; unpack object asserts.
+    Guard heal = safety net only.
     Missing DOM/FE hook → Phase-3 ungrounded (E2E_GROUNDING fail-closed) — never
     invent `button.first()` / Save-regex click.
 

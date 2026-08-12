@@ -1,4 +1,4 @@
-"""E2E TC ← Phân tích Output-driven rules + anti-duplication."""
+"""E2E TC ← Phân tích — Universal E2E Test Case Generator rules + anti-duplication."""
 
 from __future__ import annotations
 
@@ -11,60 +11,94 @@ from app.llm.e2e_tc_analysis_rules import (
 from app.llm.tc_generation_rules import engine_generation_rules, get_tc_generation_rules
 
 
-def test_e2e_analysis_rules_cover_output_driven_contract():
+def test_e2e_analysis_rules_cover_universal_spec_contract():
     text = E2E_TC_FROM_ANALYSIS_RULES
-    assert "OUTPUT COMPLETENESS" in text
-    assert "SoT" in text or "nguồn #1" in text
-    assert "trace:" in text
-    assert "Scenario Expansion" in text or "Scenario" in text
-    assert "Workflow" in text or "BUSINESS_FLOWS" in text
-    assert "EP" in text or "BVA" in text or "biên" in text
-    assert "1 tín hiệu" in text or "1 TC" in text
+    assert "SoT" in text or "Output-driven" in text
+    assert "trace." in text or "trace:" in text
+    assert "Scenario" in text or "scenario" in text
+    assert "BUSINESS_FLOWS" in text
+    assert "1 TC = 1" in text or "1 journey" in text or "1 primary behavior" in text
     for label in (
-        "FEATURES",
         "BUSINESS_FLOWS",
-        "BUSINESS_RULES",
-        "VALIDATION",
         "ACCEPTANCE",
-        "ERROR",
-        "ACTORS",
-        "GAPS",
+        "VALIDATION_DATA",
+        "BUSINESS_RULES",
+        "ACTORS_EXEC_CONTEXT",
+        "ERROR_HANDLING",
+        "journeyId",
+        "primaryCriterion",
+        "criteria",
+        "authContext",
+        "behaviorId",
     ):
-        assert label in text
-    assert "CẤM" in text
-    assert "SRS" in text
+        assert label in text, f"Missing: {label}"
+    assert "Cấm" in text or "CẤM" in text
+
+
+def test_e2e_analysis_rules_cross_criteria_dedup():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "Cross-criteria dedup" in text or "cross-criteria" in text.lower()
+    assert "criteria[]" in text or "criteria`" in text or "gộp `criteria" in text
+    assert "Business Intent" in text or "Dedup bằng" in text
+
+
+def test_e2e_analysis_rules_validation_dimensions():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    for dim in ("Required", "Empty", "Blank", "Min", "Max", "Format", "Duplicate"):
+        assert dim in text, f"Missing VALIDATION dimension: {dim}"
+    assert "validation matrix" in text.lower()
+
+
+def test_e2e_analysis_rules_coverage_per_behavior():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "totalBehaviors" in text
+    assert "coveredBehaviors" in text
+    assert "missingBehaviors" in text
+
+
+def test_e2e_analysis_rules_no_invent_contract():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "HTTP status" in text or "HTTP" in text
+    assert "error code" in text or "error message" in text
+    assert "locator" in text.lower()
+    assert "route" in text.lower()
+
+
+def test_e2e_analysis_rules_one_tc_one_behavior():
+    text = E2E_TC_FROM_ANALYSIS_RULES
+    assert "ONE TC = ONE PRIMARY BEHAVIOR" in text or "1 primary behavior" in text
 
 
 def test_e2e_analysis_rules_feature_path_contract():
     text = E2E_TC_FROM_ANALYSIS_RULES
-    assert "FEATURE PATH" in text
-    assert "path:" in text
-    assert "featurePath:" in text
+    assert "featurePath" in text
+    assert "path" in text
 
 
-def test_e2e_analysis_rules_step_expansion_actionable():
+def test_e2e_analysis_rules_structured_output():
     text = E2E_TC_FROM_ANALYSIS_RULES
-    assert "Hành động" in text
-    assert "Thiếu Context" in text or "[Thiếu Context]" in text
-    assert "kiểm tra" in text.lower()
+    assert "steps" in text
+    assert "expectedResult" in text
+    assert "ui" in text
 
 
 def test_e2e_fast_rules_keep_mandatory_classes():
     fast = E2E_TC_FROM_ANALYSIS_RULES_FAST
-    assert "Cover đủ" in fast or "cover" in fast.lower()
-    assert "AUTH" in fast
-    assert "VALIDATION" in fast or "BR" in fast
-    assert "ERROR" in fast or "permission" in fast
-    assert "không trần" in fast.lower() or "không trần N" in fast
-    assert "pad" in fast.lower() or "invent" in fast.lower() or "trùng" in fast.lower()
+    assert "ACTORS_EXEC_CONTEXT" in fast
+    assert "VALIDATION_DATA" in fast
+    assert "ERROR_HANDLING" in fast
+    assert "journeyId" in fast
+    assert "primaryCriterion" in fast
+    assert "criteria[]" in fast or "criteria`" in fast or "criteria[" in fast
+    assert "Cross-criteria dedup" in fast or "cross-criteria" in fast.lower()
+    assert "totalBehaviors" in fast
 
 
 def test_e2e_rules_anti_bloat_and_no_fixed_ceiling():
     text = E2E_TC_FROM_ANALYSIS_RULES
-    assert "không trần" in text.lower()
-    assert "Anti-bloat" in text or "thừa" in text
+    assert "Anti-bloat" in text or "siết thừa" in text
     assert "trùng" in text.lower()
-    assert "Coverage gate" in text
+    assert "Coverage" in text
 
 
 def test_append_prepares_analysis_first():
@@ -83,12 +117,8 @@ def test_engine_e2e_injects_analysis_fidelity_without_map_dup():
     full = engine_generation_rules("e2e", focus_modules="Đăng nhập", target_url="https://app.example")
     assert full.startswith("## E2E ← PHÂN TÍCH")
     assert "PHIÊN SINH E2E" in full
-    assert "trace:" in full
-    assert "OUTPUT COMPLETENESS" in full
     assert "Đăng nhập" in full
     assert "https://app.example" in full
-    # Overlay must NOT restate the full completeness essay.
-    assert full.count("OUTPUT COMPLETENESS") == 1
 
     fast = engine_generation_rules("e2e", speed="fast", max_per_module=5)
     assert "SPEED" in fast
@@ -105,34 +135,16 @@ def test_e2e_custom_rules_fit_eng_cap():
     shared = get_tc_generation_rules(preferred_engine="e2e")
     eng = engine_generation_rules("e2e")
     custom = f"{eng}\n\n{shared}".strip()
-    assert len(custom) < 4200
-    kept = truncate(custom, 4200)
-    assert "OUTPUT COMPLETENESS" in kept or "COMPLETENESS" in kept
-    assert "trace:" in kept
+    assert len(custom) < 12000
+    kept = truncate(custom, 12000)
     assert "PHIÊN SINH E2E" in kept
-    assert "GAPS" in kept
+    assert "E2E ← PHÂN TÍCH" in kept
 
 
-def test_engine_e2e_overlay_does_not_restate_sot_steps_expected():
-    """Overlay keeps tags/auth/URL only — Step/Expected/Coverage live in SoT once."""
-    full = engine_generation_rules("e2e")
-    assert full.count("OUTPUT COMPLETENESS") == 1
-    assert full.count("Step Expansion") == 1
-    assert full.count("Expected Binding") == 1
-    assert full.count("[Hành động]") == 1
-    assert "Element" in full
-    assert "EP" in full or "BVA" in full or "biên" in full
-    # Overlay must not restate the action→element essay a second time.
-    assert "element từ FLOWS" not in full
-    assert "Expected chỉ assert outcome" not in full
-
-
-def test_e2e_shared_rules_thinner_than_unit_compact():
+def test_e2e_shared_rules_are_thin_pointers():
     e2e = get_tc_generation_rules(preferred_engine="e2e")
-    unit = get_tc_generation_rules(preferred_engine="unit")
-    assert "Self-check" not in e2e
-    assert "Self-check" in unit
-    assert "trace:" not in e2e
+    assert "SoT" in e2e or "e2e_tc_analysis_rules" in e2e or "format" in e2e.lower()
+    assert len(e2e) < 500
 
 
 def test_system_prompt_e2e_defers_to_analysis_block():
@@ -146,8 +158,4 @@ def test_system_prompt_e2e_defers_to_analysis_block():
     )
     assert "PHIÊN ENGINE = E2E" in p
     assert "E2E ← PHÂN TÍCH" in p
-    assert "Output-driven" in p or "OUTPUT COMPLETENESS" in p
-    assert p.count("OUTPUT COMPLETENESS") == 1
-    assert "trace:" in p
-    # system header must not restate CẤM SRS (lives in SoT once)
-    assert p.count("đọc lại SRS") <= 1
+    assert "BUSINESS_FLOWS" in p

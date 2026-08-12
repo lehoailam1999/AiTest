@@ -28,9 +28,12 @@ import {
   UNIT_BODY_RULE,
   uploadIntentPathShapeAdjust,
   queryImpliesUploadIntent,
+  queryImpliesSearchLookupIntent,
   extractOpPreferTokens,
   functionOpPathShapeAdjust,
   pathContradictsOpPreferTokens,
+  pathContradictsUploadVerb,
+  pathContradictsSearchVerb,
   queryImpliesAssignFilterIntent,
   validateRejectPathShapeAdjust,
   type BodyRuleScoredCandidate,
@@ -994,6 +997,27 @@ export async function resolveUnitPrimaryFromIndex(
     }
   }
 
+  // Search/lookup: re-include *Query* / GetAll / SearchTerm paths dropped by Module
+  // family lock (e.g. Evidence module + CaseRecordGetAll for «tìm theo mã»).
+  if (queryImpliesSearchLookupIntent(intent, shapeBlobForRanking(query))) {
+    const have = new Set(candidates.map((c) => c.pathRel.replace(/\\/g, "/").toLowerCase()));
+    const searchExtras = seeds.filter((c) => {
+      const p = c.pathRel.replace(/\\/g, "/");
+      if (have.has(p.toLowerCase())) return false;
+      if (c.score < 8 || isUnsuitableUnitPrimary(p)) return false;
+      return (
+        /\/queries?\//i.test(p) ||
+        /(GetAll|Search|ListAvailable|FindBy|Lookup)(Query)?(Handler)?/i.test(p)
+      );
+    });
+    if (searchExtras.length) {
+      candidates = [...candidates, ...searchExtras].sort(
+        (a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel)
+      );
+      notes.push(`searchQueryWiden=${searchExtras.length}`);
+    }
+  }
+
   // Function gate — soft narrow when Function/alias tokens hit paths (Module ∩ Function).
   const funcGateRaw = functionGateTokens(query, allIndexPaths);
   const funcHitting = gateTokensHittingPaths(funcGateRaw, [
@@ -1053,7 +1077,7 @@ export async function resolveUnitPrimaryFromIndex(
             [query.title, query.module].join("\n")
           )
         ) {
-          score -= 25;
+          score -= 55;
         }
         return score === c.score ? c : { ...c, score, hits: [...(c.hits || []), "shape:handlerPrefer"] };
       })
@@ -1153,6 +1177,7 @@ export async function resolveUnitPrimaryFromIndex(
     let decision = decideBodyRuleWriteBack(rescored, intent, {
       ...marginOpts,
       preferTokens: strongPrefer,
+      shapeBlob: shapeBlobForRanking(query),
     });
     let seed = decision.seed;
 
@@ -1318,6 +1343,16 @@ export async function resolveUnitPrimaryFromIndex(
           (c) =>
             c.score >= MIN_SCORE &&
             !pathContradictsOpPreferTokens(c.pathRel, opPrefer) &&
+            !pathContradictsUploadVerb(
+              c.pathRel,
+              intent,
+              shapeBlobForRanking(query)
+            ) &&
+            !pathContradictsSearchVerb(
+              c.pathRel,
+              intent,
+              shapeBlobForRanking(query)
+            ) &&
             !isAnemicEntityLikePath(c.pathRel) &&
             !isUnsuitableUnitPrimary(c.pathRel)
         );
@@ -1338,6 +1373,43 @@ export async function resolveUnitPrimaryFromIndex(
           };
           seed = null;
           notes.push("opPreferContradict");
+        }
+      }
+    }
+
+    // Verb contradiction: upload≠Delete, search≠Assign (body-rule throw cannot rescue)
+    if (decision.writeBack && seed) {
+      const shapeBlob = shapeBlobForRanking(query);
+      if (
+        pathContradictsUploadVerb(seed.pathRel, intent, shapeBlob) ||
+        pathContradictsSearchVerb(seed.pathRel, intent, shapeBlob)
+      ) {
+        const alt = collapseBodyRuleContenders(rescored).find(
+          (c) =>
+            c.score >= MIN_SCORE &&
+            !pathContradictsUploadVerb(c.pathRel, intent, shapeBlob) &&
+            !pathContradictsSearchVerb(c.pathRel, intent, shapeBlob) &&
+            !isAnemicEntityLikePath(c.pathRel) &&
+            !isUnsuitableUnitPrimary(c.pathRel)
+        );
+        if (alt) {
+          seed = alt;
+          decision = {
+            writeBack: true,
+            seed: alt,
+            candidatesTop3: decision.candidatesTop3,
+          };
+          notes.push("verbContradictRerank");
+        } else {
+          decision = {
+            writeBack: false,
+            seed: null,
+            skipReason:
+              "FAIL_VERB_CONTRADICT — upload≠Delete / search≠Assign (refuse soft writeBack)",
+            candidatesTop3: decision.candidatesTop3,
+          };
+          seed = null;
+          notes.push("verbContradict");
         }
       }
     }
@@ -1552,11 +1624,18 @@ export async function resolveUnitPrimaryFromIndex(
     intent,
     shapeBlobForRanking(query)
   );
-  if (pathContradictsOpPreferTokens(best.pathRel, opPreferNoBody)) {
-    // Prefer next candidate that hits op tokens inside family
+  const shapeBlobNoBody = shapeBlobForRanking(query);
+  if (
+    pathContradictsUploadVerb(best.pathRel, intent, shapeBlobNoBody) ||
+    pathContradictsSearchVerb(best.pathRel, intent, shapeBlobNoBody) ||
+    pathContradictsOpPreferTokens(best.pathRel, opPreferNoBody)
+  ) {
+    // Prefer next candidate that hits op tokens / verb inside family
     const opHit = candidates.find(
       (c) =>
         c.score >= MIN_SCORE &&
+        !pathContradictsUploadVerb(c.pathRel, intent, shapeBlobNoBody) &&
+        !pathContradictsSearchVerb(c.pathRel, intent, shapeBlobNoBody) &&
         !pathContradictsOpPreferTokens(c.pathRel, opPreferNoBody) &&
         !isUnsuitableUnitPrimary(c.pathRel)
     );

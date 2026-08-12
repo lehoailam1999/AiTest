@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState, type Key } from "react";
-import { Link } from "react-router-dom";
 import {
   App,
   Button,
@@ -22,7 +21,6 @@ import {
 } from "@ant-design/icons";
 import { requirementStudio, testcases } from "../../../api";
 import type { TestCase } from "../../../api/types";
-import { EnginePicker } from "../../../components/EnginePicker";
 import {
   displayReviewStatus,
   isTcPendingReview,
@@ -322,6 +320,7 @@ export function ReviewQueuePanel({
     setBusy(true);
     let ok = 0;
     let fail = 0;
+    const failReasons: string[] = [];
     const approved: TestCase[] = [];
     try {
       const APPROVE_CONCURRENCY = 6;
@@ -331,8 +330,11 @@ export function ReviewQueuePanel({
           chunk.map(async (id) => {
             try {
               return { ok: true as const, tc: await testcases.approve(id) };
-            } catch {
-              return { ok: false as const };
+            } catch (e) {
+              return {
+                ok: false as const,
+                reason: e instanceof Error ? e.message : String(e),
+              };
             }
           })
         );
@@ -342,6 +344,7 @@ export function ReviewQueuePanel({
             ok += 1;
           } else {
             fail += 1;
+            if (h.reason) failReasons.push(h.reason);
           }
         }
       }
@@ -375,6 +378,10 @@ export function ReviewQueuePanel({
         message.success(`Đã duyệt ${ok} test case.`);
       }
       if (fail > 0) message.warning(`Duyệt: OK ${ok}, lỗi ${fail}.`);
+      if (failReasons.length > 0) {
+        const first = Array.from(new Set(failReasons)).slice(0, 3).join(" | ");
+        message.error(`Lý do từ chối: ${first}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -574,78 +581,93 @@ export function ReviewQueuePanel({
   return (
     <div className="coverage-review">
       <div className="coverage-review-toolbar">
-        <Typography.Text type="secondary">
-          {filtered.length} TC
-          {cases.length !== filtered.length ? ` (lọc / ${cases.length})` : ""}
-          {pending.length > 0 ? ` · ${pending.length} chờ duyệt` : ""}
-        </Typography.Text>
-        <EnginePicker
-          size="small"
-          value={engineSel}
-          onChange={(v) => setEngineSel(v as EngineFilter)}
-          options={[
-            { value: "all", label: "Tất cả" },
-            { value: "unit", label: "Unit" },
-            { value: "e2e", label: "E2E" },
-          ]}
-          aria-label="Lọc engine"
-        />
-        <select
-          className="coverage-review-select"
-          value={statusSel}
-          onChange={(e) => setStatusSel(e.target.value as StatusFilter)}
-          aria-label="Lọc trạng thái"
-        >
-          <option value="__all__">Tất cả trạng thái</option>
-          <option value="pending">Chờ duyệt (Nháp)</option>
-          <option value="approved">Đã duyệt</option>
-        </select>
-        <select
-          className="coverage-review-select"
-          value={moduleSel}
-          onChange={(e) => setModuleSel(e.target.value)}
-          aria-label="Lọc Function"
-        >
-          <option value="__all__">Tất cả Function</option>
-          {modules.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <Button
-          icon={<DownloadOutlined />}
-          disabled={filtered.length === 0}
-          onClick={handleDownload}
-        >
-          Tải về
-        </Button>
-        <Button
-          type="primary"
-          disabled={selectedPendingIds.length === 0 || busy}
-          loading={busy}
-          icon={<CheckOutlined />}
-          onClick={() => void bulkApprove(selectedPendingIds)}
-        >
-          Duyệt đã chọn ({selectedPendingIds.length})
-        </Button>
-        <Button
-          disabled={filteredPendingIds.length === 0 || busy}
-          loading={busy}
-          icon={<CheckOutlined />}
-          onClick={() => approveAllFiltered()}
-        >
-          Duyệt tất cả
-          {engineSel === "unit"
-            ? " Unit"
-            : engineSel === "e2e"
-              ? " E2E"
-              : ""}{" "}
-          ({filteredPendingIds.length})
-        </Button>
-        <Link to="/requirement">
-          <Button type="link">Về Requirement Studio →</Button>
-        </Link>
+        <div className="coverage-review-toolbar__filters">
+          <div className="coverage-review-stat-badge">
+            <span className="coverage-review-stat-badge__total">{filtered.length} TC</span>
+            {cases.length !== filtered.length && (
+              <span className="coverage-review-stat-badge__filtered">(lọc / {cases.length})</span>
+            )}
+            {pending.length > 0 && (
+              <>
+                <span className="coverage-review-stat-badge__dot">•</span>
+                <span className="coverage-review-stat-badge__pending">{pending.length} chờ duyệt</span>
+              </>
+            )}
+          </div>
+
+          <Space size={8} wrap className="coverage-review-controls">
+            <Select
+              className="coverage-review-select-antd"
+              value={engineSel}
+              onChange={(v) => setEngineSel(v as EngineFilter)}
+              aria-label="Lọc engine"
+              options={[
+                { value: "all", label: "Tất cả loại" },
+                { value: "unit", label: "Unit" },
+                { value: "e2e", label: "E2E" },
+              ]}
+              style={{ minWidth: 130 }}
+            />
+            <Select
+              className="coverage-review-select-antd"
+              value={statusSel}
+              onChange={(v) => setStatusSel(v as StatusFilter)}
+              aria-label="Lọc trạng thái"
+              options={[
+                { value: "__all__", label: "Tất cả trạng thái" },
+                { value: "pending", label: "Chờ duyệt (Nháp)" },
+                { value: "approved", label: "Đã duyệt" },
+              ]}
+              style={{ minWidth: 160 }}
+            />
+            <Select
+              className="coverage-review-select-antd"
+              value={moduleSel}
+              onChange={(v) => setModuleSel(v)}
+              aria-label="Lọc Function"
+              options={[
+                { value: "__all__", label: "Tất cả Function" },
+                ...modules.map((m) => ({ value: m, label: m })),
+              ]}
+              style={{ minWidth: 170 }}
+            />
+          </Space>
+        </div>
+
+        <div className="coverage-review-toolbar__actions">
+          <Space size={8} wrap>
+            <Button
+              icon={<DownloadOutlined />}
+              disabled={filtered.length === 0}
+              onClick={handleDownload}
+            >
+              Tải về
+            </Button>
+            <Button
+              type="primary"
+              disabled={selectedPendingIds.length === 0 || busy}
+              loading={busy}
+              icon={<CheckOutlined />}
+              onClick={() => void bulkApprove(selectedPendingIds)}
+            >
+              Duyệt đã chọn ({selectedPendingIds.length})
+            </Button>
+            <Button
+              disabled={filteredPendingIds.length === 0 || busy}
+              loading={busy}
+              icon={<CheckOutlined />}
+              onClick={() => approveAllFiltered()}
+            >
+              Duyệt tất cả
+              {engineSel === "unit"
+                ? " Unit"
+                : engineSel === "e2e"
+                  ? " E2E"
+                  : ""}{" "}
+              ({filteredPendingIds.length})
+            </Button>
+          </Space>
+        </div>
       </div>
 
       <div className="coverage-review-table">

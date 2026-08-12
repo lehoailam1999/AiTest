@@ -31,14 +31,6 @@ export {
 } from "./e2eSyntaxGate";
 export type { E2eSyntaxIssue } from "./e2eSyntaxGate";
 
-export type {
-  SmokeJobReport,
-  SmokeTcOutcome,
-  SmokeGateResult,
-  SmokeTaxonomyReport,
-} from "./e2eSmokeSet";
-export { runE2eSmokeJob } from "./e2eSmokeRunner";
-export type { RunE2eSmokeJobOpts, RunE2eSmokeJobResult } from "./e2eSmokeRunner";
 export { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
 export {
   assertTcReadyForE2eGen,
@@ -59,6 +51,13 @@ export {
   STRONG_CATALOG_SCORE,
 } from "./e2eRouteCatalog";
 export type { E2eRouteCatalog, RouteMatchResult } from "./e2eRouteCatalog";
+export {
+  loadOrBuildE2eRouteCatalog,
+  fingerprintRoutingPaths,
+  catalogFromCache,
+  serializeCatalogCache,
+  E2E_ROUTE_CATALOG_CACHE_REL,
+} from "./e2eRouteCatalogCache";
 export {
   createInspectDomCache,
   inspectCacheKey,

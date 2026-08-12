@@ -252,11 +252,11 @@ export default function KnowledgePanel({
           <Button
             type={onOpenFreeze && (status === "ready" || status === "stale") ? "default" : "primary"}
             icon={<ThunderboltOutlined />}
-            loading={building}
-            disabled={!canBuild}
+            loading={building || enrichPending}
+            disabled={!canBuild || building || enrichPending}
             onClick={onBuild}
           >
-            {building
+            {building || enrichPending
               ? "Đang phân tích tài liệu…"
               : status === "stale" || status === "ready"
                 ? "Phân tích lại"

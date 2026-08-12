@@ -1,42 +1,73 @@
 ---
-description: E2E TC gen Output-driven từ Phân tích DB/Knowledge — không đọc lại SRS/source
-globs: api/app/llm/tc_generation_rules.py,api/app/llm/e2e_tc_analysis_rules.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/features/requirement_studio/snapshot_prompt.py,desktop/src/features/e2e-test/**,desktop/src/pages/GenerateHubPage.tsx
+description: E2E TC gen — UNIVERSAL E2E Test Case Generator — Analysis Output → E2E TC IR (portable)
+globs: api/app/llm/tc_generation_rules.py,api/app/llm/e2e_tc_analysis_rules.py,api/app/llm/e2e_tc_ir.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/features/requirement_studio/snapshot_prompt.py,desktop/src/features/e2e-test/**,desktop/src/pages/GenerateHubPage.tsx
 alwaysApply: false
 ---
 
-# Rules E2E TC ← Phân tích (Output-driven)
+# Rules E2E TC ← Phân tích (UNIVERSAL E2E Test Case Generator)
 
-> **Một nguồn runtime:** [`e2e_tc_analysis_rules.py`](api/app/llm/e2e_tc_analysis_rules.py) — prepend trong [`engine_generation_rules("e2e")`](api/app/llm/tc_generation_rules.py).  
-> Không copy lại rule / map bucket vào `system_prompt` / COMPACT / freeze / analysis-DB header.
+> **SoT runtime:** fragments `e2e_tc_analysis_*.md` via [`e2e_tc_analysis_rules.py`](api/app/llm/e2e_tc_analysis_rules.py) — prepend trong [`engine_generation_rules("e2e")`](api/app/llm/tc_generation_rules.py).  
+> Flatten IR → DB: [`e2e_tc_ir.py`](api/app/llm/e2e_tc_ir.py) trong `parse_test_cases_json`.  
+> Prompt **không** nhồi raw SRS / DOM locators / product nouns (portable mọi tài liệu UI).
 
-Pipeline: Tài liệu → Phân tích (DB) → Freeze → **Sinh TC E2E** (chỉ từ Output).
+Pipeline:
 
-Freeze Knowledge **phải** mang `executionContexts` + `actors` (WHO) vào prompt — codegen/Verify dùng `authRole` trên TC.
+```text
+Analysis Output (6 criteria) → Behavior Extraction → Atomic UI Journey → Cross-criteria Dedup → E2E TC IR → Coverage Validation → Approve → Grounding → Codegen
+```
 
-## Độ phủ & chống thừa (không trần số cố định)
+**Pha sinh TC không đọc raw SRS / source code FE.** `path:`/`featurePath:`, `landmark:`, locators = Approve/Grounding sau. Chuẩn: ISTQB (EP/BVA/Use-Case) + ISO 29119-3.
 
-| Mode | Hành vi |
-|------|---------|
-| `full` (mặc định E2E) | Cover mọi item Output có tín hiệu — **không** trần N TC |
-| `fast` (prompt gọn) | Cùng coverage contract; wording ngắn hơn — **vẫn** không cắt lớp bắt buộc |
-| Trần số | **Chỉ opt-in** qua `engineHint.maxPerModule` / `AITEST_TC_E2E_MAX_PER_MODULE` |
+## Sáu gate (thứ tự)
 
-Số TC = số tín hiệu Output cần cover. Siết: trùng `trace:`, cùng flow+expected chỉ đổi wording, pad checklist giả.
+1. **Journey & Flow Decomposition** — multi-step workflow → atomic UI journeys (1 TC = 1 primary behavior)
+2. **UI Relevance Outcome Gate** — IN theo outcome UI (`UI_JOURNEY`); BE logic → `BE_ONLY` (OUT); `MIXED` → chỉ nhánh UI
+3. **UNKNOWN vs OUT** — thiếu Analysis Output → UNKNOWN (+ unknownBehaviors); cấm UNKNOWN→OUT
+4. **Conflict Gate** — mâu thuẫn → conflicts/GAPS; cấm tự resolve/invent
+5. **Implementation-free IR** — WHAT không HOW; cấm CSS/Playwright/HTTP status/error code/locator/route invent; `baseURL` ≠ `featurePath`; cấm malware/toast invent nếu Output không nói; wizard → steps concrete
+6. **Coverage & Anti-bloat** — coverage per behavior (totalBehaviors/coveredBehaviors/missingBehaviors); lọc trùng
 
-## Phân tầng prompt (tránh lặp)
+Approve grounding: usable AbsolutePath (moduleMap / Output) — không slug module VN; post-login `authRequired: true`.
+
+## Sáu criteria (PRIMARY)
+
+1. BUSINESS_FLOWS — Main/alt/exception journeys (xương sống E2E, ưu tiên primary khi cross-criteria)
+2. ACCEPTANCE — AC outcome hiển thị trên UI
+3. VALIDATION_DATA — EP/BVA chỉ gen dimensions có trong Output (Required/Empty/Blank/Null/Min/Max/...)
+4. BUSINESS_RULES — Rule có observable UI outcome
+5. ACTORS_EXEC_CONTEXT — RBAC & Permission (chỉ khi Output nêu rõ)
+6. ERROR_HANDLING — Dynamic UI error handling (chỉ error có trong Output)
+
+**Cấm** invent/rename/chuyển criterion.
+
+## Cross-criteria dedup
+
+Cùng behavior ở nhiều criteria → 1 TC, gộp `criteria[]` + `requirementIds`. Dedup bằng Business Intent + Condition + Observable Outcome. `BUSINESS_FLOWS` ưu tiên primary.
+
+## IR contract
+
+- `primaryCriterion` (1 string) + `criteria[]` (array of all related criteria)
+- `journeyId` = `<requirementId>-J<seq>`
+- `behaviorId` = unique behavior identifier
+- Scenario: `HAPPY_PATH` | `ALTERNATIVE_PATH` | `EXCEPTION_FLOW` | `UI_VALIDATION` | `PERMISSION_ALLOW` | `PERMISSION_DENY` | `BOUNDARY_UI` | `ERROR_UI`
+- `authContext`: `authRequired`, `authRole`, `multiRole`
+- `testData`: `{field, value, constraint, boundary, existingState}`
+- `steps`: `[{phase, action, target, data}]`
+- `expectedResult`: `{ui[], system[], data[]}`
+- Root JSON: `testCases` + `coverage`(per criterion) + `gaps` + `unknownBehaviors` + `conflicts`
+- Flat DB markers (adapter): `trace:` · `primaryCriterion:` · `criteria:` · `journeyId:` · `behaviorId:` · `authRole:` · `authRequired:` · `featurePath:` · optional `landmark:`/`sourceSignal:`
+
+## Phân tầng prompt
 
 | Tầng | Nội dung |
-|------|----------|
-| `E2E ← PHÂN TÍCH` | SoT Output + completeness + Rules 0–13 + `trace:` + AUTH WHO + anti-bloat |
-| Engine E2E overlay | Tags, storage hint, target_url |
-| E2E COMPACT/SPEED | Format title/module/priority |
-| Freeze / DB block | **Data** Knowledge (gồm Execution context) |
-
-## Rule tóm tắt (ISTQB-aligned)
-
-0 Completeness · 1 SoT · 2 Trace (1 tín hiệu/TC, unique) · 3 Workflow · 4 Permission ·  
-5 EP/BVA · 6 BR · 7 Scenario · 8 Steps (`[Hành động]→[Element]→[Data]`, cấm step chỉ «kiểm tra») · 9 Expected · 10 Coverage gate · **11 Anti-bloat** · 12 Lock · **13 AUTH WHO** · **14 FEATURE PATH** (`path:`/`featurePath:` post-login; thiếu → `[Thiếu Context]`)
+| --- | --- |
+| `E2E ← PHÂN TÍCH` | SoT IR (6 gate + 6 criteria + cross-criteria dedup + coverage per behavior) |
+| Engine E2E overlay | Tags, target_url, auth_hint |
+| COMPACT/SPEED | Format title/module/priority (thin pointer to SoT) |
+| Freeze / DB block | Data Analysis Output |
+| Post-gen / Flatten | IR → flat steps/expected/`testData` markers |
+| Approve | Grounding / Locator Discovery → `path:`/`landmark:` |
 
 ## Khi sửa
 
-Chỉ sửa `e2e_tc_analysis_rules.py` (+ file này + `tc_speed.py`). Overlay E2E giữ ngắn — không invent trần số mặc định.
+Chỉ sửa `e2e_tc_analysis_*.md` / `e2e_tc_analysis_rules.py` / `e2e_tc_ir.py` (+ file này). Overlay E2E giữ ngắn — không invent trần số mặc định. Shared rules (`tc_generation_rules.py`) chỉ là thin pointer, không restate coverage/dedup/criteria.

@@ -66,7 +66,7 @@ def test_profile_analysis_chat_resolves_diff_block():
 
 def test_profile_tc_unit_analysis_resolves_trace_block():
     txt = render_rules_for_profile("PROFILE-TC-UNIT-ANALYSIS")
-    assert "trace:" in txt
+    assert "trace." in txt or "trace:" in txt
     assert "type≠Unit" in txt or "type=Unit" in txt
 
 

@@ -634,6 +634,118 @@ describe("resolveUnitPrimaryFromIndex", () => {
     assert.ok(!/EvidenceCreateCommandHandler\.cs$/i.test(r.seed!.pathRel));
   });
 
+  it("TC-005 style: upload reject format must not latch DigitalDeviceDelete", async () => {
+    const paths = [
+      "src/Forensic.Application/Commands/DigitalDevice/DigitalDeviceDeleteCommandHandler.cs",
+      "src/Forensic.Application/Commands/EvidencePhysicalImage/EvidencePhysicalImageCreateCommandHandler.cs",
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "src/Forensic.Infrastructure/Services/UploadService.cs",
+    ];
+    const bodies: Record<string, string> = {
+      "src/Forensic.Application/Commands/DigitalDevice/DigitalDeviceDeleteCommandHandler.cs": `
+        class DigitalDeviceDeleteCommandHandler {
+          void H() { throw new BadRequestAlertException("not found"); Delete(); }
+        }`,
+      "src/Forensic.Application/Commands/EvidencePhysicalImage/EvidencePhysicalImageCreateCommandHandler.cs": `
+        class EvidencePhysicalImageCreateCommandHandler {
+          void Handle() { await _repo.CreateOrUpdateAsync(entity); }
+        }`,
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs":
+        "class EvidenceCreateCommandHandler { void H() { Create(); } }",
+      "src/Forensic.Infrastructure/Services/UploadService.cs": `
+        class UploadService {
+          void Init() { if (!allowed.Contains(ext)) throw new ArgumentException("format"); }
+        }`,
+    };
+    const query = buildUnitApproveQuery(
+      {
+        title:
+          "Tải lên hình ảnh và tệp kỹ thuật số vật chứng - Từ chối tệp hình ảnh ngoài JPG JPEG PNG WEBP - Không cho phép tải lên",
+        module: "Tải lên hình ảnh và tệp kỹ thuật số vật chứng",
+        steps:
+          "1. Chuẩn bị tệp hình ảnh định dạng ngoài danh sách\n2. Thực hiện tải lên tệp hình ảnh vật chứng",
+        expectedResult:
+          "REJECT — Hệ thống không cho phép tải lên tệp có định dạng ngoài JPG JPEG PNG WEBP",
+        testData: "trace: ERROR_HANDLING/EXC-IMG-FORMAT; dinhDang=ngoài danh sách",
+      },
+      { requirementTitle: "Create evidence" }
+    );
+    const r = await resolveUnitPrimaryFromIndex({
+      codeIndex: snapshotFromPaths(paths),
+      query,
+      readExcerpt: async (p) => bodies[p] || "",
+    });
+    const top = r.seed?.pathRel || r.candidatesTop3?.[0]?.pathRel || "";
+    assert.ok(
+      !/DigitalDeviceDelete/i.test(top),
+      `must not pick Delete: ${JSON.stringify(r)}`
+    );
+    if (r.writeBack) {
+      assert.match(
+        r.seed!.pathRel,
+        /PhysicalImageCreate|UploadService|EvidenceCreate/i,
+        JSON.stringify(r)
+      );
+    }
+  });
+
+  it("TC-054 style: search by case code prefers GetAll Query over AssignCase", async () => {
+    const paths = [
+      "src/Forensic.Application/Commands/Evidence/EvidenceAssignCaseCommandHandler.cs",
+      "src/Forensic.Application/Queries/CaseRecord/CaseRecordGetAllQueryHandler.cs",
+      "src/Forensic.Application/Queries/Evidence/EvidenceCheckCodeQueryHandler.cs",
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+    ];
+    const bodies: Record<string, string> = {
+      "src/Forensic.Application/Commands/Evidence/EvidenceAssignCaseCommandHandler.cs": `
+        class EvidenceAssignCaseCommandHandler {
+          void H() { Assign(caseId); throw new BadRequestAlertException("x"); }
+        }`,
+      "src/Forensic.Application/Queries/CaseRecord/CaseRecordGetAllQueryHandler.cs": `
+        class CaseRecordGetAllQueryHandler {
+          void Handle() {
+            var searchTerm = request.SearchTerm?.Trim().ToLower();
+            return query.Where(x => x.Code.ToLower().Contains(searchTerm));
+          }
+        }`,
+      "src/Forensic.Application/Queries/Evidence/EvidenceCheckCodeQueryHandler.cs":
+        "class EvidenceCheckCodeQueryHandler { void H() { Exists(); } }",
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs":
+        "class EvidenceCreateCommandHandler { void H() { Create(); } }",
+    };
+    const query = buildUnitApproveQuery(
+      {
+        title:
+          "Gắn hồ sơ vụ án cho vật chứng - Tìm theo mã vụ án - Trả về hồ sơ khớp mã",
+        module: "Gắn hồ sơ vụ án cho vật chứng",
+        steps:
+          "1. Chuẩn bị từ khóa tìm kiếm là mã vụ án hợp lệ\n2. Thực hiện tìm kiếm hồ sơ vụ án theo mã",
+        expectedResult:
+          "ACCEPT — Backend trả về hồ sơ vụ án khớp theo mã vụ án — (quan sát: truy vấn tìm kiếm)",
+        testData: 'trace: BUSINESS_RULES/BR-7; input={"tuKhoa":"MA-VA-001"}',
+      },
+      {
+        requirementTitle: "Create evidence",
+        projectAliases: {
+          "vat chung": ["Evidence"],
+          "ho so vu an": ["CaseRecord", "Case"],
+        },
+      }
+    );
+    const r = await resolveUnitPrimaryFromIndex({
+      codeIndex: snapshotFromPaths(paths),
+      query,
+      readExcerpt: async (p) => bodies[p] || "",
+    });
+    assert.equal(r.writeBack, true, JSON.stringify(r));
+    assert.match(
+      r.seed!.pathRel,
+      /CaseRecordGetAllQueryHandler/i,
+      JSON.stringify(r)
+    );
+    assert.ok(!/EvidenceAssignCase/i.test(r.seed!.pathRel));
+  });
+
   it("FAIL_UNGATED: VI create without CheckCode/alias does not soft-latch CasePerson", async () => {
     const paths = [
       "src/App/Commands/CasePerson/CasePersonCreateCommandHandler.cs",

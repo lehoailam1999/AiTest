@@ -2,6 +2,10 @@
  * Phase C — serialize Approved TestCase → Markdown under `.ai-test/test-cases/`.
  * Artifact for Agent local / Extension Gen — includes grounding hierarchy for SUT resolve.
  *
+ * Layout (separate Unit vs E2E):
+ *   `.ai-test/test-cases/UnitTest/{function}/{testCaseId}.md`
+ *   `.ai-test/test-cases/E2ETest/{function}/{testCaseId}.md`
+ *
  * Display labels (sync MD / UI):
  *   Module   = Requirement Studio title (`requirement:`) — scopes source-module family
  *   Function = TC.module (`function:` / legacy `module:`) — ranks files inside that family
@@ -11,6 +15,9 @@ import { AI_TEST_CASES_DIR, assertSafeAiTestCasesRel, extractTcSourceMarkers } f
 import type { TestCase } from "../../api/types";
 import { TEST_CASES_DIR } from "../projectProfile/constants";
 import { deriveAuthContextFromTestCase } from "../e2eWorkspace/deriveAuthContextFromTc";
+import { normalizeFeaturePath } from "../e2eWorkspace/assertTcReadyForE2eGen";
+import { isE2eTestCaseType } from "../testEngine";
+import { GENERATED_TEST_FOLDERS } from "../testOutputLayout";
 
 function slugSeg(raw: string, fallback: string): string {
   const s = (raw || "")
@@ -23,11 +30,26 @@ function slugSeg(raw: string, fallback: string): string {
   return s || fallback;
 }
 
-/** Relative path: `.ai-test/test-cases/{function}/{testCaseId}.md` (folder = TC.module) */
-export function approvedTcMarkdownRelPath(tc: Pick<TestCase, "testCaseId" | "module" | "id">): string {
+/** UnitTest | E2ETest under `.ai-test/test-cases/` (mirrors AItest output folders). */
+export function approvedTcKindFolder(
+  type?: string | null
+): typeof GENERATED_TEST_FOLDERS.unit | typeof GENERATED_TEST_FOLDERS.e2e {
+  return isE2eTestCaseType(type)
+    ? GENERATED_TEST_FOLDERS.e2e
+    : GENERATED_TEST_FOLDERS.unit;
+}
+
+/**
+ * Relative path:
+ * `.ai-test/test-cases/{UnitTest|E2ETest}/{function}/{testCaseId}.md`
+ */
+export function approvedTcMarkdownRelPath(
+  tc: Pick<TestCase, "testCaseId" | "module" | "id" | "type">
+): string {
+  const kindSeg = approvedTcKindFolder(tc.type);
   const moduleSeg = slugSeg(tc.module || "general", "general");
   const codeSeg = slugSeg(tc.testCaseId || tc.id, tc.id.slice(0, 8));
-  const rel = `${TEST_CASES_DIR}/${moduleSeg}/${codeSeg}.md`;
+  const rel = `${TEST_CASES_DIR}/${kindSeg}/${moduleSeg}/${codeSeg}.md`;
   return assertSafeAiTestCasesRel(rel);
 }
 
@@ -41,6 +63,8 @@ function yamlEscape(v: string): string {
 export type ApprovedTcMdRenderOpts = {
   /** Owning Module title (Requirement Studio) — scopes Unit SUT / E2E before Function/Title */
   requirementTitle?: string | null;
+  fallbackRole?: string | null;
+  analysisActors?: string[] | null;
 };
 
 /**
@@ -134,19 +158,34 @@ export function renderUnitGroundingBlock(
 
 export function renderE2eGroundingBlock(
   tc: Pick<TestCase, "title" | "module" | "precondition" | "steps" | "testData">,
-  requirementTitle?: string | null
+  requirementTitle?: string | null,
+  opts?: { fallbackRole?: string | null; analysisActors?: string[] | null }
 ): string {
   const modDoc = (requirementTitle || "").trim() || "—";
   const fn = (tc.module || "").trim() || "—";
   const title = (tc.title || "").trim() || "—";
-  const auth = deriveAuthContextFromTestCase(tc);
+  const auth = deriveAuthContextFromTestCase(tc, opts);
   const td = tc.testData || "";
-  const pathMatch = td.match(/(?:path|featurePath|route|url)\s*[:=]\s*([^\n;,|]+)/i);
-  const landmarkMatch = td.match(/landmark\s*[:=]\s*([^\n;,|]+)/i);
-  const path = pathMatch?.[1]?.trim() || "";
+  const pathMatch = td.match(/(?:^|\n)\s*(?:path|featurePath|feature_path|route)\s*[:=]\s*([^\n;,|]+)/i);
+  const urlMatch = td.match(/(?:^|\n)\s*(?:url|baseURL|base_url)\s*[:=]\s*([^\n;,|]+)/i);
+  const landmarkMatch = td.match(/(?:^|\n)\s*landmark\s*[:=]\s*([^\n;,|]+)/i);
+  const path =
+    normalizeFeaturePath(pathMatch?.[1]) ||
+    normalizeFeaturePath(urlMatch?.[1]) ||
+    "";
   const landmark = landmarkMatch?.[1]?.trim() || "";
   const skip =
     td.match(/^\s*#\s*e2e-grounding:\s*skipped\s*—\s*(.+)$/im)?.[1]?.trim() || "";
+
+  const isLogin =
+    /^(?:[a-z0-9_-]+\s*-\s*)?(?:đăng\s*nhập|login|log\s*in)$/i.test(title) ||
+    /\b(public|guest|anonymous)\b/i.test([tc.precondition, td, title].join("\n"));
+  const explicitAuthFalse = /authRequired\s*[:=]\s*(false|no|0)/i.test(
+    [tc.precondition, td].join("\n")
+  );
+  const isAuthReq =
+    auth.executionContext.includes("authRequired=true") ||
+    (!isLogin && !explicitAuthFalse);
 
   const resolvedLines: string[] = ["### Resolved E2E Route & Auth", ""];
   if (path) {
@@ -157,20 +196,27 @@ export function renderE2eGroundingBlock(
   }
   if (auth.role) {
     resolvedLines.push(`authRole: ${auth.role}`);
+  } else if (isAuthReq && !isLogin) {
+    resolvedLines.push("authRole: _(unresolved)_ — bổ sung từ Analysis actors / Auth Discover");
   }
   if (auth.roles.length > 1) {
     resolvedLines.push(`roles: ${auth.roles.join(", ")}`);
   }
-  const isAuthReq = auth.executionContext.includes("authRequired=true");
-  resolvedLines.push(`authRequired: ${isAuthReq ? "true" : "false"}`);
+  if (isLogin && !isAuthReq) {
+    resolvedLines.push(`authRequired: false`);
+  } else if (isAuthReq) {
+    resolvedLines.push(`authRequired: true`);
+  } else {
+    resolvedLines.push(`authRequired: _(unresolved)_`);
+  }
   if (auth.roleSource) {
     resolvedLines.push(`roleSource: ${auth.roleSource}`);
   }
   if (!path && !landmark && !auth.role && skip) {
     resolvedLines.push(`_(unresolved)_ ${skip}`);
-  } else if (!path && !landmark && !auth.role) {
+  } else if (!path && !landmark) {
     resolvedLines.push(
-      "_(unresolved)_ — Approve chưa có path/featurePath từ Output hoặc Auth context."
+      "_(unresolved)_ — Approve chưa có path/featurePath usable (moduleMap / Output AbsolutePath)."
     );
   }
 
@@ -198,7 +244,10 @@ export function renderApprovedTestCaseMarkdown(
   const tcType = (tc.type || "").trim().toUpperCase();
   const isE2e = ["E2E", "E2E_UI", "UI"].includes(tcType);
   const groundingBlock = isE2e
-    ? renderE2eGroundingBlock(tc, requirementTitle)
+    ? renderE2eGroundingBlock(tc, requirementTitle, {
+        fallbackRole: opts?.fallbackRole,
+        analysisActors: opts?.analysisActors,
+      })
     : renderUnitGroundingBlock(tc, requirementTitle);
 
   const lines: string[] = [
@@ -266,6 +315,8 @@ export type BuildApprovedTcMdOpts = {
   requirementTitleByCaseKey?: Record<string, string> | null;
   /** Single Module title when syncing under one Studio workspace */
   requirementTitle?: string | null;
+  fallbackRole?: string | null;
+  analysisActors?: string[] | null;
 };
 
 function resolveRequirementTitle(tc: TestCase, opts?: BuildApprovedTcMdOpts): string {
@@ -297,6 +348,8 @@ export function buildApprovedTcMarkdownFiles(
       path,
       content: renderApprovedTestCaseMarkdown(tc, {
         requirementTitle: resolveRequirementTitle(tc, opts),
+        fallbackRole: opts?.fallbackRole,
+        analysisActors: opts?.analysisActors,
       }),
       testCaseId: tc.testCaseId,
     });

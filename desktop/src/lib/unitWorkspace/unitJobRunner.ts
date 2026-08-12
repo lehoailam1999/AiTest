@@ -217,6 +217,13 @@ export async function startUnitIdeGenJob(opts: {
 
   const gate = await assertTcReadyForUnitGen({ projectRoot, tc });
   if (!gate.ok) {
+    // Extension is the final gate authority for marker/approved-md checks.
+    // Desktop keeps UX preflight for hard runtime requirements only.
+    if (gate.code === "needs_marker" || gate.code === "no_sync_md") {
+      deps.onProgress?.(
+        `preflight soft-bypass ${gate.code} — delegate final decision to Extension gate`
+      );
+    } else {
     recordUnitJobMetric({
       projectId,
       contextSource: "unknown",
@@ -234,6 +241,7 @@ export async function startUnitIdeGenJob(opts: {
       code: gate.code,
       cta: gate.cta,
     };
+    }
   }
 
   const langGate = decideUnitLanguageGate({

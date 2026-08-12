@@ -33,23 +33,37 @@ function sample(overrides: Partial<TestCase> = {}): TestCase {
 }
 
 describe("writeApprovedTcMdFilesToDisk", () => {
-  it("writes .ai-test/test-cases/{module}/{code}.md under project root", () => {
+  it("writes E2E under .ai-test/test-cases/E2ETest/{module}/{code}.md", () => {
     const root = mkdtempSync(join(tmpdir(), "aitest-tc-sync-"));
     try {
       const files = buildApprovedTcMarkdownFiles([sample()]);
       assert.equal(files.length, 1);
-      assert.equal(files[0].path, ".ai-test/test-cases/account/TC-SYNC-01.md");
+      assert.equal(files[0].path, ".ai-test/test-cases/E2ETest/account/TC-SYNC-01.md");
 
       const result = writeApprovedTcMdFilesToDisk(root, files);
       assert.equal(result.errors.length, 0, result.errors.join("; "));
       assert.equal(result.written.length, 1);
 
-      const abs = join(root, ".ai-test", "test-cases", "account", "TC-SYNC-01.md");
+      const abs = join(root, ".ai-test", "test-cases", "E2ETest", "account", "TC-SYNC-01.md");
       assert.equal(existsSync(abs), true);
       const body = readFileSync(abs, "utf8");
       assert.match(body, /Sync MD probe/);
       assert.match(body, /reviewStatus: Approved/);
       assert.match(body, /## Steps/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes Unit under .ai-test/test-cases/UnitTest/{module}/{code}.md", () => {
+    const root = mkdtempSync(join(tmpdir(), "aitest-tc-sync-unit-"));
+    try {
+      const files = buildApprovedTcMarkdownFiles([sample({ type: "Unit", testCaseId: "TC-U-SYNC" })]);
+      assert.equal(files[0].path, ".ai-test/test-cases/UnitTest/account/TC-U-SYNC.md");
+      const result = writeApprovedTcMdFilesToDisk(root, files);
+      assert.equal(result.errors.length, 0, result.errors.join("; "));
+      const abs = join(root, ".ai-test", "test-cases", "UnitTest", "account", "TC-U-SYNC.md");
+      assert.equal(existsSync(abs), true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

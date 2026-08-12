@@ -84,14 +84,14 @@ def _knowledge_sections(p: dict) -> list[str]:
         _line_items(
             "Business rules",
             _as_list(p.get("businessRules")),
-            fields=("id", "text", "priority"),
+            fields=("id", "code", "text", "priority"),
         )
     )
     lines.extend(
         _line_items(
             "Validation & data",
             _as_list(p.get("validationRules")),
-            fields=("module", "field", "rule"),
+            fields=("id", "code", "module", "field", "rule", "text"),
         )
     )
     lines.extend(
@@ -102,13 +102,17 @@ def _knowledge_sections(p: dict) -> list[str]:
         )
     )
     lines.extend(
-        _line_items("Exceptions / errors", _as_list(p.get("exceptions")), fields=("text",))
+        _line_items(
+            "Exceptions / errors",
+            _as_list(p.get("exceptions")),
+            fields=("id", "code", "text"),
+        )
     )
     lines.extend(
         _line_items(
             "Acceptance criteria",
             _as_list(p.get("acceptanceCriteria")),
-            fields=("text",),
+            fields=("id", "code", "text"),
         )
     )
     lines.extend(
@@ -183,11 +187,46 @@ def _filter_rows_for_module(rows: list, tokens: list[str], *, keep_min: int = 0)
     return rows[: max(keep_min or 3, 3)]
 
 
+def _primary_rows_for_module(
+    rows: list,
+    tokens: set[str],
+    *,
+    cap: int = 40,
+) -> list:
+    """
+    Module slice for PRIMARY lists: matched rows first, then remaining inventory.
+    Avoid dropping BR/VALIDATION/ERROR/AC that omit the Feature name in text.
+    """
+    all_rows = [r for r in rows if r is not None]
+    if not all_rows:
+        return []
+    matched = _filter_rows_for_module(all_rows, tokens, keep_min=1)
+    out: list = []
+    seen: set[int] = set()
+
+    def _add(row: Any) -> None:
+        i = id(row)
+        if i in seen:
+            return
+        seen.add(i)
+        out.append(row)
+
+    for r in matched:
+        _add(r)
+        if len(out) >= cap:
+            return out
+    for r in all_rows:
+        _add(r)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def slice_knowledge_payload_for_module(
     knowledge: dict[str, Any] | None,
     module: str,
 ) -> dict[str, Any]:
-    """Keep Feature + related FR/AC/rules/useCases that mention the module."""
+    """Keep Feature + related FR/AC/rules/useCases; PRIMARY lists anti-miss union."""
     kw = knowledge if isinstance(knowledge, dict) else {}
     tokens = _module_match_tokens(module)
     features = _as_list(kw.get("features"))
@@ -213,21 +252,21 @@ def slice_knowledge_payload_for_module(
         "executionContexts": _filter_rows_for_module(
             _as_list(kw.get("executionContexts")), tokens, keep_min=0
         )[:10],
-        "businessRules": _filter_rows_for_module(
-            _as_list(kw.get("businessRules")), tokens, keep_min=1
-        )[:15],
-        "validationRules": _filter_rows_for_module(
-            _as_list(kw.get("validationRules")), tokens, keep_min=1
-        )[:15],
+        "businessRules": _primary_rows_for_module(
+            _as_list(kw.get("businessRules")), tokens, cap=40
+        ),
+        "validationRules": _primary_rows_for_module(
+            _as_list(kw.get("validationRules")), tokens, cap=40
+        ),
         "apiSummary": _filter_rows_for_module(
             _as_list(kw.get("apiSummary")), tokens, keep_min=0
         )[:12],
-        "exceptions": _filter_rows_for_module(
-            _as_list(kw.get("exceptions")), tokens, keep_min=0
-        )[:10],
-        "acceptanceCriteria": _filter_rows_for_module(
-            _as_list(kw.get("acceptanceCriteria")), tokens, keep_min=1
-        )[:12],
+        "exceptions": _primary_rows_for_module(
+            _as_list(kw.get("exceptions")), tokens, cap=30
+        ),
+        "acceptanceCriteria": _primary_rows_for_module(
+            _as_list(kw.get("acceptanceCriteria")), tokens, cap=30
+        ),
         "constraints": _filter_rows_for_module(
             _as_list(kw.get("constraints")), tokens, keep_min=0
         )[:8],

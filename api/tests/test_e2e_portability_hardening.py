@@ -58,6 +58,36 @@ def test_annotate_ok_with_path_and_action():
     assert "[Thiếu Context]" not in (out[0].test_data or "")
 
 
+def test_annotate_flags_missing_auth_role_post_login():
+    drafts = [
+        TcDraft(
+            title="Tạo phòng",
+            type="E2E",
+            steps="1. Nhấn nút Tạo mới",
+            expected_result="OK",
+            test_data="path: /storage/rooms",
+            precondition="Đã đăng nhập",
+        )
+    ]
+    out = annotate_e2e_tc_drafts(drafts)
+    assert "[Thiếu Context]" in (out[0].test_data or "")
+    assert "authrole" in (out[0].test_data or "").lower()
+
+
+def test_annotate_rejects_vn_slug_as_usable_path():
+    drafts = [
+        TcDraft(
+            title="Tạo phòng",
+            type="E2E",
+            steps="1. Nhấn nút Tạo mới",
+            expected_result="OK",
+            test_data="path: /tạo-mới-vật-chứng\nauthRole: admin",
+        )
+    ]
+    out = annotate_e2e_tc_drafts(drafts)
+    assert "[Thiếu Context]" in (out[0].test_data or "")
+
+
 def test_invented_e2e_env_raises_context_missing():
     files = [
         E2EFile(

@@ -7,7 +7,7 @@ import {
   parseProjectProfileJson,
   saveProjectProfile,
 } from "./loadSaveProfile.js";
-import { renderE2eConventionsMd, renderE2ePlaywrightRunMd } from "./renderConventions.js";
+import { renderE2eConventionsMd } from "./renderConventions.js";
 import { discoverAndPersistProjectProfile } from "./index.js";
 import type { ProfileIo, ProjectProfile } from "./types.js";
 
@@ -91,7 +91,8 @@ export default defineConfig({
     const result = await discoverAndPersistProjectProfile("/proj", io);
     assert.ok(files[".ai-test/project.profile.json"]);
     assert.ok(files[".ai-test/e2e-conventions.md"]);
-    assert.ok(files[".ai-test/e2e-playwright-run.md"]);
+    assert.ok(files[".ai-test/unit-conventions.md"]);
+    assert.equal(files[".ai-test/e2e-playwright-run.md"], undefined);
     const loaded = parseProjectProfileJson(files[".ai-test/project.profile.json"]);
     assert.equal(loaded?.schema, "aitest-project-profile-v1");
     assert.equal(result.profile.runner, "playwright");
@@ -135,8 +136,7 @@ export default defineConfig({
     )!;
     const md = renderE2eConventionsMd(profile);
     assert.match(md, /data-testid/);
-    const runMd = renderE2ePlaywrightRunMd(profile);
-    assert.match(runMd, /apps\/web/);
+    assert.match(md, /playwrightRun|Verify \/ Playwright/i);
   });
 
   it("loadProjectProfile returns null when missing", async () => {

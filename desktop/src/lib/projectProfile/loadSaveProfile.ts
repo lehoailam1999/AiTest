@@ -3,7 +3,6 @@ import {
   DEFAULT_SHARED_STORAGE,
   DEFAULT_TEST_ROOT,
   E2E_CONVENTIONS_REL,
-  E2E_PLAYWRIGHT_RUN_REL,
   PROFILE_REL_PATH,
   PROFILE_SCHEMA,
   UNIT_CONVENTIONS_REL,
@@ -193,6 +192,5 @@ export async function readConventionExcerpt(
 export const CONVENTION_PATHS = {
   profile: PROFILE_REL_PATH,
   e2eConventions: E2E_CONVENTIONS_REL,
-  e2ePlaywrightRun: E2E_PLAYWRIGHT_RUN_REL,
   unitConventions: UNIT_CONVENTIONS_REL,
 } as const;

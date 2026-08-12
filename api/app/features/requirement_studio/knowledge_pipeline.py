@@ -560,8 +560,8 @@ async def build_knowledge(
         schedule_enrich = conn is not None and C.is_ai_ready(getattr(conn, "status", ""))
 
     if schedule_enrich:
-        # Keep status=building so UI/Freeze không hiện heuristic trước khi AI xong
-        row.status = "building"
+        # Keep status=ready so UI can render Heuristic v1 immediately while background AI enrich runs
+        row.status = "ready"
         db.commit()
         db.refresh(row)
         set_enrich_state(workspace.id, enrich_pending=True, enrich_error=None)

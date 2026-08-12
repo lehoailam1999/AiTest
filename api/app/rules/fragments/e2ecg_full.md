@@ -14,7 +14,11 @@
 6. PERMISSION VERIFY: RBAC/forbidden → assert hidden|disabled|403|redirect per Expected.
 
 ## II. Implementation Mapping (TC intent → code via Source)
-7. WORKFLOW: Map numbered TC Step → `test.step`; order = Auth → Feature entry → Arrange → Act → Assert.
+7. WORKFLOW (TC-literal): Every numbered TC step → one `test.step` with the **same wording**.
+   Order = Auth (if authRequired) → Feature entry (`path`) → open create/modal **when
+   precondition says popup/dialog** → Act steps → Assert Expected. Do not invent extra
+   steps (upload/select/submit) that TC does not list. Step indexes continuous `0..N`.
+   Phase 2 guard FAILS codegen if Auth/Entry/Act missing or reordered.
 8. UI REVERSE: Routes/menus/forms from FE source; never invent routes.
 9. ELEMENT DISCOVERY: Fields/buttons from DOM snapshot + FE attrs only.
 10. LOCATOR RESOLUTION: `data-testid|data-cy` → label → role → #id|name|formControlName → placeholder → text last.
@@ -23,10 +27,13 @@
 13. SYNC: `domcontentloaded` (never `networkidle`) + landmark assert.
 14. ASSERTION: assert expected behavior after actions; no `expect(await expectX())`.
 15. CONVENTION: `AItest/E2ETest/{Req}/{TC}` + `_shared`; reuse existing helpers first.
-16. SELF-CHECK: no invented route/role/credential; no empty POM stubs.
+16. SELF-CHECK: no invented route/role/credential; **no `Phase 3: ungrounded` throw stubs**
+   in committed POM — implement locators from FE/DOM or omit method. Empty stubs abort
+   Playwright mid-run (browser closes) before later TC steps run.
 17. NO DUPLICATE: one canonical page/spec/config path.
 18. RUNNABLE: compile + import class exact + `new Page(page)`.
-19. ACT/ARRANGE: ground in FE+DOM+Spec args; no app hardcode.
+19. ACT/ARRANGE: ground in FE+DOM+Spec args; no app hardcode. Precondition popup →
+   `openCreateModal` / create button from FE HTML before checkbox/fill steps.
 
 ## III. Definition of Ready (hard gate before writing/running tests)
 20. REQUIRED CONTEXT: featurePath + role/authRef + landmark + expected outcome, else `ContextMissing`.

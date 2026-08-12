@@ -1045,7 +1045,11 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         setWsPreviews(previews);
         setWsSelectedRel(out.manifest.files[0]?.targetRel || out.writeRel);
       }
-      return { runId: out.runId, packagePrefix: out.packagePrefix };
+      return {
+        runId: out.runId,
+        packagePrefix: out.packagePrefix,
+        unitJobId: out.manifest?.jobId,
+      };
     }
 
     // API Test artifact only (OpenAPI / handler) — still Desktop → API ↔ AI CLI.
@@ -1384,6 +1388,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               title: tc.title,
               status: "ok",
               workspaceRunId: out?.runId,
+              unitJobId: out?.unitJobId,
               packagePrefix: out?.packagePrefix,
               verifyStatus: "pending",
               applyStatus: "pending",
@@ -1555,6 +1560,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               title: tc.title,
               status: "ok",
               workspaceRunId: out?.runId,
+              unitJobId: out?.unitJobId,
               packagePrefix: out?.packagePrefix,
               verifyStatus: "pending",
               applyStatus: "pending",

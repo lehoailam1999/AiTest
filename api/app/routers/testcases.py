@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -14,6 +15,7 @@ from app.models.domain import GenerationTask, Job, Source, TestCase, WorkspaceRu
 from app.models.user import User
 from app.responses import errors, ok, page, page_params
 from app.serializers import testcase_dto
+from app.services.e2e_tc_pre_approve_enrich import enrich_e2e_tc_before_approve
 from app.services.requirement_content import source_content_hash
 from app.services.vietnamese_labels import (
     normalize_engine_type,
@@ -25,12 +27,193 @@ from app.services.vietnamese_labels import (
 
 router = APIRouter(prefix="/api", tags=["testcases"], dependencies=[Depends(get_current_user)])
 
+_E2E_ACTIONS = {
+    "NAVIGATE",
+    "INPUT",
+    "SELECT",
+    "CHECK",
+    "CLICK",
+    "SUBMIT",
+    "WAIT",
+    "ASSERT",
+}
+_CTX_PATH_RE = re.compile(
+    r"(?im)(?:^|\n)\s*(?:path|route|url|featurePath|feature_path)\s*[:=]\s*([^\n]+)"
+)
+_CTX_AUTH_REQ_RE = re.compile(
+    r"(?im)(?:^|\n)\s*(?:authRequired|auth_required)\s*[:=]\s*(true|false|yes|no|1|0)"
+)
+_CTX_ROLE_RE = re.compile(
+    r"(?im)(?:^|\n)\s*(?:authContext|authRole|auth_role|role|actor)\s*[:=]\s*([^\n]+)"
+)
+_CTX_BASE_URL_RE = re.compile(
+    r"(?im)(?:^|\n)\s*(?:baseURL|base_url)\s*[:=]\s*(https?://[^\s]+)"
+)
+_MISSING_CONTEXT_RE = re.compile(r"\[(?:MISSING CONTEXT|Thiếu Context)\]", re.I)
+_SCENARIO_RE = re.compile(
+    r"\b(positive|negative|boundary|validation|exception|happy path|error flow)\b",
+    re.I,
+)
+_TESTDATA_VAGUE_RE = re.compile(
+    r"\b(một\s+\w+\s+hợp\s*lệ|valid\s+value|some\s+valid|dữ\s*liệu\s*hợp\s*lệ)\b",
+    re.I,
+)
+_FORBIDDEN_LOCATOR_RE = re.compile(
+    r"(data-testid|data-cy|xpath|css\s*selector|page\.locator|getByRole|getByTestId|getByText|#[A-Za-z_][\w-]*)",
+    re.I,
+)
+_AMBIGUOUS_STEP_RE = re.compile(
+    r"^\s*(?:\d+[\).\-\s]*)?(thực\s*hiện\s*thao\s*tác|tiếp\s*tục|kiểm\s*tra|nhập\s*thông\s*tin\s*cần\s*thiết)\s*$",
+    re.I,
+)
+_ACTIONABLE_STEP_RE = re.compile(
+    r"(?:nhấn|bấm|click|chọn|select|điền|fill|nhập|type|enter|mở|open|tạo|create|"
+    r"thêm|add|xóa|delete|upload|lưu|save|submit|goto|navigate|truy\s*cập|assert|verify)",
+    re.I,
+)
+
 
 def _uuid(value: str) -> uuid.UUID | None:
     try:
         return uuid.UUID(value)
     except (ValueError, TypeError):
         return None
+
+
+def _is_e2e_case(tc: TestCase) -> bool:
+    return normalize_engine_type(tc.type) == "E2E"
+
+
+def _has_actionable_step(steps: str) -> bool:
+    for raw in [ln.strip() for ln in (steps or "").splitlines() if ln.strip()]:
+        if _AMBIGUOUS_STEP_RE.match(raw):
+            continue
+        if _ACTIONABLE_STEP_RE.search(raw):
+            return True
+    return False
+
+
+def _validate_e2e_approve_readiness(tc: TestCase) -> list[str]:
+    issues: list[str] = []
+    module = (tc.module or "").strip()
+    title = (tc.title or "").strip()
+    steps = (tc.steps or "").strip()
+    precondition = (tc.precondition or "").strip()
+    expected = (tc.expected_result or "").strip()
+    test_data = (tc.test_data or "").strip()
+    blob = "\n".join([precondition, test_data, steps, expected, title, module])
+
+    # 1) Meta essentials
+    if not (tc.test_case_code or "").strip():
+        issues.append("Meta thiếu Code")
+    if not title:
+        issues.append("Meta thiếu Title")
+    if not module:
+        issues.append("Meta thiếu Module/Function")
+    if not (tc.priority or "").strip():
+        issues.append("Meta thiếu Priority")
+    if not (tc.severity or "").strip():
+        issues.append("Meta thiếu Severity")
+
+    # 2) Business context essentials
+    if not _SCENARIO_RE.search(blob):
+        issues.append("Business Context thiếu Scenario type (Positive/Negative/Boundary/Validation/Exception)")
+    if not _CTX_ROLE_RE.search(blob):
+        issues.append("Business Context thiếu Actor/Role")
+    if not re.search(r"(requirement|business\s*rule|BR-|FR-|AC-)", blob, re.I):
+        issues.append("Business Context thiếu Requirement/Business Rule reference")
+
+    # 3) Preconditions
+    if not precondition:
+        issues.append("Preconditions bị trống")
+
+    # 4) Test data quality
+    if not test_data:
+        issues.append("Test Data bị trống")
+    if _TESTDATA_VAGUE_RE.search(test_data):
+        issues.append("Test Data mơ hồ (ví dụ 'một mã hợp lệ')")
+    if test_data and not re.search(r"[:=]", test_data):
+        issues.append("Test Data chưa đủ cụ thể (thiếu cặp key:value)")
+
+    # 5) E2E context
+    if not _CTX_PATH_RE.search(blob):
+        issues.append("E2E Context thiếu path/route/featurePath")
+    if not _CTX_AUTH_REQ_RE.search(blob):
+        issues.append("E2E Context thiếu authRequired")
+    if not _CTX_ROLE_RE.search(blob):
+        issues.append("E2E Context thiếu authContext/role")
+    if _MISSING_CONTEXT_RE.search(blob):
+        issues.append("Còn placeholder [MISSING CONTEXT]/[Thiếu Context]")
+    # baseURL may come from environment; require either explicit or route context.
+    if not _CTX_BASE_URL_RE.search(blob) and not _CTX_PATH_RE.search(blob):
+        issues.append("E2E Context thiếu baseURL hoặc path/route")
+
+    # 6) Steps structure & ambiguity
+    if not steps:
+        issues.append("Steps bị trống")
+    else:
+        has_valid_action = False
+        for raw in [ln.strip() for ln in steps.splitlines() if ln.strip()]:
+            if _AMBIGUOUS_STEP_RE.match(raw):
+                issues.append(f"Step mơ hồ: '{raw}'")
+                continue
+            line = re.sub(r"^\d+[\).\-\s]*", "", raw).strip()
+            action = line.split()[0].upper() if line else ""
+            if action in _E2E_ACTIONS:
+                has_valid_action = True
+                if action in {"INPUT", "SELECT", "CHECK", "CLICK", "ASSERT", "NAVIGATE", "SUBMIT"}:
+                    if "target:" not in line.lower():
+                        issues.append(f"Step thiếu Target: '{raw}'")
+                if action in {"INPUT", "SELECT", "CHECK"} and "value:" not in line.lower():
+                    issues.append(f"Step thiếu Value: '{raw}'")
+                if "expected:" not in line.lower() and action != "WAIT":
+                    issues.append(f"Step thiếu Expected: '{raw}'")
+        if not has_valid_action and not _has_actionable_step(steps):
+            issues.append(
+                "Steps thiếu action chuẩn NAVIGATE|INPUT|SELECT|CHECK|CLICK|SUBMIT|WAIT|ASSERT"
+            )
+
+    # 7) Expected result + postcondition + locator ban
+    if not expected:
+        issues.append("Expected Result bị trống")
+    if expected and re.search(r"(thành công|ok)$", expected.strip(), re.I):
+        issues.append("Expected Result quá chung, chưa verify được")
+    if not re.search(r"(postcondition|sau\s*test|sau\s*khi|không\s*tạo|không\s*cập\s*nhật|không\s*xóa|dữ\s*liệu)", blob, re.I):
+        issues.append("Thiếu Postconditions")
+    if _FORBIDDEN_LOCATOR_RE.search(blob):
+        issues.append("TC chứa locator kỹ thuật (data-testid/xpath/page.locator...) — chỉ dùng semantic target")
+
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for item in issues:
+        key = item.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            dedup.append(item)
+    return dedup[:12]
+
+
+def _split_e2e_readiness_issues(issues: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Critical issues => hard-block approve.
+    Non-critical issues => approve allowed, but mark tc.automation_ready=False + note.
+    """
+    # [MISSING CONTEXT] is soft after pre-approve enrich (DoR draft flag).
+    # Hard-block only truly unblockable content for Approve.
+    critical_tokens = (
+        "steps bị trống",
+        "step mơ hồ",
+        "locator kỹ thuật",
+    )
+    critical: list[str] = []
+    soft: list[str] = []
+    for issue in issues:
+        key = issue.strip().lower()
+        if any(tok in key for tok in critical_tokens):
+            critical.append(issue)
+        else:
+            soft.append(issue)
+    return critical, soft
 
 
 def apply_testcase_patch(tc: TestCase, body: dict) -> bool:
@@ -291,6 +474,20 @@ def _transition(
     tc = db.query(TestCase).filter(TestCase.id == tid).first()
     if tc is None:
         return errors(404, "not found")
+    e2e_soft_issues: list[str] = []
+    if to == C.REVIEW_APPROVED:
+        normalized_type = normalize_engine_type(tc.type)
+        if normalized_type == "E2E":
+            enrich_e2e_tc_before_approve(tc)
+            issues = _validate_e2e_approve_readiness(tc)
+            critical, soft = _split_e2e_readiness_issues(issues)
+            if critical:
+                return errors(
+                    400,
+                    "E2E Approve bị chặn: chưa đạt E2E_READY",
+                    *critical,
+                )
+            e2e_soft_issues = soft
     if not C.can_transition_review(tc.review_status, to):
         return errors(400, f"cannot transition from {tc.review_status} to {to}")
     tc.review_status = to
@@ -302,6 +499,14 @@ def _transition(
         if to == C.REVIEW_APPROVED:
             # R1.5 — Journey/UI/e2e → E2E; unit → Unit; api → API
             tc.type = normalize_engine_type(tc.type)
+            if tc.type == "E2E":
+                if e2e_soft_issues:
+                    tc.automation_ready = False
+                    tc.review_comment = (
+                        "E2E chưa đủ chuẩn (soft): " + " | ".join(e2e_soft_issues[:4])
+                    )
+                else:
+                    tc.automation_ready = True
     else:
         tc.reviewed_by = None
         tc.reviewed_at = None

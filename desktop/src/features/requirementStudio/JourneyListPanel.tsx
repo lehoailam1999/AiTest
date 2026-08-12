@@ -159,8 +159,9 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
       title: "Requirement",
       dataIndex: "title",
       key: "title",
+      width: "32%",
       render: (t: string, row) => (
-        <Space orientation="vertical" size={0}>
+        <Space orientation="vertical" size={2}>
           <Typography.Text strong>{t}</Typography.Text>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {row.fileCount ?? 0} file
@@ -172,21 +173,23 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
     {
       title: "Trạng thái",
       key: "status",
-      width: 160,
+      width: "18%",
       render: (_, row) => knowledgeTag(row.knowledgeStatus),
     },
     {
       title: "Snapshot",
       dataIndex: "snapshotCount",
-      width: 100,
+      key: "snapshotCount",
+      width: "12%",
+      align: "center",
       render: (n?: number) => n ?? 0,
     },
     {
       title: "Test case",
       key: "tc",
-      width: 180,
+      width: "20%",
       render: (_, row) => (
-        <Typography.Text>
+        <Typography.Text style={{ fontSize: 13 }}>
           {row.tcTotal ?? 0} tổng
           {(row.tcPending ?? 0) > 0 ? (
             <Typography.Text type="warning"> · {row.tcPending} chờ duyệt</Typography.Text>
@@ -200,9 +203,10 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
     {
       title: "",
       key: "actions",
-      width: 340,
+      width: "18%",
+      align: "right",
       render: (_, row) => (
-        <Space wrap>
+        <Space size={6} wrap={false} style={{ justifyContent: "flex-end" }}>
           <Button type="primary" size="small" onClick={() => onOpenJourney(row.id)}>
             Mở
           </Button>
@@ -211,7 +215,7 @@ export default function JourneyListPanel({ onOpenJourney, onOpenReview }: Props)
           </Button>
           {(row.tcPending ?? 0) > 0 && onOpenReview ? (
             <Button size="small" onClick={() => onOpenReview(row.id)}>
-              Duyệt test case
+              Duyệt
             </Button>
           ) : null}
           <Button

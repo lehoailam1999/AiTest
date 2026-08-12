@@ -8,7 +8,8 @@ const PATH_MARKER_RE =
 
 /** Reject LLM placeholders / soft-DoR notes mistaken as routes (e.g. path: [Thiếu Context]). */
 export function isUsableFeaturePath(raw: string | null | undefined): boolean {
-  let p = (raw || "").trim().replace(/^["'`]+|["'`]+$/g, "");
+  const normalized = coerceToPathname(raw);
+  let p = (normalized || "").trim().replace(/^["'`]+|["'`]+$/g, "");
   // Strip trailing auto-tags / comments: "/admin/x [auto:fe]" or "/admin/x # note"
   p = p.replace(/\s*[\[(#].*$/, "").trim();
   if (!p || p === "/") return false;
@@ -18,14 +19,29 @@ export function isUsableFeaturePath(raw: string | null | undefined): boolean {
   }
   if (/[\[\]{}]|featurepath\s*$/i.test(low)) return false;
   if (/^(login|signin|sign-in|auth|register)$/i.test(low.replace(/^\//, ""))) return false;
-  // Must look like a real UI path segment (at least one letter after optional /)
+  // Must look like a real UI path segment (ASCII letters only — rejects VN slug invent)
   if (!/^\/?[A-Za-z][\w\-./]*$/.test(p.replace(/\s/g, ""))) return false;
   return true;
 }
 
+/** http(s)://host/foo → /foo; bare origin → "" (not a feature path). */
+export function coerceToPathname(raw: string | null | undefined): string {
+  let p = (raw || "").trim().replace(/^["'`]+|["'`]+$/g, "");
+  if (!p) return "";
+  if (/^https?:\/\//i.test(p)) {
+    try {
+      const u = new URL(p);
+      p = u.pathname || "";
+    } catch {
+      return "";
+    }
+  }
+  return p;
+}
+
 /** Normalize raw path capture for storage / compare. */
 export function normalizeFeaturePath(raw: string | null | undefined): string {
-  let p = (raw || "").trim().replace(/^["'`]+|["'`]+$/g, "");
+  let p = coerceToPathname(raw);
   p = p.replace(/\s*[\[(#].*$/, "").trim();
   if (!p) return "";
   if (!p.startsWith("/")) p = `/${p}`;

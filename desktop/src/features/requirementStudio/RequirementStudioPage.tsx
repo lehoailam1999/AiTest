@@ -22,6 +22,7 @@ import {
   FileTextOutlined,
   InboxOutlined,
   ReloadOutlined,
+  SyncOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
@@ -93,6 +94,8 @@ export default function RequirementStudioPage({
   const [uploading, setUploading] = useState(false);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isAnalyzing = building || Boolean(knowledge?.enrichPending);
 
   const focus = focusProp ?? innerFocus;
   const setFocus = (next: StudioFocus) => {
@@ -267,40 +270,37 @@ export default function RequirementStudioPage({
       return;
     }
     setBuilding(true);
-    let keepBuildingForEnrich = false;
     try {
       const kw = await requirementStudio.buildKnowledge(workspace.id, true);
       setKnowledge(kw);
       emitStatus(files, kw);
       setFocus("knowledge");
       if (kw.enrichPending || kw.status === "building") {
-        keepBuildingForEnrich = true;
-        message.info("Đang phân tích bằng AI…");
-        return;
+        message.info("Đang hiển thị dữ liệu sơ bộ — AI đang bổ sung chi tiết trong nền…");
+      } else {
+        setBuilding(false);
+        message.success(
+          kw.builder === "llm" || kw.builder === "llm-cli"
+            ? `Phân tích v${kw.version} (${kw.builder === "llm-cli" ? "AI CLI" : "LLM"})`
+            : `Phân tích v${kw.version}`
+        );
       }
-      message.success(
-        kw.builder === "llm" || kw.builder === "llm-cli"
-          ? `Phân tích v${kw.version} (${kw.builder === "llm-cli" ? "AI CLI" : "LLM"})`
-          : `Phân tích v${kw.version}`
-      );
     } catch (e) {
+      setBuilding(false);
       message.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (!keepBuildingForEnrich) setBuilding(false);
     }
   };
 
-  // Progressive enrich: poll until Cursor/LLM merge finishes (không hiện heuristic giữa chừng)
+  // Progressive enrich: poll until Cursor/LLM merge finishes (hiển thị heuristic ngay, cập nhật khi AI xong)
   useEffect(() => {
     if (!workspace?.id || !knowledge?.enrichPending) return;
+    const ENRICH_POLL_INITIAL_MS = 1000;
     const ENRICH_POLL_MS = 1500;
-    const ENRICH_POLL_INITIAL_MS = 1500;
     const ENRICH_POLL_ERROR_MS = 3000;
     let cancelled = false;
     const wid = workspace.id;
     const started = Date.now();
     const maxMs = 10 * 60 * 1000;
-    setBuilding(true);
     const tick = async () => {
       try {
         const kw = await requirementStudio.getKnowledge(wid);
@@ -379,11 +379,15 @@ export default function RequirementStudioPage({
       : focus === "knowledge"
         ? {
             title: "Phân tích",
-            lead: "Tổng hợp kiến thức từ tài liệu. Sau khi sẵn sàng, chuyển sang bước tạo test case.",
+            lead: isAnalyzing
+              ? "AI đang phân tích và tổng hợp kiến thức từ tài liệu (vui lòng chờ trong giây lát)…"
+              : "Tổng hợp kiến thức từ tài liệu. Sau khi sẵn sàng, chuyển sang bước tạo test case.",
           }
         : {
             title: "Tài liệu",
-            lead: "Tải lên tài liệu SRS (parse xong) rồi Phân tích.",
+            lead: isAnalyzing
+              ? "Hệ thống đang phân tích tài liệu bằng AI trong nền…"
+              : "Tải lên tài liệu SRS (parse xong) rồi Phân tích.",
           };
 
   return (
@@ -403,6 +407,11 @@ export default function RequirementStudioPage({
           </Typography.Text>
         </div>
         <Space wrap>
+          {isAnalyzing ? (
+            <Tag color="processing" icon={<SyncOutlined spin />}>
+              Đang phân tích AI…
+            </Tag>
+          ) : null}
           <Button icon={<ReloadOutlined />} onClick={() => void boot()} disabled={bootLoading}>
             Tải lại
           </Button>
@@ -410,10 +419,11 @@ export default function RequirementStudioPage({
             <Button
               type="primary"
               icon={<ThunderboltOutlined />}
-              loading={building}
+              loading={isAnalyzing}
+              disabled={isAnalyzing}
               onClick={() => void buildKnowledge()}
             >
-              Phân tích
+              {isAnalyzing ? "Đang phân tích…" : "Phân tích"}
             </Button>
           ) : null}
         </Space>
@@ -450,7 +460,7 @@ export default function RequirementStudioPage({
       ) : focus === "knowledge" ? (
         <KnowledgePanel
           knowledge={knowledge}
-          building={building}
+          building={isAnalyzing}
           canBuild={canBuildKnowledge}
           onBuild={() => void buildKnowledge()}
           onOpenFreeze={() => setFocus("freeze")}

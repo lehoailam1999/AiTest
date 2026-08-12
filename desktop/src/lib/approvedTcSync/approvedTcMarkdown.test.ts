@@ -32,9 +32,14 @@ function sample(overrides: Partial<TestCase> = {}): TestCase {
 }
 
 describe("approvedTcMarkdown", () => {
-  it("builds path under .ai-test/test-cases", () => {
+  it("builds E2E path under .ai-test/test-cases/E2ETest", () => {
     const p = approvedTcMarkdownRelPath(sample());
-    assert.equal(p, ".ai-test/test-cases/account/TC-LOGIN-01.md");
+    assert.equal(p, ".ai-test/test-cases/E2ETest/account/TC-LOGIN-01.md");
+  });
+
+  it("builds Unit path under .ai-test/test-cases/UnitTest", () => {
+    const p = approvedTcMarkdownRelPath(sample({ type: "Unit", testCaseId: "TC-U-01" }));
+    assert.equal(p, ".ai-test/test-cases/UnitTest/account/TC-U-01.md");
   });
 
   it("skips non-Approved", () => {

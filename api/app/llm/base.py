@@ -425,7 +425,7 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
 
         # System extra: Unit SoT block is prepended in engine rules — keep full under cap.
         # Unit/E2E both prepend analysis SoT — keep cap room for contract + overlay.
-        eng_cap = 2200 if ctx.speed_mode == "fast" else (4200 if eng in ("unit", "e2e") else 4000)
+        eng_cap = 2200 if ctx.speed_mode == "fast" else (5200 if eng in ("unit", "e2e") else 4000)
         sys_extra = truncate(ctx.custom_rules or "", eng_cap) if ctx.custom_rules else ""
         block = format_layered_rules_block(
             system_extra=sys_extra,
@@ -996,8 +996,13 @@ def parse_test_cases_json(raw: str) -> list[TestCaseDraft]:
 
     def _draft_from_obj(tc: dict) -> TestCaseDraft | None:
         from app.llm.unit_tc_ir import flatten_unit_tc_ir
+        from app.llm.e2e_tc_ir import flatten_e2e_tc_ir
 
-        flat = flatten_unit_tc_ir(tc) if isinstance(tc, dict) else {}
+        tc_type = str(tc.get("type") or "").strip().upper() if isinstance(tc, dict) else ""
+        if tc_type in ("E2E", "E2E_UI", "UI"):
+            flat = flatten_e2e_tc_ir(tc) if isinstance(tc, dict) else {}
+        else:
+            flat = flatten_unit_tc_ir(tc) if isinstance(tc, dict) else {}
         src = flat if flat else tc
         title = coerce_tc_text(src.get("title"))
         steps = coerce_tc_text(src.get("steps"))

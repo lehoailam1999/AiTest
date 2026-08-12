@@ -19,7 +19,9 @@ def resolve_tc_speed_mode(
     Return ``fast`` | ``full``.
 
     Precedence: engineHint.speed → AITEST_TC_E2E_SPEED / AITEST_TC_UNIT_SPEED →
-    default **fast** (wall-clock). Opt into full coverage via UI checkbox / env=full.
+    engine default.
+    - E2E default: **fast** (wall-clock).
+    - Unit default: **full** (preserve analysis coverage by default).
     ``fast`` = shorter prompts + anti-bloat; E2E still covers Output signals (soft cap).
     """
     hint = engine_hint if isinstance(engine_hint, dict) else {}
@@ -32,7 +34,7 @@ def resolve_tc_speed_mode(
         env = (os.environ.get("AITEST_TC_E2E_SPEED") or "fast").strip().lower()
         return "full" if env in ("full", "complete") else "fast"
     if eng == "unit":
-        env = (os.environ.get("AITEST_TC_UNIT_SPEED") or "fast").strip().lower()
+        env = (os.environ.get("AITEST_TC_UNIT_SPEED") or "full").strip().lower()
         return "full" if env in ("full", "complete") else "fast"
     return "fast"
 
@@ -49,7 +51,8 @@ def resolve_max_tc_per_module(
     set 0 to disable). Explicit maxPerModule / AITEST_TC_E2E_MAX_PER_MODULE win.
     E2E speed=full: no default ceiling (signal-driven) unless env/hint set.
 
-    Unit: soft cap when speed=fast (default 8) unless overridden.
+    Unit: no implicit default ceiling (signal-driven). Cap only when explicitly
+    set via hint/env.
     """
     hint = engine_hint if isinstance(engine_hint, dict) else {}
     eng = (preferred_engine or "").strip().lower()
@@ -89,11 +92,14 @@ def resolve_max_tc_per_module(
         if eng == "unit"
         else "AITEST_TC_MAX_PER_MODULE"
     )
-    default = "8"
+    default = ""
     try:
-        n = int(os.environ.get(env_key, default))
+        raw = (os.environ.get(env_key) or default).strip()
+        if not raw:
+            return None
+        n = int(raw)
     except ValueError:
-        n = 8
+        return None
     return max(2, min(40, n))
 
 

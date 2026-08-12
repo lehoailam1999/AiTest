@@ -1,21 +1,24 @@
 ---
-description: E2ECG pointer — single runtime SoT
-globs: api/app/llm/e2e_codegen_rules.py,api/app/llm/base.py,api/app/routers/generate_e2e.py,api/app/services/e2e_*.py,desktop/src/lib/e2eWorkspace/**/*,desktop/src/features/e2e-test/**
+description: E2ECG pointer — Gen + journey + grounding routing
+globs: api/app/llm/e2e_codegen_rules.py,api/app/llm/e2e_journey_rules.py,api/app/llm/base.py,api/app/routers/generate_e2e.py,api/app/services/e2e_*.py,desktop/src/lib/e2eWorkspace/**/*,desktop/src/features/e2e-test/**
 alwaysApply: false
 ---
 
 # E2ECG — Single Source Pointer
 
-Runtime rule SoT (duy nhat):
-- `api/app/llm/e2e_codegen_rules.py` (E2ECG Rules 1-27)
+Runtime rule SoT (duy nhất):
+- `api/app/llm/e2e_codegen_rules.py` (E2ECG)
 
-Compatibility/adapter:
-- `api/app/llm/e2e_journey_rules.py` (thin layer only)
+Thin adapters (không author rule mới ở đây):
+- `api/app/llm/e2e_journey_rules.py`
+- `api/app/llm/e2e_grounding_rules.py` (pointer riêng: `e2e-grounding.mdc`)
 
-Runtime enforcement (khong phai rule authoring):
+Runtime enforcement:
 - `api/app/services/e2e_codegen_guard.py`
 - `api/app/services/e2e_journey_enforce.py`
 
-Guideline:
-- Khong duplicate rule text o file `.mdc` nay.
-- Khi doi rule, sua duy nhat `e2e_codegen_rules.py`.
+Project conventions (IDE Gen packet):
+- `.ai-test/e2e-conventions.md` ← `e2eConventionsCore` + profile
+- Verify config SoT ← `project.profile.json` → `playwrightRun` (không dùng e2e-playwright-run.md)
+
+Guideline: không duplicate rule text ở `.mdc`. Đổi rule → sửa SoT `.py` / conventions core.

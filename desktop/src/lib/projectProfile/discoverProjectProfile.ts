@@ -24,15 +24,25 @@ function hasPlaywrightPackage(files: string[], prefix = ""): boolean {
   return files.some((f) => norm(f) === exact || norm(f).includes("/node_modules/@playwright/test/"));
 }
 
-/** Shallow package roots: project root + first-level children (skip dot dirs and node_modules). */
+/** Shallow + second-level package roots (e.g. test/Forensic.E2E). */
 function candidatePackageRoots(files: string[]): string[] {
   const roots = new Set<string>();
   roots.add("");
-  const skip = new Set(["node_modules", ".git", "dist", "build"]);
+  const skip = new Set(["node_modules", ".git", "dist", "build", ".ai-test"]);
   for (const f of files) {
-    const parts = norm(f).split("/");
+    const parts = norm(f).split("/").filter(Boolean);
     if (parts.length >= 2 && parts[0] && !parts[0].startsWith(".") && !skip.has(parts[0])) {
       roots.add(parts[0]);
+    }
+    // Nested package: test/Forensic.E2E/…
+    if (
+      parts.length >= 3 &&
+      parts[0] &&
+      !parts[0].startsWith(".") &&
+      !skip.has(parts[0]) &&
+      !skip.has(parts[1])
+    ) {
+      roots.add(`${parts[0]}/${parts[1]}`);
     }
   }
   return [...roots];
@@ -47,6 +57,24 @@ function hasAnyPlaywrightPackage(files: string[]): boolean {
 }
 
 function findPlaywrightPackageRoot(files: string[]): string {
+  // Prefer package that owns a real playwright.config (skip staging overlays).
+  const configs = files
+    .map(norm)
+    .filter(
+      (f) =>
+        /playwright\.config\.(ts|js|mjs)$/i.test(f) &&
+        !f.includes("/.ai-test/staging/") &&
+        !f.includes("/node_modules/")
+    )
+    .sort(
+      (a, b) =>
+        a.split("/").length - b.split("/").length || a.localeCompare(b)
+    );
+  for (const cfg of configs) {
+    const idx = cfg.lastIndexOf("/");
+    const dir = idx >= 0 ? cfg.slice(0, idx) : "";
+    return dir;
+  }
   for (const root of candidatePackageRoots(files)) {
     if (hasPlaywrightPackage(files, root ? `${root}/` : "")) return root;
   }
@@ -325,7 +353,11 @@ export async function discoverProjectProfile(
       if (parsedConfig.baseURL) pw.defaultBaseURL = parsedConfig.baseURL;
       if (parsedConfig.storageState) pw.storageState.canonicalRel = parsedConfig.storageState;
       if (parsedConfig.workers != null) pw.run.workers = parsedConfig.workers;
-      if (parsedConfig.timeoutMs != null) pw.run.timeoutMs = parsedConfig.timeoutMs;
+      if (parsedConfig.timeoutMs != null) {
+        // Playwright timeouts are ms; values < 1000 are almost always seconds written by mistake.
+        const t = parsedConfig.timeoutMs;
+        pw.run.timeoutMs = t > 0 && t < 1000 ? t * 1000 : t;
+      }
       if (parsedConfig.headless != null) pw.run.headless = parsedConfig.headless;
       if (parsedConfig.slowMoMs != null) pw.run.slowMoMs = parsedConfig.slowMoMs;
       if (parsedConfig.globalSetup) pw.seed.globalSetupRel = parsedConfig.globalSetup;
