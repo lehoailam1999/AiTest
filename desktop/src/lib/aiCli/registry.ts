@@ -17,6 +17,7 @@ export const AI_CLI_REGISTRY: readonly AiCliSpec[] = [
       "cursor-agent",
     ],
     versionArgs: ["--version"],
+    authCheckArgs: ["status", "--format", "json"],
     envPathKeys: ["AITEST_AGENT_PATH", "CURSOR_AGENT_PATH"],
   },
   {
@@ -31,6 +32,7 @@ export const AI_CLI_REGISTRY: readonly AiCliSpec[] = [
     name: "Claude Code CLI",
     commandCandidates: ["claude.exe", "claude.cmd", "claude"],
     versionArgs: ["--version"],
+    authCheckArgs: ["auth", "status"],
     envPathKeys: [],
   },
   {
@@ -38,6 +40,7 @@ export const AI_CLI_REGISTRY: readonly AiCliSpec[] = [
     name: "Antigravity CLI",
     commandCandidates: ["agy.exe", "agy.cmd", "agy"],
     versionArgs: ["--version"],
+    authCheckArgs: ["status"],
     envPathKeys: [],
   },
   {

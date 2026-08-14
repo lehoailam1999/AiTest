@@ -5,8 +5,7 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from alembic.operations import ops as alembic_ops
-from sqlalchemy import engine_from_config, inspect, pool, text
+from sqlalchemy import engine_from_config, pool, text
 
 from app.config import get_settings
 from app.database import Base
@@ -45,69 +44,96 @@ def _ensure_alembic_version(connection) -> None:
     connection.commit()
 
 
-def include_object(object_, name, type_, reflected, compare_to) -> bool:
-    """Autogen only table/column diffs — ignore index/constraint naming noise.
+def _bootstrap_if_empty(connection) -> None:
+    """On a brand-new database: build schema from models, then stamp head.
 
-    Core tables historically came from create_all; index names often differ
-    (ux_* vs ix_*) and would otherwise flood every ``db:migrate``.
+    ``0001_baseline`` is only a marker — core tables historically came from
+    ``create_all`` — so replaying the revisions would leave a fresh clone
+    without ``projects`` / ``users`` / ``jobs``. ``create_all`` already produces
+    the latest schema, so the revisions are marked as applied instead of being
+    replayed (replaying would hit "column already exists" on future revisions).
+    """
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import inspect
+
+    existing = set(inspect(connection).get_table_names())
+    if "alembic_version" in existing or existing & set(target_metadata.tables):
+        return
+
+    print("[alembic] empty database — creating schema from models", flush=True)
+    target_metadata.create_all(bind=connection)
+    _ensure_alembic_version(connection)
+    for head in ScriptDirectory.from_config(config).get_heads():
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:rev)"), {"rev": head}
+        )
+        print(f"[alembic] stamped {head} (baseline, revisions not replayed)", flush=True)
+    connection.commit()
+
+
+def _drop_unknown_versions(connection) -> None:
+    """Forget revisions whose file no longer exists in ``versions/``.
+
+    Deleting a revision file that was already applied leaves the DB pointing at
+    an id Alembic cannot resolve, and every command then fails with
+    "Can't locate revision identified by ...".
+    """
+    from alembic.script import ScriptDirectory
+
+    known = {rev.revision for rev in ScriptDirectory.from_config(config).walk_revisions()}
+    current = [row[0] for row in connection.execute(text("SELECT version_num FROM alembic_version"))]
+    for rev in [rev for rev in current if rev not in known]:
+        connection.execute(
+            text("DELETE FROM alembic_version WHERE version_num = :rev"), {"rev": rev}
+        )
+        print(f"[alembic] forget revision {rev} (file missing in versions/)")
+    # Always close this transaction: leaving it open makes Alembic reuse it and
+    # the version bookkeeping of ``upgrade`` gets rolled back on disconnect.
+    connection.commit()
+
+
+def include_object(object_, name, type_, reflected, compare_to) -> bool:
+    """Autogen table/column diffs (add + drop) — ignore index naming noise.
+
+    Core tables were historically created by ``create_all``, so index names
+    differ (ux_* vs ix_*) and would flood every ``db:migrate``.
     """
     if name == "alembic_version":
         return False
-    # Ignore all index / unique-constraint churn (name or unique flag).
     if type_ in {"index", "unique_constraint"}:
-        return False
-    # Do not DROP tables that exist only in DB (not in models).
-    if type_ == "table" and reflected and compare_to is None:
         return False
     return True
 
 
 def process_revision_directives(context_, revision, directives) -> None:
-    """Safety net: never emit CREATE TABLE for a relation that already exists.
-
-    Always inspect via a fresh engine — ``context.connection`` can be None
-    during ``revision --autogenerate``, which previously skipped this filter
-    and wrote full-schema CREATE dumps.
-    """
+    """Skip writing a file when there is no table/column diff."""
     if not directives:
         return
     script = directives[0]
     if script.upgrade_ops is None:
         return
 
-    from sqlalchemy import create_engine
-
-    eng = create_engine(get_url())
-    try:
-        with eng.connect() as conn:
-            existing = set(inspect(conn).get_table_names())
-    finally:
-        eng.dispose()
-
-    print(f"[alembic] autogen filter: {len(existing)} tables in live DB")
-    skipped: list[str] = []
-
-    def _filter_ops(container) -> None:
-        kept = []
-        for op in list(container.ops):
-            if isinstance(op, alembic_ops.ModifyTableOps):
-                _filter_ops(op)
-                if op.ops:
-                    kept.append(op)
-                continue
-            if isinstance(op, alembic_ops.CreateTableOp) and op.table_name in existing:
-                skipped.append(op.table_name)
-                continue
-            kept.append(op)
-        container.ops = kept
-
-    _filter_ops(script.upgrade_ops)
-    for name in skipped:
-        print(f"[alembic] skip CREATE TABLE {name} (already exists)")
-
     if script.upgrade_ops.is_empty():
-        print("[alembic] No table/column changes detected — revision not created.")
+        print(
+            "[alembic] No table/column changes vs DB — no file created.\n"
+            "         Edit api/app/models/domain.py first, then npm run db:migrate again."
+        )
         directives[:] = []
+        return
+
+    # Keep migration files naturally sorted: 0013_migration.py,
+    # 0014_migration.py, ... instead of Alembic's random hash ids.
+    import re
+
+    from alembic.script import ScriptDirectory
+
+    numbers = []
+    for known_revision in ScriptDirectory.from_config(config).walk_revisions():
+        match = re.match(r"^(\d{4})", known_revision.revision)
+        if match:
+            numbers.append(int(match.group(1)))
+    script.rev_id = f"{max(numbers, default=0) + 1:04d}"
+    print(f"[alembic] next revision: {script.rev_id}", flush=True)
 
 
 def _configure_kwargs(**extra):
@@ -142,7 +168,9 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
+        _bootstrap_if_empty(connection)
         _ensure_alembic_version(connection)
+        _drop_unknown_versions(connection)
         context.configure(
             connection=connection,
             **_configure_kwargs(),

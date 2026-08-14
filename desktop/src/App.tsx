@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useAuth } from "./auth/AuthContext";
 import Layout from "./components/Layout";
 import LoginPage from "./features/auth/LoginPage";
+import RegisterPage from "./features/auth/RegisterPage";
 import HomePage from "./features/home/HomePage";
 import ProjectsPage from "./features/projects/ProjectsPage";
 import RequirementHubPage from "./features/requirement/RequirementHubPage";
@@ -30,6 +31,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
       <Route
         element={
           <Protected>

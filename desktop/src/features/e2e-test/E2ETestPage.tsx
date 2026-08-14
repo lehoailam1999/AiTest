@@ -47,6 +47,7 @@ import type {
   TestCase,
 } from "../../api/types";
 import { createBatchRunControl, type BatchRunStatus } from "../../lib/batchRunControl";
+import { IdeConnectPanel } from "../../components/IdeConnectPanel";
 import {
   generateE2eBatch,
   inspectE2eDom,
@@ -1780,6 +1781,10 @@ export default function E2ETestPage() {
           </Link>
         </Space>
       </header>
+
+      <div style={{ marginBottom: 12, marginTop: 12 }}>
+        <IdeConnectPanel compact projectPath={localPath ?? undefined} />
+      </div>
 
       <Space orientation="vertical" size="middle" style={{ width: "100%", marginTop: 12 }}>
         <E2eGateBanner

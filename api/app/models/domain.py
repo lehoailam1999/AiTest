@@ -48,6 +48,8 @@ class Project(TimestampMixin, Base):
     framework: Mapped[str | None] = mapped_column(String(100), nullable=True)
     meta: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Demo migrate field — safe to keep or remove later
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class Source(TimestampMixin, Base):

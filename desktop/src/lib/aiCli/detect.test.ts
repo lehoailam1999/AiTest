@@ -7,7 +7,7 @@ import type { AiCliProbe, AiCliVersionOut } from "./types.js";
 function probe(opts: {
   files?: string[];
   which?: Record<string, string | null>;
-  version?: (exe: string) => AiCliVersionOut | Promise<AiCliVersionOut>;
+  version?: (exe: string, args: string[]) => AiCliVersionOut | Promise<AiCliVersionOut>;
 }): AiCliProbe {
   const files = new Set((opts.files ?? []).map((p) => p.replace(/\\/g, "/").toLowerCase()));
   return {
@@ -18,8 +18,8 @@ function probe(opts: {
       if (!opts.which) return null;
       return opts.which[name] ?? null;
     },
-    async runVersion(exe) {
-      if (opts.version) return opts.version(exe);
+    async runVersion(exe, args) {
+      if (opts.version) return opts.version(exe, args);
       return { exitCode: 0, stdout: "1.2.3\n", stderr: "" };
     },
   };
@@ -70,6 +70,25 @@ describe("detectAiCli", () => {
     assert.equal(r.status, "READY");
     assert.equal(r.detectedBy, "known-location");
     assert.equal(r.executablePath, exe);
+  });
+
+  it("installed Cursor CLI without login → NOT_AUTHENTICATED", async () => {
+    const exe = "C:\\Tools\\agent.exe";
+    const r = await detectAiCli("cursor-cli", {
+      probe: probe({
+        files: [exe],
+        which: { "agent.exe": exe },
+        version: (_path, args) =>
+          args[0] === "status"
+            ? { exitCode: 1, stdout: "", stderr: "Not authenticated" }
+            : { exitCode: 0, stdout: "1.0.0", stderr: "" },
+      }),
+      platform: "win32",
+      env: {},
+      now,
+    });
+    assert.equal(r.status, "NOT_AUTHENTICATED");
+    assert.equal(r.version, "1.0.0");
   });
 
   it("manual path wins over PATH", async () => {

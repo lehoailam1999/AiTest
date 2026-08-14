@@ -30,6 +30,7 @@ import type {
 } from "../api/types";
 import { CodegenResultPanel } from "../components/CodegenResultPanel";
 import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
+import { IdeConnectPanel } from "../components/IdeConnectPanel";
 import { ReadyStrip } from "../components/ReadyStrip";
 import { UnitScopePanel } from "../components/UnitScopePanel";
 import {
@@ -2300,6 +2301,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
           </Button>
         </Space>
       </header>
+
+      <div style={{ marginBottom: 12 }}>
+        <IdeConnectPanel compact projectPath={localPath ?? undefined} />
+      </div>
 
       <Space orientation="vertical" size={12} style={{ width: "100%", marginTop: 12 }}>
         <ReadyStrip

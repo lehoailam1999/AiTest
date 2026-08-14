@@ -2,15 +2,11 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
-import {
-  detectAllOnUserMachine,
-  detectOneOnUserMachine,
-} from "../lib/aiCli/runDetect";
+import { detectOneOnUserMachine } from "../lib/aiCli/runDetect";
 import {
   loadAiCliLocalState,
   mergeManualPath,
@@ -24,9 +20,11 @@ type AiCliState = {
   results: AiCliDetectResult[];
   detecting: boolean;
   lastError: string | null;
-  refresh: () => Promise<void>;
-  detectOne: (id: AiCliId, opts?: { clearManual?: boolean }) => Promise<void>;
-  selectExecutable: (id: AiCliId) => Promise<void>;
+  detectOne: (
+    id: AiCliId,
+    opts?: { clearManual?: boolean }
+  ) => Promise<AiCliDetectResult>;
+  selectExecutable: (id: AiCliId) => Promise<AiCliDetectResult | null>;
 };
 
 const AiCliContext = createContext<AiCliState | null>(null);
@@ -39,29 +37,6 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
   const [local, setLocal] = useState<AiCliLocalState>(() => loadAiCliLocalState());
   const [detecting, setDetecting] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
-
-  const runAll = useCallback(async (manual: AiCliLocalState["manualPaths"]) => {
-    setDetecting(true);
-    setLastError(null);
-    try {
-      const lastResults = await detectAllOnUserMachine(manual);
-      const next = { manualPaths: manual, lastResults };
-      setLocal(next);
-      persist(next);
-    } catch (e) {
-      setLastError(e instanceof Error ? e.message : "AI CLI detect failed.");
-    } finally {
-      setDetecting(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void runAll(loadAiCliLocalState().manualPaths);
-  }, [runAll]);
-
-  const refresh = useCallback(async () => {
-    await runAll(loadAiCliLocalState().manualPaths);
-  }, [runAll]);
 
   const detectOne = useCallback(
     async (id: AiCliId, opts?: { clearManual?: boolean }) => {
@@ -76,8 +51,11 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
         next = { ...next, lastResults };
         setLocal(next);
         persist(next);
+        return one;
       } catch (e) {
-        setLastError(e instanceof Error ? e.message : "AI CLI detect failed.");
+        const message = e instanceof Error ? e.message : "AI CLI detect failed.";
+        setLastError(message);
+        throw e instanceof Error ? e : new Error(message);
       } finally {
         setDetecting(false);
       }
@@ -88,10 +66,10 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
   const selectExecutable = useCallback(async (id: AiCliId) => {
     if (!isTauri()) {
       setLastError("Chọn executable cần AITest Desktop (Tauri).");
-      return;
+      return null;
     }
     const picked = await pickExecutableFile();
-    if (!picked) return;
+    if (!picked) return null;
     setDetecting(true);
     setLastError(null);
     try {
@@ -102,8 +80,11 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
       next = { ...next, lastResults };
       setLocal(next);
       persist(next);
+      return one;
     } catch (e) {
-      setLastError(e instanceof Error ? e.message : "AI CLI detect failed.");
+      const message = e instanceof Error ? e.message : "AI CLI detect failed.";
+      setLastError(message);
+      throw e instanceof Error ? e : new Error(message);
     } finally {
       setDetecting(false);
     }
@@ -114,11 +95,10 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
       results: local.lastResults,
       detecting,
       lastError,
-      refresh,
       detectOne,
       selectExecutable,
     }),
-    [local.lastResults, detecting, lastError, refresh, detectOne, selectExecutable]
+    [local.lastResults, detecting, lastError, detectOne, selectExecutable]
   );
 
   return <AiCliContext.Provider value={value}>{children}</AiCliContext.Provider>;

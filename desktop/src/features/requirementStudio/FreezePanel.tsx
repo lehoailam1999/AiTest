@@ -23,6 +23,8 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { jobs, requirementStudio, testcases, connection } from "../../api";
+import { workspace } from "../../workspace";
+import { IdeConnectPanel } from "../../components/IdeConnectPanel";
 import type {
   KnowledgeWorkspaceView,
   RequirementSnapshot,
@@ -372,8 +374,13 @@ export default function FreezePanel({
     );
   }
 
+  const localPath = project?.id ? workspace.getLocalPath(project.id) : undefined;
+
   return (
     <div className="freeze-panel">
+      <div style={{ marginBottom: 12 }}>
+        <IdeConnectPanel compact projectPath={localPath} />
+      </div>
       {enrichPending ? (
         <Alert
           style={{ marginBottom: 12 }}

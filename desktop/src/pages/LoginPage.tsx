@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
 export default function LoginPage() {
@@ -54,6 +54,9 @@ export default function LoginPage() {
         <button type="submit" disabled={submitting}>
           {submitting ? "Signing in…" : "Sign in"}
         </button>
+        <p className="auth-footer">
+          Chưa có tài khoản? <Link to="/register">Đăng ký ngay</Link>
+        </p>
       </form>
     </div>
   );

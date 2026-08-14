@@ -219,6 +219,8 @@ export default function SettingsPage() {
   }
 
   const locked = busy || saving || verifying;
+  const savedCliType = conn?.cliType || "gemini-cli";
+  const selectionChanged = cliType !== savedCliType;
 
   return (
     <div className="page settings-ai-page">
@@ -234,12 +236,18 @@ export default function SettingsPage() {
         <Space size={6} wrap className="page-head-actions">
           {conn ? (
             <Tag
-              color={statusTone(conn.status)}
+              color={selectionChanged ? "warning" : statusTone(conn.status)}
               icon={
-                conn.status === "Ready" ? <CheckCircleOutlined /> : <SafetyCertificateOutlined />
+                !selectionChanged && conn.status === "Ready" ? (
+                  <CheckCircleOutlined />
+                ) : (
+                  <SafetyCertificateOutlined />
+                )
               }
             >
-              {conn.status === "Ready"
+              {selectionChanged
+                ? "CLI đã đổi · Chưa lưu"
+                : conn.status === "Ready"
                 ? `Ready · ${aiConnectionDisplayLabel(conn) || "AI CLI"}`
                 : conn.status}
             </Tag>
@@ -337,7 +345,12 @@ export default function SettingsPage() {
             </Text>
           </div>
         </Form>
-        <AiCliEnvironmentPanel />
+        <AiCliEnvironmentPanel
+          cliType={cliType}
+          backendReady={!selectionChanged && conn?.status === "Ready"}
+          verifying={verifying}
+          onVerify={onVerify}
+        />
       </section>
     </div>
   );

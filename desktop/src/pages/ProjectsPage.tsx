@@ -87,6 +87,16 @@ export default function ProjectsPage() {
   const [editItem, setEditItem] = useState<Project | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
+  const createName = Form.useWatch("name", createForm);
+  const createCode = Form.useWatch("code", createForm);
+  const createLocalPath = Form.useWatch("localPath", createForm);
+  const editLocalPath = Form.useWatch("localPath", editForm);
+
+  const isCreateValid = Boolean(
+    createName?.trim() &&
+    createCode?.trim() &&
+    createLocalPath?.trim()
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -104,9 +114,25 @@ export default function ProjectsPage() {
     }
   }, [active, clearProject, message]);
 
+  const autoConnectIfMatching = useIdeBridgeSession((s) => s.autoConnectIfMatching);
+  const disconnect = useIdeBridgeSession((s) => s.disconnect);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (active?.id) {
+      const localPath = workspace.getLocalPath(active.id);
+      if (localPath) {
+        void autoConnectIfMatching(localPath);
+      } else {
+        disconnect();
+      }
+    } else {
+      disconnect();
+    }
+  }, [active, autoConnectIfMatching, disconnect]);
 
   /** Bind path from Modal save — scan stack + open workspace. */
   async function bindPathFromModal(opts: {
@@ -271,7 +297,10 @@ export default function ProjectsPage() {
       cancelText: "Huỷ",
       onOk: async () => {
         await projects.remove(p.id);
-        if (active?.id === p.id) clearProject();
+        if (active?.id === p.id) {
+          clearProject();
+          disconnect();
+        }
         message.success("Đã xoá");
         await load();
       },
@@ -395,6 +424,7 @@ export default function ProjectsPage() {
         onOk={onCreate}
         confirmLoading={saving}
         okText="Tạo & gắn source"
+        okButtonProps={{ disabled: !isCreateValid }}
         cancelText="Huỷ"
         destroyOnHidden
         width={640}
@@ -403,8 +433,8 @@ export default function ProjectsPage() {
           <Form.Item name="name" label="Tên dự án" rules={[{ required: true, message: "Nhập tên dự án" }]}>
             <Input placeholder="My Project" />
           </Form.Item>
-          <Form.Item name="code" label="Code">
-            <Input placeholder="tuỳ chọn" />
+          <Form.Item name="code" label="Code dự án" rules={[{ required: true, message: "Nhập code dự án" }]}>
+            <Input placeholder="Ví dụ: PROJ_01" />
           </Form.Item>
           <Form.Item name="description" label="Mô tả">
             <Input.TextArea rows={2} placeholder="tuỳ chọn" />
@@ -433,13 +463,7 @@ export default function ProjectsPage() {
               message="UI web không gắn được folder local — mở Desktop app."
             />
           ) : null}
-          <Typography.Text
-            type="secondary"
-            style={{ display: "block", marginBottom: 8, fontSize: 12 }}
-          >
-            IDE bridge — mở đúng folder source trong Cursor rồi Connect (có thể Connect sau khi Tạo).
-          </Typography.Text>
-          <IdeConnectPanel compact />
+          <IdeConnectPanel compact projectPath={createLocalPath} />
         </Form>
       </Modal>
 
@@ -510,13 +534,7 @@ export default function ProjectsPage() {
               description="Chọn thư mục ở trên rồi Lưu để scan stack và Gen Unit/E2E."
             />
           ) : null}
-          <Typography.Text
-            type="secondary"
-            style={{ display: "block", marginBottom: 8, marginTop: 4, fontSize: 12 }}
-          >
-            IDE bridge — Cursor Open Folder đúng source ở trên, rồi Connect (Gen Unit / Apply).
-          </Typography.Text>
-          <IdeConnectPanel compact />
+          <IdeConnectPanel compact projectPath={editLocalPath} />
         </Form>
       </Modal>
     </div>

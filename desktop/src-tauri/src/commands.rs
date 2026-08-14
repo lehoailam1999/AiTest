@@ -802,11 +802,482 @@ pub fn read_ide_bridge_discovery() -> Result<Option<String>, String> {
     Ok(Some(content))
 }
 
+/// Read all discovery JSON files (~/.aitest/ide-bridge*.json) written by IDE plugins.
+#[tauri::command]
+pub fn read_all_ide_bridge_discoveries() -> Result<Vec<String>, String> {
+    let home = dirs_next_home().ok_or_else(|| "Không xác định được home directory".to_string())?;
+    let dir = home.join(".aitest");
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let filename = entry.file_name().to_string_lossy().to_string();
+                if filename.starts_with("ide-bridge") && filename.ends_with(".json") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdeExtensionStatus {
+    pub bridge_online: bool,
+    pub extension_installed: bool,
+    pub extension_path: Option<String>,
+}
+
+/// Extension roots for the VS Code family (VS Code + Cursor).
+fn vscode_extension_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".cursor").join("extensions"),
+        home.join(".vscode").join("extensions"),
+    ]
+}
+
+/// Antigravity IDE reuses the VS Code layout but ships several profile roots.
+fn antigravity_extension_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![
+        home.join(".gemini").join("antigravity-ide").join("extensions"),
+        home.join(".antigravity").join("extensions"),
+        home.join(".antigravity-ide").join("extensions"),
+    ];
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let base = PathBuf::from(appdata);
+        roots.push(base.join("Antigravity").join("User").join("extensions"));
+        roots.push(base.join("Gemini Antigravity").join("User").join("extensions"));
+    }
+    roots
+}
+
+fn all_extension_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vscode_extension_roots(home);
+    roots.extend(antigravity_extension_roots(home));
+    roots
+}
+
+#[tauri::command]
+pub fn check_ide_extension_status() -> Result<IdeExtensionStatus, String> {
+    let bridge_online = match read_ide_bridge_discovery() {
+        Ok(Some(_)) => true,
+        _ => false,
+    };
+
+    let home = dirs_next_home().ok_or_else(|| "Không xác định được home directory".to_string())?;
+
+    let mut extension_installed = false;
+    let mut found_path = None;
+
+    for dir in all_extension_roots(&home) {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // A leftover folder without package.json cannot activate — treat as missing.
+                if name.contains("aitest-ide") && entry.path().join("package.json").is_file() {
+                    extension_installed = true;
+                    found_path = Some(entry.path().to_string_lossy().into_owned());
+                    break;
+                }
+            }
+        }
+        if extension_installed {
+            break;
+        }
+    }
+
+    Ok(IdeExtensionStatus {
+        bridge_online,
+        extension_installed,
+        extension_path: found_path,
+    })
+}
+
+/// Locate `ide-plugins/<variant>`: bundled resources first (installed app), then repo layout (dev).
+fn plugin_source_dir(variant: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let current_dir = std::env::current_dir().unwrap_or_default();
+    candidates.push(current_dir.join("ide-plugins").join(variant));
+    candidates.push(current_dir.join("..").join("ide-plugins").join(variant));
+
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cursor = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..6 {
+            let Some(dir) = cursor else { break };
+            candidates.push(dir.join("resources").join("ide-plugins").join(variant));
+            candidates.push(dir.join("ide-plugins").join(variant));
+            cursor = dir.parent().map(|p| p.to_path_buf());
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|p| p.join("package.json").is_file())
+}
+
+/// Folder name IDEs expect: `<publisher>.<name>-<version>`.
+fn plugin_folder_name(plugin_dir: &Path) -> Result<String, String> {
+    let raw = fs::read_to_string(plugin_dir.join("package.json"))
+        .map_err(|e| format!("Đọc package.json thất bại: {e}"))?;
+    let pkg: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("package.json không hợp lệ: {e}"))?;
+    let field = |key: &str| -> Result<String, String> {
+        pkg.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("package.json thiếu field {key}"))
+    };
+    Ok(format!(
+        "{}.{}-{}",
+        field("publisher")?,
+        field("name")?,
+        field("version")?
+    ))
+}
+
+fn run_npm(args: &[&str], cwd: &Path) -> Result<(), String> {
+    let joined = args.join(" ");
+    #[cfg(windows)]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()))
+            .args(["/d", "/c", "npm"])
+            .args(args)
+            .current_dir(cwd)
+            .creation_flags(0x0800_0000)
+            .output()
+            .map_err(|e| format!("Không chạy được npm: {e}"))?
+    };
+    #[cfg(not(windows))]
+    let output = Command::new("npm")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("Không chạy được npm: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+    let tail: String = detail.trim().chars().rev().take(400).collect::<String>().chars().rev().collect();
+    Err(format!("`npm {joined}` thất bại: {tail}"))
+}
+
+/// Bundled payloads ship precompiled; a repo checkout may need install + compile first.
+fn ensure_plugin_compiled(plugin_dir: &Path) -> Result<(), String> {
+    let entry = plugin_dir.join("out").join("extension.js");
+    if entry.is_file() {
+        return Ok(());
+    }
+    if !plugin_dir.join("node_modules").is_dir() {
+        run_npm(&["install"], plugin_dir)?;
+    }
+    run_npm(&["run", "compile"], plugin_dir)?;
+    if !entry.is_file() {
+        return Err(format!(
+            "compile xong nhưng thiếu {}",
+            entry.to_string_lossy()
+        ));
+    }
+    Ok(())
+}
+
+/// CLI entry points shipped by each editor — used for a real (registered) extension install.
+fn ide_cli_paths() -> Vec<(&'static str, PathBuf)> {
+    let mut out: Vec<(&'static str, PathBuf)> = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        out.push((
+            "cursor",
+            local
+                .join("Programs")
+                .join("cursor")
+                .join("resources")
+                .join("app")
+                .join("bin")
+                .join("cursor.cmd"),
+        ));
+        out.push((
+            "vscode",
+            local
+                .join("Programs")
+                .join("Microsoft VS Code")
+                .join("bin")
+                .join("code.cmd"),
+        ));
+        out.push((
+            "antigravity",
+            local
+                .join("Programs")
+                .join("Antigravity IDE")
+                .join("bin")
+                .join("antigravity-ide.cmd"),
+        ));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+        out.push((
+            "vscode",
+            pf.join("Microsoft VS Code").join("bin").join("code.cmd"),
+        ));
+    }
+    out.retain(|(_, p)| p.is_file());
+    out
+}
+
+/// Only the vsix matching package.json version — a stale build would install the wrong bridge.
+fn plugin_vsix(plugin_dir: &Path) -> Option<PathBuf> {
+    let raw = fs::read_to_string(plugin_dir.join("package.json")).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let name = pkg.get("name")?.as_str()?;
+    let version = pkg.get("version")?.as_str()?;
+    let exact = plugin_dir.join(format!("{name}-{version}.vsix"));
+    if exact.is_file() {
+        return Some(exact);
+    }
+    None
+}
+
+/// `--install-extension` registers the extension in the running editor, so the bridge starts
+/// without a window reload (a copied folder is only scanned at window startup).
+fn install_vsix_via_cli(cli: &Path, vsix: &Path) -> Result<(), String> {
+    // `.cmd` launchers need cmd.exe, and each arg must be passed separately: a hand-built
+    // command line gets its quotes escaped to \" and cmd then fails with `'\' is not recognized`.
+    #[cfg(windows)]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()))
+            .arg("/d")
+            .arg("/c")
+            .arg(cli)
+            .arg("--install-extension")
+            .arg(vsix)
+            .arg("--force")
+            .creation_flags(0x0800_0000)
+            .output()
+            .map_err(|e| format!("không chạy được CLI: {e}"))?
+    };
+    #[cfg(not(windows))]
+    let output = Command::new(cli)
+        .arg("--install-extension")
+        .arg(vsix)
+        .arg("--force")
+        .output()
+        .map_err(|e| format!("không chạy được CLI: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+    Err(detail.trim().chars().take(300).collect())
+}
+
+/// Only touch roots of editors that exist — never create profile folders for absent IDEs.
+fn extension_root_usable(root: &Path) -> bool {
+    root.is_dir() || root.parent().map(|p| p.is_dir()).unwrap_or(false)
+}
+
+/// Copy the same payload as `scripts/install-ide-extension.ps1`: package.json + out (+ README).
+fn install_plugin_payload(
+    plugin_dir: &Path,
+    folder_name: &str,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(root).map_err(|e| format!("Tạo {} thất bại: {e}", root.display()))?;
+    let dest = root.join(folder_name);
+    let _ = fs::remove_dir_all(&dest);
+    fs::create_dir_all(&dest).map_err(|e| format!("Tạo {} thất bại: {e}", dest.display()))?;
+    fs::copy(
+        plugin_dir.join("package.json"),
+        dest.join("package.json"),
+    )
+    .map_err(|e| format!("Chép package.json thất bại: {e}"))?;
+    copy_dir_all(&plugin_dir.join("out"), &dest.join("out"))
+        .map_err(|e| format!("Chép out/ thất bại: {e}"))?;
+    let readme = plugin_dir.join("README.md");
+    if readme.is_file() {
+        let _ = fs::copy(&readme, dest.join("README.md"));
+    }
+    Ok(dest)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdeExtensionInstallResult {
+    pub message: String,
+    /// True only when the extension was copied as a folder — those need a window reload.
+    pub needs_reload: bool,
+    pub activated_via_cli: Vec<String>,
+    pub copied_into: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+#[tauri::command]
+pub fn install_ide_extension_native() -> Result<IdeExtensionInstallResult, String> {
+    let home = dirs_next_home().ok_or_else(|| "Không xác định được home directory".to_string())?;
+    let clis = ide_cli_paths();
+
+    let targets: [(&str, Vec<PathBuf>, Vec<&str>); 2] = [
+        (
+            "vscode",
+            vscode_extension_roots(&home),
+            vec!["cursor", "vscode"],
+        ),
+        (
+            "antigravity",
+            antigravity_extension_roots(&home),
+            vec!["antigravity"],
+        ),
+    ];
+
+    let mut activated: Vec<String> = Vec::new();
+    let mut copied: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut any_source = false;
+
+    for (variant, roots, cli_names) in targets {
+        let Some(plugin_dir) = plugin_source_dir(variant) else {
+            skipped.push(format!("{variant}: không tìm thấy nguồn ide-plugins/{variant}"));
+            continue;
+        };
+        any_source = true;
+
+        if let Err(e) = ensure_plugin_compiled(&plugin_dir) {
+            skipped.push(format!("{variant}: {e}"));
+            continue;
+        }
+
+        let mut cli_installed = false;
+        let mut vsix = plugin_vsix(&plugin_dir);
+        if vsix.is_none() {
+            // Build it once per version so the CLI path (no reload needed) stays available.
+            if let Err(e) = run_npm(&["run", "package"], &plugin_dir) {
+                skipped.push(format!("{variant}: không đóng gói được .vsix ({e})"));
+            }
+            vsix = plugin_vsix(&plugin_dir);
+        }
+        match vsix {
+            Some(vsix) => {
+                for (name, cli) in clis.iter().filter(|(n, _)| cli_names.contains(n)) {
+                    match install_vsix_via_cli(cli, &vsix) {
+                        Ok(()) => {
+                            activated.push((*name).to_string());
+                            cli_installed = true;
+                        }
+                        Err(e) => skipped.push(format!("{name} CLI: {e}")),
+                    }
+                }
+            }
+            None => skipped.push(format!(
+                "{variant}: không có .vsix đúng version — dùng cách copy thư mục"
+            )),
+        }
+
+        if cli_installed {
+            continue;
+        }
+
+        // Fallback: copy the payload. Works everywhere but only loads on the next window reload.
+        let folder_name = match plugin_folder_name(&plugin_dir) {
+            Ok(name) => name,
+            Err(e) => {
+                skipped.push(format!("{variant}: {e}"));
+                continue;
+            }
+        };
+        let usable: Vec<PathBuf> = roots.into_iter().filter(|r| extension_root_usable(r)).collect();
+        if usable.is_empty() {
+            skipped.push(format!("{variant}: không thấy IDE nào trên máy"));
+            continue;
+        }
+        for root in usable {
+            match install_plugin_payload(&plugin_dir, &folder_name, &root) {
+                Ok(dest) => copied.push(dest.to_string_lossy().into_owned()),
+                Err(e) => skipped.push(format!("{}: {e}", root.display())),
+            }
+        }
+    }
+
+    if !any_source {
+        return Err(
+            "Không tìm thấy nguồn extension (ide-plugins/*). Bản Desktop này chưa đóng gói extension — chạy từ repo hoặc build lại kèm resources."
+                .into(),
+        );
+    }
+    if activated.is_empty() && copied.is_empty() {
+        return Err(format!("Không cài được extension — {}", skipped.join(" · ")));
+    }
+
+    let needs_reload = !copied.is_empty();
+    let mut message = String::new();
+    if !activated.is_empty() {
+        message.push_str(&format!(
+            "Đã cài qua CLI của {} — bridge kích hoạt ngay, không cần reload.",
+            activated.join(", ")
+        ));
+    }
+    if needs_reload {
+        if !message.is_empty() {
+            message.push(' ');
+        }
+        message.push_str(&format!(
+            "Đã copy vào {} vị trí IDE — reload IDE (Developer: Reload Window) để kích hoạt.",
+            copied.len()
+        ));
+        // Copy-only means the CLI path failed; without the reason the user cannot fix it.
+        if !skipped.is_empty() {
+            message.push_str(&format!(" Lý do không cài qua CLI: {}", skipped.join(" · ")));
+        }
+    }
+
+    Ok(IdeExtensionInstallResult {
+        message,
+        needs_reload,
+        activated_via_cli: activated,
+        copied_into: copied,
+        skipped,
+    })
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str == "node_modules" || name_str == "src" {
+            continue;
+        }
+        let dst_path = dst.join(&name);
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dst_path)?;
+        } else {
+            fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn dirs_next_home() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
 }
+
 
 /// Read UTF-8 text under project root.
 /// Deprecated for AI generate context — prefer FastAPI `POST /api/workspace/{id}/read`.

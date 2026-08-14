@@ -278,12 +278,14 @@ export async function startIdeBridgeServer(opts?: {
   });
 
   const discoveryPath = defaultBridgeDiscoveryPath();
+  const portDiscoveryPath = discoveryPath.replace(/\.json$/i, `-${port}.json`);
   discovery = createDiscovery({
     port,
     ide: detectIde(),
     workspaceRoot: workspaceRoot() || undefined,
   });
   writeBridgeDiscovery(discovery, discoveryPath);
+  writeBridgeDiscovery(discovery, portDiscoveryPath);
 
   return {
     port,
@@ -299,6 +301,7 @@ export async function startIdeBridgeServer(opts?: {
     },
     close: async () => {
       clearBridgeDiscovery(discoveryPath);
+      clearBridgeDiscovery(portDiscoveryPath);
       for (const c of wss.clients) c.terminate();
       await new Promise<void>((r) => wss.close(() => r()));
       await new Promise<void>((r, j) => httpServer.close((e) => (e ? j(e) : r())));

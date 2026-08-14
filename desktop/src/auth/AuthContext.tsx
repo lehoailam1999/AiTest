@@ -16,6 +16,12 @@ type AuthState = {
   accessToken: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  register: (
+    email: string,
+    password: string,
+    firstName: string,
+    lastName: string
+  ) => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -90,6 +96,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [persist]
   );
 
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      firstName: string,
+      lastName: string
+    ) => {
+      const res = await authApi.register(email, password, firstName, lastName);
+      persist(res.accessToken, res.refreshToken, res.user);
+    },
+    [persist]
+  );
+
   const logout = useCallback(async () => {
     const token = session.getAccess();
     try {
@@ -100,8 +119,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clear]);
 
   const value = useMemo(
-    () => ({ user, accessToken, loading, login, logout }),
-    [user, accessToken, loading, login, logout]
+    () => ({ user, accessToken, loading, login, register, logout }),
+    [user, accessToken, loading, login, register, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

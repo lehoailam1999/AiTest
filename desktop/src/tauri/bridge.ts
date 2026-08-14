@@ -182,6 +182,36 @@ export function readIdeBridgeDiscovery(): Promise<string | null> {
   return invoke<string | null>("read_ide_bridge_discovery");
 }
 
+export function readAllIdeBridgeDiscoveries(): Promise<string[]> {
+  if (!isTauri()) return Promise.resolve([]);
+  return invoke<string[]>("read_all_ide_bridge_discoveries");
+}
+
+export type IdeExtensionStatus = {
+  bridgeOnline: boolean;
+  extensionInstalled: boolean;
+  extensionPath?: string | null;
+};
+
+export async function checkIdeExtensionStatus(): Promise<IdeExtensionStatus> {
+  if (!isTauri()) return { bridgeOnline: false, extensionInstalled: false };
+  return invoke<IdeExtensionStatus>("check_ide_extension_status");
+}
+
+export type IdeExtensionInstallResult = {
+  message: string;
+  /** Folder-copy installs only load on the next IDE window reload. */
+  needsReload: boolean;
+  activatedViaCli: string[];
+  copiedInto: string[];
+  skipped: string[];
+};
+
+export async function installIdeExtensionNative(): Promise<IdeExtensionInstallResult> {
+  ensureTauri();
+  return invoke<IdeExtensionInstallResult>("install_ide_extension_native");
+}
+
 export function writeTextFile(
   projectRoot: string,
   relativePath: string,
@@ -238,6 +268,16 @@ export async function runTestCommand(
 export async function openPathInOs(path: string): Promise<void> {
   ensureTauri();
   await invoke<void>("open_path_in_os", { path });
+}
+
+/** Open a docs URL in the OS browser — `target="_blank"` is a no-op in the webview. */
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!isTauri()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const { open } = await import("@tauri-apps/api/shell");
+  await open(url);
 }
 
 export async function pickExecutableFile(): Promise<string | null> {

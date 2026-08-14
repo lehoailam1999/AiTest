@@ -1,0 +1,62 @@
+image: atlassian/default-image:4
+
+definitions:
+  caches:
+    pip: ~/.cache/pip
+
+pipelines:
+  default:
+    - parallel:
+        - step:
+            name: Backend API (Python 3.12 FastAPI)
+            image: python:3.12
+            caches:
+              - pip
+            script:
+              - cd api
+              - pip install --upgrade pip
+              - pip install -r requirements.txt
+              - pytest
+
+        - step:
+            name: Desktop UI & Logic (Node.js 20 React)
+            image: node:20
+            caches:
+              - node
+            script:
+              - cd desktop
+              - npm ci
+              - npm run test
+              - npm run build:ui
+
+  branches:
+    main:
+      - parallel:
+          - step:
+              name: Backend API (Python 3.12 FastAPI)
+              image: python:3.12
+              caches:
+                - pip
+              script:
+                - cd api
+                - pip install --upgrade pip
+                - pip install -r requirements.txt
+                - pytest
+
+          - step:
+              name: Desktop UI & Logic (Node.js 20 React)
+              image: node:20
+              caches:
+                - node
+              script:
+                - cd desktop
+                - npm ci
+                - npm run test
+                - npm run build:ui
+
+      - step:
+          name: Production Docker Build Check
+          services:
+            - docker
+          script:
+            - docker compose -f docker-compose.production.yml build

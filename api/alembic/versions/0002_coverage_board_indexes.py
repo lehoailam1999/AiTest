@@ -16,17 +16,25 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # 0001 is a marker only; core tables may come from create_all.
     op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_test_cases_project_module_review "
-        "ON test_cases (project_id, module, review_status)"
-    )
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_workspace_runs_project_module_status "
-        "ON workspace_runs (project_id, module, status)"
-    )
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_requirement_topics_project "
-        "ON requirement_topics (project_id)"
+        """
+        DO $$
+        BEGIN
+          IF to_regclass('public.test_cases') IS NOT NULL THEN
+            CREATE INDEX IF NOT EXISTS ix_test_cases_project_module_review
+              ON test_cases (project_id, module, review_status);
+          END IF;
+          IF to_regclass('public.workspace_runs') IS NOT NULL THEN
+            CREATE INDEX IF NOT EXISTS ix_workspace_runs_project_module_status
+              ON workspace_runs (project_id, module, status);
+          END IF;
+          IF to_regclass('public.requirement_topics') IS NOT NULL THEN
+            CREATE INDEX IF NOT EXISTS ix_requirement_topics_project
+              ON requirement_topics (project_id);
+          END IF;
+        END $$;
+        """
     )
 
 

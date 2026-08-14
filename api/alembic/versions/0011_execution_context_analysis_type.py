@@ -51,10 +51,9 @@ _TYPES_LEGACY = (
 
 
 def upgrade() -> None:
-    op.drop_constraint(
-        "ck_requirement_analysis_records_type",
-        "requirement_analysis_records",
-        type_="check",
+    op.execute(
+        "ALTER TABLE requirement_analysis_records "
+        "DROP CONSTRAINT IF EXISTS ck_requirement_analysis_records_type"
     )
     op.create_check_constraint(
         "ck_requirement_analysis_records_type",

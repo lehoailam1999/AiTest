@@ -45,6 +45,7 @@ Write-Host "Da migrate + mo API + Desktop. Health: http://localhost:5088/health"
 Write-Host "Login: admin@aitest.com / Admin@123" -ForegroundColor Green
 Write-Host ""
 Write-Host "IDE bridge (Unit/E2E Gen):" -ForegroundColor Yellow
-Write-Host "  npm run extension:install"
+Write-Host "  Desktop -> Du an -> Sua -> Connect IDE -> 'Tu dong cai dat Extension'"
 Write-Host "  Reload Window → status bar AITest :port"
 Write-Host "  %USERPROFILE%\.aitest\ide-bridge.json"
+Write-Host "  (fallback thu cong: npm run extension:install)"

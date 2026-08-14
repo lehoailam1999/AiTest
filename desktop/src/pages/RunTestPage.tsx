@@ -28,6 +28,7 @@ import {
 } from "../lib/runCenter";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
+import { IdeConnectPanel } from "../components/IdeConnectPanel";
 import {
   isTauri,
   runDotnetTest,
@@ -238,13 +239,16 @@ export default function RunTestPage() {
             Regression trên code đã <strong>Apply</strong> — không sinh TC / không sinh code tại đây.
             <br />
             {project.name} · Stack: <Typography.Text strong>{stackHint}</Typography.Text>
-            {" · "}
-            Parser: <Typography.Text code>{runnerLabel}</Typography.Text>
-            {" · "}
-            <Link to={ROUTES.reports}>Báo cáo</Link>
           </Typography.Paragraph>
         </div>
+        <Button icon={<ReloadOutlined />} onClick={() => void loadHistory()} loading={running}>
+          Tải lại lịch sử
+        </Button>
       </header>
+
+      <div style={{ marginBottom: 12, marginTop: 12 }}>
+        <IdeConnectPanel compact projectPath={localPath ?? undefined} />
+      </div>
 
       <Alert
         type="info"

@@ -286,7 +286,7 @@ volumes:
 | `ports: API_PORT:8080` | Máy QA gọi `http://<host>:<API_PORT>/...` |
 | `depends_on` + `service_healthy` | Không start API khi Postgres chưa sẵn |
 
-`api/Dockerfile`: `python:3.12-slim`, cài `requirements.txt`, copy `app/`, `uvicorn app.main:app --host 0.0.0.0 --port 8080`. Secret inject lúc runtime từ `.env.production`, không copy `.env` vào image.
+`api/Dockerfile`: `python:3.12-slim`, cài `requirements.txt`, copy `alembic.ini`, `alembic/` và `app/`, `uvicorn app.main:app --host 0.0.0.0 --port 8080`. Secret inject lúc runtime từ `.env.production`, không copy `.env` vào image.
 
 #### A.5 `deploy.sh`
 
@@ -585,13 +585,13 @@ CI/CD **không** chạy AITest Desktop cho QA. CI/CD chỉ build và phát hành
 
 ### 7.2 As-built CI
 
-`.github/workflows/ci.yml` (push `main`/`develop`, PR `main`):
+`bitbucket-pipelines.yml` (Bitbucket Pipelines) & `.github/workflows/ci.yml` (GitHub Actions):
 
-- `api`: Go `api/cmd/server` — không khớp FastAPI hiện tại
-- `frontend/`: không phải `desktop/` Tauri
-- `docker`: `docker compose build` trên `main`
+- `api`: Python 3.12 (FastAPI + SQLAlchemy + pytest)
+- `desktop`: React / Vite / Tauri (`desktop/`)
+- `docker`: `docker compose -f docker-compose.production.yml build` trên nhánh `main`
 
-Không build Desktop, không upload MSI/DMG/DEB, không GitHub Release Desktop. Không có `.gitlab-ci.yml`. Không có `release.sh`. `deploy.sh` chỉ Backend.
+Tự động hóa kiểm thử Backend API, Frontend Desktop và Build Docker Image khi push code lên Bitbucket hoặc GitHub.
 
 ### 7.3 Pipeline Target (Recommended Architecture)
 

@@ -23,7 +23,7 @@
     "test:context-builder": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/contextBuilder/contextBuilder.phase4.test.ts",
     "test:phase5-gen": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/ideLocalCommands.phase5.test.ts",
     "test:phase6-metrics": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/unitWorkspace/unitFailureMetrics.test.ts src/lib/e2eWorkspace/e2eFailureMetrics.test.ts src/lib/unitJobMetrics.test.ts",
-    "test:ai-cli": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/aiCli/detect.test.ts src/lib/aiCli/knownLocations.test.ts src/lib/aiCli/localStore.test.ts src/lib/aiCli/gate.test.ts"
+    "test:ai-cli": "node ../packages/ide-protocol/node_modules/tsx/dist/cli.mjs --test src/lib/aiCli/detect.test.ts src/lib/aiCli/knownLocations.test.ts src/lib/aiCli/localStore.test.ts src/lib/aiCli/connectionState.test.ts src/lib/aiCli/setupGuides.test.ts src/lib/aiCli/gate.test.ts"
   },
   "dependencies": {
     "@aitest/ide-protocol": "file:../packages/ide-protocol",

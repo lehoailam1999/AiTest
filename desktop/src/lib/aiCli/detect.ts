@@ -129,11 +129,57 @@ async function validateExecutable(
     };
   }
 
+  const version = trimVersion(out.stdout, out.stderr);
+  if (spec?.authCheckArgs?.length) {
+    let auth;
+    try {
+      auth = await opts.probe.runVersion(executablePath, spec.authCheckArgs);
+    } catch (e) {
+      return {
+        provider: id,
+        name,
+        executablePath,
+        version,
+        detectedBy,
+        os,
+        status: "ERROR",
+        lastCheckedAt: iso(now),
+        message: e instanceof Error ? e.message : "Authentication check failed.",
+      };
+    }
+    if (auth.error && auth.exitCode === -1) {
+      return {
+        provider: id,
+        name,
+        executablePath,
+        version,
+        detectedBy,
+        os,
+        status: "ERROR",
+        lastCheckedAt: iso(now),
+        message: auth.error,
+      };
+    }
+    if (auth.exitCode !== 0) {
+      return {
+        provider: id,
+        name,
+        executablePath,
+        version,
+        detectedBy,
+        os,
+        status: "NOT_AUTHENTICATED",
+        lastCheckedAt: iso(now),
+        message: `${name} is installed but not signed in.`,
+      };
+    }
+  }
+
   return {
     provider: id,
     name,
     executablePath,
-    version: trimVersion(out.stdout, out.stderr),
+    version,
     detectedBy,
     os,
     status: "READY",

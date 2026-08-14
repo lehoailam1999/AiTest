@@ -89,7 +89,7 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
 
 @app.on_event("startup")
 def on_startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    _bootstrap_schema_if_greenfield()
     _ensure_project_meta_columns()
     _ensure_indexes()
     db = SessionLocal()
@@ -97,6 +97,20 @@ def on_startup() -> None:
         seed_admin(db)
     finally:
         db.close()
+
+
+def _bootstrap_schema_if_greenfield() -> None:
+    """Create tables only on a DB that Alembic does not manage yet.
+
+    Once ``alembic_version`` exists, schema changes must go through
+    ``npm run db:migrate`` + ``npm run db:up`` so model edits are not silently
+    applied on API startup.
+    """
+    from sqlalchemy import inspect
+
+    if inspect(engine).has_table("alembic_version"):
+        return
+    Base.metadata.create_all(bind=engine)
 
 
 def _ensure_project_meta_columns() -> None:

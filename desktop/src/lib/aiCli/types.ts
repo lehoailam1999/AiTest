@@ -26,6 +26,8 @@ export type AiCliSpec = {
   /** Names tried on PATH (Windows may add .exe/.cmd/.bat/.ps1). */
   commandCandidates: string[];
   versionArgs: string[];
+  /** Non-interactive command that exits non-zero when the CLI is not signed in. */
+  authCheckArgs?: string[];
   /** Env vars treated as user-configured path (as-built Cursor only). */
   envPathKeys: string[];
 };

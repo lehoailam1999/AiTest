@@ -39,6 +39,8 @@ desktop/node_modules/
 # Environment
 .env
 *.env.local
+.env.production
+*.env.production
 
 # Uploads
 uploads/
