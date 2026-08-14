@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD is required in .env.production}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD is required in .env.production}"
       POSTGRES_DB: ${POSTGRES_DB:-AITestDb}
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
@@ -23,9 +23,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-AITestDb}}
-      JWT_KEY: ${JWT_KEY:?Error: JWT_KEY is required in .env.production}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in .env.production}
+      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-AITestDb}}"
+      JWT_KEY: "${JWT_KEY:?Error: JWT_KEY is required in .env.production}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in .env.production}"
       JWT_ISSUER: ${JWT_ISSUER:-AITest.API}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-AITest.Client}
       JWT_ACCESS_HOURS: ${JWT_ACCESS_HOURS:-24}
