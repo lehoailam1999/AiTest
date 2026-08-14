@@ -56,15 +56,8 @@ api\.venv\Scripts\python.exe -m pip install -r api\requirements.txt
 
 | Gói | Thư mục | Lệnh từ root |
 | :--- | :--- | :--- |
-| IDE protocol (shared) | `packages/ide-protocol` | `npm run protocol:install` |
-| Desktop (React / Vite / Tauri) | `desktop` | `npm run desktop:install` |
-
-```powershell
-npm run protocol:install
-npm run desktop:install
-```
-
-Tương đương:
+| IDE protocol (shared) | `packages/ide-protocol` | `npm install --prefix packages/ide-protocol` |
+| Desktop (React / Vite / Tauri) | `desktop` | `npm install --prefix desktop` |
 
 ```powershell
 npm install --prefix packages/ide-protocol
@@ -78,7 +71,7 @@ Rust crate của Tauri (`desktop/src-tauri`) được `cargo` kéo khi chạy `n
 ```powershell
 npm run setup
 # = Postgres Docker + venv + pip install -r requirements.txt + alembic
-#   + protocol:install + desktop:install (+ thử extension)
+#   + ide-protocol + desktop npm install (+ thử extension)
 ```
 
 Chỉ cài lib, bỏ extension: `npm run setup:no-ext`.
@@ -98,7 +91,7 @@ cd AITest
 # Lần đầu (đã gồm cài lib BE + FE ở mục 2)
 npm run setup
 
-# Mỗi lần làm việc: Postgres → migrate → mở cửa sổ API (:5088) + Desktop Tauri
+# Mỗi lần làm việc: Postgres → migrate → mở cửa sổ API (:8000) + Desktop Tauri
 npm run up
 ```
 
@@ -118,8 +111,8 @@ cd api
 # .venv + pip đã làm ở mục 2
 alembic upgrade head
 
-# Dev (reload) — port 5088, khớp api/.env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 5088
+# Dev (reload) — port 8000, khớp api/.env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Từ root (Windows, đã có `api/.venv`):
@@ -156,14 +149,14 @@ Trong Desktop → **Cấu hình AI**: chọn CLI → tool hướng dẫn cài / 
 
 | | |
 | :--- | :--- |
-| Health | http://localhost:5088/health |
-| Swagger | http://localhost:5088/docs |
+| Health | http://localhost:8000/health |
+| Swagger | http://localhost:8000/docs |
 | Admin seed | `admin@aitest.com` / `Admin@123` |
 | Đăng ký | màn hình Register trên Desktop |
 
-`api/.env` (tạo từ `.env.example`): Postgres `localhost:5433`, API `PORT=5088`. Desktop dev gọi `http://127.0.0.1:5088/api`.
+`api/.env` (tạo từ `.env.example`): Postgres `localhost:5433`, API `PORT=8000`. Desktop dev gọi `http://127.0.0.1:8000/api`.
 
-Full Docker (Postgres + API container): `docker compose up -d --build` → API host **:5100**. Schema vẫn nên `npm run db:up` trên máy có venv (xem [`api/README.md`](api/README.md)).
+Full Docker (Postgres + API container): `docker compose up -d --build` → API host **:8000**. Schema vẫn nên `npm run db:up` trên máy có venv (xem [`api/README.md`](api/README.md)).
 
 ---
 
@@ -186,11 +179,12 @@ DB trống lần đầu: `db:up` bootstrap schema từ model rồi stamp head.
 ## 6. Build Desktop installer
 
 ```powershell
-# Endpoint API lúc build (bake vào UI)
-$env:VITE_API_URL = "http://<IP_HOẶC_HOST>:5088/api"
-
+# Endpoint API lúc build (bake vào UI) — một lệnh: cài protocol + desktop deps rồi đóng gói MSI
+$env:VITE_API_URL = "http://<IP_HOẶC_HOST>:8000/api"
 npm run desktop:build
 ```
+
+`desktop:build` tự cài `packages/ide-protocol` + `desktop` rồi `tauri build`.
 
 Output: `desktop/src-tauri/target/release/bundle/msi/` (Windows). Chi tiết deploy: [`docs/DESKTOP_DEPLOYMENT_GUIDE.md`](docs/DESKTOP_DEPLOYMENT_GUIDE.md).
 
@@ -202,16 +196,14 @@ Output: `desktop/src-tauri/target/release/bundle/msi/` (Windows). Chi tiết dep
 | :--- | :--- |
 | `npm run setup` | Lần đầu: Docker Postgres, **pip BE**, migrate, **npm FE** (+ thử extension) |
 | `npm run setup:no-ext` | Như trên, bỏ extension |
-| `npm run protocol:install` | Cài lib `packages/ide-protocol` |
-| `npm run desktop:install` | Cài lib `desktop/` (React / Vite / Tauri UI) |
 | `npm run up` / `dev` | Postgres + migrate + API + Desktop (cửa sổ mới) |
 | `npm run db` / `db:down` | Bật / dừng Postgres |
 | `npm run db:up` | `alembic upgrade head` (DB trống → bootstrap) |
 | `npm run db:migrate` | Autogen file migration mới |
 | `npm run db:status` / `db:rollback` | Xem revision / lùi 1 bước |
-| `npm run api` | API native `:5088` (`--reload`) |
+| `npm run api` | API native `:8000` (`--reload`) |
 | `npm run desktop` | Tauri + Vite |
-| `npm run desktop:build` | Đóng gói MSI / … |
+| `npm run desktop:build` | Cài deps protocol/desktop + đóng gói MSI |
 | `npm run extension:install` | Fallback cài IDE extension |
 | `npm test` | Test protocol + desktop |
 

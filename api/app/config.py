@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    port: int = 5000
+    port: int = 8000
     database_url: str = (
         "host=localhost user=postgres password=postgres "
         "dbname=AITestDb port=5433 sslmode=disable TimeZone=UTC"

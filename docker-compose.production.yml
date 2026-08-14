@@ -35,7 +35,7 @@ services:
       AITEST_RULE_RETRIEVE_ANALYSIS: ${AITEST_RULE_RETRIEVE_ANALYSIS:-1}
       AITEST_RULE_RETRIEVE_TCGEN: ${AITEST_RULE_RETRIEVE_TCGEN:-1}
     ports:
-      - "${API_PORT:-5000}:8080"
+      - "${API_PORT:-8000}:8080"
     depends_on:
       postgres:
         condition: service_healthy

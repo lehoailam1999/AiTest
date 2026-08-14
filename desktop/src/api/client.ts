@@ -1,4 +1,4 @@
-const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:5088/api";
+const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000/api";
 
 const ACCESS_KEY = "aitest.accessToken";
 const REFRESH_KEY = "aitest.refreshToken";
@@ -54,7 +54,7 @@ async function parse<T>(res: Response): Promise<T> {
       if (!res.ok) {
         const hint =
           res.status === 500
-            ? " Có thể port API bị app khác chiếm (vd. 5000) — chạy AITest api/ (PORT=5001) và khớp VITE_API_URL."
+            ? " Có thể port API bị app khác chiếm (vd. 5000/5001 Forensic) — chạy AITest api/ (PORT=8000) và khớp VITE_API_URL."
             : "";
         throw new Error(`HTTP ${res.status} — phản hồi không phải JSON AITest.${hint}`);
       }

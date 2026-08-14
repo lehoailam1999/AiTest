@@ -257,8 +257,8 @@ export function AiCliEnvironmentPanel({
             <Alert
               type="info"
               showIcon
-              message="Bước 3 — Lưu cấu hình & Test CLI"
-              description={`${spec.name} đã cài và đã đăng nhập trên máy này. Backend chưa ghi nhận Ready cho project, nên hãy lưu cấu hình rồi Test CLI.`}
+              message="Bước 3 — Lưu & Test CLI"
+              description={`${spec.name} đã cài và đã đăng nhập trên máy này. Backend chưa ghi nhận Ready — bấm Lưu & Test CLI.`}
             />
           </div>
         ) : null}
@@ -304,7 +304,7 @@ export function AiCliEnvironmentPanel({
               disabled={detecting}
               onClick={() => void verifyAfterLogin()}
             >
-              {guide?.loginCommand ? "Đã đăng nhập · Test CLI" : "Test kết nối CLI"}
+              {guide?.loginCommand ? "Đã đăng nhập · Lưu & Test CLI" : "Lưu & Test kết nối"}
             </Button>
           ) : state === "needs_verify" ? (
             <>

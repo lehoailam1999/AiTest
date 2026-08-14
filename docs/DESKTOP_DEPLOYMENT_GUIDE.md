@@ -87,9 +87,9 @@ Cổng API mặc định trong repo (phải khớp `VITE_API_URL` lúc build Des
 
 | Ngữ cảnh | Cổng API trên host | Postgres trên host |
 |----------|--------------------|--------------------|
-| Native — `api/.env.example` | **5088** | `localhost:5433` |
-| `docker-compose.yml` (dev) | **5100** → container 8080 | **5433** → 5432 |
-| `docker-compose.production.yml` | **`${API_PORT:-5000}`** → 8080 | **`${POSTGRES_PORT:-5433}`** → 5432 |
+| Native — `api/.env.example` | **8000** | `localhost:5433` |
+| `docker-compose.yml` (dev) | **8000** → container 8080 | **5433** → 5432 |
+| `docker-compose.production.yml` | **`${API_PORT:-8000}`** → 8080 | **`${POSTGRES_PORT:-5433}`** → 5432 |
 
 Health check API: `GET /health` (không prefix `/api`). Desktop dùng base `http://<host>:<port>/api`.
 
@@ -145,7 +145,7 @@ Hai phương án cùng một API + Postgres. Khác cách cài. Desktop / CLI / S
 
 ### Phương án A — Docker Compose
 
-Tách biệt `docker-compose.yml` (dev: API host **5100**, mật khẩu mẫu `postgres`). File production **bắt buộc** `POSTGRES_PASSWORD`, `JWT_KEY`, `ENCRYPTION_KEY` — thiếu thì Compose dừng.
+Tách biệt `docker-compose.yml` (dev: API host **8000**, mật khẩu mẫu `postgres`). File production **bắt buộc** `POSTGRES_PASSWORD`, `JWT_KEY`, `ENCRYPTION_KEY` — thiếu thì Compose dừng.
 
 #### A.1 Thành phần & mạng
 
@@ -159,7 +159,7 @@ Ba file ở **thư mục gốc repo**:
 
 ```text
 Host
-  ${API_PORT:-5000} ──────► api:8080
+  ${API_PORT:-8000} ──────► api:8080
   ${POSTGRES_PORT:-5433} ─► postgres:5432
 Mạng Compose:
   hostname `postgres` port 5432  ← API dùng cổng này, không dùng 5433
@@ -184,7 +184,7 @@ POSTGRES_PASSWORD=<SET_ME>
 POSTGRES_DB=AITestDb
 POSTGRES_PORT=5433
 
-API_PORT=5000
+API_PORT=8000
 JWT_KEY=<SET_ME_MIN_32_CHARS>
 ENCRYPTION_KEY=<SET_ME_MIN_32_CHARS>
 JWT_ISSUER=AITest.API
@@ -204,7 +204,7 @@ AITEST_RULE_RETRIEVE_TCGEN=1
 | `POSTGRES_PASSWORD` | Có | Fail (`:?`) | Mật khẩu DB |
 | `POSTGRES_DB` | Không | `AITestDb` | Tên database |
 | `POSTGRES_PORT` | Không | `5433` | Cổng Postgres trên **host** (trong container: 5432) |
-| `API_PORT` | Không | `5000` | Cổng API trên **host** (trong container: 8080) |
+| `API_PORT` | Không | `8000` | Cổng API trên **host** (trong container: 8080) |
 | `DATABASE_URL` | Không | `postgresql://USER:PASS@postgres:5432/DB` | Chỉ set khi Postgres nằm ngoài stack |
 | `JWT_KEY` | Có | Fail | Ký JWT |
 | `ENCRYPTION_KEY` | Có | Fail | Mã hóa secret connection trong DB |
@@ -255,7 +255,7 @@ services:
       AITEST_RULE_RETRIEVE_ANALYSIS: ${AITEST_RULE_RETRIEVE_ANALYSIS:-1}
       AITEST_RULE_RETRIEVE_TCGEN: ${AITEST_RULE_RETRIEVE_TCGEN:-1}
     ports:
-      - "${API_PORT:-5000}:8080"
+      - "${API_PORT:-8000}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -298,7 +298,7 @@ Chạy từ thư mục gốc repo. Linux / macOS / Git Bash / WSL: `chmod +x dep
 | Kiểm tra `docker` và `docker compose version` | Thiếu thì dừng |
 | Không có `.env.production` | Copy từ example rồi **thoát** — bắt điền secret |
 | Còn `<SET_ME` | Dừng |
-| Đọc `API_PORT` | In URL cuối; mặc định `5000` |
+| Đọc `API_PORT` | In URL cuối; mặc định `8000` |
 | `up -d --build` | Build image API, start 2 container |
 | `exec -T api alembic upgrade head` | Migration (`-T` = không TTY) |
 | `ps` | Trạng thái container |
@@ -325,7 +325,7 @@ docker compose -f docker-compose.production.yml --env-file .env.production ps
 ```
 
 ```bash
-curl -sS "http://127.0.0.1:${API_PORT:-5000}/health"
+curl -sS "http://127.0.0.1:${API_PORT:-8000}/health"
 ```
 
 `GET /health` trả `status: ok`. Desktop: `VITE_API_URL=http://<host-api>:<API_PORT>/api`.
@@ -356,7 +356,7 @@ API chạy uvicorn trên OS. Postgres là service máy hoặc instance có sẵn
 ```text
 Host
   PostgreSQL 16     ${PGPORT:-5433}
-  uvicorn           ${PORT:-5088}     ← api/.env.example
+  uvicorn           ${PORT:-8000}     ← api/.env.example
 Máy QA
   VITE_API_URL = http://<host>:${PORT}/api
 ```
@@ -375,7 +375,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 set -a && source .env && set +a
 alembic upgrade head
-uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-5088}"
+uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
 ```
 
 Production: `--workers` theo CPU, hoặc systemd với `EnvironmentFile=` trỏ `api/.env`.
@@ -388,13 +388,13 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 alembic upgrade head
-uvicorn app.main:app --host 0.0.0.0 --port 5088
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Cổng lấy từ `PORT` trong `.env`. Có thể đăng ký Windows Service (NSSM) với cùng env.
 
 ```bash
-curl -sS "http://127.0.0.1:${PORT:-5088}/health"
+curl -sS "http://127.0.0.1:${PORT:-8000}/health"
 ```
 
 ---
@@ -413,7 +413,7 @@ Linux   → chưa bật
 macOS   → chưa bật
 ```
 
-Lệnh local (Windows): `npm run desktop:install` rồi `npm run desktop:build` (`tauri build` trong `desktop/`).
+Lệnh local (Windows): `npm run desktop:build` (tự cài deps rồi `tauri build` trong `desktop/`).
 
 ### 4.2 Target
 
@@ -527,7 +527,7 @@ Không bật `updater`. Cập nhật = cài bản mới. Khi bật: `endpoints` 
 
 ### 6.2 `VITE_API_URL` (build-time)
 
-`desktop/src/api/client.ts`: `import.meta.env.VITE_API_URL`, fallback `http://127.0.0.1:5088/api`. Vite `envPrefix`: `VITE_`, `TAURI_`. Nhúng lúc `vite build` (`beforeBuildCommand`). Không đổi sau khi đã cài.
+`desktop/src/api/client.ts`: `import.meta.env.VITE_API_URL`, fallback `http://127.0.0.1:8000/api`. Vite `envPrefix`: `VITE_`, `TAURI_`. Nhúng lúc `vite build` (`beforeBuildCommand`). Không đổi sau khi đã cài.
 
 Một Backend production → cùng URL trên cả ba job:
 
@@ -544,9 +544,9 @@ CORS: `tauri://localhost`, `http://tauri.localhost`, `https://tauri.localhost` (
 ### 6.3 Lệnh build local (đúng OS)
 
 ```bash
-npm run desktop:install
 export VITE_API_URL="https://<host-api>/api"   # PowerShell: $env:VITE_API_URL=...
 npm run desktop:build
+# = npm install ide-protocol + desktop, rồi tauri build
 ```
 
 Đường dẫn as-built (Windows):

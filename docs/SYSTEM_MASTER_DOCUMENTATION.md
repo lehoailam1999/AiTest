@@ -397,7 +397,7 @@ Sau cài: **Reload Window** trên workspace **SUT**. Desktop → Connect IDE (đ
 
 ```env
 # api/.env
-PORT=5088
+PORT=8000
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:4200,http://localhost:4300,tauri://localhost,http://tauri.localhost,https://tauri.localhost
 ```
 
@@ -405,7 +405,7 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:4200,h
 
 ```powershell
 npm run db      # PostgreSQL :5433
-npm run api     # http://localhost:5088
+npm run api     # http://localhost:8000
 npm run desktop # Tauri + Vite
 ```
 

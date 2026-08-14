@@ -63,10 +63,10 @@ try {
 }
 
 Write-Host "`n=== 3) packages/ide-protocol ===" -ForegroundColor Cyan
-npm run protocol:install
+npm install --prefix packages/ide-protocol
 
 Write-Host "`n=== 4) desktop npm install ===" -ForegroundColor Cyan
-npm run desktop:install
+npm install --prefix desktop
 
 if (-not $SkipExtension) {
   Write-Host "`n=== 5) IDE extension ===" -ForegroundColor Cyan
@@ -83,6 +83,6 @@ if (-not $SkipExtension) {
 Write-Host ""
 Write-Host "Setup xong. Chay stack:" -ForegroundColor Green
 Write-Host "  npm run up"
-Write-Host "Health: http://localhost:5088/health"
+Write-Host "Health: http://localhost:8000/health"
 Write-Host "Login:  admin@aitest.com / Admin@123"
 Write-Host ""

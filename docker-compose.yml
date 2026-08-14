@@ -42,7 +42,7 @@ services:
       AITEST_TC_FANOUT_CONCURRENCY_CURSOR: "4"
       AITEST_TC_CURSOR_HIDDEN_CHAT: "0"
     ports:
-      - "5100:8080"
+      - "8000:8080"
     depends_on:
       postgres:
         condition: service_healthy

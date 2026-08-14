@@ -41,7 +41,7 @@ Start-Process powershell -ArgumentList @(
 )
 
 Write-Host ""
-Write-Host "Da migrate + mo API + Desktop. Health: http://localhost:5088/health" -ForegroundColor Green
+Write-Host "Da migrate + mo API + Desktop. Health: http://localhost:8000/health" -ForegroundColor Green
 Write-Host "Login: admin@aitest.com / Admin@123" -ForegroundColor Green
 Write-Host ""
 Write-Host "IDE bridge (Unit/E2E Gen):" -ForegroundColor Yellow

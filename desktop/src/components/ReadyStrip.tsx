@@ -114,7 +114,7 @@ export function ReadyStrip({
               </Button>
             </Link>
           }
-          description="Vào Cấu hình AI, chọn CLI (vd. Cursor CLI) rồi Lưu → Test CLI cho đến khi Ready."
+          description="Vào Cấu hình AI, chọn CLI (vd. Cursor CLI) rồi Lưu & Test CLI cho đến khi Ready."
         />
       ) : null}
 

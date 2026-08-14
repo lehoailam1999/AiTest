@@ -156,7 +156,7 @@ export default function SettingsPage() {
     };
   }
 
-  async function onSave() {
+  async function onSaveOnly() {
     if (!projectId) return;
     setSaving(true);
     // Chặn load() đang bay đè form trong lúc save
@@ -173,7 +173,8 @@ export default function SettingsPage() {
     }
   }
 
-  async function onVerify() {
+  /** Lưu cấu hình rồi verify CLI — một bước đến Ready. */
+  async function onSaveAndTestCli() {
     if (!projectId) return;
     setVerifying(true);
     loadSeq.current += 1;
@@ -183,12 +184,12 @@ export default function SettingsPage() {
       const c = await connection.verify(projectId);
       applyConnectionToForm(c, { setConn, setModelName, setCliType });
       if (c.status === "Ready") {
-        message.success("CLI sẵn sàng — AI đã Ready");
+        message.success("Đã lưu · CLI Ready");
       } else {
-        message.warning(`Trạng thái: ${c.status}`);
+        message.warning(`Đã lưu · trạng thái: ${c.status}`);
       }
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "Xác minh thất bại");
+      message.error(err instanceof Error ? err.message : "Lưu & Test CLI thất bại");
     } finally {
       setVerifying(false);
     }
@@ -272,7 +273,7 @@ export default function SettingsPage() {
           size="middle"
           requiredMark={false}
           className="settings-ai-form"
-          onFinish={() => void onSave()}
+          onFinish={() => void onSaveAndTestCli()}
         >
           <div className="settings-ai-block">
             <div className="settings-ai-block-label">CLI</div>
@@ -319,16 +320,23 @@ export default function SettingsPage() {
 
           <div className="settings-ai-actions">
             <Space size={8} wrap>
-              <Button type="primary" htmlType="submit" loading={saving} disabled={locked && !saving}>
-                Lưu
-              </Button>
               <Button
+                type="primary"
+                htmlType="submit"
                 icon={<SafetyCertificateOutlined />}
-                onClick={() => void onVerify()}
                 loading={verifying}
                 disabled={locked && !verifying}
               >
-                Test CLI
+                Lưu &amp; Test CLI
+              </Button>
+              <Button
+                type="text"
+                size="small"
+                onClick={() => void onSaveOnly()}
+                loading={saving}
+                disabled={locked && !saving}
+              >
+                Chỉ lưu
               </Button>
               <Button
                 type="text"
@@ -341,7 +349,7 @@ export default function SettingsPage() {
               </Button>
             </Space>
             <Text type="secondary" className="settings-ai-actions-hint">
-              Lưu → Test CLI → Ready trước khi Sinh TC / Phân tích
+              Một bước: lưu cấu hình + xác minh CLI đến Ready trước khi Sinh TC / Phân tích
             </Text>
           </div>
         </Form>
@@ -349,7 +357,7 @@ export default function SettingsPage() {
           cliType={cliType}
           backendReady={!selectionChanged && conn?.status === "Ready"}
           verifying={verifying}
-          onVerify={onVerify}
+          onVerify={onSaveAndTestCli}
         />
       </section>
     </div>

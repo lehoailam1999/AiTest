@@ -117,7 +117,7 @@ export function assertProjectSynced(project: Project, projectId: string): void {
   if (!syncedAt) {
     const hint =
       project.meta == null
-        ? "Server trả meta = null (API có thể chưa hỗ trợ lưu meta — hãy restart API Python trên port 5000)."
+        ? "Server trả meta = null (API có thể chưa hỗ trợ lưu meta — hãy restart API Python trên port 8000)."
         : typeof project.meta === "string"
           ? "Server trả meta dạng chuỗi không parse được."
           : "meta không có syncedAt.";

@@ -21,7 +21,7 @@ npm run db
 
 # Hoặc full stack (Postgres + API container)
 docker compose up -d --build
-# Postgres :5433 · API http://localhost:5100
+# Postgres :5433 · API http://localhost:8000
 ```
 
 Hai lệnh trên đều bật Postgres trước. `docker compose up -d --build` thêm container API nhờ `depends_on` + healthcheck.
@@ -38,18 +38,18 @@ Cần `api/.venv` + `api/.env` (có sau `npm run setup`).
 
 | Cách | Lệnh | Port | Khi nào |
 |------|------|------|---------|
-| **Dev (path chính)** | `npm run api` | **5088** | Sửa code, `--reload` — trùng `npm run up` |
-| **Full Docker** | (đã lên ở bước 1 nếu dùng `compose … --build`) | **5100** | Không cần venv |
+| **Dev (path chính)** | `npm run api` | **8000** | Sửa code, `--reload` — trùng `npm run up` |
+| **Full Docker** | (đã lên ở bước 1 nếu dùng `compose … --build`) | **8000** | Không cần venv |
 
 Dev:
 
 ```powershell
-npm run api         # uvicorn --reload :5088
+npm run api         # uvicorn --reload :8000
 ```
 
-`api/.env`: `DATABASE_URL` … `port=5433`. Desktop: `http://127.0.0.1:5088/api`.
+`api/.env`: `DATABASE_URL` … `port=5433`. Desktop: `http://127.0.0.1:8000/api`.
 
-Full Docker: image chỉ `uvicorn`, **không** chạy Alembic — nên vẫn làm bước 2 trên host (hoặc DB trống thì startup tự `create_all` nếu chưa có `alembic_version`). Desktop trỏ container: `VITE_API_URL=http://127.0.0.1:5100/api`.
+Full Docker: image chỉ `uvicorn`, **không** chạy Alembic — nên vẫn làm bước 2 trên host (hoặc DB trống thì startup tự `create_all` nếu chưa có `alembic_version`). Desktop trỏ container: `VITE_API_URL=http://127.0.0.1:8000/api`.
 
 Dừng Postgres: `npm run db:down`.
 
@@ -85,8 +85,8 @@ npm run db:status
 
 | | Dev native | Full Docker |
 |--|------------|-------------|
-| Health | http://localhost:5088/health | http://localhost:5100/health |
-| Swagger | http://localhost:5088/docs | http://localhost:5100/docs |
+| Health | http://localhost:8000/health | http://localhost:8000/health |
+| Swagger | http://localhost:8000/docs | http://localhost:8000/docs |
 | Seed | `admin@aitest.com` / `Admin@123` | cùng |
 
 ## Env
@@ -96,4 +96,4 @@ npm run db:status
 | Biến | Dev native | API trong compose |
 |------|------------|-------------------|
 | `DATABASE_URL` | `host=localhost` … `port=5433` | `host=postgres` … `port=5432` |
-| `PORT` | `5088` | `8080` (map host **5100**) |
+| `PORT` | `8000` | `8080` (map host **8000**) |

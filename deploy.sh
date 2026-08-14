@@ -45,7 +45,7 @@ if grep -qE '<SET_ME' "$ENV_FILE"; then
 fi
 
 API_PORT=$(grep -E '^API_PORT=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '\r" ')
-API_PORT=${API_PORT:-5000}
+API_PORT=${API_PORT:-8000}
 
 # 3. Khởi chạy Containers
 echo "📦 1/3. Khởi chạy Containers bằng $COMPOSE_FILE..."
