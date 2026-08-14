@@ -27,13 +27,16 @@
 13. SYNC: `domcontentloaded` (never `networkidle`) + landmark assert.
 14. ASSERTION: assert expected behavior after actions; no `expect(await expectX())`.
 15. CONVENTION: `AItest/E2ETest/{Req}/{TC}` + `_shared`; reuse existing helpers first.
-16. SELF-CHECK: no invented route/role/credential; **no `Phase 3: ungrounded` throw stubs**
-   in committed POM — implement locators from FE/DOM or omit method. Empty stubs abort
-   Playwright mid-run (browser closes) before later TC steps run.
+16. SELF-CHECK: no invented route/role/credential; **Act stubs click/fill or throw** —
+   never `console.warn`+return (silent no-op hides missing locators); never bind
+   `*Button` to `main|body`. Empty Act must fail-closed, not skip to a bogus assert.
 17. NO DUPLICATE: one canonical page/spec/config path.
 18. RUNNABLE: compile + import class exact + `new Page(page)`.
 19. ACT/ARRANGE: ground in FE+DOM+Spec args; no app hardcode. Precondition popup →
-   `openCreateModal` / create button from FE HTML before checkbox/fill steps.
+   `openCreateModal` via `getByTestId('entityCreateButton')` / `#jh-create-entity` /
+   Create|Add. Wizard Next = dialog button `Tiếp theo|Next|Continue` (not main|body).
+   Spec passes expected text into `expect*` (R6); incomplete-step TCs assert Next
+   `toBeDisabled`. Missing DOM/FE hook → Phase-3 ungrounded throw — never soft-skip.
 
 ## III. Definition of Ready (hard gate before writing/running tests)
 20. REQUIRED CONTEXT: featurePath + role/authRef + landmark + expected outcome, else `ContextMissing`.

@@ -13,6 +13,7 @@ import {
   hasUnitSourceMarkers,
   isBlockedUnitPrimaryPath,
   isInterfaceLikePrimaryPath,
+  isValidationDataBucket,
   pathsMatchMarker,
   primaryMatchesMarkers,
   promoteImplementationPrimary,
@@ -35,6 +36,15 @@ import {
   scopedFamilyReresolveFromDisk,
 } from "./unitGenRelatedSources";
 import { getUnitGenEngine, writeUnitGenDebugDump } from "./cursorAgentCliEngine";
+import { focusSutExcerpt } from "./focusSutExcerpt";
+import { slimTcMdForGen } from "./slimTcMdForGen";
+import {
+  groundingRelatedPaths,
+  inferDtoCandidatePaths,
+  loadUnitGroundingContract,
+  plainRelatedExcerpt,
+  resolveTestDataForGen,
+} from "./unitGenPromptPrep";
 
 export { stripCodeFences, excerptFromContextPacket, toRepoRelativePath } from "./unitGenParse";
 export {
@@ -91,6 +101,22 @@ function formatRelatedBlocks(
   })();
 }
 
+function canAlwaysGenerateOnFeatureGap(
+  tcBlob: string,
+  genMode: "strict_spec" | "always_generate"
+): boolean {
+  if (genMode !== "always_generate") return false;
+  return !isValidationDataBucket(tcBlob);
+}
+
+function prepareTcMdForGen(
+  rawMd: string,
+  codeAliases: Parameters<typeof resolveTestDataForGen>[1]
+): string {
+  const resolved = resolveTestDataForGen(rawMd, codeAliases);
+  return slimTcMdForGen(resolved.md);
+}
+
 function notifyProgress(notify: NotifyFn, progress: CodegenProgressNotification): void {
   notify(IdeNotifications.codegenProgress, progress);
 }
@@ -104,20 +130,22 @@ function canSoftBypassGateForGroundedSource(opts: {
   primaryPath?: string;
   source?: string;
   markers: { paths: string[]; codes: string[] };
+  tcBlob?: string;
+  alignmentScore?: number;
+  minAlignment?: number;
 }): boolean {
   if (!/FEATURE_GAP|SUT_MISMATCH/i.test(opts.code || "")) return false;
   if (!opts.primaryPath || !opts.source?.trim()) return false;
-  // Logic-layer SUT with concrete excerpt should be enough to generate.
   if (isNonProductionUnitPath(opts.primaryPath)) return false;
   if (isBlockedUnitPrimaryPath(opts.primaryPath, opts.markers)) return false;
-  // If markers exist, prefer consistency; if markers absent, still allow grounded generate.
-  if (
-    (opts.markers.paths.length > 0 || opts.markers.codes.length > 0) &&
-    !primaryMatchesMarkers(opts.primaryPath, opts.markers)
-  ) {
-    return false;
-  }
-  return true;
+  const markersMatch =
+    !(opts.markers.paths.length > 0 || opts.markers.codes.length > 0) ||
+    primaryMatchesMarkers(opts.primaryPath, opts.markers);
+  if (!markersMatch) return false;
+  const highConf = /\bconfidence=HIGH\b/i.test(opts.tcBlob || "");
+  const min = opts.minAlignment ?? 50;
+  const score = opts.alignmentScore ?? 0;
+  return highConf || score >= min;
 }
 
 async function readTextIfExists(abs: string, maxChars = UNIT_GEN_LIMITS.maxConventionsChars): Promise<string> {
@@ -384,6 +412,8 @@ async function genOneItem(
     .join("\n");
 
   const markers = extractTcSourceMarkers(tcBlob);
+  const groundingContract = await loadUnitGroundingContract(root, md.path);
+  const groundingPaths = groundingRelatedPaths(groundingContract);
   const profileGate = await loadUnitProfileGate(root);
   const allowDisk = profileGate.allowDiskReresolve;
 
@@ -674,9 +704,18 @@ async function genOneItem(
     ];
   }
 
-  // Related: markers + packet expand only (no disk candidate pool unless allowDisk)
+  // Related: grounding.json + markers + packet expand (no disk pool unless allowDisk)
   {
+    const dtoBoost = primaryPath
+      ? inferDtoCandidatePaths(primaryPath, [
+          ...groundingPaths,
+          ...markers.related,
+          ...(disk?.candidates || []),
+        ])
+      : [];
     const relatedRels = [
+      ...groundingPaths,
+      ...dtoBoost,
       ...markers.related.map((p) => toRepoRelativePath(root, p)),
       ...expandUnitRelatedPaths({
         entryPathRel: primaryPath || "",
@@ -779,10 +818,20 @@ async function genOneItem(
   let softBypassReason = "";
   let softBypassCode = "";
 
+  if (source?.trim() && markers.codes[0]) {
+    source = focusSutExcerpt(
+      source,
+      markers.codes[0],
+      UNIT_GEN_LIMITS.maxExcerptChars
+    );
+  }
+  const relatedExcerpt = plainRelatedExcerpt(related || "");
+
   let gate = decideUnitSutGate({
     tcText: tcBlob,
     primaryPath,
     sourceExcerpt: source,
+    relatedExcerpt,
     codeAliases: paramsCodeAliases,
     moduleText: [item.module, item.title, md.content.slice(0, 1500)].filter(Boolean).join("\n"),
     domainGuards,
@@ -826,6 +875,7 @@ async function genOneItem(
           tcText: tcBlob,
           primaryPath,
           sourceExcerpt: source,
+          relatedExcerpt,
           codeAliases: paramsCodeAliases,
           moduleText: [item.module, item.title, md.content.slice(0, 1500)]
             .filter(Boolean)
@@ -841,7 +891,7 @@ async function genOneItem(
 
   if (gate.decision === "block") {
     const code = gate.code || "FAIL_NEEDS_MARKER";
-    if (/FEATURE_GAP/i.test(code) && profileGate.genMode === "always_generate") {
+    if (/FEATURE_GAP/i.test(code) && canAlwaysGenerateOnFeatureGap(tcBlob, profileGate.genMode)) {
       gapFallbackUsed = true;
       gapFallbackReason = `${code} — ${gate.reason}`;
       notifyProgress(notify, {
@@ -857,6 +907,9 @@ async function genOneItem(
         primaryPath,
         source,
         markers,
+        tcBlob,
+        alignmentScore: gate.alignmentScore,
+        minAlignment: gate.minAlignment,
       })
     ) {
       softBypassUsed = true;
@@ -915,11 +968,8 @@ async function genOneItem(
 
   try {
     const engine = getUnitGenEngine();
-    const result = await engine.generate(item, {
-      workspaceRoot: root,
-      conventions,
-      projectRules,
-      tcMd: gapFallbackUsed
+    const genTcMd = prepareTcMdForGen(
+      gapFallbackUsed
         ? withGapFallbackInstruction(md.content, gapFallbackReason || "FEATURE_GAP")
         : softBypassUsed
           ? withSoftBypassDiagnosticInstruction(md.content, {
@@ -928,6 +978,13 @@ async function genOneItem(
               primaryPath,
             })
           : md.content,
+      paramsCodeAliases
+    );
+    const result = await engine.generate(item, {
+      workspaceRoot: root,
+      conventions,
+      projectRules,
+      tcMd: genTcMd,
       tcMdPath: md.path,
       primaryPath,
       source,

@@ -51,8 +51,9 @@ def resolve_max_tc_per_module(
     set 0 to disable). Explicit maxPerModule / AITEST_TC_E2E_MAX_PER_MODULE win.
     E2E speed=full: no default ceiling (signal-driven) unless env/hint set.
 
-    Unit: no implicit default ceiling (signal-driven). Cap only when explicitly
-    set via hint/env.
+    Unit speed=fast: soft default 10/module (AITEST_TC_UNIT_FAST_MAX_PER_MODULE;
+    set 0 to disable). Explicit maxPerModule / AITEST_TC_UNIT_MAX_PER_MODULE win.
+    Unit speed=full: no default ceiling unless env/hint set.
     """
     hint = engine_hint if isinstance(engine_hint, dict) else {}
     eng = (preferred_engine or "").strip().lower()
@@ -84,23 +85,54 @@ def resolve_max_tc_per_module(
                 return 10
         return None
 
-    if (speed or "").strip().lower() != "fast":
+    if eng == "unit":
+        raw = (os.environ.get("AITEST_TC_UNIT_MAX_PER_MODULE") or "").strip()
+        if raw:
+            try:
+                return max(2, min(40, int(raw)))
+            except ValueError:
+                pass
+        if (speed or "").strip().lower() == "fast":
+            fast_cap = (
+                os.environ.get("AITEST_TC_UNIT_FAST_MAX_PER_MODULE") or "10"
+            ).strip()
+            if fast_cap in ("", "0", "none", "off"):
+                return None
+            try:
+                return max(2, min(40, int(fast_cap)))
+            except ValueError:
+                return 10
         return None
 
-    env_key = (
-        "AITEST_TC_UNIT_MAX_PER_MODULE"
-        if eng == "unit"
-        else "AITEST_TC_MAX_PER_MODULE"
-    )
-    default = ""
+    if (speed or "").strip().lower() != "fast":
+        return None
     try:
-        raw = (os.environ.get(env_key) or default).strip()
+        raw = (os.environ.get("AITEST_TC_MAX_PER_MODULE") or "").strip()
         if not raw:
             return None
         n = int(raw)
     except ValueError:
         return None
     return max(2, min(40, n))
+
+
+def resolve_unit_primary_retry_rounds(speed: str) -> int:
+    """
+    Extra CLI rounds after fan-out to fill missing PRIMARY markers.
+
+    - Explicit ``AITEST_TC_UNIT_PRIMARY_RETRY_ROUNDS`` wins (0–4).
+    - speed=fast → default **0** (skip; wall-clock).
+    - speed=full → default **2**.
+    """
+    raw = (os.environ.get("AITEST_TC_UNIT_PRIMARY_RETRY_ROUNDS") or "").strip()
+    if raw:
+        try:
+            return max(0, min(4, int(raw)))
+        except ValueError:
+            pass
+    if (speed or "").strip().lower() == "fast":
+        return 0
+    return 2
 
 
 def knowledge_enough_skip_source_scan(
@@ -111,17 +143,19 @@ def knowledge_enough_skip_source_scan(
     Skip workspace file scan when freeze Knowledge already has enough signals.
 
     - E2E: UI/AC/rule signals (override AITEST_TC_E2E_FORCE_SOURCE_SCAN=1 to always scan)
-    - Unit: **never** skip for "Knowledge đủ" — Unit TCs must see Handler/Service excerpts.
-      Opt out of scan only with AITEST_TC_UNIT_SKIP_SOURCE_SCAN=1.
+    - Unit: PRIMARY BE signals (BR/VAL/ERR/AC). Analysis-first — path/code = Approve.
+      Force scan: AITEST_TC_UNIT_FORCE_SOURCE_SCAN=1.
+      Always skip: AITEST_TC_UNIT_SKIP_SOURCE_SCAN=1.
     """
     eng = (preferred_engine or "").strip().lower()
     if eng == "e2e":
         if _env_truthy("AITEST_TC_E2E_FORCE_SOURCE_SCAN"):
             return False
     elif eng == "unit":
-        # Unit must ground reject/validate/persist on real SUT excerpts.
-        # Skip only when explicitly opted out (debug / no workspace).
-        return _env_truthy("AITEST_TC_UNIT_SKIP_SOURCE_SCAN")
+        if _env_truthy("AITEST_TC_UNIT_FORCE_SOURCE_SCAN"):
+            return False
+        if _env_truthy("AITEST_TC_UNIT_SKIP_SOURCE_SCAN"):
+            return True
     else:
         return False
 
@@ -148,6 +182,16 @@ def knowledge_enough_skip_source_scan(
             + _len("actors")
         )
         return modules >= 1 and signals >= 3
+
+    if eng == "unit":
+        primary = (
+            _len("businessRules")
+            + _len("validationRules")
+            + _len("exceptions")
+            + _len("errorHandling")
+            + _len("acceptanceCriteria")
+        )
+        return modules >= 1 and primary >= 3
 
     return False
 

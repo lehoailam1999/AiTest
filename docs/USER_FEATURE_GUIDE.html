@@ -1,0 +1,1524 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AITest Platform — Hướng dẫn Tester</title>
+  <style>
+    :root {
+      --bg: #eef2f6;
+      --ink: #152033;
+      --muted: #5c6b7a;
+      --accent: #0f6e56;
+      --accent-2: #16b58a;
+      --card: #ffffff;
+      --line: #d5dee7;
+      --danger: #b42318;
+      --warn: #b7791f;
+      --ok: #1a7f4c;
+      --side: #0f1b26;
+      --side-text: #dbe6ef;
+      --shadow: 0 12px 28px rgba(21, 32, 51, 0.07);
+      --sans: "Segoe UI", "IBM Plex Sans", "Be Vietnam Pro", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 10%, #d9ebe4 0%, transparent 42%),
+        radial-gradient(circle at 90% 0%, #dce6f5 0%, transparent 40%),
+        var(--bg);
+      line-height: 1.55;
+    }
+    a { color: var(--accent); }
+    .layout {
+      display: grid;
+      grid-template-columns: 250px 1fr;
+      min-height: 100vh;
+    }
+    .toc {
+      position: sticky; top: 0; height: 100vh; overflow: auto;
+      background: var(--side); color: var(--side-text);
+      padding: 22px 14px 40px;
+    }
+    .toc-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; color: #fff; font-weight: 700; }
+    .mark {
+      width: 34px; height: 34px; border-radius: 10px;
+      background: linear-gradient(135deg, #16b58a, #0f6e56);
+      display: grid; place-items: center; font-size: 12px; font-weight: 800;
+    }
+    .toc h2 {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
+      color: #93a4b3; margin: 16px 8px 6px;
+    }
+    .toc a {
+      display: block; color: #c5d0db; text-decoration: none;
+      padding: 8px 10px; border-radius: 8px; font-size: 13px; margin: 2px 0;
+    }
+    .toc a:hover, .toc a.active { background: rgba(22,181,138,.18); color: #fff; }
+    .toc a.sub { font-size: 12.5px; padding-left: 16px; color: #93a4b3; }
+
+    .doc { padding: 28px 36px 72px; max-width: 1240px; }
+    .hero {
+      background: #0f1b26; color: #fff; border-radius: 16px;
+      padding: 28px 32px; margin-bottom: 28px;
+    }
+    .hero h1 { margin: 0 0 8px; font-size: 26px; }
+    .hero p { margin: 0; color: #c5d0db; max-width: 720px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .chip {
+      font-size: 11px; padding: 4px 10px; border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.16); color: #dbe6ef;
+    }
+
+    .chapter {
+      margin: 0 0 40px;
+      padding: 0 0 8px;
+    }
+    .chapter > h2 {
+      margin: 0 0 14px; font-size: 13px; letter-spacing: .14em;
+      text-transform: uppercase; color: var(--accent);
+    }
+
+    /* Mỗi chức năng = 1 tấm tách biệt */
+    .feat {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      margin: 0 0 36px;
+      overflow: hidden;
+    }
+    .feat-head {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 16px;
+      padding: 20px 22px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #f7fbf9;
+    }
+    .feat-num {
+      width: 56px; height: 56px; border-radius: 14px;
+      background: linear-gradient(135deg, #16b58a, #0f6e56);
+      color: #fff; font-weight: 800; font-size: 18px;
+      display: grid; place-items: center;
+    }
+    .feat-menu {
+      margin: 0 0 4px; font-size: 12px; color: var(--accent); font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .feat-head h3 { margin: 0 0 6px; font-size: 20px; }
+    .feat-why { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+    .feat-split {
+      display: flex;
+      flex-direction: column;
+    }
+    .feat-ui {
+      padding: 16px 18px 18px;
+      background: #e8eef3;
+      border-bottom: 1px solid var(--line);
+    }
+    .feat-steps {
+      padding: 16px 22px 20px;
+      background: #fff;
+    }
+    .col-label {
+      margin: 0 0 10px; font-size: 11px; font-weight: 700;
+      letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+    }
+    .feat-foot {
+      border-top: 1px solid var(--line);
+      padding: 14px 22px 18px;
+      background: #f0fdf4;
+    }
+    .feat-foot h4 { margin: 0 0 6px; color: var(--ok); font-size: 13px; }
+    .feat-foot ul { margin: 0; padding-left: 18px; color: #14532d; font-size: 14px; }
+    /* Steps — mỗi bước 1 hàng, không dính */
+    ol.steps {
+      list-style: none; margin: 0; padding: 0; counter-reset: st;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 28px;
+    }
+    ol.steps > li {
+      counter-increment: st;
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 10px;
+      padding: 12px 0;
+      border-bottom: 1px dashed var(--line);
+    }
+    ol.steps > li:last-child { border-bottom: 0; }
+    ol.steps > li::before {
+      content: counter(st);
+      width: 28px; height: 28px; border-radius: 50%;
+      background: var(--accent); color: #fff;
+      font-weight: 700; font-size: 13px;
+      display: grid; place-items: center;
+      margin-top: 1px;
+    }
+    ol.steps .do { font-weight: 650; margin: 0 0 4px; }
+    ol.steps .see { margin: 0; font-size: 13px; color: var(--muted); }
+    kbd, .ui-name {
+      display: inline-block; font-family: inherit; font-size: 12px; font-weight: 650;
+      padding: 1px 7px; border-radius: 6px;
+      background: #e8f4f0; color: var(--accent); border: 1px solid #b7e4d4;
+    }
+
+    /* Mock app = shell Desktop: sidebar 220–260px, content xám */
+    .app {
+      border: 1px solid #c5d0db; border-radius: 12px; overflow: hidden;
+      display: grid; grid-template-columns: 220px minmax(0, 1fr);
+      min-height: 380px;
+      background: #eef2f6; font-size: 12.5px; box-shadow: var(--shadow);
+    }
+    .app.login-shell {
+      grid-template-columns: 1fr;
+      min-height: 340px;
+      background: #eef2f6;
+    }
+    .app-side {
+      background: #0f1b26; color: #dbe6ef;
+      padding: 14px 12px 12px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .app-side .b {
+      display: flex; align-items: center; gap: 8px; color: #fff;
+      font-weight: 700; font-size: 13.5px; margin: 0;
+    }
+    .app-side .b i {
+      width: 28px; height: 28px; border-radius: 8px; font-style: normal;
+      background: linear-gradient(135deg, #16b58a, #0f6e56);
+      display: grid; place-items: center; font-size: 11px; font-weight: 800;
+    }
+    .app-side .proj {
+      display: grid; gap: 3px;
+      background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 10px;
+    }
+    .app-side .proj small {
+      display: block; color: #93a4b3; font-size: 10px;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .app-side .proj .st { color: #7dd3a8; font-size: 10px; }
+    .app-side .proj .cta {
+      color: #7eb8ff; font-size: 11px; padding: 0; background: none;
+      border: 0; text-align: left; cursor: default; margin-top: 2px;
+    }
+    .app-side nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .app-side .sec {
+      font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+      color: #6b7d8c; padding: 8px 10px 4px; font-weight: 600;
+    }
+    .app-side .ni {
+      padding: 7px 10px; border-radius: 8px; color: #c3d0dc; font-size: 12.5px;
+    }
+    .app-side .ni.on { background: rgba(22,181,138,.18); color: #fff; font-weight: 600; }
+    .app-foot {
+      border-top: 1px solid rgba(255,255,255,.08); padding-top: 10px; display: grid; gap: 8px;
+    }
+    .uc { display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,.05); border-radius: 10px; padding: 6px 8px; }
+    .av {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: linear-gradient(135deg, #16b58a, #0f6e56);
+      color: #fff; display: grid; place-items: center; font-size: 11px; font-weight: 700;
+    }
+    .uc b { display: block; color: #fff; font-size: 12px; }
+    .uc small { color: #93a4b3; font-size: 10px; }
+    .lo {
+      border: 1px solid rgba(255,255,255,.12); border-radius: 8px;
+      text-align: center; padding: 7px; font-weight: 600; font-size: 12px; color: #dbe6ef;
+    }
+    .app-main { padding: 14px 16px 16px; min-width: 0; overflow: auto; }
+    .ph { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; gap: 10px; flex-wrap: wrap; }
+    .ph h4 { margin: 0; font-size: 20px; font-weight: 650; color: #152033; }
+    .ph .sub { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; max-width: 520px; }
+    .btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .b1, .b2, .b3 {
+      border-radius: 8px; padding: 5px 12px; font-size: 12.5px; font-weight: 600;
+      display: inline-flex; align-items: center; gap: 4px; line-height: 1.4;
+    }
+    .b1 { background: #0f6e56; color: #fff; border: 1px solid #0f6e56; }
+    .b2 { background: #fff; color: #152033; border: 1px solid #d5dee7; }
+    .b3 { background: #fff; color: #b42318; border: 1px solid #f0c4c0; }
+    .tbl { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; font-size: 12px; border: 1px solid var(--line); }
+    .tbl th { background: #fafbfc; text-align: left; padding: 8px 10px; color: var(--muted); font-weight: 650; border-bottom: 1px solid var(--line); }
+    .tbl td { padding: 8px 10px; border-bottom: 1px solid #eef2f6; vertical-align: middle; }
+    .tbl tr:last-child td { border-bottom: 0; }
+    .tag { font-size: 11px; padding: 1px 8px; border-radius: 999px; font-weight: 650; }
+    .tag.g { background: #dcfce7; color: #166534; }
+    .tag.y { background: #fef3c7; color: #92400e; }
+    .tag.b { background: #e0f2fe; color: #075985; }
+    .alert {
+      background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+      border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 10px;
+    }
+    .alert.ok { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+    .alert.info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 0 0 10px; }
+    .stat { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+    .stat span { display: block; font-size: 10.5px; color: var(--muted); }
+    .stat b { font-size: 18px; }
+    .journey { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-bottom: 10px; align-items: stretch; }
+    .j {
+      background: #fff; border: 1px solid var(--line); padding: 8px 10px; font-size: 12px;
+      display: flex; gap: 8px; align-items: center;
+    }
+    .j:first-child { border-radius: 10px 0 0 10px; }
+    .j:last-child { border-radius: 0 10px 10px 0; }
+    .j.on { border-color: var(--accent); background: #e8f4f0; z-index: 1; }
+    .j .ix {
+      width: 22px; height: 22px; border-radius: 50%; background: #e8eef4;
+      display: grid; place-items: center; font-size: 11px; font-weight: 700; flex-shrink: 0;
+    }
+    .j.on .ix { background: var(--accent); color: #fff; }
+    .j small { display: block; color: var(--muted); font-size: 10.5px; }
+    .compact { display: flex; width: 100%; }
+    .compact .inp { flex: 1; border-radius: 8px 0 0 8px; }
+    .compact .b2 { border-radius: 0 8px 8px 0; }
+    .modal {
+      background: #fff; border: 1px solid var(--line); border-radius: 12px;
+      padding: 12px 14px; margin-top: 10px; box-shadow: 0 8px 24px rgba(21,32,51,.08);
+    }
+    .modal h5 { margin: 0 0 8px; font-size: 14px; }
+    .lab { font-size: 12px; color: var(--muted); margin: 8px 0 4px; display: block; }
+    .inp { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: #fff; font-size: 12px; }
+    .card-in { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+    .card-in .ctitle { font-weight: 650; margin-bottom: 10px; font-size: 13.5px; }
+    .login-card {
+      width: min(420px, 92%); margin: 28px auto; background: #fff; border: 1px solid var(--line);
+      border-radius: 16px; padding: 28px; box-shadow: 0 18px 40px rgba(21,32,51,.08);
+    }
+    .login-card .br { color: var(--accent); font-size: 13px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; margin: 0; }
+    .login-card h4 { margin: 8px 0 16px; font-size: 28px; }
+    .pipe { display: flex; gap: 0; margin: 8px 0 12px; font-size: 11.5px; max-width: 720px; }
+    .pipe span {
+      flex: 1; background: #fff; border: 1px solid var(--line); padding: 6px 8px; text-align: center;
+    }
+    .pipe span:first-child { border-radius: 8px 0 0 8px; }
+    .pipe span:last-child { border-radius: 0 8px 8px 0; }
+    .pipe span.on { background: #0f6e56; color: #fff; border-color: #0f6e56; }
+    .ide-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+      background: #fafafa; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-top: 8px;
+    }
+
+    table.data { width: 100%; border-collapse: collapse; font-size: 14px; background: #fff; }
+    table.data th, table.data td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+    table.data th { background: #f7fafc; }
+
+    .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .flow .box {
+      background: #fff; border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px 12px; min-width: 128px; font-size: 13px;
+    }
+    .flow .box b { display: block; color: var(--accent); font-size: 11px; }
+    .arrow { color: var(--muted); font-weight: 700; }
+
+    footer { color: var(--muted); font-size: 13px; margin-top: 8px; }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: relative; height: auto; }
+      .feat-head { grid-template-columns: 1fr; }
+      ol.steps { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .journey { grid-template-columns: 1fr 1fr; }
+      .doc { padding: 16px; }
+    }
+    @media print {
+      .toc { display: none; }
+      .layout { display: block; }
+      .feat { break-inside: avoid; box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav class="toc">
+      <div class="toc-brand"><span class="mark">AI</span> Test Studio</div>
+      <h2>Mở đầu</h2>
+      <a href="#gioi-thieu">AITest là gì?</a>
+      <a href="#dang-nhap">Đăng nhập · Sign in</a>
+      <h2>Từng chức năng</h2>
+      <a class="sub" href="#f1">01 · Projects</a>
+      <a class="sub" href="#f2">02 · Requirement Studio</a>
+      <a class="sub" href="#f3">03 · Duyệt TC</a>
+      <a class="sub" href="#f4">04 · Unit test</a>
+      <a class="sub" href="#f5">05 · E2E test</a>
+      <a class="sub" href="#f6">06 · Job Board</a>
+      <a class="sub" href="#f7">07 · Chạy test</a>
+      <a class="sub" href="#f8">08 · Báo cáo</a>
+      <a class="sub" href="#f9">09 · Cấu hình AI</a>
+      <h2>Phụ lục</h2>
+      <a href="#phan-cong">Tester vs hệ thống</a>
+      <a href="#quickstart">Quick-start 5 bước</a>
+    </nav>
+
+    <div class="doc">
+      <header class="hero">
+        <p class="chip" style="display:inline-block;margin:0 0 10px">Tester User Guide · Desktop</p>
+        <h1>Hướng dẫn từng chức năng AITest</h1>
+        <p>Mỗi chức năng: <strong>Giao diện hệ thống</strong> (layout + nút đúng Desktop) phía trên, <strong>Từng bước</strong> phía dưới.</p>
+        <div class="chips">
+          <span class="chip">Phiên bản 1.5.1 · 13/08/2026</span>
+          <span class="chip">Chỉ dùng AITest Desktop — không dùng trình duyệt thuần</span>
+        </div>
+      </header>
+
+      <section class="chapter" id="gioi-thieu">
+        <h2>Giới thiệu</h2>
+        <article class="feat">
+          <div class="feat-head">
+            <div class="feat-num">·</div>
+            <div>
+              <p class="feat-menu">Chu trình sản phẩm</p>
+              <h3>AITest làm gì cho Tester?</h3>
+              <p class="feat-why">Đọc yêu cầu → sinh kịch bản → bạn duyệt → AI viết Unit / E2E trên máy bạn → chạy test và xem coverage.</p>
+            </div>
+          </div>
+          <div style="padding:18px 22px 22px">
+            <div class="flow">
+              <div class="box"><b>Design</b>Projects · Requirement · Duyệt TC</div>
+              <span class="arrow">→</span>
+              <div class="box"><b>Automate</b>Unit test · E2E test · Chạy test</div>
+              <span class="arrow">→</span>
+              <div class="box"><b>Insight</b>Báo cáo · Job Board · Cấu hình AI</div>
+            </div>
+            <p class="note" style="margin:16px 0 0">Sinh Test Case ≠ gắn path mã nguồn ≠ sinh file test. Unit và E2E dùng cùng luồng Gen: Desktop → Connect IDE → Agent CLI trên repo khách.</p>
+          </div>
+        </article>
+      </section>
+
+      <!-- LOGIN -->
+      <section class="chapter" id="dang-nhap">
+        <h2>Trước khi vào hệ thống</h2>
+        <article class="feat">
+          <div class="feat-head">
+            <div class="feat-num">00</div>
+            <div>
+              <p class="feat-menu">Màn hình độc lập · không có sidebar</p>
+              <h3>Sign in</h3>
+              <p class="feat-why">Một tài khoản dùng chung. Form card giữa màn, nền xám nhạt — đúng như Desktop.</p>
+            </div>
+          </div>
+          <div class="feat-split">
+            <div class="feat-ui">
+              <p class="col-label">Giao diện hệ thống</p>
+            <div class="app login-shell">
+                <div class="app-main" style="display:grid;place-items:center">
+                  <form class="login-card">
+                    <p class="br">AITest</p>
+                    <h4>Sign in</h4>
+                    <label class="lab">Email</label>
+                    <div class="inp">admin@aitest.com</div>
+                    <label class="lab" style="display:block;margin-top:12px">Password</label>
+                    <div class="inp">••••••••••••</div>
+                    <div class="b1" style="width:100%;justify-content:center;margin-top:16px;padding:10px 12px">Sign in</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+            <div class="feat-steps">
+              <p class="col-label">Từng bước</p>
+              <ol class="steps">
+                <li>
+                  <div>
+                    <p class="do">Mở ứng dụng <span class="ui-name">AITest Desktop</span> (Hỗ trợ đa nền tảng: Windows <code>.msi</code>/<code>.exe</code>, Linux <code>.deb</code>/<code>.AppImage</code>, macOS <code>.dmg</code>/<code>.app</code>).</p>
+                    <p class="see">Không mở bản web trên Chrome — sẽ không chọn được folder, Connect IDE thất bại.</p>
+                  </div>
+                </li>
+                <li>
+                  <div>
+                    <p class="do">Nhập Email / Password trên form <span class="ui-name">Sign in</span>.</p>
+                    <p class="see">Mặc định: <code>admin@aitest.com</code> / <code>Admin@123</code> (đổi trên môi trường công ty).</p>
+                  </div>
+                </li>
+                <li>
+                  <div>
+                    <p class="do">Bấm nút xanh <span class="ui-name">Sign in</span>.</p>
+                    <p class="see">Vào shell: sidebar trái <strong>AI Test Studio</strong>, khối «Dự án hiện tại», menu Design / Automate / Insight.</p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="chapter" id="tinh-nang">
+        <h2>Tám (+1) chức năng — tách từng màn</h2>
+      </section>
+
+      <!-- F1 PROJECTS -->
+      <article class="feat" id="f1">
+        <div class="feat-head">
+          <div class="feat-num">01</div>
+          <div>
+            <p class="feat-menu">Sidebar · Design · Projects</p>
+            <h3>Dự án — gắn source &amp; Connect IDE</h3>
+            <p class="feat-why">Trang tiêu đề «Dự án». Bảng danh sách + modal Tạo mới / Cập nhật dự án. Đây là nơi gắn folder repo và Connect IDE — bắt buộc trước Gen Unit/E2E.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni on">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div><h4>Dự án</h4></div>
+                  <div class="btns"><span class="b2">Unit test</span><span class="b2">E2E test</span><span class="b1">Tạo mới</span></div>
+                </div>
+                <table class="tbl">
+                  <tr>
+                    <th>Tên dự án</th>
+                    <th>Mã dự án</th>
+                    <th>Import / Stack</th>
+                    <th>Yêu cầu</th>
+                    <th>Test case</th>
+                    <th>Hành động</th>
+                  </tr>
+                  <tr>
+                    <td>SalesApp <span class="tag g">đang chọn</span></td>
+                    <td>SALES</td>
+                    <td>.NET 8 · xUnit<br /><span style="color:#5c6b7a;font-size:11px">Đã gắn source root<br />IDE: Connected · SalesApp</span></td>
+                    <td>12</td>
+                    <td>48</td>
+                    <td>
+                      <span class="b1">Đang chọn</span>
+                      <span class="b2">Requirement</span>
+                      <span class="b2">Sửa</span>
+                      <span class="b3">Xoá</span>
+                    </td>
+                  </tr>
+                </table>
+                <div class="modal">
+                  <h5>Cập nhật dự án</h5>
+                  <div class="lab">Tên dự án</div>
+                  <div class="inp">SalesApp</div>
+                  <div class="lab">Code</div>
+                  <div class="inp">SALES</div>
+                  <div class="lab">Mô tả</div>
+                  <div class="inp">tuỳ chọn</div>
+                  <div class="lab">Thư mục source (project root)</div>
+                  <div class="compact"><div class="inp">D:\Projects\SalesApp</div><span class="b2">Chọn thư mục</span></div>
+                  <div class="alert ok" style="margin-top:8px">Source root đã gắn — <code>D:\Projects\SalesApp</code></div>
+                  <p style="margin:8px 0 0;font-size:12px;color:#5c6b7a">IDE bridge — Cursor Open Folder đúng source ở trên, rồi Connect (Gen Unit / Apply).</p>
+                  <div class="ide-row">
+                    <span>IDE <span class="tag g">cursor · Connected</span> Focus: Caret tuỳ chọn (boost)</span>
+                    <span class="btns">
+                      <span class="b2">Reconnect</span>
+                      <span class="b2">Làm mới từ IDE</span>
+                      <span class="b2">Ngắt</span>
+                    </span>
+                  </div>
+                  <div class="btns" style="justify-content:flex-end;margin-top:12px"><span class="b2">Huỷ</span><span class="b1">Lưu &amp; gắn source</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar trái → nhóm Design → <span class="ui-name">Projects</span>.</p>
+                  <p class="see">Tiêu đề trang: <strong>Dự án</strong>. Góc phải: Unit test · E2E test · Tạo mới.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Bấm <span class="ui-name">Tạo mới</span> (hoặc <span class="ui-name">Sửa</span> trên một dòng).</p>
+                  <p class="see">Modal «Tạo dự án mới» / «Cập nhật dự án». Nút OK: <strong>Tạo &amp; gắn source</strong> hoặc <strong>Lưu &amp; gắn source</strong>.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Điền <span class="ui-name">Tên dự án</span>. Ô <span class="ui-name">Thư mục source (project root)</span> → <span class="ui-name">Chọn thư mục</span>.</p>
+                  <p class="see">Cửa sổ chọn thư mục hiện ra (File Explorer trên Windows, Finder trên macOS, File Manager trên Linux). Chọn repo khách trên máy bạn, vd. <code>D:\Projects\SalesApp</code>. Path nằm trên máy bạn, không upload full source lên Backend.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Cùng modal, khối <span class="ui-name">IDE</span>: mở Cursor/VS Code đúng folder đó, Reload extension <strong>AITest IDE Bridge</strong>, bấm <span class="ui-name">Connect IDE</span>.</p>
+                  <p class="see">Tag xanh <strong>Connected</strong>. Cột bảng: «Đã gắn source root» + «IDE: Connected».</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Trên dòng dự án bấm <span class="ui-name">Chọn</span> rồi <span class="ui-name">Requirement</span>.</p>
+                  <p class="see">Sidebar «Dự án hiện tại» đổi tên. Sẵn sàng sang chức năng 02.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <p class="note warn">Chỉ gắn folder khi chạy Desktop (Tauri). Path Desktop và folder Cursor phải cùng một repo.</p>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul>
+            <li>Workspace kích hoạt; hệ thống quét stack (xUnit / vitest / pytest…).</li>
+            <li>Connect IDE xong mới Gen Unit / E2E được (fail-closed, không fallback LLM Backend).</li>
+          </ul>
+        </div>
+      </article>
+
+      <!-- F2 REQUIREMENT -->
+      <article class="feat" id="f2">
+        <div class="feat-head">
+          <div class="feat-num">02</div>
+          <div>
+            <p class="feat-menu">Sidebar · Design · Requirement</p>
+            <h3>Requirement Studio — tài liệu → phân tích → tạo TC</h3>
+            <p class="feat-why">Trang «Requirement»: toolbar Tải lại / Requirement mới, bảng danh sách. Bấm Mở mới vào hành trình Tài liệu → Phân tích → Tạo test case → Duyệt test case.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni on">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Requirement</h4>
+                    <p class="sub">Quản lý theo Requirement (mỗi phần nghiệp vụ một mục). Trong Requirement: tài liệu → phân tích → sinh TC Unit/E2E → duyệt. Sau Approved: Unit test · E2E test.</p>
+                  </div>
+                </div>
+                <div class="ph" style="margin-bottom:10px">
+                  <p class="sub" style="margin:0">Mỗi Requirement = tài liệu + phân tích → TC. Muốn viết TC cho phần khác — tạo Requirement mới.</p>
+                  <div class="btns"><span class="b2">Tải lại</span><span class="b1">Requirement mới</span></div>
+                </div>
+                <div class="stats">
+                  <div class="stat"><span>Requirement</span><b>3</b></div>
+                  <div class="stat"><span>Tài liệu</span><b>5</b></div>
+                  <div class="stat"><span>Test case</span><b>48</b></div>
+                  <div class="stat"><span>Chờ duyệt</span><b>12</b></div>
+                </div>
+                <table class="tbl">
+                  <tr>
+                    <th>Requirement</th>
+                    <th>Trạng thái</th>
+                    <th>Snapshot</th>
+                    <th>Test case</th>
+                    <th></th>
+                  </tr>
+                  <tr>
+                    <td><strong>Đăng nhập hệ thống</strong><br /><span style="color:#5c6b7a;font-size:11px">2 file · Phân tích v1</span></td>
+                    <td><span class="tag g">Phân tích sẵn sàng</span></td>
+                    <td style="text-align:center">1</td>
+                    <td>24 tổng · 8 chờ duyệt · 16 OK</td>
+                    <td><span class="b1">Mở</span> <span class="b2">Sửa</span> <span class="b2">Duyệt</span> <span class="b3">Xóa</span></td>
+                  </tr>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar → <span class="ui-name">Requirement</span>.</p>
+                  <p class="see">Nếu chưa gắn source: banner vàng «Chưa gắn source root» + link về Projects.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                    <p class="do">Bấm <span class="ui-name">Requirement mới</span> (hoặc <span class="ui-name">Mở</span> một dòng). Toolbar hub: <span class="ui-name">Tải lại</span> · <span class="ui-name">Requirement mới</span>.</p>
+                    <p class="see">Vào Studio. Header: <span class="ui-name">Tất cả Requirement</span> · <span class="ui-name">Thêm tài liệu</span>. Thanh 4 bước: Tài liệu · Phân tích · Tạo test case · Duyệt test case.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Ô <span class="ui-name">Tài liệu</span> → <span class="ui-name">Thêm tài liệu</span>: upload <code>.md</code> / <code>.docx</code> hoặc dán mô tả.</p>
+                  <p class="see">Số file hiện trên hint journey (vd. «2 file»).</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Ô <span class="ui-name">Phân tích</span> → bấm <span class="ui-name">Phân tích</span> (hoặc Phân tích lại).</p>
+                  <p class="see">Knowledge: Business Rules, Validation, Edge, Error, actor, use case. Status «Sẵn sàng» hoặc «Cần phân tích lại».</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Ô <span class="ui-name">Tạo test case</span> → chọn engine Unit hoặc E2E → <span class="ui-name">Chốt snapshot và tạo test case</span> (E2E: «…tạo TC E2E»).</p>
+                  <p class="see">Job sinh TC chạy Backend. Draft xuất hiện để duyệt ở bước 03. Jobs sinh TC không ghi path mã nguồn.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul>
+            <li>Bảng quy tắc trên UI + danh sách TC nháp (Draft).</li>
+            <li>Knowledge lưu dưới <code>.ai-test/</code> trên repo khách.</li>
+          </ul>
+        </div>
+      </article>
+
+      <!-- F3 REVIEW -->
+      <article class="feat" id="f3">
+        <div class="feat-head">
+          <div class="feat-num">03</div>
+          <div>
+            <p class="feat-menu">Requirement · bước «Duyệt test case»</p>
+            <h3>Duyệt Test Case (Approve)</h3>
+            <p class="feat-why">Cùng trang Requirement, pane «Duyệt TC». Bảng lọc Unit/E2E, nút Duyệt đã chọn / Duyệt tất cả. Approve mới ground path và cho phép Gen.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni on">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Requirement</h4>
+                    <p class="sub">Quản lý theo Requirement · sau Approved: Unit test · E2E test</p>
+                  </div>
+                  <div class="btns"><span class="b2">Tất cả Requirement</span><span class="b1">Thêm tài liệu</span></div>
+                </div>
+                <div class="journey">
+                  <div class="j"><span class="ix">✓</span><div>Tài liệu<small>2 file</small></div></div>
+                  <div class="j"><span class="ix">✓</span><div>Phân tích<small>Sẵn sàng</small></div></div>
+                  <div class="j"><span class="ix">✓</span><div>Tạo test case<small>Đã chốt snapshot</small></div></div>
+                  <div class="j on"><span class="ix">4</span><div>Duyệt test case<small>8 chờ duyệt</small></div></div>
+                </div>
+                <div class="ph" style="margin-bottom:8px">
+                  <div>
+                    <strong>Duyệt TC</strong>
+                    <span class="sub"> · 24 TC · 8 chờ duyệt</span>
+                  </div>
+                  <span class="b2">← Tất cả Requirement</span>
+                </div>
+                <div class="ph" style="margin-bottom:8px">
+                  <div class="btns">
+                    <span class="b2">Tất cả loại ▾</span>
+                    <span class="b2">Chờ duyệt (Nháp) ▾</span>
+                    <span class="b2">Tất cả Function ▾</span>
+                    <span class="tag y">8 TC · 8 chờ duyệt</span>
+                  </div>
+                  <div class="btns">
+                    <span class="b2">Tải về</span>
+                    <span class="b1">Duyệt đã chọn (2)</span>
+                    <span class="b2">Duyệt tất cả (8)</span>
+                  </div>
+                </div>
+                <table class="tbl">
+                  <tr><th></th><th>ID</th><th>Module</th><th>Function</th><th>Tiêu đề</th><th>Loại</th><th>Ưu tiên</th><th>Trạng thái</th><th>Thao tác</th></tr>
+                  <tr>
+                    <td>☑</td><td>TC01</td><td>Auth</td><td>Login</td><td>Đăng nhập thành công</td><td>Unit</td><td>P0</td><td><span class="tag y">Nháp</span></td>
+                    <td>Sửa · Xoá</td>
+                  </tr>
+                  <tr>
+                    <td>☑</td><td>TC02</td><td>Auth</td><td>Login</td><td>Sai mật khẩu 5 lần</td><td>E2E</td><td>P1</td><td><span class="tag y">Nháp</span></td>
+                    <td>Sửa · Xoá</td>
+                  </tr>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                    <p class="do">Bấm ô journey <span class="ui-name">Duyệt test case</span> (hoặc nút <span class="ui-name">Duyệt</span> trên hub).</p>
+                    <p class="see">Link «← Tất cả Requirement», tiêu đề Duyệt TC, bộ lọc + Tải về / Duyệt đã chọn / Duyệt tất cả.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Lọc engine Unit / E2E / tất cả; lọc trạng thái Draft.</p>
+                  <p class="see">Chỉ TC của Requirement này. Muốn E2E Gen sau này: loại TC phải là E2E trước khi Approve.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Mở chi tiết (Sửa): kiểm Steps, Expected, Module / Function, Priority.</p>
+                  <p class="see">Modal sửa TC. Đổi loại Unit ↔ E2E nếu AI gắn nhầm.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                    <p class="do">Tick checkbox các dòng Nháp → <span class="ui-name">Duyệt đã chọn (n)</span> hoặc <span class="ui-name">Duyệt tất cả (n)</span>. Cột Thao tác chỉ có Sửa / Xoá.</p>
+                  <p class="see">Draft → Approved. Unit: ghi <code>path:</code> <code>code:</code> vào MD. E2E: <code>featurePath</code> / <code>authRole</code>. File <code>.ai-test/test-cases/…</code>.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <p class="note warn">Banner «Duyệt OK nhưng chưa ghi .ai-test/test-cases» = chưa gắn project root hoặc chưa Connect IDE — quay lại chức năng 01.</p>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul>
+            <li>TC Approved mới hiện trên trang Unit test / E2E test để Gen.</li>
+          </ul>
+        </div>
+      </article>
+
+      <!-- F4 UNIT -->
+      <article class="feat" id="f4">
+        <div class="feat-head">
+          <div class="feat-num">04</div>
+          <div>
+            <p class="feat-menu">Sidebar · Automate · Unit test</p>
+            <h3>Unit test — Unit Job · AI CLI</h3>
+            <p class="feat-why">Tiêu đề «Unit test». Pipeline: TC Approved → Project root → Unit Job → Staging → Verify → Apply <code>AItest/</code>. Card «Unit Job · AI CLI».</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni on">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Unit test</h4>
+                    <p class="sub">TC Approved → Project root → Unit Job → Staging → Verify → Apply AItest/</p>
+                  </div>
+                  <div class="btns"><span class="b2">Unit Job Board</span><span class="b2">Tải lại</span></div>
+                </div>
+                <div class="alert">Connect IDE bắt buộc trước Gen Unit — Thứ tự: Approve → Connect IDE (Dự án) → Gen → Verify → Apply. Không còn fallback API tự động.</div>
+                <div class="pipe"><span class="on">Approve + IDE</span><span>Unit Job</span><span>Verify</span><span>Apply</span></div>
+                <div class="card-in">
+                  <div class="ctitle">Unit Job · AI CLI</div>
+                  <div class="btns" style="margin-bottom:10px">
+                    <span class="b1">📌 Theo Requirement (Batch tất cả TC)</span>
+                    <span class="b2">🎯 Theo Test Case (Từng TC lẻ)</span>
+                  </div>
+                  <div class="lab">1. Chọn Yêu cầu (Requirement) muốn chạy Unit Test hàng loạt:</div>
+                  <div class="inp">📄 Đăng nhập hệ thống (24 Unit TC · 16 Approved)</div>
+                  <div class="alert.info" style="margin-top:8px">Yêu cầu: Đăng nhập hệ thống
+                    <span class="btns" style="float:right"><span class="b1">Chỉ Approved</span><span class="b2">Tất cả (Gồm Draft)</span></span>
+                  </div>
+                  <div class="btns" style="margin-top:12px;clear:both">
+                    <span class="b1">⚡ Chạy Unit Job · Tất cả Unit TC trong Requirement (16 TC)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar Automate → <span class="ui-name">Unit test</span> (hoặc nút Unit test trên trang Dự án).</p>
+                  <p class="see">Ready strip: AI CLI, project root, framework. Thiếu IDE: banner vàng Connect IDE.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Card Unit Job: chọn <span class="ui-name">Yêu cầu</span> (requirement) và radio <span class="ui-name">Chỉ Approved</span>.</p>
+                  <p class="see">Danh sách TC Unit đã duyệt. Trống → link về Sinh / duyệt TC.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Bấm <span class="ui-name">⚡ Chạy Unit Job · Tất cả Unit TC trong Requirement</span>.</p>
+                  <p class="see">Progress + log CLI. Extension + Agent CLI viết file. Nút bị disable nếu chưa Connect IDE / chưa gắn root / AI chưa Ready.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Sau gen: <span class="ui-name">Kiểm thử</span> (Verify) rồi <span class="ui-name">Apply</span> vào <code>AItest/UnitTest/{Module}/</code>.</p>
+                  <p class="see">Panel «IDE Extension — Gen / Apply / Run». Job Board để xem lịch sử.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul>
+            <li>File test stack-agnostic: <code>*.cs</code> / <code>*.test.ts</code> / <code>test_*.py</code> dưới <code>AItest/UnitTest/</code>.</li>
+          </ul>
+        </div>
+      </article>
+
+      <!-- F5 E2E -->
+      <article class="feat" id="f5">
+        <div class="feat-head">
+          <div class="feat-num">05</div>
+          <div>
+            <p class="feat-menu">Sidebar · Automate · E2E test</p>
+            <h3>E2E test — E2E Job · Playwright</h3>
+            <p class="feat-why">Cùng hình Unit: tiêu đề «E2E test», Steps E2E Job → Verify → Apply. Gen cũng qua Connect IDE + Agent CLI. Auth / Inspect nằm trong card E2E Job.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni on">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>E2E test</h4>
+                    <p class="sub">Giống Unit: E2E Job → Kiểm thử → Apply vào {project root}/AItest/E2ETest/</p>
+                  </div>
+                  <div class="btns"><span class="b2">E2E Job Board</span><span class="b2">Unit test</span></div>
+                </div>
+                <div class="alert.info">Connect IDE ở trang Dự án — Gắn source + Connect IDE trong Dự án → Sửa dự án (Cursor mở đúng repo đích).</div>
+                <div class="pipe"><span class="on">E2E Job</span><span>Verify</span><span>Apply</span></div>
+                <div class="card-in">
+                  <div class="ctitle">E2E Job · AI CLI</div>
+                  <div class="btns" style="margin-bottom:10px">
+                    <span class="b1">📌 Theo Requirement (Batch tất cả TC E2E)</span>
+                    <span class="b2">🎯 Theo Test Case (Từng TC lẻ)</span>
+                  </div>
+                  <div class="lab">Target URL</div>
+                  <div class="compact"><div class="inp">http://localhost:3000</div><span class="b2">Lưu</span></div>
+                  <div class="lab" style="margin-top:8px">Chế độ trình duyệt khi Kiểm thử</div>
+                  <div class="btns"><span class="b1">Chromium · xem từng bước</span><span class="b2">Chạy ngầm (nhanh)</span></div>
+                  <div class="btns" style="margin-top:12px">
+                    <span class="b1">⚡ Chạy E2E Job · Tất cả TC E2E trong Requirement (8 TC)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar → <span class="ui-name">E2E test</span>. Kiểm banner Connect IDE và Gate (AI, root, URL, Auth).</p>
+                  <p class="see">Chưa có TC type=E2E: «Đổi loại thành E2E tại Duyệt TC, rồi Approve.»</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Trong card E2E Job: Target URL; khối <span class="ui-name">Auth</span> → <span class="ui-name">Đồng bộ auth (auto / AI)</span> hoặc username/password.</p>
+                  <p class="see">Thiếu auth → Inspect dễ ra login-wall, locator trống.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Bấm <span class="ui-name">⚡ Chạy E2E Job</span> (một TC hoặc tất cả TC E2E trong Requirement).</p>
+                  <p class="see">Log «Generate (Extension Agent CLI)». Spec + POM vào staging, jail dưới <code>AItest/E2ETest/</code>.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Step <span class="ui-name">Verify</span> (Playwright) → <span class="ui-name">Apply</span>. Fail có thể Heal (tùy chọn).</p>
+                  <p class="see">Ảnh snapshot / stacktrace trên console Verify. File Apply: <code>E2ETest/_shared/pages</code> + <code>{Req}/{TC}/specs</code>.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul>
+            <li>Playwright Spec + Page Object. Gen Owner = Extension CLI (giống Unit), không còn POST generate-e2e làm nơi viết code.</li>
+          </ul>
+        </div>
+      </article>
+
+      <!-- F6 JOBS -->
+      <article class="feat" id="f6">
+        <div class="feat-head">
+          <div class="feat-num">06</div>
+          <div>
+            <p class="feat-menu">Sidebar · Insight · Unit Jobs</p>
+            <h3>Job Board</h3>
+            <p class="feat-why">Trang tiêu đề «Job Board». Tab Unit Jobs · E2E Jobs · campaigns. Nút Chạy Unit Job / Chạy E2E Job đưa về trang Automate.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni on">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Job Board</h4>
+                    <p class="sub">Unit Jobs · E2E Jobs · campaigns · lịch sử trên PostgreSQL (không cần đọc log máy).</p>
+                  </div>
+                  <div class="btns"><span class="b1">Chạy Unit Job</span><span class="b2">Chạy E2E Job</span><span class="b2">Làm mới</span></div>
+                </div>
+                <div class="btns" style="margin-bottom:10px">
+                  <span class="b1">Unit Jobs (3)</span>
+                  <span class="b2">E2E Jobs (1)</span>
+                  <span class="b2">Campaigns (0)</span>
+                  <span class="b2">Legacy TC jobs</span>
+                </div>
+                <table class="tbl">
+                  <tr><th>Job</th><th>Trạng thái</th><th></th></tr>
+                  <tr><td>Unit · Đăng nhập</td><td><span class="tag b">verifying</span></td><td>Chi tiết</td></tr>
+                  <tr><td>E2E · Login</td><td><span class="tag g">generated</span></td><td>Chi tiết</td></tr>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar Insight → <span class="ui-name">Unit Jobs</span> (hoặc nút Unit Job Board / E2E Job Board trên trang Gen).</p>
+                  <p class="see">Header Job Board + 2 nút chạy job.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Chọn tab <span class="ui-name">Unit Jobs</span> hoặc <span class="ui-name">E2E Jobs</span>.</p>
+                  <p class="see">Danh sách run: verifying / generated / fail…</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Bấm một dòng → xem log / timeline. Job đang chạy: đợi hoặc hủy từ trang Gen (pause/cancel batch).</p>
+                  <p class="see">Chi tiết không cần đọc file log trên đĩa SUT — lưu Postgres.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul><li>Truy vết Gen/Verify theo thời gian; Retry bằng cách chạy lại Job trên trang Unit/E2E.</li></ul>
+        </div>
+      </article>
+
+      <!-- F7 RUN -->
+      <article class="feat" id="f7">
+        <div class="feat-head">
+          <div class="feat-num">07</div>
+          <div>
+            <p class="feat-menu">Sidebar · Automate · Chạy test</p>
+            <h3>Chạy test</h3>
+            <p class="feat-why">Trang «Chạy test». Chọn lane Unit hoặc E2E rồi chạy bộ đã Apply — không gọi AI. Verify ngay sau Gen vẫn làm trên trang Unit/E2E.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni on">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Chạy test</h4>
+                    <p class="sub">Regression trên code đã Apply — không sinh TC / không sinh code tại đây.<br />SalesApp · Stack: .NET 8 · xUnit · <u>Báo cáo</u></p>
+                  </div>
+                </div>
+                <div class="alert.info">Tách flow — Sinh / Verify / Apply: Unit test · E2E. Trang này chỉ chạy lại test đã nằm trong repo (AItest/).</div>
+                <div class="card-in">
+                  <div class="btns" style="margin-bottom:10px">
+                    <span class="b1">Unit</span><span class="b2">E2E</span><span class="b2">Advanced</span>
+                  </div>
+                  <p class="sub">Chạy AItest Unit đã Apply (dotnet / jest / vitest / pytest theo stack). Không gọi AI generate.</p>
+                  <div class="lab">Lệnh</div>
+                  <div class="inp">dotnet test AItest/AItest.UnitTests.csproj</div>
+                  <div class="btns" style="margin-top:12px">
+                    <span class="b1">Chạy Unit</span>
+                    <span class="b2">Reset preset</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar → <span class="ui-name">Chạy test</span>.</p>
+                  <p class="see">Cần đã Apply file xuống <code>AItest/</code>.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                    <p class="do">Tab <span class="ui-name">Unit</span> / <span class="ui-name">E2E</span> / <span class="ui-name">Advanced</span> → <span class="ui-name">Chạy Unit</span> hoặc <span class="ui-name">Chạy E2E</span> (tuỳ tab). Có thể <span class="ui-name">Reset preset</span>.</p>
+                  <p class="see">Kết quả PASSED / FAILED, stacktrace; E2E có thể có ảnh snapshot.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul><li>Báo cáo lần chạy; lịch sử vào trang Báo cáo.</li></ul>
+        </div>
+      </article>
+
+      <!-- F8 REPORTS -->
+      <article class="feat" id="f8">
+        <div class="feat-head">
+          <div class="feat-num">08</div>
+          <div>
+            <p class="feat-menu">Sidebar · Insight · Báo cáo</p>
+            <h3>Báo cáo &amp; coverage</h3>
+            <p class="feat-why">Tổng hợp Execution Unit/E2E + coverage phụ. Không đụng Generate / Verify / Apply.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni on">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Báo cáo</h4>
+                    <p class="sub">Kết quả regression sau Chạy test (Unit / E2E đã Apply) — không sinh TC hay code tại đây.</p>
+                  </div>
+                  <div class="btns"><span class="b1">Chạy Unit</span><span class="b2">Chạy E2E</span><span class="b2">Tải lại</span></div>
+                </div>
+                <div class="alert.info">Phạm vi sản phẩm — Hệ thống hiện hỗ trợ Unit + E2E. Coverage line/branch chủ yếu gắn Unit; E2E theo dõi pass rate journey.</div>
+                <div class="stats">
+                  <div class="stat"><span>Lần chạy</span><b>15</b></div>
+                  <div class="stat"><span>Run pass</span><b>14</b></div>
+                  <div class="stat"><span>Run fail</span><b>1</b></div>
+                  <div class="stat"><span>Unit runs</span><b>10</b></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar → <span class="ui-name">Báo cáo</span>.</p>
+                  <p class="see">Statistic lần chạy + bảng coverage (nếu đã upload/ghi).</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Xem requirement Uncovered → quay Requirement để bổ sung TC / Approve / Gen.</p>
+                  <p class="see">Trang này chỉ đọc kết quả, không sinh code.</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul><li>Biết tính năng nào 100% / còn thiếu test.</li></ul>
+        </div>
+      </article>
+
+      <!-- F9 SETTINGS -->
+      <article class="feat" id="f9">
+        <div class="feat-head">
+          <div class="feat-num">09</div>
+          <div>
+            <p class="feat-menu">Sidebar · Insight · Cấu hình AI</p>
+            <h3>Cấu hình AI</h3>
+            <p class="feat-why">Trang «Cấu hình AI». Vendor CLI (khuyến nghị Cursor Agent CLI), Lưu, Test CLI → Ready. Connect IDE vẫn làm ở Projects.</p>
+          </div>
+        </div>
+        <div class="feat-split">
+          <div class="feat-ui">
+            <p class="col-label">Giao diện hệ thống</p>
+            <div class="app">
+              <aside class="app-side">
+                <div class="b"><i>AI</i> Test Studio</div>
+                <div class="proj">
+                  <small>Dự án hiện tại</small>
+                  <strong>SalesApp</strong>
+                  <span class="st">Đang làm việc</span>
+                  <button class="cta" type="button">Mở Requirement →</button>
+                </div>
+                <nav>
+                  <div class="sec">Design</div>
+                  <div class="ni">Home</div>
+                  <div class="ni">Projects</div>
+                  <div class="ni">Requirement</div>
+                  <div class="sec">Automate</div>
+                  <div class="ni">Unit test</div>
+                  <div class="ni">E2E test</div>
+                  <div class="ni">Chạy test</div>
+                  <div class="sec">Insight</div>
+                  <div class="ni">Báo cáo</div>
+                  <div class="ni">Unit Jobs</div>
+                  <div class="ni on">Cấu hình AI</div>
+                </nav>
+                <div class="app-foot">
+                  <div class="uc"><span class="av">A</span><div><b>Admin</b><small>admin@aitest.com</small></div></div>
+                  <div class="lo">Đăng xuất</div>
+                </div>
+              </aside>
+              <div class="app-main">
+                <div class="ph">
+                  <div>
+                    <h4>Cấu hình AI</h4>
+                    <p class="sub">AI CLI · Sinh TC &amp; Phân tích · SalesApp</p>
+                  </div>
+                  <div class="btns"><span class="tag g">Ready · Cursor Agent CLI</span><span class="tag b">AI CLI</span></div>
+                </div>
+                <div class="card-in">
+                  <div class="ctitle">CLI</div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                    <div>
+                      <div class="lab">Vendor</div>
+                      <div class="inp">Cursor Agent CLI ▾</div>
+                      <p class="sub">Lệnh: agent (trên PATH) · khuyến nghị Pro + model auto</p>
+                    </div>
+                    <div>
+                      <div class="lab">Model</div>
+                      <div class="inp">auto</div>
+                    </div>
+                  </div>
+                  <div class="btns" style="margin-top:14px">
+                    <span class="b1">Lưu</span>
+                    <span class="b2">Test CLI</span>
+                    <span class="b2">Tải lại</span>
+                  </div>
+                  <p class="sub" style="margin-top:8px">Lưu → Test CLI → Ready trước khi Sinh TC / Phân tích</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-steps">
+            <p class="col-label">Từng bước</p>
+            <ol class="steps">
+              <li>
+                <div>
+                  <p class="do">Sidebar → <span class="ui-name">Cấu hình AI</span>. Phải đã chọn dự án.</p>
+                  <p class="see">Empty «Chưa chọn dự án» nếu chưa Chọn ở Projects.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                    <p class="do">Chọn Vendor <span class="ui-name">Cursor Agent CLI</span> → <span class="ui-name">Lưu</span> → <span class="ui-name">Test CLI</span>.</p>
+                    <p class="see">Toast «CLI sẵn sàng — AI đã Ready». Tag Ready trên header.</p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <p class="do">Extension: cài <code>aitest-ide</code>, Reload Window Cursor, Connect IDE ở modal Sửa dự án.</p>
+                  <p class="see">Hai thứ khác nhau: CLI Ready (Settings) và IDE Connected (Projects).</p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div class="feat-foot">
+          <h4>Kết quả</h4>
+          <ul><li>Nút Chạy Unit/E2E Job hết disable vì AI Ready (vẫn cần Connect IDE + source root).</li></ul>
+        </div>
+      </article>
+
+      <section class="chapter" id="phan-cong">
+        <h2>Phụ lục</h2>
+        <article class="feat">
+          <div class="feat-head">
+            <div class="feat-num">T</div>
+            <div>
+              <p class="feat-menu">Phân công</p>
+              <h3>Tester làm gì trên UI? Hệ thống làm gì?</h3>
+              <p class="feat-why">Đối chiếu đúng nhãn menu / nút Desktop.</p>
+            </div>
+          </div>
+          <div style="padding:16px 20px 22px;overflow:auto">
+            <table class="data">
+              <thead>
+                <tr><th>Màn hình</th><th>Bạn bấm</th><th>Hệ thống làm</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Projects</td><td>Tạo mới · Chọn thư mục · Connect IDE · Chọn</td><td>Gắn root, quét stack, mở bridge Extension</td></tr>
+                <tr><td>Requirement</td><td>Thêm tài liệu · Phân tích · Chốt snapshot và tạo test case</td><td>Knowledge + Draft TC (chưa path SUT)</td></tr>
+                <tr><td>Duyệt TC</td><td>Duyệt / Duyệt đã chọn</td><td>Approved + MD <code>.ai-test/test-cases</code> + marker</td></tr>
+                <tr><td>Unit test</td><td>Chạy Unit Job</td><td>Agent CLI → Staging → Verify → <code>AItest/UnitTest</code></td></tr>
+                <tr><td>E2E test</td><td>Đồng bộ auth · Chạy E2E Job</td><td>Inspect + Agent CLI → Playwright → <code>AItest/E2ETest</code></td></tr>
+                <tr><td>Job Board</td><td>Tab Unit/E2E Jobs · Chi tiết</td><td>Log/timeline trên Postgres</td></tr>
+                <tr><td>Chạy test / Báo cáo</td><td>Chạy Unit/E2E · xem coverage</td><td>Runner local, Pass/Fail, matrix</td></tr>
+                <tr><td>Cấu hình AI</td><td>Lưu · Test CLI · Tải lại</td><td>CLI Ready trên PATH</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <article class="feat" id="quickstart">
+        <div class="feat-head">
+          <div class="feat-num">5</div>
+          <div>
+            <p class="feat-menu">Quick-start</p>
+            <h3>Năm bước cho Tester mới</h3>
+            <p class="feat-why">Làm đúng thứ tự này — đừng Gen khi chưa Approve và chưa Connect IDE.</p>
+          </div>
+        </div>
+        <div class="feat-steps" style="padding:8px 22px 8px">
+          <ol class="steps">
+            <li>
+              <div>
+                <p class="do">Sign in → Projects → Tạo mới → Chọn thư mục → Connect IDE → Chọn dự án.</p>
+                <p class="see">Sidebar hiện tên dự án «Đang làm việc».</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <p class="do">Cấu hình AI → Cursor Agent CLI → <span class="ui-name">Lưu</span> → <span class="ui-name">Test CLI</span> (Ready).</p>
+                <p class="see">Có thể làm song song bước 1.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <p class="do">Requirement → Tài liệu → Phân tích → Chốt snapshot và tạo test case.</p>
+                <p class="see">Có Draft TC.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <p class="do">Duyệt TC → Duyệt (đúng loại Unit hoặc E2E).</p>
+                <p class="see">MD + marker trên đĩa.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <p class="do">Unit test hoặc E2E test → Chạy Job → Verify → Apply → (tuỳ chọn) Chạy test / Báo cáo.</p>
+                <p class="see">Code nằm trong <code>AItest/</code> của repo khách.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+        <p class="note bad">
+          <strong>Lỗi hay gặp:</strong> Gen báo chưa Connect IDE → Reload extension, mở đúng folder, Connect ở Sửa dự án.
+          Duyệt không ghi MD → chưa gắn root. E2E locator trống → Auth / data-testid. Mở UI trên trình duyệt → dùng Desktop.
+        </p>
+      </article>
+
+      <footer>
+        Nguồn: <code>docs/USER_FEATURE_GUIDE.md</code> · Nhãn UI đối chiếu Desktop (sidebar Design / Automate / Insight, Ant Design). Mở HTML bằng trình duyệt hoặc Ctrl+P in PDF.
+      </footer>
+    </div>
+  </div>
+  <script>
+    const links = [...document.querySelectorAll(".toc a[href^='#']")];
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (!e.isIntersecting) return;
+        links.forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + e.target.id));
+      });
+    }, { rootMargin: "-18% 0px -70% 0px" });
+    links.forEach((a) => {
+      const el = document.querySelector(a.getAttribute("href"));
+      if (el) io.observe(el);
+    });
+  </script>
+</body>
+</html>

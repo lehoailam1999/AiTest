@@ -28,6 +28,25 @@ describe("buildUnitApproveQuery", () => {
     assert.equal(q.plan.testType, "Unit");
   });
 
+  it("VALIDATION_DATA primaryBucket forces requiresBodyRule", () => {
+    const q = buildUnitApproveQuery(
+      {
+        title: "Update - empty field - reject",
+        module: "Update feature",
+        steps: "1. Act",
+        expectedResult: "REJECT",
+        testData:
+          "primaryBucket: VALIDATION_DATA\n" +
+          "trace: VALIDATION_DATA/VAL-1\n" +
+          "target.field: Name\n" +
+          "target.constraint: required",
+      },
+      { requirementTitle: "Update evidence" }
+    );
+    assert.equal(q.requiresBodyRule, true);
+    assert.equal(q.intent.requiresBodyRule, true);
+  });
+
   it("validate_reject + tech stem Widget from errorKey", () => {
     const q = buildUnitApproveQuery(
       {
@@ -920,6 +939,134 @@ describe("resolveUnitPrimaryFromIndex", () => {
     assert.ok(
       (r.notes || []).some((n) => /FAIL_SOFT_CROSS_CUTTING/i.test(n)),
       JSON.stringify(r.notes)
+    );
+  });
+
+  it("TC-016 style load/display detail: GetQuery not Create writeBack", async () => {
+    const paths = [
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "src/Forensic.Application/Commands/Evidence/EvidenceAssignCaseCommandHandler.cs",
+      "src/Forensic.Application/Queries/Evidence/EvidenceGetQueryHandler.cs",
+      "src/Forensic.Application/Commands/Evidence/EvidenceUpdateCommandHandler.cs",
+    ];
+    const bodies: Record<string, string> = {
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs":
+        "class EvidenceCreateCommandHandler { void H() { Create(); } }",
+      "src/Forensic.Application/Commands/Evidence/EvidenceAssignCaseCommandHandler.cs":
+        "class EvidenceAssignCaseCommandHandler { void H() { Assign(); } }",
+      "src/Forensic.Application/Queries/Evidence/EvidenceGetQueryHandler.cs":
+        "class EvidenceGetQueryHandler { void H() { return GetById(); } }",
+      "src/Forensic.Application/Commands/Evidence/EvidenceUpdateCommandHandler.cs":
+        "class EvidenceUpdateCommandHandler { void H() { Update(); } }",
+    };
+    const query = buildUnitApproveQuery(
+      {
+        title:
+          "Hiển thị và chỉnh sửa chi tiết vật chứng - Tải dữ liệu vật chứng đã lưu - Trả về đầy đủ thông tin đã lưu",
+        module: "Hiển thị và chỉnh sửa chi tiết vật chứng",
+        steps:
+          "1. Chuẩn bị vật chứng đã lưu\n2. Thực hiện lấy chi tiết vật chứng theo định danh đã lưu",
+        expectedResult:
+          "ACCEPT — Hệ thống trả về đúng các thông tin vật chứng đã lưu trước đó — (quan sát: read)",
+        testData:
+          "trace: ACCEPTANCE/FEAT-1\nprimaryBucket: ACCEPTANCE\ninput: {\"evidenceId\":\"[Giả định] id\"}",
+      },
+      {
+        requirementTitle: "Update evidence",
+        projectAliases: { "vat chung": ["Evidence"], evidence: ["Evidence"] },
+      }
+    );
+    const r = await resolveUnitPrimaryFromIndex({
+      codeIndex: snapshotFromPaths(paths),
+      query,
+      readExcerpt: async (p) => bodies[p] || "",
+    });
+    assert.equal(r.writeBack, true, JSON.stringify(r));
+    assert.match(r.seed!.pathRel, /EvidenceGetQueryHandler/i);
+    assert.ok(
+      !/EvidenceCreateCommandHandler/i.test(r.seed!.pathRel),
+      JSON.stringify(r.seed)
+    );
+  });
+
+  it("CRUD: update+duplicate reject → UpdateHandler not Create (TC-063 style)", async () => {
+    const paths = [
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      "src/Forensic.Application/Commands/Evidence/EvidenceUpdateCommandHandler.cs",
+      "src/Forensic.Application/Commands/Evidence/EvidenceDeleteCommandHandler.cs",
+      "src/Forensic.Application/Queries/Evidence/EvidenceGetQueryHandler.cs",
+    ];
+    const bodies: Record<string, string> = {
+      "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs":
+        "class EvidenceCreateCommandHandler { void H() { throw new BadRequestAlertException(\"Duplicate\"); Create(); } }",
+      "src/Forensic.Application/Commands/Evidence/EvidenceUpdateCommandHandler.cs":
+        "class EvidenceUpdateCommandHandler { void H() { throw new BadRequestAlertException(\"Duplicate\"); Update(); } }",
+      "src/Forensic.Application/Commands/Evidence/EvidenceDeleteCommandHandler.cs":
+        "class EvidenceDeleteCommandHandler { void H() { Delete(); } }",
+      "src/Forensic.Application/Queries/Evidence/EvidenceGetQueryHandler.cs":
+        "class EvidenceGetQueryHandler { void H() { return GetById(); } }",
+    };
+    const query = buildUnitApproveQuery(
+      {
+        title:
+          "Cập nhật mã và tên vật chứng - Cập nhật mã trùng mã đã tồn tại - Từ chối",
+        module: "Cập nhật mã và tên vật chứng",
+        steps:
+          "1. Chuẩn bị mã đã tồn tại\n2. Thực hiện cập nhật mã vật chứng thành mã đã tồn tại",
+        expectedResult:
+          "REJECT — Hệ thống từ chối khi mã trùng — (quan sát: update)",
+        testData:
+          "trace: BUSINESS_RULES/BR-16\nprimaryBucket: BUSINESS_RULES\ntarget.constraint: unique",
+      },
+      {
+        requirementTitle: "Update evidence",
+        projectAliases: { "vat chung": ["Evidence"], evidence: ["Evidence"] },
+      }
+    );
+    const r = await resolveUnitPrimaryFromIndex({
+      codeIndex: snapshotFromPaths(paths),
+      query,
+      readExcerpt: async (p) => bodies[p] || "",
+    });
+    assert.equal(r.writeBack, true, JSON.stringify(r));
+    assert.match(r.seed!.pathRel, /EvidenceUpdateCommandHandler/i);
+    assert.ok(!/CreateCommandHandler/i.test(r.seed!.pathRel), JSON.stringify(r));
+  });
+
+  it("CRUD: create+duplicate reject still prefers CreateHandler", async () => {
+    const paths = [
+      "src/App/Commands/Widget/WidgetCreateCommandHandler.cs",
+      "src/App/Commands/Widget/WidgetUpdateCommandHandler.cs",
+    ];
+    const bodies: Record<string, string> = {
+      "src/App/Commands/Widget/WidgetCreateCommandHandler.cs":
+        "class WidgetCreateCommandHandler { void H() { throw Duplicate; Create(); } }",
+      "src/App/Commands/Widget/WidgetUpdateCommandHandler.cs":
+        "class WidgetUpdateCommandHandler { void H() { throw Duplicate; Update(); } }",
+    };
+    const query = buildUnitApproveQuery(
+      {
+        title: "Tạo mới widget - Mã trùng - Từ chối",
+        module: "Tạo mới widget",
+        steps: "Thực hiện tạo mới với mã đã tồn tại",
+        expectedResult: "REJECT — từ chối mã trùng — (quan sát: create)",
+        testData: "trace: BUSINESS_RULES/BR-1\nprimaryBucket: BUSINESS_RULES",
+      },
+      {
+        requirementTitle: "Create widget",
+        projectAliases: { widget: ["Widget"] },
+      }
+    );
+    const r = await resolveUnitPrimaryFromIndex({
+      codeIndex: snapshotFromPaths(paths),
+      query,
+      readExcerpt: async (p) => bodies[p] || "",
+    });
+    assert.equal(r.writeBack, true, JSON.stringify(r));
+    assert.match(r.seed!.pathRel, /WidgetCreateCommandHandler/i);
+    assert.ok(
+      r.confidence === "HIGH" || r.confidence === "MEDIUM",
+      `expected confidence band, got ${r.confidence}`
     );
   });
 });

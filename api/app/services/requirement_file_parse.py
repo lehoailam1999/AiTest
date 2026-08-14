@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import html as html_module
 import io
 import re
@@ -95,23 +94,16 @@ def extract_mime_document(raw: bytes) -> ParsedRequirementFile | None:
     location_urls: dict[str, str] = {}
     html_chunks: list[str] = []
     plain_chunks: list[str] = []
+    image_parts = 0
 
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
             continue
         ctype = part.get_content_type()
         if ctype.startswith("image/"):
-            payload = part.get_payload(decode=True)
-            if not payload:
-                continue
-            url = f"data:{ctype};base64,{base64.b64encode(payload).decode('ascii')}"
-            cid = part.get("Content-ID")
-            if cid:
-                key = cid.strip().strip("<>")
-                cid_urls[key] = url
-            loc = part.get("Content-Location")
-            if loc:
-                location_urls[loc.strip()] = url
+            # Count only — do not base64-encode into preview (slow + huge).
+            image_parts += 1
+            continue
         elif ctype == "text/html":
             try:
                 payload = part.get_content()
@@ -129,26 +121,29 @@ def extract_mime_document(raw: bytes) -> ParsedRequirementFile | None:
 
     html = max(html_chunks, key=len) if html_chunks else ""
     if html:
-        for cid, url in cid_urls.items():
-            html = html.replace(f"cid:{cid}", url)
-            html = re.sub(
-                rf'src=(["\'])cid:{re.escape(cid)}\1',
-                f'src="{url}"',
-                html,
-                flags=re.I,
-            )
-        for loc, url in location_urls.items():
-            html = html.replace(loc, url)
+        # Strip cid:/embedded images — do not base64-inflate preview (upload hang).
+        img_n = len(re.findall(r"(?i)<img\b", html)) + image_parts
+        html = re.sub(
+            r"(?i)<img\b[^>]*>",
+            '<span class="img-omitted">[ảnh]</span>',
+            html,
+        )
+        html = re.sub(r"(?i)cid:[^\s\"'>]+", "#", html)
 
         text = html_to_text(html)
         if not text.strip() and plain_chunks:
             text = "\n\n".join(plain_chunks)
         if not text.strip():
             return None
+        warning = ""
+        if img_n:
+            warning = (
+                f"Đã bỏ {img_n} ảnh khỏi preview MIME (giữ text) — tránh upload chậm/lỗi."
+            )
         return ParsedRequirementFile(
             text=text.strip(),
             parser="mime-doc",
-            warning="",
+            warning=warning,
             html=_wrap_preview_html(html),
         )
 
@@ -192,34 +187,32 @@ def parse_docx_document(raw: bytes) -> ParsedRequirementFile:
         if block:
             body_parts.append(f"<p>{html_module.escape(block)}</p>")
 
-    imgs: list[str] = []
+    # Do NOT embed word/media as base64 — screenshots blow preview to multi‑MB,
+    # stall upload commit / getFile, and Phân tích only needs extracted text.
+    media_n = 0
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            for name in sorted(zf.namelist()):
-                if not name.startswith("word/media/"):
-                    continue
-                ext = name.rsplit(".", 1)[-1].lower()
-                if ext not in ("png", "jpg", "jpeg", "gif", "webp"):
-                    continue
-                data = zf.read(name)
-                mime = {
-                    "png": "image/png",
-                    "jpg": "image/jpeg",
-                    "jpeg": "image/jpeg",
-                    "gif": "image/gif",
-                    "webp": "image/webp",
-                }[ext]
-                url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-                alt = html_module.escape(name.split("/")[-1])
-                imgs.append(f'<figure><img src="{url}" alt="{alt}"/></figure>')
+            media_n = sum(
+                1
+                for name in zf.namelist()
+                if name.startswith("word/media/")
+                and name.rsplit(".", 1)[-1].lower() in ("png", "jpg", "jpeg", "gif", "webp")
+            )
     except Exception:
-        pass
+        media_n = 0
 
-    if imgs:
-        body_parts.append('<section class="doc-images">' + "".join(imgs) + "</section>")
+    warning = ""
+    if media_n:
+        warning = (
+            f"Đã bỏ {media_n} ảnh khỏi preview (giữ text) — parse nhanh hơn; "
+            "Phân tích dùng extracted text."
+        )
+        body_parts.append(
+            f'<p class="doc-images-skipped"><em>({media_n} ảnh trong Word — không nhúng preview)</em></p>'
+        )
 
     html = _wrap_preview_html("".join(body_parts))
-    return ParsedRequirementFile(text=text, parser="docx", warning="", html=html)
+    return ParsedRequirementFile(text=text, parser="docx", warning=warning, html=html)
 
 
 def _looks_like_mime_envelope(text: str) -> bool:
@@ -286,11 +279,18 @@ def parse_requirement_file(raw: bytes, filename: str) -> ParsedRequirementFile:
             raise ValueError("File không phải UTF-8 — lưu lại UTF-8 hoặc dùng .docx.")
         if ext in (".html", ".htm"):
             text = html_to_text(decoded) or decoded.strip()
+            # Preview from text only — raw HTML with assets can be huge.
+            safe = html_module.escape(text[:20_000])
             return ParsedRequirementFile(
                 text=text,
                 parser="html",
-                warning=warning,
-                html=_wrap_preview_html(decoded),
+                warning=warning
+                or (
+                    "Preview HTML rút gọn (text) — tránh nhúng full page/asset."
+                    if len(decoded) > 40_000
+                    else warning
+                ),
+                html=_wrap_preview_html(f"<pre>{safe}</pre>"),
             )
         safe = html_module.escape(decoded.strip())
         return ParsedRequirementFile(

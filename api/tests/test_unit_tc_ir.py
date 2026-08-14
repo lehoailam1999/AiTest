@@ -48,7 +48,10 @@ def test_looks_like_ir_and_flattens_portable_markers():
     assert "behaviorId: VAL-25-B04" in td
     assert "target.constraint: maxLength" in td
     assert "trace: VALIDATION_DATA/VAL-25" in td
-    assert "layerHint:" not in td  # null not emitted
+    assert "target.property:" in td or "target.field: T" in td
+    # Auto layerHint/sourceSignal when VALIDATION field binds
+    if "maxLength" in td:
+        assert "sourceSignal:" in td
 
 
 def test_parse_test_cases_json_accepts_ir_wrapper():

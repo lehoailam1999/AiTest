@@ -51,18 +51,55 @@ def test_knowledge_enough_skip_source_scan():
             "actors": [{"name": "User"}],
         }
     }
+    unit_rich = {
+        "knowledge": {
+            "features": [{"name": "Evidence"}],
+            "businessRules": [{"id": "BR-1"}],
+            "validationRules": [{"id": "VAL-1"}],
+            "exceptions": [{"id": "EXC-1"}],
+            "acceptanceCriteria": [{"id": "AC-1"}],
+        }
+    }
     assert knowledge_enough_skip_source_scan(rich, "e2e") is True
-    # Unit: never skip just because Knowledge is rich
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_UNIT_SKIP_SOURCE_SCAN", None)
-        assert knowledge_enough_skip_source_scan(rich, "unit") is False
+        os.environ.pop("AITEST_TC_UNIT_FORCE_SOURCE_SCAN", None)
+        # Unit: skip when PRIMARY rich (analysis-first)
+        assert knowledge_enough_skip_source_scan(unit_rich, "unit") is True
     thin = {"knowledge": {"features": [{"name": "X"}]}}
     assert knowledge_enough_skip_source_scan(thin, "e2e") is False
     assert knowledge_enough_skip_source_scan(thin, "unit") is False
     with mock.patch.dict(os.environ, {"AITEST_TC_E2E_FORCE_SOURCE_SCAN": "1"}, clear=False):
         assert knowledge_enough_skip_source_scan(rich, "e2e") is False
+    with mock.patch.dict(os.environ, {"AITEST_TC_UNIT_FORCE_SOURCE_SCAN": "1"}, clear=False):
+        assert knowledge_enough_skip_source_scan(unit_rich, "unit") is False
     with mock.patch.dict(os.environ, {"AITEST_TC_UNIT_SKIP_SOURCE_SCAN": "1"}, clear=False):
-        assert knowledge_enough_skip_source_scan(rich, "unit") is True
+        assert knowledge_enough_skip_source_scan(thin, "unit") is True
+
+
+def test_unit_fast_soft_ceiling_and_primary_rounds():
+    from app.llm.tc_speed import (
+        resolve_max_tc_per_module,
+        resolve_unit_primary_retry_rounds,
+    )
+
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AITEST_TC_UNIT_MAX_PER_MODULE", None)
+        os.environ.pop("AITEST_TC_UNIT_FAST_MAX_PER_MODULE", None)
+        os.environ.pop("AITEST_TC_UNIT_PRIMARY_RETRY_ROUNDS", None)
+        assert resolve_max_tc_per_module("unit", "fast", {}) == 10
+        assert resolve_max_tc_per_module("unit", "full", {}) is None
+        assert resolve_unit_primary_retry_rounds("fast") == 0
+        assert resolve_unit_primary_retry_rounds("full") == 2
+    with mock.patch.dict(
+        os.environ, {"AITEST_TC_UNIT_FAST_MAX_PER_MODULE": "0"}, clear=False
+    ):
+        assert resolve_max_tc_per_module("unit", "fast", {}) is None
+    with mock.patch.dict(
+        os.environ, {"AITEST_TC_UNIT_PRIMARY_RETRY_ROUNDS": "1"}, clear=False
+    ):
+        assert resolve_unit_primary_retry_rounds("fast") == 1
+
 
 
 def test_slim_rules_when_speed_fast():

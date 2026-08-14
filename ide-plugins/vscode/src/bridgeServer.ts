@@ -57,11 +57,11 @@ import {
 import {
   handleCodegenApplyFiles,
   handleCodegenCancel,
-  handleCodegenGenerateStub,
   handleCodegenRunTests,
 } from "./codegenCommands";
 import { handleTcSyncApprovedMd } from "./tcSyncCommands";
 import { handleCodegenGenerateUnitBatch } from "./unitGenCommands";
+import { handleCodegenGenerateE2eBatch } from "./e2eGenCommands";
 
 export type BridgeHandle = {
   port: number;
@@ -384,12 +384,17 @@ export async function startIdeBridgeServer(opts?: {
         }
         case IdeMethods.codegenGenerateE2eBatch: {
           const p = (msg.params ?? {}) as CodegenGenerateE2eBatchParams;
-          reply(
-            makeSuccess(
-              msg.id,
-              handleCodegenGenerateStub("e2e", p?.commandId || "unknown")
-            )
-          );
+          if (!p?.commandId || !Array.isArray(p.items)) {
+            reply(makeError(msg.id, RpcErrorCode.invalidParams, "commandId + items required"));
+            break;
+          }
+          const notify: (method: string, params: unknown) => void = (method, params) => {
+            const body = JSON.stringify(makeNotification(method, params));
+            for (const c of clients) {
+              if (authed.has(c) && c.readyState === WebSocket.OPEN) c.send(body);
+            }
+          };
+          reply(makeSuccess(msg.id, await handleCodegenGenerateE2eBatch(p, notify)));
           break;
         }
         case IdeMethods.tcSyncApprovedMd: {

@@ -16,6 +16,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Windows native fs.watch often throws UV UNKNOWN (-4094) under Node 23 / AV / D: sync.
+    // Polling is slower but stable; ignore src-tauri (Tauri + Vite template).
+    watch: {
+      usePolling: process.platform === "win32",
+      ignored: ["**/src-tauri/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

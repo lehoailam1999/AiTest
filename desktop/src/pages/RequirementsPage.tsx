@@ -23,7 +23,10 @@ import { TestingJourney } from "../components/TestingJourney";
 import { useTestingJourney } from "../hooks/useTestingJourney";
 import { generateTcUrl } from "../lib/testingJourney";
 import { activityUrl, e2eTestUrl, unitTestUrl } from "../lib/productRoutes";
-import { ENGINE_TOOLTIP, TC_TYPE_OPTIONS } from "../lib/testEngine";
+import TestCaseEditModal, {
+  type TestCaseEditModalFormValues,
+} from "../components/TestCaseEditModal";
+import { ENGINE_TOOLTIP } from "../lib/testEngine";
 import type { Requirement, RequirementSource, TestCase } from "../api/types";
 import RequirementDocField, {
   buildRequirementPayload,
@@ -811,16 +814,6 @@ function RequirementPanel({
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<TestCase | null>(null);
   const [editBusy, setEditBusy] = useState(false);
-  const [editForm] = Form.useForm<{
-    title: string;
-    module?: string;
-    type?: string;
-    priority?: string;
-    precondition?: string;
-    steps: string;
-    expectedResult: string;
-    testData?: string;
-  }>();
 
   useEffect(() => {
     setLoading(true);
@@ -928,39 +921,20 @@ function RequirementPanel({
 
   function openEditTc(row: TestCase) {
     setEditing(row);
-    editForm.setFieldsValue({
-      title: row.title,
-      module: row.module || undefined,
-      type: row.type,
-      priority: row.priority,
-      precondition: row.precondition || undefined,
-      steps: row.steps,
-      expectedResult: row.expectedResult,
-      testData: row.testData || undefined,
-    });
   }
 
-  async function saveEditTc() {
+  async function saveEditTc(values: TestCaseEditModalFormValues) {
     if (!editing) return;
     try {
-      const values = await editForm.validateFields();
       setEditBusy(true);
       await testcases.update(editing.id, {
         projectId: editing.projectId,
-        title: values.title.trim(),
-        module: values.module?.trim() || undefined,
-        type: values.type,
-        priority: values.priority,
-        precondition: values.precondition?.trim() || undefined,
-        steps: values.steps.trim(),
-        expectedResult: values.expectedResult.trim(),
-        testData: values.testData?.trim() || undefined,
+        ...values,
       });
       message.success("Đã cập nhật test case.");
       setEditing(null);
       onEdited?.();
     } catch (e) {
-      if (e && typeof e === "object" && "errorFields" in e) return;
       message.error(e instanceof Error ? e.message : "Không cập nhật được test case");
     } finally {
       setEditBusy(false);
@@ -1196,63 +1170,12 @@ function RequirementPanel({
         tcTable(filteredCases)
       )}
 
-      <Modal
-        title={editing ? `Sửa ${editing.testCaseId}` : "Sửa test case"}
-        open={!!editing}
+      <TestCaseEditModal
+        editing={editing}
         onCancel={() => setEditing(null)}
-        onOk={() => void saveEditTc()}
-        okText="Lưu"
-        cancelText="Huỷ"
-        confirmLoading={editBusy}
-        destroyOnHidden
-        width={640}
-      >
-        <Form form={editForm} layout="vertical" style={{ marginTop: 8 }}>
-          <Form.Item
-            name="title"
-            label="Tiêu đề"
-            rules={[{ required: true, message: "Nhập tiêu đề" }]}
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item name="module" label="Function">
-            <Input placeholder="Tên Function (feature / TC.module)" />
-          </Form.Item>
-          <Form.Item name="type" label="Loại (engine)">
-            <Select options={[...TC_TYPE_OPTIONS]} />
-          </Form.Item>
-          <Form.Item name="priority" label="Ưu tiên">
-            <Select
-              options={[
-                { value: "Low", label: "Thấp" },
-                { value: "Medium", label: "Trung bình" },
-                { value: "High", label: "Cao" },
-                { value: "Critical", label: "Nghiêm trọng" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="precondition" label="Tiền điều kiện">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-          <Form.Item
-            name="steps"
-            label="Các bước"
-            rules={[{ required: true, message: "Nhập các bước" }]}
-          >
-            <Input.TextArea rows={4} />
-          </Form.Item>
-          <Form.Item
-            name="expectedResult"
-            label="Kết quả mong đợi"
-            rules={[{ required: true, message: "Nhập kết quả mong đợi" }]}
-          >
-            <Input.TextArea rows={3} />
-          </Form.Item>
-          <Form.Item name="testData" label="Test data">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Modal>
+        onSave={saveEditTc}
+        editBusy={editBusy}
+      />
     </div>
   );
 }

@@ -47,6 +47,107 @@ def test_mine_jhipster_i18n_and_defaults(tmp_path: Path):
     assert creds["admin"].password == "admin"
     assert creds["user"].username == "user"
     assert "default" in creds
+    assert "director" not in creds
+    assert "staff" not in creds
+    assert "manager" not in creds
+
+
+def test_mine_e2e_seed_roles_ts(tmp_path: Path):
+    pkg = tmp_path / "test" / "App.E2E"
+    roles = pkg / "support" / "config" / "roles.ts"
+    roles.parent.mkdir(parents=True)
+    roles.write_text(
+        "const defaultPassword = process.env.E2E_SEED_PASSWORD ?? 'user';\n"
+        "export const E2E_SEED_ACCOUNTS = {\n"
+        "  admin: {\n"
+        "    username: process.env.E2E_ADMIN_USERNAME ?? 'admin',\n"
+        "    password: process.env.E2E_ADMIN_PASSWORD ?? 'admin',\n"
+        "  },\n"
+        "  director: {\n"
+        "    username: process.env.E2E_DIRECTOR_USERNAME ?? 'dir_c09a',\n"
+        "    password: process.env.E2E_DIRECTOR_PASSWORD ?? defaultPassword,\n"
+        "  },\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    aitest = tmp_path / ".ai-test"
+    aitest.mkdir()
+    (aitest / "project.profile.json").write_text(
+        json.dumps(
+            {
+                "playwrightRun": {"packageRoot": "test/App.E2E"},
+                "auth": {
+                    "strategy": "uiLogin",
+                    "roles": ["admin", "director"],
+                    "seedFiles": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    creds = {c.role: c for c in mine_sut_credentials(tmp_path)}
+    assert creds["admin"].username == "admin"
+    assert creds["admin"].password == "admin"
+    assert creds["director"].username == "dir_c09a"
+    assert creds["director"].password == "user"
+    assert "staff" not in creds
+    written = materialize_mined_auth_artifacts(tmp_path)
+    assert set(written) == {"admin", "director"}
+    assert not (tmp_path / ".ai-test" / "auth" / "staff.json").is_file()
+
+
+def test_materialize_seed_file_roles_when_profile_roles_empty(tmp_path: Path):
+    """E2E roles.ts is SoT — persist those accounts even if auth.roles is []."""
+    pkg = tmp_path / "test" / "App.E2E"
+    roles = pkg / "support" / "config" / "roles.ts"
+    roles.parent.mkdir(parents=True)
+    roles.write_text(
+        "const defaultPassword = process.env.E2E_SEED_PASSWORD ?? 'user';\n"
+        "export const E2E_SEED_ACCOUNTS = {\n"
+        "  admin: {\n"
+        "    username: process.env.E2E_ADMIN_USERNAME ?? 'admin',\n"
+        "    password: process.env.E2E_ADMIN_PASSWORD ?? 'admin',\n"
+        "  },\n"
+        "  head: {\n"
+        "    username: process.env.E2E_HEAD_USERNAME ?? 'head_c09a',\n"
+        "    password: process.env.E2E_HEAD_PASSWORD ?? defaultPassword,\n"
+        "  },\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    aitest = tmp_path / ".ai-test"
+    aitest.mkdir()
+    (aitest / "project.profile.json").write_text(
+        json.dumps(
+            {
+                "playwrightRun": {"packageRoot": "test/App.E2E"},
+                "auth": {
+                    "strategy": "uiLogin",
+                    "roles": [],
+                    "seedFiles": ["test/App.E2E/support/config/roles.ts"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    written = set(materialize_mined_auth_artifacts(tmp_path))
+    assert "admin" in written
+    assert "head" in written
+    assert "staff" not in written
+    head = json.loads(
+        (tmp_path / ".ai-test" / "auth" / "head.json").read_text(encoding="utf-8")
+    )
+    assert head["username"] == "head_c09a"
+    assert head["password"] == "user"
+
+
+def test_materialize_without_profile_roles_keeps_primary_only(tmp_path: Path):
+    (tmp_path / ".yo-rc.json").write_text("{}", encoding="utf-8")
+    written = materialize_mined_auth_artifacts(tmp_path)
+    assert "admin" in written
+    assert "default" in written
+    assert "staff" not in written
+    assert not (tmp_path / ".ai-test" / "auth" / "staff.json").is_file()
 
 
 def test_materialize_writes_auth_artifacts(tmp_path: Path):

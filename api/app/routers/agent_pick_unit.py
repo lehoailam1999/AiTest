@@ -103,6 +103,90 @@ def parse_pick_unit_json(raw: str) -> dict[str, Any]:
     }
 
 
+def build_pick_unit_field_prompts(
+    *,
+    field_label: str,
+    input_keys: list[str],
+    title: str,
+    steps: str,
+    primary_path: str,
+    candidates: list[str],
+) -> tuple[str, str]:
+    lines = [f"{i}. {p}" for i, p in enumerate(candidates[:24], start=1)]
+    keys = ", ".join(input_keys[:12]) if input_keys else "—"
+    system = (
+        "You pick the best backend DTO/command property for a Unit validation Test Case.\n"
+        "You MUST choose exactly one property name from the candidate list. Never invent names.\n"
+        "Match the human field label / input keys / title meaning to the Latin property "
+        "(e.g. a Vietnamese label for an evidence code maps to EvidenceCode if that is in the list).\n"
+        "Return ONLY JSON: {\"property\":\"...\",\"confidence\":0.0-1.0}\n"
+        "If none fit, return {\"property\":null,\"confidence\":0}."
+    )
+    user = "\n".join(
+        [
+            f"Field label: {field_label or '—'}",
+            f"Input keys: {keys}",
+            f"Title: {title or '—'}",
+            f"Primary path: {primary_path or '—'}",
+            f"Steps:\n{(steps or '—')[:800]}",
+            "",
+            "Candidates (index DTO properties only):",
+            *lines,
+        ]
+    )
+    return system, user
+
+
+def parse_pick_field_json(raw: str) -> dict[str, Any]:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return {"property": None, "confidence": 0}
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return {"property": None, "confidence": 0}
+    if not isinstance(data, dict):
+        return {"property": None, "confidence": 0}
+    prop = data.get("property")
+    try:
+        conf = float(data.get("confidence") if data.get("confidence") is not None else 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    return {
+        "property": str(prop).strip() if prop else None,
+        "confidence": max(0.0, min(1.0, conf)),
+    }
+
+
+def accept_field_shortlist_pick(
+    pick: dict[str, Any],
+    candidates: list[str],
+    *,
+    min_confidence: float = 0.7,
+) -> dict[str, Any] | None:
+    if not pick or not candidates:
+        return None
+    conf = float(pick.get("confidence") or 0)
+    if conf < min_confidence:
+        return None
+    want = str(pick.get("property") or "").strip()
+    if not want:
+        return None
+    want_l = want.lower()
+    for c in candidates:
+        name = str(c or "").strip()
+        if name and name.lower() == want_l:
+            return {"property": name, "confidence": conf, "source": "llm"}
+    return None
+
+
 def accept_shortlist_pick(
     pick: dict[str, Any],
     candidates: list[dict[str, Any]],
@@ -213,4 +297,92 @@ async def pick_unit_primary(request: Request, db: Annotated[Session, Depends(get
         return ok(accepted)
     except Exception as exc:  # noqa: BLE001
         log.warning("pick-unit-primary LLM failed: %s", exc)
+        return ok(refuse)
+
+
+@router.post("/agent/pick-unit-field")
+async def pick_unit_field(request: Request, db: Annotated[Session, Depends(get_db)]):
+    """
+    Grounded Approve pick: AI chooses DTO property ∈ candidates only.
+    Body: { projectId, fieldLabel, inputKeys[], title?, steps?, primaryPath?,
+            candidates:[{property}] | [string] }
+    """
+    body = await request.json()
+    project_id = _uuid(str(body.get("projectId") or ""))
+    if project_id is None:
+        return errors(400, "projectId required")
+
+    project = db.query(Project).filter(Project.id == project_id, Project.deleted_at.is_(None)).first()
+    if project is None:
+        return errors(404, "Project not found")
+
+    candidates_raw = body.get("candidates") or []
+    if not isinstance(candidates_raw, list) or not candidates_raw:
+        return errors(400, "candidates required (non-empty property shortlist from index)")
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for c in candidates_raw[:24]:
+        if isinstance(c, dict):
+            name = str(c.get("property") or c.get("name") or "").strip()
+        else:
+            name = str(c or "").strip()
+        if not name or not re.match(r"^[A-Za-z_][\w]*$", name):
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(name)
+    if not candidates:
+        return errors(400, "no valid candidate properties")
+
+    refuse = {"property": None, "confidence": 0, "source": "refuse"}
+
+    conn = (
+        db.query(AiBackendConnection)
+        .filter(AiBackendConnection.project_id == project_id)
+        .first()
+    )
+    if conn is None or not C.is_ai_ready(conn.status):
+        log.info("pick-unit-field: AI not ready — refuse project=%s", project_id)
+        return ok(refuse)
+
+    try:
+        api_key = connection_api_key(conn)
+        provider = llm_from_connection(conn)
+    except (ValueError, LLMError) as exc:
+        log.warning("pick-unit-field connection error: %s", exc)
+        return ok(refuse)
+
+    input_keys_raw = body.get("inputKeys") or body.get("input_keys") or []
+    input_keys = (
+        [str(k).strip() for k in input_keys_raw if str(k).strip()]
+        if isinstance(input_keys_raw, list)
+        else []
+    )
+
+    system, user = build_pick_unit_field_prompts(
+        field_label=str(body.get("fieldLabel") or body.get("field_label") or ""),
+        input_keys=input_keys,
+        title=str(body.get("title") or ""),
+        steps=str(body.get("steps") or ""),
+        primary_path=str(body.get("primaryPath") or body.get("primary_path") or ""),
+        candidates=candidates,
+    )
+    try:
+        raw = await provider.chat(
+            api_key,
+            system,
+            user,
+            max_tokens=256,
+            timeout=25.0,
+        )
+        parsed = parse_pick_field_json(raw)
+        accepted = accept_field_shortlist_pick(parsed, candidates)
+        if accepted is None:
+            return ok(refuse)
+        return ok(accepted)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pick-unit-field LLM failed: %s", exc)
         return ok(refuse)

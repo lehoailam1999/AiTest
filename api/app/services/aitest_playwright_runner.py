@@ -20,6 +20,8 @@ from app.llm.cli.process_runner import _CREATE_NO_WINDOW
 
 logger = logging.getLogger(__name__)
 
+_cached_status: SharedRunnerStatus | None = None
+
 RUNNER_PACKAGE_JSON = {
     "name": "aitest-playwright-runner",
     "version": "1.0.0",
@@ -94,8 +96,12 @@ def ensure_shared_playwright_runner(
 ) -> SharedRunnerStatus:
     """
     Create ~/.aitest/playwright-runner and install @playwright/test (+ Chromium).
-    Idempotent unless force=True.
+    Idempotent unless force=True.  Result cached in-process after first success.
     """
+    global _cached_status  # noqa: PLW0603
+    if _cached_status and _cached_status.ok and not force:
+        return _cached_status
+
     runner = shared_playwright_runner_dir()
     runner.mkdir(parents=True, exist_ok=True)
     pkg = runner / "package.json"
@@ -107,12 +113,13 @@ def ensure_shared_playwright_runner(
 
     if shared_playwright_installed(runner) and not force:
         _ensure_dump_script(runner)
-        return SharedRunnerStatus(
+        _cached_status = SharedRunnerStatus(
             ok=True,
             runner_dir=str(runner),
             message=f"AITest Playwright ready tại `{runner}`",
             installed=True,
         )
+        return _cached_status
 
     if not (shutil.which("npx") or shutil.which("npx.cmd") or shutil.which("npm")):
         return SharedRunnerStatus(
@@ -147,7 +154,7 @@ def ensure_shared_playwright_runner(
     ok = shared_playwright_installed(runner)
     if ok:
         _ensure_dump_script(runner)
-    return SharedRunnerStatus(
+    result = SharedRunnerStatus(
         ok=ok,
         runner_dir=str(runner),
         message=(
@@ -157,6 +164,9 @@ def ensure_shared_playwright_runner(
         ),
         installed=ok,
     )
+    if ok:
+        _cached_status = result
+    return result
 
 
 def playwright_cli_via_shared_runner(

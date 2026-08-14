@@ -23,6 +23,7 @@ import {
 } from "@aitest/ide-protocol";
 import { workspaceRoot } from "./semanticContext";
 import { markUnitGenCancelled } from "./unitGenCommands";
+import { markE2eGenCancelled } from "./e2eGenCommands";
 import { spawnCli } from "./cursorAgentCliEngine";
 
 const cancelledIds = new Set<string>();
@@ -53,6 +54,7 @@ function notifyResult(notify: NotifyFn, result: CodegenResultCallback): void {
 export function handleCodegenCancel(params: CodegenCancelParams): { ok: boolean } {
   cancelledIds.add(params.commandId);
   markUnitGenCancelled(params.commandId);
+  markE2eGenCancelled(params.commandId);
   return { ok: true };
 }
 

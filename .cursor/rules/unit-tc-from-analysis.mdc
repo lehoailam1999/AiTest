@@ -1,74 +1,38 @@
 ---
-description: Unit TC gen — UNIVERSAL Backend TC IR — SRS-only (portable)
-globs: api/app/llm/tc_generation_rules.py,api/app/llm/unit_tc_analysis_rules.py,api/app/llm/unit_tc_ir.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/features/requirement_studio/snapshot_prompt.py,api/app/services/unit_tc_gen_guard.py,desktop/src/features/unit-test/**,desktop/src/pages/GenerateUnitPage.tsx
+description: Unit TC gen — pointer to runtime SoT (PRIMARY BE IR). Not Approve path/code.
+globs: api/app/llm/tc_generation_rules.py,api/app/llm/unit_tc_analysis_rules.py,api/app/llm/unit_tc_ir.py,api/app/llm/base.py,api/app/routers/jobs.py,api/app/rules/fragments/unit_tc_analysis_*.md,api/app/rules/fragments/tc_*unit*.md,api/app/services/unit_tc_gen_guard.py,api/app/services/unit_tc_be_context.py,desktop/src/features/unit-test/**,desktop/src/pages/GenerateUnitPage.tsx
 alwaysApply: false
 ---
 
-# Rules Unit TC ← Phân tích (UNIVERSAL Backend TC IR)
+# Unit TC gen ← Phân tích (pointer)
 
-> **SoT runtime:** fragments `unit_tc_analysis_*.md` via [`unit_tc_analysis_rules.py`](api/app/llm/unit_tc_analysis_rules.py) — prepend trong [`engine_generation_rules("unit")`](api/app/llm/tc_generation_rules.py).  
-> Flatten IR → DB: [`unit_tc_ir.py`](api/app/llm/unit_tc_ir.py) trong `parse_test_cases_json`.  
-> Post-gen: [`unit_tc_gen_guard.py`](api/app/services/unit_tc_gen_guard.py).  
-> Prompt **không** nhồi taxonomy UI/FE / product nouns (portable mọi tài liệu).
+> **Không duplicate essay ở đây.** SoT chạy job = fragments + inject Python.  
+> **Approve `path:`/`code:`** = pha khác → [`code-aliases-unit-gen.mdc`](code-aliases-unit-gen.mdc).
 
-Pipeline:
+## SoT runtime (sửa nội dung ở đây)
+
+| Việc | File |
+| --- | --- |
+| IR / 6 gate / PRIMARY | `api/app/rules/fragments/unit_tc_analysis_full.md` (+ `_fast.md`) |
+| Load + prepend | `api/app/llm/unit_tc_analysis_rules.py` → `engine_generation_rules("unit")` |
+| Shared format | `tc_compact_unit.md` / `tc_speed_unit.md` |
+| System schema Unit | `api/app/llm/base.py` (`preferred_engine=unit`) |
+| Context inject | `unit_tc_be_context.py` + MSC — chỉ BR/VAL/ERROR/AC(BE) |
+| Flatten IR → DB | `api/app/llm/unit_tc_ir.py` |
+| Post-gen drop UI | `api/app/services/unit_tc_gen_guard.py` |
+
+## Pipeline (không trộn pha)
 
 ```text
-Knowledge PRIMARY → Atomic Backend Behavior → Unit TC IR → Approve → Source Retrieval → Codegen
+Knowledge PRIMARY (BR|VAL|ERROR|AC-BE) → Unit TC IR → Approve (index.db) → Codegen
 ```
 
-**Pha sinh TC không cần source.** `path:`/`code:` = Approve. Chuẩn: ISTQB (EP/BVA) + ISO 29119-3.
-
-## Sáu gate (thứ tự)
-
-1. **Behavior Decomposition** — multi-behavior / multi-constraint → atomic BE trước Scope  
-2. **Backend Outcome Gate (SRS-only)** — IN theo outcome BE trong Knowledge; **cấm** bỏ BE chỉ vì wording UI; **không** bắt buộc source excerpt  
-3. **UNKNOWN vs OUT** — UI-only chắc → OUT; Knowledge thiếu/cắt → UNKNOWN (+ `unknownBehaviors`); **cấm** UNKNOWN→OUT để giảm TC  
-4. **Conflict Gate** — mâu thuẫn → `conflicts` / GAPS; cấm tự resolve/invent  
-5. **Implementation-free IR** — WHAT không HOW; `layerHint`/`sourceSignal` = null trừ Knowledge/excerpt nói rõ  
-6. **Coverage / Gap Detection** — inventory IN (VALIDATION_DATA + FILE security) ↔ TC; output `coverage`/`gaps`/`unknownBehaviors`/`conflicts`
-
-## Scope (sau Rule 1–3)
-
-YES (outcome BE trong Knowledge)→**IN** · UI-only chắc→**OUT** · BOTH→**MIXED** (chỉ nhánh BE) · Knowledge thiếu→**UNKNOWN** (≠ OUT).
-
-## PRIMARY (bảo toàn từ Phân tích)
-
-1. BUSINESS_RULES  
-2. VALIDATION_DATA — chỉ chiều criterion hỗ trợ; EP/BVA khi có biên  
-3. ERROR_HANDLING  
-4. ACCEPTANCE — UI-only AC → OUT  
-
-**Cấm** invent/rename/chuyển bucket.
-
-## IR contract
-
-- `behaviorId` = `<requirementId>-B<seq>`  
-- Scenario chỉ chiều relevant (không blind matrix)  
-- Root JSON: `testCases` + `coverage` + `gaps` + `unknownBehaviors` + `conflicts`  
-- Flat DB markers (adapter): `trace:` · `primaryBucket:` · `behaviorId:` · `target.*` · optional `layerHint:`/`sourceSignal:`
-
-## Flow sinh
-
-1. Atomic BE (+ multi-constraint)  
-2. Gate 2–5 → IN|OUT|MIXED|UNKNOWN  
-3. MIXED → chỉ nhánh BE  
-4. Scenario relevant; dedup cùng BE (gộp `requirementIds`)  
-5. Rule 6 Coverage ↔ TC hoặc gap  
-6. Cấm invent HTTP/exception/limit/permission/class/method
-
-## Phân tầng prompt
-
-| Tầng | Nội dung |
-| --- | --- |
-| `UNIT ← PHÂN TÍCH` | SoT IR (6 gate + PRIMARY + output contract) |
-| Engine Unit overlay | AAA + soft-cap ưu tiên PRIMARY |
-| COMPACT/SPEED | Title VN; self-check PRIMARY |
-| system_prompt Unit | Lock type=Unit |
-| Post-gen guard | Drop presentation-only; strip Class.Method |
-| Flatten | IR → flat steps/expected/`testData` markers |
-| Approve | Source Retrieval → `path:`/`code:` |
+- FEATURES = tên `module` only · FLOWS/UI → E2E  
+- Gen **không** ghi `path:`/`code:` · Approve **không** inject `unit_tc_analysis_*`
 
 ## Khi sửa
 
-Chỉ sửa `unit_tc_analysis_*.md` / `unit_tc_analysis_rules.py` / `unit_tc_ir.py` (+ file này). Không hardcode product domain.
+1. Đổi hành vi gen → sửa **fragment** (+ legacy fallback trong `unit_tc_analysis_rules.py` nếu cần).  
+2. Cập nhật `rule_registry.yaml` nếu đổi id/tags.  
+3. Chạy `tests/test_unit_tc_analysis_rules.py` (+ guard/MSC nếu đụng context).  
+4. Không hardcode product domain · không vá bằng SUT `code-aliases.json`.

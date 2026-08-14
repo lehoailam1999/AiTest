@@ -13,6 +13,7 @@ import {
   matchingProjectAliasTokens,
   pathHitsToken,
   UNIT_INTENT_DEFS,
+  type UnitCrudVerb,
 } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import type { CodeIndexSnapshot } from "../codeIndex/types";
@@ -424,4 +425,155 @@ export function preferredSymbolFromCodeIndex(
   }
   const ranked = [...symbols].sort((a, b) => implScore(b) - implScore(a));
   return ranked[0]?.name || null;
+}
+
+/** Parse `code:` marker — Type or Type.Method (portable; one dot max). */
+export function parseCodeMarker(code: string): {
+  typeName: string;
+  methodName?: string;
+} {
+  const raw = String(code || "").trim();
+  if (!raw) return { typeName: "" };
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(raw);
+  if (m) return { typeName: m[1]!, methodName: m[2]! };
+  return { typeName: raw };
+}
+
+const METHOD_SCORE_MARGIN = 8;
+const ENTRY_METHOD_RE = /^(Handle|HandleAsync|Execute|ExecuteAsync)$/i;
+
+function crudMethodStemScore(name: string, verb: UnitCrudVerb | null | undefined): number {
+  if (!verb) return 0;
+  const n = name;
+  switch (verb) {
+    case "create":
+      return /^(Create|Insert|Add)\b|CreateAsync|InsertAsync|AddAsync/i.test(n) ||
+        /^(create|insert|add)/i.test(n)
+        ? 40
+        : 0;
+    case "read":
+      return /^(Get|Find|Query|Load|Read|Fetch)\b|GetAsync|FindAsync/i.test(n) ||
+        /^(get|find|query|load|read|fetch)/i.test(n)
+        ? 40
+        : 0;
+    case "update":
+      return /^(Update|Edit|Patch|Save|Set)\b|UpdateAsync|SaveAsync/i.test(n) ||
+        /^(update|edit|patch|save)/i.test(n)
+        ? 40
+        : 0;
+    case "delete":
+      return /^(Delete|Remove)\b|DeleteAsync|RemoveAsync/i.test(n) ||
+        /^(delete|remove)/i.test(n)
+        ? 40
+        : 0;
+    default:
+      return 0;
+  }
+}
+
+function tokenOverlapScore(name: string, tokens: string[]): number {
+  if (!tokens.length) return 0;
+  const nl = name.toLowerCase();
+  let score = 0;
+  for (const t of tokens) {
+    const tl = t.toLowerCase();
+    if (tl.length < 3) continue;
+    if (nl === tl) score += 25;
+    else if (nl.includes(tl)) score += 12;
+  }
+  return score;
+}
+
+function titleTokens(...parts: Array<string | null | undefined>): string[] {
+  const blob = parts.filter(Boolean).join(" ");
+  if (!blob.trim()) return [];
+  const out: string[] = [];
+  for (const m of blob.matchAll(/[A-Za-z][A-Za-z0-9]{2,}/g)) {
+    out.push(m[0]!);
+  }
+  // Also split Pascal/camel in prefer tokens already passed separately
+  return uniq(out);
+}
+
+export type PreferredCodeMarkerOpts = {
+  preferTokens?: string[];
+  crudVerb?: UnitCrudVerb | null;
+  title?: string | null;
+  functionTitle?: string | null;
+};
+
+/**
+ * Layer 1: `code:` = Type, or Type.Method when method pick is unambiguous.
+ * Does not change path ranking / writeBack — call only after primary path is chosen.
+ */
+export function preferredCodeMarkerFromIndex(
+  snap: CodeIndexSnapshot,
+  pathRel: string,
+  opts?: PreferredCodeMarkerOpts
+): string | null {
+  const preferTokens = opts?.preferTokens || [];
+  const typeName = preferredSymbolFromCodeIndex(snap, pathRel, preferTokens);
+  if (!typeName) return null;
+
+  const symbols = snap.symbolsByFile[pathRel] || [];
+  const methods = symbols.filter(
+    (s) =>
+      s.kind === "method" &&
+      (!s.parent || s.parent.toLowerCase() === typeName.toLowerCase())
+  );
+  if (!methods.length) return typeName;
+
+  const isHandler = /Handler$/i.test(typeName);
+  const textTokens = titleTokens(opts?.title, opts?.functionTitle);
+  const scored = methods.map((m) => {
+    let score = 0;
+    score += crudMethodStemScore(m.name, opts?.crudVerb);
+    score += tokenOverlapScore(m.name, [...preferTokens, ...textTokens]);
+    if (ENTRY_METHOD_RE.test(m.name)) {
+      score += isHandler ? 30 : 10;
+    }
+    return { name: m.name, score };
+  });
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+  const top = scored[0]!;
+  const second = scored[1];
+
+  // CQRS: single entry Handle/HandleAsync (or only entry-style among methods)
+  const entryMethods = methods.filter((m) => ENTRY_METHOD_RE.test(m.name));
+  const domainWinners = scored.filter(
+    (s) => s.score >= 40 && !ENTRY_METHOD_RE.test(s.name)
+  );
+  if (
+    isHandler &&
+    entryMethods.length === 1 &&
+    domainWinners.length === 0 &&
+    ENTRY_METHOD_RE.test(top.name)
+  ) {
+    return `${typeName}.${entryMethods[0]!.name}`;
+  }
+
+  // Unambiguous CRUD/title method (margin + min score)
+  if (
+    top.score >= 40 &&
+    (!second || top.score - second.score >= METHOD_SCORE_MARGIN)
+  ) {
+    return `${typeName}.${top.name}`;
+  }
+
+  // Multiple entry methods only (Handle + HandleAsync) — prefer Async if present else first
+  if (
+    isHandler &&
+    entryMethods.length >= 1 &&
+    domainWinners.length === 0 &&
+    methods.every((m) => ENTRY_METHOD_RE.test(m.name) || /^ToString$|^GetHashCode$|^Equals$/i.test(m.name))
+  ) {
+    const prefer =
+      entryMethods.find((m) => /^HandleAsync$/i.test(m.name)) ||
+      entryMethods.find((m) => /^Handle$/i.test(m.name)) ||
+      entryMethods[0]!;
+    return `${typeName}.${prefer.name}`;
+  }
+
+  return typeName;
 }

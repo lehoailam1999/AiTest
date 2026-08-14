@@ -2,7 +2,8 @@
 
 Công cụ Desktop hỗ trợ QA/Developer sinh Test Case, sinh Unit Test, chạy kiểm thử và tổng hợp kết quả bằng AI, theo kiến trúc **Hybrid**: Desktop (React + Tauri) ↔ Backend (Python FastAPI) ↔ PostgreSQL, với Backend là trung tâm điều phối PostgreSQL và LLM.
 
-**Tài liệu hệ thống tổng hợp (Single Source of Truth):** [`docs/SYSTEM_MASTER_DOCUMENTATION.md`](docs/SYSTEM_MASTER_DOCUMENTATION.md)
+**Tài liệu hệ thống tổng hợp (Single Source of Truth):** [`docs/SYSTEM_MASTER_DOCUMENTATION.md`](docs/SYSTEM_MASTER_DOCUMENTATION.md)  
+**Tài liệu hướng dẫn & báo cáo triển khai Desktop App:** [`docs/DESKTOP_DEPLOYMENT_GUIDE.md`](docs/DESKTOP_DEPLOYMENT_GUIDE.md)
 
 ## Kiến trúc repo
 
@@ -109,7 +110,7 @@ docker compose up -d
 ## Core loop
 
 1. Login → 2. Projects (tạo/chọn) → 3. Open Project (trỏ source .NET local qua Tauri) →
-4. Settings AI (lưu key + Verify) → 5. Requirements → tạo Job Generate →
+4. Settings (kết nối IDE Extension / Cursor CLI) → 5. Requirements → tạo Job Generate →
 6. Jobs (poll) → 7. Test Cases (review → Approve) → 8. Generate Unit (ghi file) →
 9. Run Test (`dotnet test` → upload execution).
 

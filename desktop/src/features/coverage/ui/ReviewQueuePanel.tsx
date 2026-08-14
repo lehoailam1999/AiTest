@@ -2,9 +2,6 @@ import { useEffect, useMemo, useState, type Key } from "react";
 import {
   App,
   Button,
-  Form,
-  Input,
-  Modal,
   Select,
   Space,
   Table,
@@ -21,6 +18,9 @@ import {
 } from "@ant-design/icons";
 import { requirementStudio, testcases } from "../../../api";
 import type { TestCase } from "../../../api/types";
+import TestCaseEditModal, {
+  type TestCaseEditModalFormValues,
+} from "../../../components/TestCaseEditModal";
 import {
   displayReviewStatus,
   isTcPendingReview,
@@ -31,8 +31,6 @@ import {
 import { syncApprovedTestCasesMdBestEffort } from "../../../lib/approvedTcSync";
 import { normalizeFunctionLabel } from "../../../lib/normalizeFunctionLabel";
 import {
-  ENGINE_TOOLTIP,
-  TC_TYPE_OPTIONS,
   resolveTestEngine,
 } from "../../../lib/testEngine";
 import { workspace } from "../../../workspace";
@@ -77,15 +75,6 @@ type EditForm = {
 
 type StatusFilter = "__all__" | "pending" | "approved";
 type EngineFilter = "all" | "unit" | "e2e";
-
-const TYPE_OPTIONS = [...TC_TYPE_OPTIONS];
-
-const PRIORITY_OPTIONS = [
-  { value: "Low", label: "Thấp" },
-  { value: "Medium", label: "Trung bình" },
-  { value: "High", label: "Cao" },
-  { value: "Critical", label: "Nghiêm trọng" },
-];
 
 function escapeHtml(value: string): string {
   return value
@@ -216,7 +205,6 @@ export function ReviewQueuePanel({
   );
   const [editing, setEditing] = useState<TestCase | null>(null);
   const [editBusy, setEditBusy] = useState(false);
-  const [form] = Form.useForm<EditForm>();
 
   useEffect(() => {
     if (!moduleFilter) return;
@@ -408,39 +396,20 @@ export function ReviewQueuePanel({
 
   function openEdit(row: TestCase) {
     setEditing(row);
-    form.setFieldsValue({
-      title: row.title,
-      module: row.module || undefined,
-      type: row.type,
-      priority: row.priority,
-      precondition: row.precondition || undefined,
-      steps: row.steps,
-      expectedResult: row.expectedResult,
-      testData: row.testData || undefined,
-    });
   }
 
-  async function saveEdit() {
+  async function saveEdit(values: TestCaseEditModalFormValues) {
     if (!editing) return;
     try {
-      const values = await form.validateFields();
       setEditBusy(true);
       await testcases.update(editing.id, {
         projectId: editing.projectId,
-        title: values.title.trim(),
-        module: values.module?.trim() || undefined,
-        type: values.type,
-        priority: values.priority,
-        precondition: values.precondition?.trim() || undefined,
-        steps: values.steps.trim(),
-        expectedResult: values.expectedResult.trim(),
-        testData: values.testData?.trim() || undefined,
+        ...values,
       });
       message.success("Đã cập nhật test case.");
       setEditing(null);
       onChanged();
     } catch (e) {
-      if (e && typeof e === "object" && "errorFields" in e) return;
       message.error(e instanceof Error ? e.message : "Không cập nhật được test case");
     } finally {
       setEditBusy(false);
@@ -691,75 +660,13 @@ export function ReviewQueuePanel({
         />
       </div>
 
-      <Modal
-        title={editing ? `Sửa ${editing.testCaseId}` : "Sửa test case"}
-        open={!!editing}
+      <TestCaseEditModal
+        editing={editing}
         onCancel={() => setEditing(null)}
-        onOk={() => void saveEdit()}
-        okText="Lưu"
-        cancelText="Huỷ"
-        confirmLoading={editBusy}
-        destroyOnHidden
-        width={640}
-      >
-        <Form form={form} layout="vertical" style={{ marginTop: 8 }}>
-          <Form.Item label="Module">
-            <Input.TextArea
-              rows={1}
-              value={workspaceTitle || ""}
-              placeholder="Module (từ Studio — chỉ xem)"
-              readOnly
-              disabled
-            />
-          </Form.Item>
-          <Form.Item name="module" label="Function">
-            <Input.TextArea rows={2} placeholder="Tên Function (feature)" />
-          </Form.Item>
-          <Form.Item
-            name="title"
-            label="Tiêu đề"
-            rules={[{ required: true, message: "Nhập tiêu đề" }]}
-          >
-            <Input.TextArea rows={2} placeholder="Tiêu đề test case" />
-          </Form.Item>
-          <Space wrap style={{ width: "100%" }} styles={{ item: { flex: 1, minWidth: 160 } }}>
-            <Form.Item
-              name="type"
-              label={
-                <Tooltip title={ENGINE_TOOLTIP}>
-                  <span>Loại (engine)</span>
-                </Tooltip>
-              }
-              style={{ marginBottom: 12, width: "100%" }}
-            >
-              <Select options={TYPE_OPTIONS} />
-            </Form.Item>
-            <Form.Item name="priority" label="Ưu tiên" style={{ marginBottom: 12, width: "100%" }}>
-              <Select options={PRIORITY_OPTIONS} />
-            </Form.Item>
-          </Space>
-          <Form.Item name="precondition" label="Tiền điều kiện">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-          <Form.Item
-            name="steps"
-            label="Các bước"
-            rules={[{ required: true, message: "Nhập các bước" }]}
-          >
-            <Input.TextArea rows={4} />
-          </Form.Item>
-          <Form.Item
-            name="expectedResult"
-            label="Kết quả mong đợi"
-            rules={[{ required: true, message: "Nhập kết quả mong đợi" }]}
-          >
-            <Input.TextArea rows={3} />
-          </Form.Item>
-          <Form.Item name="testData" label="Test data">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Modal>
+        onSave={saveEdit}
+        editBusy={editBusy}
+        workspaceTitle={workspaceTitle || undefined}
+      />
     </div>
   );
 }

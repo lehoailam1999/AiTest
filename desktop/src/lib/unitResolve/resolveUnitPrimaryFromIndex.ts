@@ -29,21 +29,30 @@ import {
   uploadIntentPathShapeAdjust,
   queryImpliesUploadIntent,
   queryImpliesSearchLookupIntent,
+  queryImpliesReadGetDetailIntent,
   extractOpPreferTokens,
   functionOpPathShapeAdjust,
   pathContradictsOpPreferTokens,
   pathContradictsUploadVerb,
   pathContradictsSearchVerb,
+  pathContradictsReadGetVerb,
+  pathContradictsCrudVerb,
+  detectUnitCrudVerb,
   queryImpliesAssignFilterIntent,
   validateRejectPathShapeAdjust,
+  mapUnitApproveConfidence,
+  applyConfidenceWriteGate,
+  confidenceMdWarning,
   type BodyRuleScoredCandidate,
   type UnitIntent,
+  type UnitApproveConfidence,
+  type MapUnitApproveConfidenceInput,
 } from "@aitest/ide-protocol";
 import { resolveImportSpecifier } from "../codeIndex/buildDependencyGraph";
 import type { CodeIndexSnapshot } from "../codeIndex/types";
 import {
   extractTechIdentifierStems,
-  preferredSymbolFromCodeIndex,
+  preferredCodeMarkerFromIndex,
 } from "../approvedTcSync/progressiveSeedFromCodeIndex";
 import {
   extractMatchTokens,
@@ -59,6 +68,12 @@ import type {
   PickFromShortlistFn,
 } from "./llmPickUnitPrimary";
 import { acceptShortlistPick } from "./llmPickUnitPrimary";
+import { validateUnitPrimaryBeforeWrite } from "./validateUnitPrimaryBeforeWrite";
+import { mergeUnitRelatedCandidates } from "./rankUnitRelatedPaths";
+import {
+  checkIndexFileFreshness,
+  type IndexFreshnessStatus,
+} from "./checkIndexFileFreshness";
 
 export type ReadExcerptFn = (pathRel: string) => Promise<string>;
 
@@ -77,6 +92,12 @@ export type ResolveUnitPrimaryResult = {
   bodyRuleLog?: string;
   notes: string[];
   source: "index.db" | "path-index" | "llm-shortlist";
+  /** Layer 2 — HIGH|MEDIUM|LOW; LOW never writeBack */
+  confidence?: UnitApproveConfidence;
+  /** Layer 3 — validate check ids when writeBack */
+  validateChecks?: string[];
+  /** Layer 4 — index vs disk hash */
+  freshness?: IndexFreshnessStatus;
 };
 
 export type ResolveUnitPrimaryOpts = {
@@ -104,6 +125,166 @@ const MIN_MARGIN = 20;
 const MIN_RATIO = 1.45;
 const SOFT_MARGIN = 8;
 const SOFT_RATIO = 1.15;
+
+/** Sole-candidate sentinel so mapUnitApproveConfidence treats as clear winner. */
+const SOLE_MARGIN = 999;
+
+function marginPair(
+  bestScore: number,
+  secondScore?: number | null
+): { margin: number; ratio: number | null } {
+  if (secondScore == null || !Number.isFinite(secondScore)) {
+    return { margin: SOLE_MARGIN, ratio: null };
+  }
+  const margin = bestScore - secondScore;
+  const ratio = secondScore > 0 ? bestScore / secondScore : null;
+  return { margin, ratio };
+}
+
+/**
+ * Margin for confidence: if seed is not raw top (verb/search/CRUD rerank),
+ * do not compare against higher raw peers — treat as clear preferred pick.
+ */
+function marginForConfidence(
+  seedPath: string,
+  seedScore: number,
+  top3: Array<{ pathRel: string; score: number }>
+): { margin: number; ratio: number | null } {
+  const leader = top3[0];
+  if (leader && leader.pathRel !== seedPath) {
+    return { margin: MIN_MARGIN, ratio: null };
+  }
+  const peer = top3.find((c) => c.pathRel !== seedPath);
+  return marginPair(seedScore, peer?.score);
+}
+
+type GateValidateOpts = {
+  codeIndex: CodeIndexSnapshot;
+  moduleGated: boolean;
+  intent: UnitIntent;
+  shapeBlob: string;
+  /** When set (incl. ""), excerpt must be non-empty */
+  excerpt?: string | null;
+  testData?: string | null;
+  /**
+   * Layer 4 — full-file reader for contentHash check.
+   * When omitted, freshness is skipped (ok).
+   */
+  readDisk?: ReadExcerptFn | null;
+};
+
+async function gateWriteResult(
+  result: ResolveUnitPrimaryResult,
+  confInput: MapUnitApproveConfidenceInput,
+  validateOpts?: GateValidateOpts | null
+): Promise<ResolveUnitPrimaryResult> {
+  const confidence = mapUnitApproveConfidence(confInput);
+  let notes = uniq([...(result.notes || []), `confidence=${confidence}`]);
+  const gate = applyConfidenceWriteGate(result.writeBack, confidence);
+  if (!gate.writeBack) {
+    return {
+      ...result,
+      writeBack: false,
+      seed: null,
+      symbol: null,
+      relatedPaths: [],
+      confidence: gate.confidence,
+      skipReason: gate.skipReason || result.skipReason,
+      bodyRuleLog: `writeBack=no confidence=${gate.confidence}${
+        result.bodyRuleLog ? ` prior=${result.bodyRuleLog}` : ""
+      }`,
+      notes,
+      freshness: "skipped",
+    };
+  }
+
+  let validateChecks = result.validateChecks;
+  if (validateOpts && result.seed) {
+    const v = validateUnitPrimaryBeforeWrite({
+      codeIndex: validateOpts.codeIndex,
+      pathRel: result.seed.pathRel,
+      code: result.symbol,
+      moduleGated: validateOpts.moduleGated,
+      intent: validateOpts.intent,
+      shapeBlob: validateOpts.shapeBlob,
+      source: result.source,
+      excerpt: validateOpts.excerpt,
+      testData: validateOpts.testData,
+    });
+    if (!v.ok) {
+      return {
+        ...result,
+        writeBack: false,
+        seed: null,
+        symbol: null,
+        relatedPaths: [],
+        confidence,
+        skipReason: v.skipReason,
+        bodyRuleLog: `writeBack=no ${v.skipReason || "FAIL_VALIDATE"}${
+          result.bodyRuleLog ? ` prior=${result.bodyRuleLog}` : ""
+        }`,
+        notes: uniq([...notes, "validate=fail"]),
+        validateChecks: v.checks,
+        freshness: "skipped",
+      };
+    }
+    validateChecks = v.checks;
+    notes = uniq([...notes, `validate=${v.checks.join("+")}`]);
+  }
+
+  let freshness: IndexFreshnessStatus = "skipped";
+  if (validateOpts?.codeIndex && result.seed) {
+    let diskContent: string | null = null;
+    if (validateOpts.readDisk) {
+      try {
+        diskContent = await validateOpts.readDisk(result.seed.pathRel);
+      } catch {
+        diskContent = null;
+      }
+    }
+    const fr = await checkIndexFileFreshness({
+      codeIndex: validateOpts.codeIndex,
+      pathRel: result.seed.pathRel,
+      diskContent,
+    });
+    freshness = fr.status;
+    notes = uniq([...notes, `freshness=${fr.status}`]);
+    if (!fr.ok) {
+      return {
+        ...result,
+        writeBack: false,
+        seed: null,
+        symbol: null,
+        relatedPaths: [],
+        confidence,
+        skipReason: fr.skipReason,
+        bodyRuleLog: `writeBack=no ${fr.skipReason || "STALE_INDEX"}${
+          result.bodyRuleLog ? ` prior=${result.bodyRuleLog}` : ""
+        }`,
+        notes: uniq([...notes, "freshness=stale"]),
+        validateChecks,
+        freshness: fr.status,
+      };
+    }
+  } else {
+    notes = uniq([...notes, "freshness=skipped"]);
+  }
+
+  const warn = confidenceMdWarning(confidence);
+  const validatePart = validateChecks?.length
+    ? ` validate=${validateChecks.join("+")}`
+    : "";
+  return {
+    ...result,
+    writeBack: true,
+    confidence,
+    notes,
+    validateChecks,
+    freshness,
+    bodyRuleLog:
+      `${result.bodyRuleLog || "writeBack=yes"}${warn}${validatePart} freshness=${freshness}`.trim(),
+  };
+}
 
 function uniq(xs: string[]): string[] {
   const seen = new Set<string>();
@@ -160,22 +341,17 @@ function functionTitleBlob(query: UnitApproveQuery): string {
     .toLowerCase();
 }
 
-/** Create shape boosts only when Function/Title (or create intent class) imply create — not assign/filter. */
+/** Create shape boosts only when CRUD verb is create — not validate_reject / update / read / assign. */
 function queryImpliesCreateShape(query: UnitApproveQuery): boolean {
   const shapeBlob = shapeBlobForRanking(query);
   if (queryImpliesAssignFilterIntent(query.intent, shapeBlob)) return false;
   if (queryImpliesUploadIntent(query.intent, shapeBlob)) return false;
-  const pc = query.intent.primaryClass;
-  const classes = query.intent.classes || [];
-  if (
-    pc === "persist_create" ||
-    pc === "auto_generate_code" ||
-    pc === "validate_reject" ||
-    classes.includes("persist_create") ||
-    classes.includes("auto_generate_code")
-  ) {
-    return true;
-  }
+  if (queryImpliesReadGetDetailIntent(query.intent, shapeBlob)) return false;
+  if (queryImpliesSearchLookupIntent(query.intent, shapeBlob)) return false;
+  const verb = detectUnitCrudVerb(query.intent, shapeBlob);
+  if (verb === "create") return true;
+  if (verb === "update" || verb === "delete" || verb === "read") return false;
+  // No CRUD verb (e.g. validate_reject alone): do NOT force Create shape
   return /tao\s*moi|\bcreate\b|them\s*moi|\badd\s*new\b/.test(
     functionTitleBlob(query)
   );
@@ -607,10 +783,10 @@ function relatedFromDeps(
     maxRelated,
     preferDtoValidator,
   });
-  if (fromGraph.length) {
-    return uniq([...expanded, ...fromGraph]).slice(0, maxRelated);
-  }
-  return expanded;
+  return mergeUnitRelatedCandidates(primary, expanded, fromGraph, {
+    maxRelated,
+    preferDtoValidator,
+  });
 }
 
 /** VALIDATION / AUTH / layerHint dto|validator|authz → DTO/Validator siblings. */
@@ -619,6 +795,22 @@ function preferDtoValidatorForIntent(
   testData?: string | null
 ): boolean {
   return preferDtoValidatorForHints(intent, testData);
+}
+
+function codeMarkerForResolve(
+  codeIndex: CodeIndexSnapshot,
+  pathRel: string,
+  query: UnitApproveQuery,
+  preferTokens: string[]
+): string | null {
+  const shapeBlob = shapeBlobForRanking(query);
+  const verb = detectUnitCrudVerb(query.intent, shapeBlob);
+  return preferredCodeMarkerFromIndex(codeIndex, pathRel, {
+    preferTokens,
+    crudVerb: verb,
+    title: query.title,
+    functionTitle: query.module,
+  });
 }
 
 function applyLayerHintToWriteBack(
@@ -641,9 +833,10 @@ function applyLayerHintToWriteBack(
   }
   notes.push(`layerHintPromote=${applied.primaryPath.split("/").pop()}`);
   const nextSym =
-    preferredSymbolFromCodeIndex(
+    codeMarkerForResolve(
       codeIndex,
       applied.primaryPath,
+      query,
       query.preferTokensStrong
     ) ||
     applied.primaryPath.split("/").pop()?.replace(/\.[^.]+$/, "") ||
@@ -681,7 +874,7 @@ async function tryLlmShortlistPick(
   const shortlist = candidates.slice(0, 8).map((c) => ({
     pathRel: c.pathRel,
     code:
-      preferredSymbolFromCodeIndex(opts.codeIndex, c.pathRel, opts.query.preferTokensStrong) ||
+      codeMarkerForResolve(opts.codeIndex, c.pathRel, opts.query, opts.query.preferTokensStrong) ||
       undefined,
     score: c.score,
   }));
@@ -740,9 +933,10 @@ async function tryLlmShortlistPick(
   notes.push(`llmPick=${accepted.pathRel.split("/").pop()}`);
   const symbol =
     accepted.code ||
-    preferredSymbolFromCodeIndex(
+    codeMarkerForResolve(
       opts.codeIndex,
       accepted.pathRel,
+      opts.query,
       opts.query.preferTokensStrong
     );
   const relatedPaths = relatedFromDeps(
@@ -760,20 +954,51 @@ async function tryLlmShortlistPick(
     symbol,
     notes
   );
-  return {
-    writeBack: true,
-    seed: finalized.seed,
-    symbol: finalized.symbol,
-    relatedPaths: finalized.relatedPaths,
-    candidatesTop3: candidates.slice(0, 3).map((c) => ({
-      pathRel: c.pathRel,
-      score: c.score,
-      ruleHits: [],
-    })),
-    bodyRuleLog: `writeBack=yes source=llm-shortlist conf=${accepted.confidence}`,
-    notes,
-    source: "llm-shortlist",
-  };
+  const second = candidates[1];
+  const { margin, ratio } = marginPair(
+    finalized.seed.score,
+    second?.score
+  );
+  return await gateWriteResult(
+    {
+      writeBack: true,
+      seed: finalized.seed,
+      symbol: finalized.symbol,
+      relatedPaths: finalized.relatedPaths,
+      candidatesTop3: candidates.slice(0, 3).map((c) => ({
+        pathRel: c.pathRel,
+        score: c.score,
+        ruleHits: [],
+      })),
+      bodyRuleLog: `writeBack=yes source=llm-shortlist conf=${accepted.confidence}`,
+      notes,
+      source: "llm-shortlist",
+    },
+    {
+      score: finalized.seed.score,
+      margin,
+      ratio,
+      moduleGated: true,
+      hasStrongSignal: true,
+      requiresBodyRule: Boolean(opts.query.intent.requiresBodyRule),
+      ruleHitCount: 0,
+      source: "llm-shortlist",
+      llmConfidence: accepted.confidence,
+    },
+    {
+      codeIndex: opts.codeIndex,
+      moduleGated: true,
+      intent: opts.query.intent,
+      shapeBlob: [
+        opts.query.requirementTitle,
+        opts.query.module,
+        opts.query.title,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      readDisk: opts.readExcerpt || null,
+    }
+  );
 }
 
 /**
@@ -1015,6 +1240,26 @@ export async function resolveUnitPrimaryFromIndex(
         (a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel)
       );
       notes.push(`searchQueryWiden=${searchExtras.length}`);
+    }
+  }
+
+  // Read/get-detail: re-include GetQuery /Queries/ paths for load/display TCs
+  if (queryImpliesReadGetDetailIntent(intent, shapeBlobForRanking(query))) {
+    const have = new Set(candidates.map((c) => c.pathRel.replace(/\\/g, "/").toLowerCase()));
+    const readExtras = seeds.filter((c) => {
+      const p = c.pathRel.replace(/\\/g, "/");
+      if (have.has(p.toLowerCase())) return false;
+      if (c.score < 8 || isUnsuitableUnitPrimary(p)) return false;
+      return (
+        /\/queries?\//i.test(p) ||
+        /(Get(Query|ById|Detail)|FindById)(Handler)?/i.test(p)
+      );
+    });
+    if (readExtras.length) {
+      candidates = [...candidates, ...readExtras].sort(
+        (a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel)
+      );
+      notes.push(`readGetQueryWiden=${readExtras.length}`);
     }
   }
 
@@ -1377,18 +1622,22 @@ export async function resolveUnitPrimaryFromIndex(
       }
     }
 
-    // Verb contradiction: upload≠Delete, search≠Assign (body-rule throw cannot rescue)
+    // Verb contradiction: upload≠Delete, search≠Assign, read≠Create, CRUD verb≠other CRUD
     if (decision.writeBack && seed) {
       const shapeBlob = shapeBlobForRanking(query);
       if (
         pathContradictsUploadVerb(seed.pathRel, intent, shapeBlob) ||
-        pathContradictsSearchVerb(seed.pathRel, intent, shapeBlob)
+        pathContradictsSearchVerb(seed.pathRel, intent, shapeBlob) ||
+        pathContradictsReadGetVerb(seed.pathRel, intent, shapeBlob) ||
+        pathContradictsCrudVerb(seed.pathRel, intent, shapeBlob)
       ) {
         const alt = collapseBodyRuleContenders(rescored).find(
           (c) =>
             c.score >= MIN_SCORE &&
             !pathContradictsUploadVerb(c.pathRel, intent, shapeBlob) &&
             !pathContradictsSearchVerb(c.pathRel, intent, shapeBlob) &&
+            !pathContradictsReadGetVerb(c.pathRel, intent, shapeBlob) &&
+            !pathContradictsCrudVerb(c.pathRel, intent, shapeBlob) &&
             !isAnemicEntityLikePath(c.pathRel) &&
             !isUnsuitableUnitPrimary(c.pathRel)
         );
@@ -1405,7 +1654,7 @@ export async function resolveUnitPrimaryFromIndex(
             writeBack: false,
             seed: null,
             skipReason:
-              "FAIL_VERB_CONTRADICT — upload≠Delete / search≠Assign (refuse soft writeBack)",
+              "FAIL_VERB_CONTRADICT — upload≠Delete / search≠Assign / read≠Create / CRUD verb mismatch (refuse soft writeBack)",
             candidatesTop3: decision.candidatesTop3,
           };
           seed = null;
@@ -1462,9 +1711,10 @@ export async function resolveUnitPrimaryFromIndex(
       };
     }
 
-    const symbol = preferredSymbolFromCodeIndex(
+    const symbol = codeMarkerForResolve(
       codeIndex,
       seed.pathRel,
+      query,
       [...strongPrefer, ...(seed.ruleHits || [])]
     );
     const relatedPaths = relatedFromDeps(
@@ -1482,16 +1732,68 @@ export async function resolveUnitPrimaryFromIndex(
       symbol,
       notes
     );
-    return {
-      writeBack: true,
-      seed: finalized.seed as ResolvedSeed,
-      symbol: finalized.symbol,
-      relatedPaths: finalized.relatedPaths,
-      candidatesTop3: decision.candidatesTop3,
-      bodyRuleLog: `writeBack=yes score=${finalized.seed.score} ruleHits=${(seed.ruleHits || []).join(",")} intent=${intent.primaryClass || "-"}${signalsNote}`,
-      notes,
-      source: "index.db",
-    };
+    const { margin, ratio } = marginForConfidence(
+      finalized.seed.pathRel,
+      finalized.seed.score,
+      decision.candidatesTop3
+    );
+    const strongOk = hasStrongWriteBackSignal({
+      pathRel: finalized.seed.pathRel,
+      ruleHits: seed.ruleHits || [],
+      hits: seed.hits,
+      preferTokens: strongPrefer,
+    });
+    let seedExcerpt: string | undefined;
+    if (readExcerpt && finalized.seed) {
+      try {
+        seedExcerpt = clipBodyExcerpt(await readExcerpt(finalized.seed.pathRel));
+      } catch {
+        seedExcerpt = "";
+      }
+    }
+    const gated = await gateWriteResult(
+      {
+        writeBack: true,
+        seed: finalized.seed as ResolvedSeed,
+        symbol: finalized.symbol,
+        relatedPaths: finalized.relatedPaths,
+        candidatesTop3: decision.candidatesTop3,
+        bodyRuleLog: `writeBack=yes score=${finalized.seed.score} ruleHits=${(seed.ruleHits || []).join(",")} intent=${intent.primaryClass || "-"}${signalsNote}`,
+        notes,
+        source: "index.db",
+      },
+      {
+        score: finalized.seed.score,
+        margin,
+        ratio,
+        moduleGated,
+        hasStrongSignal: strongOk,
+        requiresBodyRule: Boolean(intent.requiresBodyRule),
+        ruleHitCount: (seed.ruleHits || []).length,
+        source: "index.db",
+      },
+      {
+        codeIndex,
+        moduleGated,
+        intent,
+        shapeBlob: shapeBlobForRanking(query),
+        readDisk: readExcerpt || null,
+        excerpt: seedExcerpt,
+        testData: query.testData,
+      }
+    );
+    if (!gated.writeBack) {
+      if (/STALE_INDEX/i.test(gated.skipReason || "")) return gated;
+      const llm = await tryLlmShortlistPick(
+        opts,
+        candidates,
+        notes,
+        gated.skipReason || "FAIL_CONFIDENCE_LOW",
+        llmSoftGate()
+      );
+      if (llm) return llm;
+    }
+    return gated;
   }
 
   // No excerpt reader (or skipped body-rule): soft pick from ranked seeds — Module-gated only
@@ -1628,6 +1930,8 @@ export async function resolveUnitPrimaryFromIndex(
   if (
     pathContradictsUploadVerb(best.pathRel, intent, shapeBlobNoBody) ||
     pathContradictsSearchVerb(best.pathRel, intent, shapeBlobNoBody) ||
+    pathContradictsReadGetVerb(best.pathRel, intent, shapeBlobNoBody) ||
+    pathContradictsCrudVerb(best.pathRel, intent, shapeBlobNoBody) ||
     pathContradictsOpPreferTokens(best.pathRel, opPreferNoBody)
   ) {
     // Prefer next candidate that hits op tokens / verb inside family
@@ -1636,14 +1940,17 @@ export async function resolveUnitPrimaryFromIndex(
         c.score >= MIN_SCORE &&
         !pathContradictsUploadVerb(c.pathRel, intent, shapeBlobNoBody) &&
         !pathContradictsSearchVerb(c.pathRel, intent, shapeBlobNoBody) &&
+        !pathContradictsReadGetVerb(c.pathRel, intent, shapeBlobNoBody) &&
+        !pathContradictsCrudVerb(c.pathRel, intent, shapeBlobNoBody) &&
         !pathContradictsOpPreferTokens(c.pathRel, opPreferNoBody) &&
         !isUnsuitableUnitPrimary(c.pathRel)
     );
     if (opHit) {
       notes.push("opPreferRerank");
-      const symbolOp = preferredSymbolFromCodeIndex(
+      const symbolOp = codeMarkerForResolve(
         codeIndex,
         opHit.pathRel,
+        query,
         [...strongPrefer, ...opPreferNoBody]
       );
       const relatedOp = relatedFromDeps(
@@ -1661,20 +1968,60 @@ export async function resolveUnitPrimaryFromIndex(
         symbolOp,
         notes
       );
-      return {
-        writeBack: true,
-        seed: finalizedOp.seed as ResolvedSeed,
-        symbol: finalizedOp.symbol,
-        relatedPaths: finalizedOp.relatedPaths,
-        candidatesTop3: candidates.slice(0, 3).map((c) => ({
-          pathRel: c.pathRel,
-          score: c.score,
-          ruleHits: [],
-        })),
-        bodyRuleLog: `writeBack=yes opPreferRerank intent=${intent.primaryClass || "-"}`,
-        notes,
-        source: "index.db",
-      };
+      const { margin, ratio } = marginPair(
+        finalizedOp.seed.score,
+        candidates.find((c) => c.pathRel !== opHit.pathRel)?.score
+      );
+      const gatedOp = await gateWriteResult(
+        {
+          writeBack: true,
+          seed: finalizedOp.seed as ResolvedSeed,
+          symbol: finalizedOp.symbol,
+          relatedPaths: finalizedOp.relatedPaths,
+          candidatesTop3: candidates.slice(0, 3).map((c) => ({
+            pathRel: c.pathRel,
+            score: c.score,
+            ruleHits: [],
+          })),
+          bodyRuleLog: `writeBack=yes opPreferRerank intent=${intent.primaryClass || "-"}`,
+          notes,
+          source: "index.db",
+        },
+        {
+          score: finalizedOp.seed.score,
+          margin,
+          ratio,
+          moduleGated,
+          hasStrongSignal: hasStrongWriteBackSignal({
+            pathRel: finalizedOp.seed.pathRel,
+            ruleHits: [],
+            hits: opHit.hits,
+            preferTokens: strongPrefer,
+          }),
+          requiresBodyRule: Boolean(intent.requiresBodyRule),
+          ruleHitCount: 0,
+          source: "index.db",
+        },
+        {
+          codeIndex,
+          moduleGated,
+          intent,
+          shapeBlob: shapeBlobNoBody,
+          readDisk: readExcerpt || null,
+        }
+      );
+      if (!gatedOp.writeBack) {
+        if (/STALE_INDEX/i.test(gatedOp.skipReason || "")) return gatedOp;
+        const llm = await tryLlmShortlistPick(
+          opts,
+          candidates,
+          notes,
+          gatedOp.skipReason || "FAIL_CONFIDENCE_LOW",
+          llmSoftGate()
+        );
+        if (llm) return llm;
+      }
+      return gatedOp;
     }
     const skip = `FAIL_OP_CONTRADICT — path misses op tokens «${opPreferNoBody.slice(0, 4).join(",")}»`;
     const llm = await tryLlmShortlistPick(opts, candidates, notes, skip, llmSoftGate());
@@ -1694,9 +2041,10 @@ export async function resolveUnitPrimaryFromIndex(
       source: "index.db",
     };
   }
-  const symbol = preferredSymbolFromCodeIndex(
+  const symbol = codeMarkerForResolve(
     codeIndex,
     best.pathRel,
+    query,
     strongPrefer
   );
   const relatedPaths = relatedFromDeps(
@@ -1714,17 +2062,54 @@ export async function resolveUnitPrimaryFromIndex(
     symbol,
     notes
   );
-  return {
-    writeBack: true,
-    seed: finalized.seed,
-    symbol: finalized.symbol,
-    relatedPaths: finalized.relatedPaths,
-    candidatesTop3: candidates.slice(0, 3).map((c) => ({
-      pathRel: c.pathRel,
-      score: c.score,
-      ruleHits: [],
-    })),
-    notes,
-    source: "index.db",
-  };
+  const { margin, ratio } = marginPair(finalized.seed.score, second?.score);
+  const gatedSoft = await gateWriteResult(
+    {
+      writeBack: true,
+      seed: finalized.seed,
+      symbol: finalized.symbol,
+      relatedPaths: finalized.relatedPaths,
+      candidatesTop3: candidates.slice(0, 3).map((c) => ({
+        pathRel: c.pathRel,
+        score: c.score,
+        ruleHits: [],
+      })),
+      notes,
+      source: "index.db",
+    },
+    {
+      score: finalized.seed.score,
+      margin,
+      ratio,
+      moduleGated,
+      hasStrongSignal: hasStrongWriteBackSignal({
+        pathRel: finalized.seed.pathRel,
+        ruleHits: [],
+        hits: best.hits,
+        preferTokens: strongPrefer,
+      }),
+      requiresBodyRule: Boolean(intent.requiresBodyRule),
+      ruleHitCount: 0,
+      source: "index.db",
+    },
+    {
+      codeIndex,
+      moduleGated,
+      intent,
+      shapeBlob: shapeBlobForRanking(query),
+      readDisk: readExcerpt || null,
+    }
+  );
+  if (!gatedSoft.writeBack) {
+    if (/STALE_INDEX/i.test(gatedSoft.skipReason || "")) return gatedSoft;
+    const llm = await tryLlmShortlistPick(
+      opts,
+      candidates,
+      notes,
+      gatedSoft.skipReason || "FAIL_CONFIDENCE_LOW",
+      llmSoftGate()
+    );
+    if (llm) return llm;
+  }
+  return gatedSoft;
 }

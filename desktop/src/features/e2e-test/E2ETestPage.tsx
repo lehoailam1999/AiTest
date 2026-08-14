@@ -312,8 +312,6 @@ export default function E2ETestPage() {
   const [run, setRun] = useState<E2eJobRunState>(initialE2eJobRunState);
   const [activePhase, setActivePhase] = useState<E2ePhaseId | null>(null);
   const [resultTab, setResultTab] = useState("log");
-  const [, setGateReady] = useState(false);
-  const [, setGateReasons] = useState<string[]>([]);
   const [staging, setStaging] = useState<E2eStagingSession | null>(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [appliedPaths, setAppliedPaths] = useState<string[]>([]);
@@ -664,11 +662,6 @@ export default function E2ETestPage() {
     [searchParams, setSearchParams]
   );
 
-  const onGateChange = useCallback((g: { ready: boolean; reasons: string[] }) => {
-    setGateReady(g.ready);
-    setGateReasons(g.reasons);
-  }, []);
-
   function selectPhase(id: E2ePhaseId) {
     setActivePhase(id);
     setResultTab("log");
@@ -839,35 +832,6 @@ export default function E2ETestPage() {
       setAppliedPaths([]);
     } catch {
       /* optional */
-    }
-  }
-
-  /** Step 1 — Inspect only */
-  async function runStepInspect() {
-    if (!localPath) {
-      message.warning("Cần gắn project root");
-      return;
-    }
-    if (!targetUrl.trim()) {
-      message.warning("Cần Target URL");
-      return;
-    }
-    setBusy(true);
-    setResultTab("log");
-    try {
-      await ensureInspectSnapshot(true);
-      message.success("Inspect xong");
-      void persistE2eEnv();
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-      setRun((r) =>
-        finishPhase(appendPhaseLog(r, "inspect", `ERROR: ${String(e)}\n`), "inspect", {
-          status: "error",
-          durationMs: 0,
-        })
-      );
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -1851,7 +1815,7 @@ export default function E2ETestPage() {
                 ? "Đã discover role nhưng chưa có storageState hợp lệ — trong panel E2E Job mở Auth → bấm «Đồng bộ auth (auto / AI)» (hoặc Override username/password)."
                 : "Chưa Auth — trong panel E2E Job mở Auth → «Đồng bộ auth» hoặc Override username/password. Thiếu auth → Inspect login-wall / Verify fail cao (Gen vẫn chạy được)."
           }
-          onGateChange={onGateChange}
+          onGateChange={() => undefined}
         />
 
         {!isIdeCodegenReady() ? (
@@ -1862,7 +1826,7 @@ export default function E2ETestPage() {
             description={
               <span>
                 Gắn source + Connect IDE trong <Link to={ROUTES.projects}>Dự án → Sửa dự án</Link>{" "}
-                (Cursor mở đúng repo đích) — dùng cho Apply/Run qua Extension.
+                (Cursor mở đúng repo đích) — Gen E2E / Apply / Run qua Extension + Agent CLI.
               </span>
             }
           />
@@ -2071,13 +2035,6 @@ export default function E2ETestPage() {
                         </Space>
                       }
                     />
-                    <Button
-                      size="small"
-                      disabled={busy || !localPath || !targetUrl.trim()}
-                      onClick={() => void runStepInspect()}
-                    >
-                      Quét DOM (Inspect) ngay
-                    </Button>
                   </Space>
                 ),
               },

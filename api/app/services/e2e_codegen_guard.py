@@ -56,6 +56,12 @@ const COMMON_LOGIN_PATHS = [
   '/#/account/login',
 ];
 
+const LOGIN_FORM_WAIT_MS = Number(process.env.E2E_LOGIN_FORM_WAIT_MS || 6000);
+const LOGIN_PATH_PROBE_MAX = Math.max(
+  1,
+  Number(process.env.E2E_LOGIN_PATH_PROBE_MAX || 3),
+);
+
 /**
  * Step 0 for feature journeys: reach + leave the login wall before POM actions.
  *
@@ -139,7 +145,7 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
     return false;
   };
 
-  const waitForLoginForm = async (ms = 15000): Promise<boolean> =>
+  const waitForLoginForm = async (ms = LOGIN_FORM_WAIT_MS): Promise<boolean> =>
     passwordField()
       .or(userField())
       .or(loginHeading())
@@ -150,17 +156,20 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
 
   const tryGotoLoginPath = async (raw: string): Promise<boolean> => {
     const path = raw.startsWith('http') ? raw : raw.startsWith('/') ? raw : `/${raw}`;
-    await page.goto(path, { waitUntil: 'domcontentloaded' });
-    return await waitForLoginForm(12000);
+    await page.goto(path, { waitUntil: 'domcontentloaded' }).catch(() => undefined);
+    return await waitForLoginForm(Math.min(LOGIN_FORM_WAIT_MS, 5000));
   };
 
   const openLoginEntry = async (): Promise<boolean> => {
     if (await isLoginWall()) return true;
 
     const explicit = (process.env.E2E_LOGIN_PATH || '').trim();
-    if (explicit && (await tryGotoLoginPath(explicit))) return true;
-
-    for (const p of COMMON_LOGIN_PATHS) {
+    const candidatePaths = [
+      ...(explicit ? [explicit] : []),
+      ...COMMON_LOGIN_PATHS,
+    ];
+    const deduped = [...new Set(candidatePaths)].slice(0, LOGIN_PATH_PROBE_MAX);
+    for (const p of deduped) {
       if (await tryGotoLoginPath(p)) return true;
     }
     // Return to home before CTA clicks (last path may have been a 404).
@@ -214,12 +223,42 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
     .catch(() => undefined);
 
   const roleHint = (process.env.E2E_ROLE || process.env.E2E_AUTH_ROLE || 'default').trim();
+  const forceUiLogin = (process.env.E2E_FORCE_UI_LOGIN || '').trim() === '1';
+  const storageStateHint = (process.env.E2E_STORAGE_STATE || '').trim();
   const roleSlug = roleHint.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase();
-  const roleUser = roleSlug ? (process.env[`E2E_${roleSlug}_USERNAME`] || '').trim() : '';
-  const rolePass = roleSlug ? (process.env[`E2E_${roleSlug}_PASSWORD`] || '').trim() : '';
-  const user = (roleUser || process.env.E2E_USERNAME || '').trim();
-  const pass = (rolePass || process.env.E2E_PASSWORD || '').trim();
+  const roleUser = forceUiLogin && roleSlug ? (process.env[`E2E_${roleSlug}_USERNAME`] || '').trim() : '';
+  const rolePass = forceUiLogin && roleSlug ? (process.env[`E2E_${roleSlug}_PASSWORD`] || '').trim() : '';
+  const user = forceUiLogin ? (roleUser || process.env.E2E_USERNAME || '').trim() : '';
+  const pass = forceUiLogin ? (rolePass || process.env.E2E_PASSWORD || '').trim() : '';
   const hasCreds = Boolean(user && pass);
+  const likelyAuthedSession = async (): Promise<boolean> => {
+    const onLogin = await isLoginWall();
+    if (onLogin) return false;
+    const hasLoginCta = await anyLoginCtaVisible();
+    if (!hasLoginCta) return true;
+    const hasAccountMenu = await page
+      .locator('[data-cy="accountMenu"], [data-testid="accountMenu"], [aria-label*="account" i]')
+      .first()
+      .isVisible()
+      .catch(() => false);
+    return hasAccountMenu;
+  };
+
+  if (await likelyAuthedSession()) {
+    await persistAuthTokens();
+    return;
+  }
+
+  // Default mode: if storageState is provided but login wall still appears,
+  // fail fast with a clear message (avoid slow route/credential retries).
+  if (storageStateHint && !forceUiLogin) {
+    if (await isLoginWall()) {
+      throw new Error(
+        `AuthRequired: storageState='${storageStateHint}' provided but app is still on login wall. ` +
+          `Reseed .ai-test/auth/${(roleHint || 'default').replace(/[^a-zA-Z0-9_-]+/g, '-')}.json or set E2E_FORCE_UI_LOGIN=1 to use UI credentials.`,
+      );
+    }
+  }
 
   let onLogin = await isLoginWall();
   if (!onLogin) {
@@ -254,7 +293,8 @@ export async function ensureAuthenticated(page: Page): Promise<void> {
 
   if (!hasCreds) {
     throw new Error(
-      'App requires login but E2E_USERNAME / E2E_PASSWORD are not set. ' +
+      'App requires login but UI credential mode is off (or E2E_USERNAME / E2E_PASSWORD are not set). ' +
+        'Set E2E_FORCE_UI_LOGIN=1 to allow credential login. ' +
         'For multi-role, set E2E_ROLE + E2E_<ROLE>_USERNAME/PASSWORD. ' +
         'Enter them on AITest → E2E → Môi trường, or Seed auth → .ai-test/auth/{role}.json.',
     );
@@ -1667,6 +1707,12 @@ def _is_create_open_method(method: str) -> bool:
         norm,
     ):
         return True
+    if "create" in norm and any(
+        x in norm for x in ("modal", "dialog", "drawer", "popup")
+    ):
+        return True
+    if re.search(r"(open|click|press).*(create|addnew|taomoi|entitycreate)", norm):
+        return True
     return norm in (
         "clickcreate",
         "opencreate",
@@ -1678,18 +1724,19 @@ def _is_create_open_method(method: str) -> bool:
 
 
 def _render_create_open_stub(method: str) -> str:
-    """Click Create/Add when Spec passes a label — else fail-closed (no invent regex)."""
+    """Open create: Spec label, else JHipster/a11y Create control (not shell main|body)."""
     name = method or "clickCreateNew"
     return (
         f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
         "    const raw = _args.length ? _args[0] : undefined;\n"
-        "    if (!(raw instanceof RegExp) && !(typeof raw === 'string' && raw.trim())) {\n"
-        f"      throw new Error('Phase 3: ungrounded POM stub `{name}` — "
-        "pass Create button label from Spec or DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
-        "    }\n"
         "    const loc = raw instanceof RegExp\n"
         "      ? this.page.getByRole('button', { name: raw }).first()\n"
-        "      : this.page.getByRole('button', { name: raw }).first();\n"
+        "      : typeof raw === 'string' && raw.trim()\n"
+        "        ? this.page.getByRole('button', { name: raw }).first()\n"
+        "        : this.page.getByTestId('entityCreateButton')\n"
+        "            .or(this.page.locator('#jh-create-entity'))\n"
+        "            .or(this.page.getByRole('button', { name: /Tạo mới|Create|Add/i }))\n"
+        "            .first();\n"
         "    await loc.waitFor({ state: 'visible', timeout: 15000 });\n"
         "    await loc.click();\n"
         "  }\n"
@@ -1776,6 +1823,39 @@ def _is_select_field_method(method: str) -> bool:
     )
 
 
+def _is_leave_empty_method(method: str) -> bool:
+    """leaveRequired*Empty / fillPartial*LeaveRestEmpty — clear required, do not invent fill."""
+    norm = _norm_key(method or "")
+    if not norm:
+        return False
+    if norm.startswith(("expect", "assert", "click", "goto", "open")):
+        return False
+    return bool(
+        re.search(
+            r"(leave\w*(empty|blank|rest)|omit\w+|unfilled|"
+            r"incomplete\w*field|field\w*empty|empty\w*field)",
+            norm,
+        )
+    )
+
+
+def _is_expect_disabled_or_blocked(method: str) -> bool:
+    """expectStep1IncompleteBlocksStep2 / expectNextDisabled — assert wizard Next disabled."""
+    norm = _norm_key(method or "")
+    if not norm.startswith(("expect", "assert")):
+        return False
+    if re.search(r"(allow|success|complete(?!step)|permitted|enabled)", norm):
+        if not re.search(r"(disabled|block|incomplete|invalid|prevent)", norm):
+            return False
+    return bool(
+        re.search(
+            r"(disabled|block|incomplete|invalid|required|cannot|prevent|"
+            r"stay.*step|not.*step|step1)",
+            norm,
+        )
+    )
+
+
 def _is_field_fill_method(method: str) -> bool:
     """arrangeRequiredName / fillSeizureLocation / setTitle — not Phase-3 throw."""
     norm = _norm_key(method or "")
@@ -1784,6 +1864,8 @@ def _is_field_fill_method(method: str) -> bool:
     if _is_menu_nav_method(method) or _is_feature_nav_method(method):
         return False
     if _is_select_field_method(method):
+        return False
+    if _is_leave_empty_method(method):
         return False
     return bool(
         re.match(
@@ -1822,19 +1904,20 @@ def _render_field_fill_stub(method: str) -> str:
       }}
     }}
     if (!q) {{
-      throw new Error('Phase 3: ungrounded POM stub `' + {name_js} + '` — '
+      throw new Error('Phase 3: unresolved POM stub `' + {name_js} + '` — '
         + 'pass fill value from Spec testData (E2E_GROUNDING fail-closed)');
     }}
     const hint = new RegExp({hint_js}.replace(/\\s+/g, '\\\\s*'), 'i');
     const field = this.page.getByLabel(hint)
       .or(this.page.getByPlaceholder(hint))
       .or(this.page.getByRole('textbox', {{ name: hint }}))
+      .or(this.page.locator('input[type="text"], input:not([type]), textarea, [role="textbox"]').first())
       .first();
     if (await field.isVisible().catch(() => false)) {{
       await field.fill(q);
       return;
     }}
-    throw new Error('Phase 3: ungrounded POM stub `' + {name_js} + '` — '
+    throw new Error('Phase 3: unresolved POM stub `' + {name_js} + '` — '
       + 'no matching label/placeholder for field hint (E2E_GROUNDING fail-closed)');
   }}
 """
@@ -1853,7 +1936,7 @@ def _render_select_field_stub(method: str) -> str:
       : raw instanceof RegExp ? raw
       : '';
     if (!optLabel) {{
-      throw new Error('Phase 3: ungrounded POM stub `' + {name_js} + '` — '
+      throw new Error('Phase 3: unresolved POM stub `' + {name_js} + '` — '
         + 'pass option label from Spec (E2E_GROUNDING fail-closed)');
     }}
     const hint = new RegExp({hint_js}.replace(/\\s+/g, '\\\\s*'), 'i');
@@ -1925,6 +2008,8 @@ def _is_wizard_next_method(method: str) -> bool:
     norm = _norm_key(method or "")
     if not norm:
         return False
+    if norm.startswith(("expect", "assert", "get", "find", "locate")):
+        return False
     if re.search(
         r"(gonext|clicknext|continuenext|nextstep|nextfrom|gotostep|"
         r"completestep|finishstep|submitstep|advancestep|reachstep|"
@@ -1932,8 +2017,8 @@ def _is_wizard_next_method(method: str) -> bool:
         norm,
     ):
         return True
-    # completeXToReachY / finishXAndGoToY
-    if re.search(r"(complete|finish|submit|advance).*(step|next|reach)", norm):
+    # completeXToReachY / finishXAndGoToY — not the substring inside "incomplete"
+    if re.search(r"(?<![a-z])(complete|finish|submit|advance).*(step|next|reach)", norm):
         return True
     if re.search(r"(reach|goto|moveto).*step", norm) and "login" not in norm:
         return True
@@ -1941,20 +2026,51 @@ def _is_wizard_next_method(method: str) -> bool:
 
 
 def _render_wizard_next_stub(method: str) -> str:
-    """Click Next/Continue when Spec passes a label — else fail-closed."""
+    """Click wizard Next — Spec label, else portable Next/Continue/Tiếp theo in dialog."""
     name = method or "goNext"
     return (
         f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
         "    const raw = _args.length ? _args[0] : undefined;\n"
-        "    if (!(raw instanceof RegExp) && !(typeof raw === 'string' && raw.trim())) {\n"
-        f"      throw new Error('Phase 3: ungrounded POM stub `{name}` — "
-        "pass Next button label from Spec or DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
-        "    }\n"
+        "    const scope = this.page.locator('ngb-modal-window, [role=\"dialog\"], form').last();\n"
         "    const nextBtn = raw instanceof RegExp\n"
-        "      ? this.page.getByRole('button', { name: raw }).first()\n"
-        "      : this.page.getByRole('button', { name: raw }).first();\n"
+        "      ? scope.getByRole('button', { name: raw }).first()\n"
+        "      : typeof raw === 'string' && raw.trim()\n"
+        "        ? scope.getByRole('button', { name: raw }).first()\n"
+        "        : scope.getByRole('button', { name: /Tiếp theo|Next|Continue|Hoàn tất|Submit/i }).first();\n"
         "    await nextBtn.waitFor({ state: 'visible', timeout: 15000 });\n"
         "    await nextBtn.click();\n"
+        "  }\n"
+    )
+
+
+def _render_leave_empty_stub(method: str) -> str:
+    """Clear required name field in dialog — do not invent a fill value."""
+    name = method or "leaveRequiredFieldEmpty"
+    return (
+        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+        "    const dlg = this.page.locator('ngb-modal-window, [role=\"dialog\"]').last();\n"
+        "    const field = dlg.locator('#field_name, [formControlName=\"name\"]')\n"
+        "      .or(dlg.locator('input.stitch-modal-input, input[id^=\"field_\"]').first())\n"
+        "      .first();\n"
+        "    if (await field.isVisible().catch(() => false)) {\n"
+        "      await field.fill('');\n"
+        "    }\n"
+        "  }\n"
+    )
+
+
+def _render_expect_disabled_stub(method: str) -> str:
+    """Incomplete/blocked wizard step → Next must stay disabled (not R6 text, not body)."""
+    name = method or "expectNextDisabled"
+    return (
+        f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
+        "    const next = this.page.locator('ngb-modal-window, [role=\"dialog\"]').last()\n"
+        "      .getByRole('button', { name: /Tiếp theo|Next|Continue/i }).first();\n"
+        "    await expect(next).toBeDisabled({ timeout: 15000 });\n"
+        "    const raw = _args.length ? _args[0] : undefined;\n"
+        "    if (raw instanceof RegExp) {\n"
+        "      await expect(this.page.getByText(raw).first()).toBeVisible({ timeout: 15000 });\n"
+        "    }\n"
         "  }\n"
     )
 
@@ -2045,6 +2161,8 @@ def _render_smart_method_stub(
         return _render_create_open_stub(name)
     if _is_wizard_next_method(name):
         return _render_wizard_next_stub(name)
+    if _is_leave_empty_method(name):
+        return _render_leave_empty_stub(name)
     if _is_select_field_method(name):
         return _render_select_field_stub(name)
     if _is_field_fill_method(name):
@@ -2094,11 +2212,16 @@ def _render_smart_method_stub(
             "    if (raw instanceof RegExp) return this.page.getByText(raw).first();\n"
             "    const texts = __aitestVisibleTexts(raw);\n"
             "    if (texts.length) return this.page.getByText(texts[0], { exact: false }).first();\n"
-            "    return this.page.locator('main, [role=\"main\"], body').first();\n"
+            "    throw new Error(\n"
+            f"      'Phase 3: unresolved POM stub `{name}` — "
+            "get* needs Spec text (no shell main|body locator)'\n"
+            "    );\n"
             "  }\n"
         )
 
     if low.startswith(("expect", "assert")):
+        if _is_expect_disabled_or_blocked(name):
+            return _render_expect_disabled_stub(name)
         helper = _ts_visible_texts_from_arg_helper(indent="    ")
         return (
             f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"
@@ -2141,7 +2264,7 @@ def _render_smart_method_stub(
             "      await loc.click();\n"
             "      return;\n"
             "    }\n"
-            f"    throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+            f"    throw new Error('Phase 3: unresolved POM stub `{name}` — "
             "no Spec label and no DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
             "  }\n"
         )
@@ -2202,13 +2325,13 @@ def _render_smart_method_stub(
             "      await loc.click();\n"
             "      return;\n"
             "    }\n"
-            f"    throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+            f"    throw new Error('Phase 3: unresolved POM stub `{name}` — "
             "no Spec label and no DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
             "  }\n"
         )
 
     if re.match(
-        r"^(click|tap|press|do|run|trigger|invoke|complete|finish|submit|advance)",
+        r"^(click|tap|press|complete|finish|submit|advance)",
         norm,
     ):
         # Wizard already handled above; bare invent Save/Next → fail-closed.
@@ -2228,7 +2351,7 @@ def _render_smart_method_stub(
             "      await loc.click();\n"
             "      return;\n"
             "    }\n"
-            f"    throw new Error('Phase 3: ungrounded POM stub `{name}` — "
+            f"    throw new Error('Phase 3: unresolved POM stub `{name}` — "
             "no Spec label and no DOM selector_candidates (E2E_GROUNDING fail-closed)');\n"
             "  }\n"
         )
@@ -2426,7 +2549,7 @@ def _rewrite_ungrounded_nav_stubs(
     text = page_content or ""
     pattern = re.compile(
         r"async\s+(\w+)\s*\([^)]*\)\s*:\s*Promise<\s*void\s*>\s*\{"
-        r"\s*throw\s+new\s+Error\(\s*['\"]Phase 3: ungrounded POM stub[^'\"]*['\"]\s*\)\s*;?\s*"
+        r"\s*throw\s+new\s+Error\(\s*['\"]Phase 3: (?:ungrounded|unresolved) POM stub[^'\"]*['\"]\s*\)\s*;?\s*"
         r"\}",
         re.IGNORECASE,
     )
@@ -2450,6 +2573,47 @@ _POM_LANDMARK_EXPECT_RE = re.compile(
     r"await\s+expect\s*\(\s*this\.page\.locator\(\s*['\"]main,\s*\[role=",
     re.IGNORECASE,
 )
+
+_ASSIGN_SHELL_BODY_RE = re.compile(
+    r"this\.(\w+)\s*=\s*this\.page\.locator\(\s*['\"]main,\s*\[role=[\"']main[\"']\],\s*body['\"]\s*\)\.first\(\)",
+    re.IGNORECASE,
+)
+
+
+def _locator_init_expr(name: str) -> str:
+    """Never bind action locators to main|body (toBeDisabled on body always fails)."""
+    n = _norm_key(name)
+    if re.search(r"(create|addnew|taomoi|entitycreate)", n) and re.search(
+        r"(button|btn|open|click|new)", n
+    ):
+        return (
+            "this.page.getByTestId('entityCreateButton')"
+            ".or(this.page.locator('#jh-create-entity'))"
+            ".or(this.page.getByRole('button', { name: /Tạo mới|Create|Add/i }))"
+            ".first()"
+        )
+    if re.search(r"(next|submit|save|confirm|apply|button|btn)", n):
+        return (
+            "this.page.locator('ngb-modal-window, [role=\"dialog\"]').last()"
+            ".getByRole('button', { name: /Tiếp theo|Next|Continue|Hoàn tất|Submit|Save/i })"
+            ".first()"
+        )
+    if re.search(r"(input|field|textbox|name)", n):
+        return (
+            "this.page.locator('#field_name, [formControlName=\"name\"], "
+            "[role=\"dialog\"] input:not([type=\"hidden\"])').first()"
+        )
+    return "this.page.locator('ngb-modal-window, [role=\"dialog\"], main').first()"
+
+
+def _rewrite_shell_action_locators(page_content: str) -> str:
+    """Rewrite this.nextButton = locator(main|body) to a real wizard/create control."""
+    text = page_content or ""
+
+    def repl(m: re.Match[str]) -> str:
+        return f"this.{m.group(1)} = {_locator_init_expr(m.group(1))}"
+
+    return _ASSIGN_SHELL_BODY_RE.sub(repl, text)
 
 
 def _rewrite_expect_object_string_stubs(page_content: str) -> str:
@@ -2665,15 +2829,24 @@ def _field_id_to_form_control(root: str) -> str:
     return ""
 
 
+def _contains_ci(values: set[str], needle: str) -> bool:
+    n = (needle or "").strip().lower()
+    if not n:
+        return False
+    return any((v or "").strip().lower() == n for v in (values or set()))
+
+
 def _value_allowed(key: str, value: str, allowed: dict[str, set[str]]) -> bool:
     if not value:
         return True
     bucket = allowed.get(key) or set()
-    if value in bucket:
+    if value in bucket or _contains_ci(bucket, value):
         return True
     if key in ("data-cy", "data-testid"):
         alt = "data-testid" if key == "data-cy" else "data-cy"
-        if value in (allowed.get(alt) or set()):
+        if value in (allowed.get(alt) or set()) or _contains_ci(
+            allowed.get(alt) or set(), value
+        ):
             return True
     if key == "id":
         root = _id_root_token(value)
@@ -2689,6 +2862,14 @@ def _value_allowed(key: str, value: str, allowed: dict[str, set[str]]) -> bool:
     if key == "formControlName":
         # Bridge reverse: control name allowed when id field_{name} is listed
         if f"field_{value}" in (allowed.get("id") or set()):
+            return True
+    if key == "name":
+        # Common FE convention: name ~= formControlName ~= id field_{name}
+        fcn = allowed.get("formControlName") or set()
+        if value in fcn or _contains_ci(fcn, value):
+            return True
+        ids = allowed.get("id") or set()
+        if f"field_{value}" in ids or _contains_ci(ids, f"field_{value}"):
             return True
     return False
 
@@ -3217,6 +3398,7 @@ def apply_e2e_codegen_guards(
                 feature_path=stub_feature_path,
                 dom_snapshot=dom_snapshot,
             )
+            f.content = _rewrite_shell_action_locators(f.content or "")
             f.content = _rewrite_expect_object_string_stubs(f.content or "")
             f.content = _rewrite_feature_nav_seed_stubs(
                 f.content or "", feature_path=stub_feature_path
@@ -3499,6 +3681,12 @@ def apply_e2e_codegen_guards(
 
     # Per-TC deep-link bake (force) — fixes suite noise like /admin/case-record on Evidence TCs
     _bake_feature_paths_per_tc(normalized, hint=feature_path)
+    for f in normalized:
+        p = (f.path or "").replace("\\", "/")
+        if not (f.content or "").strip():
+            continue
+        f.content = rewrite_nested_aitest_imports(f.content or "", p)
+        f.content = fix_playwright_shim_reference(f.content or "", p)
     _assert_locator_contract(normalized, locator_contract)
     # Rule 23: ban invented E2E_* env (always — not only strict_gate)
     _rewrite_or_assert_e2e_env_usage(
@@ -3664,6 +3852,8 @@ def normalize_collapsed_imports(content: str) -> str:
         text,
         flags=re.MULTILINE,
     )
+    # Fix glued test steps: `});await test.step(...)` → newline between steps.
+    text = re.sub(r"\}\);\s*await\s+test\.step\(", "});\n\n  await test.step(", text)
     return text
 
 
@@ -4061,6 +4251,77 @@ def is_bogus_spec_content(content: str) -> bool:
     return False
 
 
+def _e2e_suite_root_from_path(file_path: str) -> str | None:
+    """Return ``[{pkg}/]AItest/E2ETest`` prefix from a normalized file path."""
+    p = (file_path or "").replace("\\", "/").strip("/")
+    if not p:
+        return None
+    parts = p.split("/")
+    for i, seg in enumerate(parts):
+        if seg == "AItest" and i + 1 < len(parts) and parts[i + 1] == "E2ETest":
+            return "/".join(parts[: i + 2])
+    return None
+
+
+def fix_playwright_shim_reference(content: str, file_path: str) -> str:
+    """Recompute ``/// <reference path=…>`` → ``_shared/types/playwright-shim.d.ts``."""
+    text = content or ""
+    if "playwright/test" not in text.lower():
+        return text
+    suite = _e2e_suite_root_from_path(file_path)
+    if not suite:
+        return text
+    shim_abs = f"{suite}/_shared/types/playwright-shim.d.ts"
+    file_dir = os.path.dirname(file_path.replace("\\", "/")) or "."
+    rel = os.path.relpath(shim_abs, file_dir).replace("\\", "/")
+    new_ref = f'/// <reference path="{rel}" />'
+    if re.search(r"///\s*<reference\s+path=", text):
+        return re.sub(
+            r'///\s*<reference\s+path=["\'][^"\']*["\']\s*/>',
+            new_ref,
+            text,
+            count=1,
+        )
+    return f"{new_ref}\n{text}"
+
+
+def rewrite_nested_aitest_imports(content: str, file_path: str) -> str:
+    """
+    LLM sometimes emits ``../AItest/E2ETest/_shared/pages/X`` from files already
+    under the suite — rewrite to correct relative imports.
+    """
+    text = content or ""
+    if "AItest" not in text and "aitest" not in text.lower():
+        return text
+    suite = _e2e_suite_root_from_path(file_path)
+    if not suite:
+        return text
+    import_re = re.compile(r"""(from\s+['"])([^'"]+)(['"])""")
+
+    def _repl(m: re.Match[str]) -> str:
+        prefix, raw, suffix = m.group(1), m.group(2).replace("\\", "/"), m.group(3)
+        if "AItest/E2ETest" not in raw and "aitest/e2etest" not in raw.lower():
+            return m.group(0)
+        tail_m = re.search(
+            r"(?:^|[./]*)(?:[^/]+/)*AItest/E2ETest/(.+)$", raw, re.IGNORECASE
+        )
+        if not tail_m:
+            return m.group(0)
+        tail = tail_m.group(1)
+        target = f"{suite}/{tail}"
+        if not target.endswith((".ts", ".tsx", ".js", ".jsx")):
+            # import spec usually omits extension — keep as-is for relpath target
+            pass
+        from_dir = os.path.dirname(file_path.replace("\\", "/")) or "."
+        rel = os.path.relpath(target, from_dir).replace("\\", "/")
+        rel = re.sub(r"\.(tsx?|jsx?)$", "", rel, flags=re.IGNORECASE)
+        if not rel.startswith("."):
+            rel = f"./{rel}"
+        return f"{prefix}{rel}{suffix}"
+
+    return import_re.sub(_repl, text)
+
+
 def _rewrite_cross_tc_imports(content: str, spec_path: str, all_files: list) -> str:
     """
     Specs import POM from suite ``_shared/pages`` (or legacy sibling ``../pages``).
@@ -4076,6 +4337,15 @@ def _rewrite_cross_tc_imports(content: str, spec_path: str, all_files: list) -> 
         prefix, raw_path, suffix = m.group(1), m.group(2).replace("\\", "/"), m.group(3)
         if "/pages/" not in raw_path:
             return m.group(0)
+        # Nested LLM path like ../AItest/E2ETest/_shared/pages/foo — normalize first
+        if "AItest/E2ETest" in raw_path or "aitest/e2etest" in raw_path.lower():
+            if spec_path:
+                fixed = rewrite_nested_aitest_imports(
+                    f"{prefix}{raw_path}{suffix}", spec_path
+                )
+                inner = re.match(r"""from\s+['"]([^'"]+)['"]""", fixed)
+                if inner:
+                    raw_path = inner.group(1)
         # Already suite-shared or classic sibling — keep
         if "/_shared/pages/" in raw_path or raw_path.startswith("../pages/"):
             return m.group(0)
@@ -4521,7 +4791,7 @@ def _ensure_locator_fields_for_spec_expects(
         page_content,
     )
     init = "".join(
-        f"\n    this.{name} = this.page.locator('main, [role=\"main\"], body').first();"
+        f"\n    this.{name} = {_locator_init_expr(name)};"
         for name in sorted(needed)
     )
     if page_assign:

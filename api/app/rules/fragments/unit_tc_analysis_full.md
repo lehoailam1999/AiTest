@@ -75,7 +75,14 @@ Root: `testCases`, `coverage` (per PRIMARY: total/covered/missing), `gaps`, `unk
 
 Mỗi TC tối thiểu: `title`, `type=Unit`, `primaryBucket`, `scenario`, `trace.{requirementIds,behaviorId}`, `preconditions`, `testData.{input,target,existingState}`, `steps.{prepare,execute}`, `expectedResult.{type,observable,description}`, `testDataHints.{layerHint,sourceSignal}` (null nếu không biết), `status` READY_FOR_CODEGEN|NOT_READY.
 
-Title VN: `[Feature] - [Hành động BE] - [Kết quả]` — **cấm** Class.Method.  
+**Nguồn cover:** chỉ BUSINESS_RULES · VALIDATION_DATA · ERROR_HANDLING · ACCEPTANCE(BE).  
+FEATURES = tên `module` — **cấm** pad TC từ FEATURES/FLOWS/useCases/UI.
+
+**Approve-ready (bắt buộc — không invent class/method):**  
+- `primaryBucket` + `behaviorId` + `requirementIds`  
+- VALIDATION → `target.field` + `target.constraint` (+ boundary/value khi có)  
+- `expectedResult.observable` ∈ create|update|query|validate|reject|persist|authz|state  
+- Title VN: `[Feature] - [Hành động BE] - [Kết quả]` — động từ nghiệp vụ (tạo/cập nhật/từ chối/lọc/đọc/gán) — **cấm** Class.Method / click / điền form / màn hình.  
 Steps/expected: ngôn ngữ nghiệp vụ BE — không class/repo/HTTP invent.
 
 ---

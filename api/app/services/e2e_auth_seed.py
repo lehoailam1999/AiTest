@@ -349,7 +349,7 @@ async def _ensure_auth_seed_unlocked(
     try:
         from app.services.e2e_auth_sut_mine import materialize_mined_auth_artifacts
 
-        materialize_mined_auth_artifacts(root)
+        materialize_mined_auth_artifacts(root, roles=[role_s])
         mined = load_auth_artifact(root, role_s)
         if not mined and role_s not in ("admin", "default"):
             # Unknown role → fall back to admin if present (common for feature TCs)

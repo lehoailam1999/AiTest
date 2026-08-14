@@ -468,9 +468,20 @@ def discover_project_auth(
 
     # 0) Deterministic SUT mine → materialize missing .ai-test/auth/{role}.json (no AITest UI)
     try:
-        from app.services.e2e_auth_sut_mine import materialize_mined_auth_artifacts
+        from app.services.e2e_auth_sut_mine import (
+            load_aitest_profile,
+            materialize_mined_auth_artifacts,
+        )
 
-        mined_roles = materialize_mined_auth_artifacts(root)
+        profile = load_aitest_profile(root)
+        profile_roles = [
+            str(r).strip()
+            for r in ((profile.get("auth") or {}).get("roles") or [])
+            if str(r).strip()
+        ]
+        mined_roles = materialize_mined_auth_artifacts(
+            root, roles=profile_roles or None
+        )
         if mined_roles:
             discovery.notes.append(
                 f"Auto auth từ SUT (i18n/JHipster/.env mine): {', '.join(mined_roles)}"

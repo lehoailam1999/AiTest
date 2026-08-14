@@ -275,8 +275,14 @@ export default function RequirementStudioPage({
       setKnowledge(kw);
       emitStatus(files, kw);
       setFocus("knowledge");
-      if (kw.enrichPending || kw.status === "building") {
-        message.info("Đang hiển thị dữ liệu sơ bộ — AI đang bổ sung chi tiết trong nền…");
+      if (kw.enrichPending) {
+        // Heuristic already ready — unlock UI; enrich runs in background.
+        setBuilding(false);
+        message.info(
+          "Bản heuristic sẵn sàng — có thể xem / Freeze. AI đang bổ sung chi tiết trong nền…"
+        );
+      } else if (kw.status === "building") {
+        message.info("Đang phân tích…");
       } else {
         setBuilding(false);
         message.success(
@@ -409,7 +415,9 @@ export default function RequirementStudioPage({
         <Space wrap>
           {isAnalyzing ? (
             <Tag color="processing" icon={<SyncOutlined spin />}>
-              Đang phân tích AI…
+              {knowledge?.enrichPending && !building
+                ? "AI enrich nền…"
+                : "Đang phân tích…"}
             </Tag>
           ) : null}
           <Button icon={<ReloadOutlined />} onClick={() => void boot()} disabled={bootLoading}>
@@ -419,11 +427,15 @@ export default function RequirementStudioPage({
             <Button
               type="primary"
               icon={<ThunderboltOutlined />}
-              loading={isAnalyzing}
-              disabled={isAnalyzing}
+              loading={building}
+              disabled={building || Boolean(knowledge?.enrichPending)}
               onClick={() => void buildKnowledge()}
             >
-              {isAnalyzing ? "Đang phân tích…" : "Phân tích"}
+              {building
+                ? "Đang phân tích…"
+                : knowledge?.enrichPending
+                  ? "Đang enrich AI…"
+                  : "Phân tích"}
             </Button>
           ) : null}
         </Space>
@@ -460,7 +472,7 @@ export default function RequirementStudioPage({
       ) : focus === "knowledge" ? (
         <KnowledgePanel
           knowledge={knowledge}
-          building={isAnalyzing}
+          building={building}
           canBuild={canBuildKnowledge}
           onBuild={() => void buildKnowledge()}
           onOpenFreeze={() => setFocus("freeze")}

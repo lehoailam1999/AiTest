@@ -14,8 +14,6 @@ export {
   generateE2eBatch,
   verifyE2eModuleBatch,
   verifyE2eForTestCase,
-  runE2eJobForTestCase,
-  runE2eModuleBatch,
 } from "./e2eJobRunner";
 export type {
   E2eBatchItemResult,

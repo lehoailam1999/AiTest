@@ -79,10 +79,15 @@ def test_fail_closed_stub_no_button_first_invent():
     assert "ungrounded" in labeled.lower() or "raw" in labeled
 
 
-def test_create_open_stub_fail_closed_without_label():
-    """openCreate* requires Spec label — no invent Create regex (P1)."""
-    from app.services.e2e_codegen_guard import _render_create_open_stub
+def test_create_open_stub_uses_entity_create_testid():
+    """openCreate* grounds on JHipster data-cy / Create role — not warn+return."""
+    from app.services.e2e_codegen_guard import (
+        _is_create_open_method,
+        _render_create_open_stub,
+    )
 
+    assert _is_create_open_method("openCreateModal")
     stub = _render_create_open_stub("openCreateModal")
-    assert "ungrounded" in stub.lower() or "fail-closed" in stub.lower()
-    assert "tạo mới" not in stub.lower()
+    assert "entityCreateButton" in stub
+    assert "console.warn" not in stub
+    assert "return;" not in stub.split("waitFor")[0] or "entityCreateButton" in stub

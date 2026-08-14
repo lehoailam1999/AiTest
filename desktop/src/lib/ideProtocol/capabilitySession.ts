@@ -2,6 +2,7 @@
  * Desktop helpers — Capability Negotiation + Unit Gen CLI session reuse.
  */
 import {
+  DESKTOP_REQUIRED_E2E_CAPS,
   DESKTOP_REQUIRED_UNIT_CAPS,
   IdeCapabilities,
   hasCapability,
@@ -16,11 +17,20 @@ export function assertIdeUnitCapabilities(
   return negotiateCapabilities(capabilities, DESKTOP_REQUIRED_UNIT_CAPS);
 }
 
+export function assertIdeE2eCapabilities(
+  capabilities: string[] | null | undefined
+): CapabilityNegotiation {
+  return negotiateCapabilities(capabilities, DESKTOP_REQUIRED_E2E_CAPS);
+}
+
 /**
  * Ensure a reusable AI CLI session when Extension advertises sessionReuse.
  * Returns sessionId or null (batch will open ephemeral session).
  */
-export async function ensureUnitGenSession(projectRoot: string): Promise<string | null> {
+export async function ensureUnitGenSession(
+  projectRoot: string,
+  kind: "unit" | "e2e" = "unit"
+): Promise<string | null> {
   const client = getIdeRpcClientOrNull();
   if (!client?.isConnected) return null;
   const state = useIdeBridgeSession.getState();
@@ -33,7 +43,7 @@ export async function ensureUnitGenSession(projectRoot: string): Promise<string 
   try {
     const opened = await client.codegenOpenSession({
       projectRoot,
-      kind: "unit",
+      kind,
     });
     if (opened?.ok && opened.sessionId) {
       useIdeBridgeSession.getState().setUnitGenSession(opened.sessionId);

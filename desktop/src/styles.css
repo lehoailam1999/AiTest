@@ -3323,3 +3323,216 @@ label textarea:disabled,
   display: flex;
   flex-direction: column;
 }
+
+/* ==========================================================================
+   Clean & Neat Test Case Edit Modal Aesthetics
+   ========================================================================== */
+.tc-edit-modal .ant-modal-content {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 16px 36px rgba(21, 32, 51, 0.14);
+  padding: 0;
+  border: 1px solid var(--line, #d5dee7);
+  background: var(--card, #ffffff);
+  color: var(--ink, #152033);
+}
+
+.tc-edit-modal .ant-modal-header {
+  padding: 16px 20px;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--line, #d5dee7);
+  background: var(--card, #ffffff);
+}
+
+.tc-edit-modal .ant-modal-body {
+  padding: 16px 20px;
+  max-height: calc(82vh - 110px);
+  overflow-y: auto;
+}
+
+.tc-edit-modal .ant-modal-body::-webkit-scrollbar {
+  width: 5px;
+}
+
+.tc-edit-modal .ant-modal-body::-webkit-scrollbar-thumb {
+  background-color: var(--line, #d5dee7);
+  border-radius: 4px;
+}
+
+.tc-edit-modal .ant-modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--line, #d5dee7);
+  background: var(--card, #ffffff);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Header */
+.tc-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tc-header-icon {
+  color: var(--accent, #0f6e56);
+  font-size: 16px;
+}
+
+.tc-header-title-text {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink, #152033);
+}
+
+.tc-badge-id {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.tc-badge-status {
+  font-size: 11.5px;
+  font-weight: 500;
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.tc-badge-status-approved {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.tc-badge-status-review {
+  background: #fefce8;
+  color: #854d0e;
+  border: 1px solid #fef08a;
+}
+
+.tc-badge-status-rejected {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.tc-badge-status-draft {
+  background: var(--bg, #eef2f6);
+  color: var(--muted, #5c6b7a);
+  border: 1px solid var(--line, #d5dee7);
+}
+
+.tc-badge-req {
+  font-size: 11.5px;
+  background: #f5f3ff;
+  color: #6d28d9;
+  border: 1px solid #ddd6fe;
+  border-radius: 4px;
+  padding: 1px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+}
+
+.tc-badge-req-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Highlighted Form Section Header */
+.tc-form-section-header {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent, #0f6e56);
+  background: rgba(15, 110, 86, 0.08);
+  border-left: 3.5px solid var(--accent, #0f6e56);
+  padding: 6px 12px;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tc-section-icon {
+  font-size: 14px;
+  color: var(--accent, #0f6e56);
+}
+
+/* Form Items */
+.tc-edit-modal .ant-form-item {
+  margin-bottom: 12px;
+}
+
+.tc-edit-modal .ant-form-item-label {
+  padding-bottom: 3px;
+}
+
+.tc-label {
+  font-weight: 600;
+  font-size: 0.84rem;
+  color: var(--ink, #152033);
+}
+
+.tc-asterisk {
+  color: var(--danger, #b42318);
+  margin-left: 2px;
+}
+
+/* Inputs */
+.tc-edit-modal .ant-input,
+.tc-edit-modal .ant-select-selector {
+  border-color: var(--line, #d5dee7) !important;
+  border-radius: 8px !important;
+  font-size: 13.5px !important;
+  color: var(--ink, #152033) !important;
+  background-color: var(--card, #ffffff) !important;
+}
+
+.tc-edit-modal .ant-input:focus,
+.tc-edit-modal .ant-select-focused .ant-select-selector {
+  border-color: var(--accent, #0f6e56) !important;
+  box-shadow: 0 0 0 3px rgba(15, 110, 86, 0.12) !important;
+}
+
+.tc-code-input {
+  font-family: var(--font-mono, monospace) !important;
+  font-size: 12px !important;
+  background-color: var(--bg, #eef2f6) !important;
+}
+
+/* Buttons */
+.tc-btn-cancel {
+  border-radius: 6px !important;
+  height: 34px !important;
+  padding: 0 16px !important;
+  font-weight: 500 !important;
+  color: var(--muted, #5c6b7a) !important;
+  background: var(--card, #ffffff) !important;
+  border-color: var(--line, #d5dee7) !important;
+}
+
+.tc-btn-save {
+  border-radius: 6px !important;
+  height: 34px !important;
+  padding: 0 18px !important;
+  font-weight: 600 !important;
+  background: var(--accent, #0f6e56) !important;
+  border: none !important;
+  color: #ffffff !important;
+}
+
+.tc-btn-save:hover {
+  background: #0b5442 !important;
+}

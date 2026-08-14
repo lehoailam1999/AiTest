@@ -142,8 +142,8 @@ async function checkPlaywrightInstalled(
   }
   // API authoritative check (sees nested test/*/node_modules + shared runner)
   try {
-    const { e2e } = await import("../../api");
-    const st = await e2e.playwrightCheck({ projectRoot });
+    const { generateE2e } = await import("../../api");
+    const st = await generateE2e.playwrightCheck({ projectRoot });
     if (st?.ok && (st.source === "project" || st.source === "aitest")) {
       return st.source === "aitest" ? "aitest-shared" : "project";
     }
@@ -178,8 +178,8 @@ export async function resolveProfileForVerify(
   // Prefer API-reported package root when local profile left it empty
   if (!packageRoot && playwrightInstalled) {
     try {
-      const { e2e } = await import("../../api");
-      const st = await e2e.playwrightCheck({ projectRoot });
+      const { generateE2e } = await import("../../api");
+      const st = await generateE2e.playwrightCheck({ projectRoot });
       if (st?.packageRoot && st.source === "project") {
         const abs = String(st.packageRoot).replace(/\\/g, "/");
         const rootAbs = projectRoot.replace(/\\/g, "/").replace(/\/$/, "");
@@ -268,8 +268,8 @@ export async function resolveProfileForVerify(
     }
   }
 
-  // If explicit credentials exist, allow UI-login fallback without blocking verify.
-  // storageState remains optional in this mode.
+  // If explicit credentials are provided from UI, allow UI-login fallback.
+  // This is an explicit operator choice; otherwise keep storageState-first semantics.
   const hasUiCreds = Boolean((ui.username || "").trim() && (ui.password || "").trim());
   if (hasUiCreds) {
     ctx.storageStateValid = true;
@@ -280,8 +280,8 @@ export async function resolveProfileForVerify(
     return ctx;
   }
 
-  // Auth Discover often writes credential seeds (username/password) under .ai-test/auth/*.json
-  // before a real Playwright storageState (cookies/origins) exists — use UI-login fallback.
+  // Auth Discover writes username/password JSON before Playwright cookies exist.
+  // Prefer storageState when cookies are present; otherwise Verify with uiLogin + seed creds.
   const seed = await findAuthSeedCredentialsOnDisk(
     projectRoot,
     discoverDirs,

@@ -124,6 +124,7 @@ export async function assertTcReadyForUnitGen(opts: {
     tcLabel: label,
     hasSourceMarkers: hasMarkers,
     sutResolveSkipped: skipped,
+    markerBlob,
   });
 }
 

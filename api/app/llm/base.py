@@ -279,9 +279,9 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         type_block = (
             "PHIÊN ENGINE = UNIT: mọi TC type=Unit — BACKEND ONLY, portable mọi stack "
             "(logic/service/handler/validator/domain; tên SUT từ dự án). "
-            "SoT = UNIVERSAL Backend Relevance: PRIMARY 4 (BR/VALIDATION/ERROR/AC) + "
-            "scope IN|OUT|MIXED|UNKNOWN + categories A–I "
-            "→ khối «UNIT ← PHÂN TÍCH» trong QUY TẮC HỆ THỐNG.\n"
+            "SoT = PRIMARY 4 ONLY: BUSINESS_RULES · VALIDATION_DATA · ERROR_HANDLING · "
+            "ACCEPTANCE(BE). FEATURES = tên module; FLOWS/useCases/UI → không cover. "
+            "scope IN|OUT|MIXED|UNKNOWN → khối «UNIT ← PHÂN TÍCH».\n"
         )
         example = _VIETNAMESE_TC_EXAMPLE_UNIT
         type_schema = "Unit"
@@ -305,8 +305,11 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
 
     if eng == "unit":
         doc_usage = (
-            "Tài liệu: Freeze/DB Knowledge = SoT; SRS+source bổ sung chi tiết tín hiệu đã có. "
-            "Chi tiết coverage → QUY TẮC HỆ THỐNG (UNIT ← PHÂN TÍCH).\n\n"
+            "Tài liệu Unit: chỉ PRIMARY BE (BR/VALIDATION/ERROR/AC-BE). "
+            "Không sinh TC từ FEATURES/FLOWS/UI. "
+            "Approve sau cần primaryBucket+behaviorId+target.field/constraint "
+            "(layerHint/sourceSignal chỉ khi Knowledge nêu) — "
+            "chi tiết → QUY TẮC HỆ THỐNG (UNIT ← PHÂN TÍCH).\n\n"
         )
     elif eng == "e2e":
         doc_usage = (
@@ -342,13 +345,37 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         "- Dù requirement đầu vào là tiếng Anh, vẫn phải viết test case bằng tiếng Việt.\n\n"
         f"{type_block}\n"
         f"{doc_usage}"
-        "Trả về CHỈ JSON hợp lệ (không markdown), đúng schema:\n"
-        f'{{"testCases":[{{"title":"...","type":"{type_schema}",'
-        '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
-        '"module":"...","precondition":"...","steps":"1. ...\\n2. ...",'
-        '"expectedResult":"...","testData":"...","automationReady":false}]}\n\n'
-        f"Ví dụ schema (placeholder — thay bằng nội dung từ tài liệu):\n{example}\n"
     )
+    if eng == "unit":
+        base += (
+            "Trả về CHỈ JSON hợp lệ (không markdown), đúng Unit TC IR:\n"
+            '{"testCases":[{"title":"...","type":"Unit","primaryBucket":'
+            '"BUSINESS_RULES|VALIDATION_DATA|ERROR_HANDLING|ACCEPTANCE",'
+            '"scenario":"POSITIVE|NEGATIVE|BOUNDARY|…",'
+            '"module":"[Tên FEATURES]",'
+            '"trace":{"requirementIds":["…"],"behaviorId":"…-B01"},'
+            '"preconditions":[],'
+            '"testData":{"input":{},"target":{"field":"…","constraint":"…",'
+            '"boundary":"","value":""},"existingState":{}},'
+            '"steps":{"prepare":["…"],"execute":["…"]},'
+            '"expectedResult":{"type":"REJECT|ACCEPT|STATE|…",'
+            '"observable":"create|update|query|validate|…","description":"…"},'
+            '"testDataHints":{"layerHint":null,"sourceSignal":null},'
+            '"status":"READY_FOR_CODEGEN|NOT_READY",'
+            '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng",'
+            '"severity":"Nhẹ|Nặng|Nghiêm trọng","automationReady":true}],'
+            '"coverage":{},"gaps":[],"unknownBehaviors":[],"conflicts":[]}\n\n'
+            f"Ví dụ schema (placeholder — thay bằng nội dung PRIMARY BE):\n{example}\n"
+        )
+    else:
+        base += (
+            "Trả về CHỈ JSON hợp lệ (không markdown), đúng schema:\n"
+            f'{{"testCases":[{{"title":"...","type":"{type_schema}",'
+            '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng","severity":"Nhẹ|Nặng|Nghiêm trọng",'
+            '"module":"...","precondition":"...","steps":"1. ...\\n2. ...",'
+            '"expectedResult":"...","testData":"...","automationReady":false}]}\n\n'
+            f"Ví dụ schema (placeholder — thay bằng nội dung từ tài liệu):\n{example}\n"
+        )
     eng_for_cap = (ctx.preferred_engine or "").strip().lower()
     # E2E: no default numeric ceiling — only Unit/mixed use soft-cap language when max set.
     use_numeric_cap = (
@@ -356,7 +383,23 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
         and ctx.speed_mode == "fast"
         and bool(ctx.max_tc_per_module)
     )
-    if ctx.mode == "append" and ctx.existing_cases and not ctx.topic_scope:
+    if eng == "unit":
+        # Unit: PRIMARY BE coverage only — never FR/UI journey language.
+        if use_numeric_cap:
+            base += (
+                f"\nSPEED Unit: cover BR+VALIDATION+ERROR+AC(BE) — "
+                f"tối đa ~{ctx.max_tc_per_module} TC/module. "
+                "Cấm pad FEATURES/FLOWS/UI. Toàn bộ tiếng Việt."
+            )
+        else:
+            base += (
+                "\nUnit: cover HẾT tín hiệu PRIMARY BE (BR/VALIDATION/ERROR/AC-BE) "
+                "trong phạm vi module (≥1 TC mỗi behavior độc lập). "
+                "Cấm TC từ FEATURES/FLOWS/UI presentation. "
+                "Mỗi TC: primaryBucket+behaviorId+target.* để Approve map path/code. "
+                "Toàn bộ tiếng Việt."
+            )
+    elif ctx.mode == "append" and ctx.existing_cases and not ctx.topic_scope:
         base += (
             "\nCHẾ ĐỘ BỔ SUNG: Đã có test case bên dưới.\n"
             "Chỉ sinh test case MỚI cho phần còn thiếu — không trùng hoặc paraphrase nhẹ.\n"

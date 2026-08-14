@@ -89,9 +89,10 @@ def test_complete_step_wizard_not_ungrounded():
 
     assert _is_wizard_next_method("completeStep1ToReachStep2")
     stub = _render_smart_method_stub("completeStep1ToReachStep2", dom_snapshot="")
-    # P1: requires Spec label — stub gates on _args (not invent Next regex)
+    # Portable wizard Next in dialog when Spec omits label
     assert "_args" in stub
     assert "getByRole" in stub
+    assert "Tiếp theo" in stub or "Next" in stub
 
     page = """\
 export class P {

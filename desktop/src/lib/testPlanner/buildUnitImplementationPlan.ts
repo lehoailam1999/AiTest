@@ -19,6 +19,7 @@ import {
 import type { CodeIndexSnapshot } from "../codeIndex/types";
 import { listDependencies, lookupSymbol } from "../codeIndex/lookup";
 import { resolveImportSpecifier } from "../codeIndex/buildDependencyGraph";
+import { parseCodeMarker } from "../approvedTcSync/progressiveSeedFromCodeIndex";
 import {
   isExcludedFromUnitRetrieve,
   isUnsuitableUnitPrimary,
@@ -324,10 +325,12 @@ export async function buildUnitImplementationPlan(
     notes.push(`marker path not in index: ${p}`);
   }
 
-  // 2) Marker codes → symbol lookup
+  // 2) Marker codes → symbol lookup (Type or Type.Method)
   if (!entryPath) {
     for (const code of markers.codes) {
-      const hits = lookupSymbol(input.snapshot, code, { limit: 8 });
+      const parsed = parseCodeMarker(code);
+      const lookupName = parsed.typeName || code;
+      const hits = lookupSymbol(input.snapshot, lookupName, { limit: 8 });
       const prefer = hits.find(
         (h) =>
           !isExcludedFromUnitRetrieve(h.pathRel) &&
@@ -344,7 +347,9 @@ export async function buildUnitImplementationPlan(
         hits[0];
       if (pick) {
         entryPath = pick.pathRel;
-        entrySymbol = pick.name;
+        entrySymbol = parsed.methodName
+          ? `${parsed.typeName}.${parsed.methodName}`
+          : parsed.typeName || pick.name;
         entryReason = `marker code:${code}`;
         break;
       }
@@ -431,16 +436,27 @@ export async function buildUnitImplementationPlan(
     }
   }
 
-  // Final alignment gate (even for marker paths — wrong marker still fails)
+  // Final alignment gate — markers must still align with TC intent
   const finalAlign = await scoreCandidate(blob, entryPath, input.readFile);
-  if (!isSutAlignedEnough(finalAlign) && markers.paths.length === 0 && markers.codes.length === 0) {
-    return empty("needs_marker", [
-      `Entry ${entryPath} not aligned (score=${finalAlign.score})`,
-      "Add path:/code: markers for this TC.",
-    ]);
+  const hasMarkers = markers.paths.length > 0 || markers.codes.length > 0;
+  if (!isSutAlignedEnough(finalAlign)) {
+    if (!hasMarkers) {
+      return empty("needs_marker", [
+        `Entry ${entryPath} not aligned (score=${finalAlign.score})`,
+        "Add path:/code: markers for this TC.",
+      ]);
+    }
+    const highConf = /\bconfidence=HIGH\b/i.test(blob);
+    if (!highConf) {
+      return empty("misaligned_marker", [
+        `Marker SUT ${entryPath} not aligned (score=${finalAlign.score})`,
+        "Re-Approve with body-rule or fix path:/code: markers.",
+      ]);
+    }
+    notes.push(
+      `marker path accepted with LOW alignment (score=${finalAlign.score}) confidence=HIGH`
+    );
   }
-  // Marker path: accept even if token overlap is low (explicit user pointer),
-  // unless weak admin FE and marker is only a vague code without path.
   if (
     !isSutAlignedEnough(finalAlign) &&
     isWeakClientAppAdmin(entryPath) &&

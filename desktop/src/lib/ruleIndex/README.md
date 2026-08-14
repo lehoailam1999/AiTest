@@ -1,8 +1,8 @@
-# Rule Index (desktop scaffold — Phase 2+)
+# Rule Index (desktop scaffold)
 
-Phase 0 governance: `.cursor/rules/rule-index.mdc` + `docs/SYSTEM_MASTER_DOCUMENTATION.md`. No desktop Rule Index runtime yet.
+Agent governance only: `.cursor/rules/rule-index.mdc`.
 
-Planned: mirror API registry profiles for client-side observability
-(`rule_ids` injected per job, token budget).
+- **Sinh TC Unit** → API fragments / `unit_tc_analysis_rules.py` (not Desktop Rule Index).
+- **Approve path/code** → `desktop/src/lib/unitResolve/` + `@aitest/ide-protocol` CRUD ranking.
 
-Code retrieval today: `desktop/src/lib/retrieval/` + `codeIndex/`.
+No Desktop Rule Index runtime yet. Retrieval: `desktop/src/lib/retrieval/` + `codeIndex/`.

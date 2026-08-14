@@ -62,6 +62,22 @@ public class PersonGetAllQueryHandler
         (s) => s.name === "Handle" && s.kind === "method"
       )
     );
+    const handle = parsed!.symbols.find(
+      (s) => s.name === "Handle" && s.kind === "method"
+    );
+    assert.ok(handle);
+    assert.ok(
+      typeof handle!.endLine === "number" && handle!.endLine! >= handle!.line,
+      `Handle endLine expected, got ${JSON.stringify(handle)}`
+    );
+    const cls = parsed!.symbols.find(
+      (s) => s.name === "PersonGetAllQueryHandler" && s.kind === "class"
+    );
+    assert.ok(cls);
+    assert.ok(
+      typeof cls!.endLine === "number" && cls!.endLine! >= cls!.line,
+      `class endLine expected, got ${JSON.stringify(cls)}`
+    );
   });
 
   it("indexes C# auto-property names (SearchTerm) for Approve bridges", () => {

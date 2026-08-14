@@ -1260,6 +1260,13 @@ def _ensure_auth_env_from_project(project_root: str, env: dict[str, str]) -> Non
         if nested or not exists:
             env.pop("E2E_STORAGE_STATE", None)
 
+    # Cred-only verify (uiLogin / auth-seed, no Playwright cookies on disk).
+    user = (env.get("E2E_USERNAME") or "").strip()
+    pwd = (env.get("E2E_PASSWORD") or "").strip()
+    ss = (env.get("E2E_STORAGE_STATE") or "").strip()
+    if user and pwd and not ss and (env.get("E2E_FORCE_UI_LOGIN") or "").strip() != "1":
+        env["E2E_FORCE_UI_LOGIN"] = "1"
+
 
 def _assert_feature_auth_ready(
     files: list[E2EFile],
@@ -1622,6 +1629,10 @@ async def _run_one_e2e_root(
     )
 
 
+_probe_cache: dict[str, tuple[float, str | None]] = {}
+_PROBE_CACHE_TTL = 30.0  # seconds
+
+
 def probe_e2e_target_url(url: str, *, timeout_sec: float = 5.0) -> str | None:
     """
     Return a short note when Target URL looks unhealthy.
@@ -1630,44 +1641,56 @@ def probe_e2e_target_url(url: str, *, timeout_sec: float = 5.0) -> str | None:
     noscript/fallback shell WHILE still serving main.js/vendor.js — that is NOT
     a dead SPA. Only FAIL when error markers appear without app bundles.
     """
+    import time as _time
+
     u = (url or "").strip()
     if not u:
         return None
-    try:
-        import urllib.request
+    cached = _probe_cache.get(u)
+    if cached:
+        ts, result = cached
+        if _time.monotonic() - ts < _PROBE_CACHE_TTL:
+            return result
+    def _do_probe() -> str | None:
+        try:
+            import urllib.request
 
-        req = urllib.request.Request(u, method="GET", headers={"User-Agent": "AITest-E2E-preflight"})
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            raw = resp.read(12000).decode("utf-8", errors="replace")
-    except Exception as exc:  # noqa: BLE001
-        return f"WARN: Target URL không mở được ({type(exc).__name__}: {exc})"
-    low = raw.lower()
-    has_bundle = bool(
-        re.search(
-            r"""src=["'][^"']*(?:main|runtime|polyfills|vendor|chunk)[^"']*\.(?:js|mjs)""",
-            low,
+            req_ = urllib.request.Request(u, method="GET", headers={"User-Agent": "AITest-E2E-preflight"})
+            with urllib.request.urlopen(req_, timeout=timeout_sec) as resp:
+                raw = resp.read(12000).decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            return f"WARN: Target URL không mở được ({type(exc).__name__}: {exc})"
+        low = raw.lower()
+        has_bundle = bool(
+            re.search(
+                r"""src=["'][^"']*(?:main|runtime|polyfills|vendor|chunk)[^"']*\.(?:js|mjs)""",
+                low,
+            )
         )
-    )
-    has_error_shell = bool(
-        re.search(
-            r"an error has occurred|usual error causes|building the client side|"
-            r"webpack compiled with",
-            low,
+        has_error_shell = bool(
+            re.search(
+                r"an error has occurred|usual error causes|building the client side|"
+                r"webpack compiled with",
+                low,
+            )
         )
-    )
-    if has_error_shell and not has_bundle:
-        return (
-            "FAIL: Target URL đang trả SPA error/build page (không có bundle JS). "
-            "Hãy start frontend của dự án đích rồi Verify lại."
-        )
-    if has_bundle:
+        if has_error_shell and not has_bundle:
+            return (
+                "FAIL: Target URL đang trả SPA error/build page (không có bundle JS). "
+                "Hãy start frontend của dự án đích rồi Verify lại."
+            )
+        if has_bundle:
+            return None
+        if "you must enable javascript" in low and "<script" not in low:
+            return (
+                "FAIL: Target URL không có script app (chỉ placeholder). "
+                "Hãy start frontend rồi Verify lại."
+            )
         return None
-    if "you must enable javascript" in low and "<script" not in low:
-        return (
-            "FAIL: Target URL không có script app (chỉ placeholder). "
-            "Hãy start frontend rồi Verify lại."
-        )
-    return None
+
+    out = _do_probe()
+    _probe_cache[u] = (_time.monotonic(), out)
+    return out
 
 
 def e2e_verify_preflight_notes(
@@ -2639,6 +2662,12 @@ class E2EOrchestrator:
                         for p in specs_rel
                     ],
                 )
+            if check.source == "aitest" and check.package_root:
+                from app.services.aitest_playwright_runner import ensure_shared_playwright_runner
+                try:
+                    await asyncio.to_thread(ensure_shared_playwright_runner, install_browsers=True)
+                except Exception as _e:
+                    logger.warning("ensure_shared_playwright_runner warn: %s", _e)
             runner_prefix = check.package_root
             if check.package_root:
                 nm = str(Path(check.package_root) / "node_modules")

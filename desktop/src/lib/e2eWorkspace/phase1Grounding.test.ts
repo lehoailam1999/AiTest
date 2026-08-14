@@ -156,6 +156,21 @@ describe("E2E_FEATURE_PATH env", () => {
     assert.equal(pe.E2E_USER_USERNAME, "user");
     assert.equal(pe.E2E_USER_PASSWORD, "user");
   });
+
+  it("sets E2E_FORCE_UI_LOGIN when creds without storageState", () => {
+    const uiOnly = playwrightEnvFromConfig(
+      buildE2EEnvConfig({ username: "admin", password: "admin" })
+    );
+    assert.equal(uiOnly.E2E_FORCE_UI_LOGIN, "1");
+    const withStorage = playwrightEnvFromConfig(
+      buildE2EEnvConfig({
+        username: "admin",
+        password: "admin",
+        storageStateRel: "./fixtures/storageState.json",
+      })
+    );
+    assert.equal(withStorage.E2E_FORCE_UI_LOGIN, undefined);
+  });
 });
 
 describe("Sprint 2.1 featurePath seed priority", () => {

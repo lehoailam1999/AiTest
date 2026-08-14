@@ -83,9 +83,9 @@ QUY TẮC SINH TEST CASE (BẮT BUỘC — HỆ THỐNG):
 # Keep thin — do NOT restate bucket map / trace / completeness here.
 _LEGACY_COMPACT_SHARED_TC_RULES = """\
 QUY TẮC CHUNG UNIT (BẮT BUỘC — BACKEND ONLY, PORTABLE, SRS-ONLY):
-1. Bám Knowledge/Freeze — PRIMARY từ Phân tích (không đổi bucket); 6 gate IR; scope IN|OUT|MIXED|UNKNOWN.
-2. module = Feature; title VN `[Feature] - [Hành động BE] - [Kết quả]` — cấm Class.Method Latin.
-3. Steps = prepare/execute nghiệp vụ BE (không class/repo/HTTP invent). path/code = pha Approve.
+1. Bám Knowledge PRIMARY ONLY (BR/VALIDATION/ERROR/AC-BE); 6 gate IR; scope IN|OUT|MIXED|UNKNOWN. FEATURES=tên module; FLOWS/UI→không sinh.
+2. module = Feature name; title VN `[Feature] - [Hành động BE] - [Kết quả]` — cấm Class.Method / UI verbs.
+3. Steps = prepare/execute nghiệp vụ BE. Bắt buộc primaryBucket+behaviorId+(VALIDATION→target.*). path/code = pha Approve.
 4. 1 behaviorId / 1 TC; dedup cùng BE; coverage/gaps/unknown; cấm dừng sớm bỏ VALIDATION/FILE.
 5. Không gộp Unit+E2E. OUT/presentation-only → không sinh. priority/severity thang Việt.
 6. Self-check: còn IN chưa cover → TC hoặc gap; đủ → dừng.
@@ -101,10 +101,10 @@ QUY TẮC CHUNG E2E (format — SoT xem e2e_tc_analysis_rules):
 # Fan-out / speed=fast — shorter shared block (engine overlay + SPEED MODE addon carry detail).
 _LEGACY_SPEED_SHARED_TC_RULES = """\
 QUY TẮC CHUNG UNIT (SPEED — BACKEND ONLY, PORTABLE, SRS-ONLY):
-1. Knowledge PRIMARY giữ nguyên; 6 gate IR (SRS-only); IN|OUT|MIXED|UNKNOWN; cấm invent / UNKNOWN→OUT / dừng sớm.
-2. module = Feature; title VN `[Feature]-[Hành động BE]-[Kết quả]` (cấm Class.Method Latin).
-3. Steps/expected = prepare→execute nghiệp vụ BE; thiếu → [Giả định]. Không bắt buộc source.
-4. Không gộp Unit+E2E; không presentation-only. Cover PRIMARY + coverage gaps trước pad FEATURES.
+1. Knowledge PRIMARY ONLY (BR/VALIDATION/ERROR/AC-BE); 6 gate IR; IN|OUT|MIXED|UNKNOWN; cấm invent / UNKNOWN→OUT / dừng sớm / pad FEATURES.
+2. module = Feature name; title VN `[Feature]-[Hành động BE]-[Kết quả]` (cấm Class.Method / UI).
+3. Steps/expected = prepare→execute nghiệp vụ BE; markers Approve: primaryBucket+behaviorId+target.*. Thiếu → [Giả định]. Không bắt buộc source.
+4. Không gộp Unit+E2E; không presentation-only. Cover PRIMARY + coverage gaps — không pad FEATURES/FLOWS.
 5. Tôn trọng SPEED MODE — nhánh backend chính; priority/severity thang Việt.
 """
 
@@ -229,20 +229,25 @@ def engine_generation_rules(
         if fast:
             parts = [
                 "=== PHIÊN SINH UNIT (SPEED) ===",
-                "1. type=`Unit` only — **Backend TC IR từ Knowledge** (SRS-only; không bắt buộc source).",
-                "2. PRIMARY từ Phân tích — không đổi bucket. OUT→bỏ · MIXED→nhánh BE · UNKNOWN→unknownBehaviors · coverage/gaps bắt buộc.",
-                "3. Steps: prepare/execute nghiệp vụ BE — cấm class/method/HTTP invent. path/code = Approve sau.",
-                "4. 1 behaviorId / 1 TC; Coverage: VALIDATION_DATA + FILE security IN phải có TC hoặc gap — cấm dừng sớm happy-path.",
+                "1. type=`Unit` only — **Backend TC IR từ Knowledge** (PRIMARY ONLY: "
+                "BR+VALIDATION+ERROR+AC-BE; không FEATURES/FLOWS/UI).",
+                "2. PRIMARY từ Phân tích — không đổi bucket. OUT→bỏ · MIXED→nhánh BE · "
+                "UNKNOWN→unknownBehaviors · coverage/gaps bắt buộc.",
+                "3. Steps: prepare/execute nghiệp vụ BE — cấm class/method/HTTP invent; "
+                "cấm click/điền/màn hình. path/code = Approve sau.",
+                "4. Mỗi TC bắt buộc: primaryBucket + behaviorId + (VALIDATION→target.field/"
+                "constraint); observable=create|update|query|validate|reject — "
+                "để Approve map path/code trên SUT.",
                 "5. Title VN hành vi BE quan sát được — không mô tả UI presentation.",
             ]
             if cap:
                 parts.append(
                     f"6. Trần mềm ≤{cap} TC/module: cover hết BR+VALIDATION+ERROR+AC(BE) trước; "
-                    "FEATURES happy tối thiểu 0–1 — không cắt PRIMARY có tín hiệu."
+                    "không pad FEATURES/FLOWS."
                 )
             else:
                 parts.append(
-                    "6. Cover đủ PRIMARY (BR/VALIDATION/ERROR/AC-BE) trước pad FEATURES."
+                    "6. Cover đủ PRIMARY (BR/VALIDATION/ERROR/AC-BE) — không pad FEATURES."
                 )
             if focus_modules.strip():
                 parts.append(f"7. Focus module: {focus_modules.strip()}.")
@@ -250,16 +255,21 @@ def engine_generation_rules(
 
         parts = [
             "=== PHIÊN SINH UNIT ===",
-            "1. type=`Unit` only — Backend TC IR (SRS-only). 6 gate rồi scope atomic IN|OUT|MIXED|UNKNOWN.",
-            "2. PRIMARY buckets từ Phân tích (giữ nguyên) — chi tiết khối UNIT ← PHÂN TÍCH.",
-            "3. Steps prepare/execute nghiệp vụ; expected observable BE — không class/repo/HTTP invent; không test entrypoint/bootstrap (main.ts/Program).",
-            "4. Coverage/Gap + Conflict: inventory IN↔TC; unknownBehaviors khi thiếu Knowledge; layerHint=null trừ Knowledge nói rõ.",
-            "5. Output JSON: testCases + coverage + gaps + unknownBehaviors + conflicts; mỗi TC có behaviorId + primaryBucket.",
+            "1. type=`Unit` only — Backend TC IR. Nguồn: BR+VALIDATION+ERROR+AC(BE) only. "
+            "FEATURES=tên module; FLOWS/UI=OUT.",
+            "2. 6 gate rồi scope atomic IN|OUT|MIXED|UNKNOWN — chi tiết khối UNIT ← PHÂN TÍCH.",
+            "3. Steps prepare/execute nghiệp vụ; expected observable BE "
+            "(create/update/query/validate/reject) — không class/repo/HTTP invent; "
+            "không UI verbs; không test entrypoint/bootstrap.",
+            "4. Approve-ready markers: primaryBucket + behaviorId + target.field/constraint "
+            "(khi VALIDATION); layerHint/sourceSignal=null trừ Knowledge nói rõ.",
+            "5. Output JSON: testCases + coverage + gaps + unknownBehaviors + conflicts.",
             "6. path:/code: thuộc Approve/Retrieval — không yêu cầu ở pha sinh TC.",
-            "7. OUT/UNKNOWN → không sinh Unit TC; MIXED → chỉ nhánh BE; cấm UNKNOWN→OUT; cấm dừng sớm bỏ validation/file.",
+            "7. OUT/UNKNOWN → không sinh Unit TC; MIXED → chỉ nhánh BE; cấm UNKNOWN→OUT; "
+            "cấm dừng sớm bỏ validation/file; cấm pad FEATURES.",
         ]
         if focus_modules.strip():
-            parts.append(f"8. Focus module (khớp FEATURES): {focus_modules.strip()}.")
+            parts.append(f"8. Focus module (khớp FEATURES name): {focus_modules.strip()}.")
         return append_unit_tc_from_analysis_rules("\n".join(parts), speed=False)
 
     from app.llm.e2e_tc_analysis_rules import append_e2e_tc_from_analysis_rules

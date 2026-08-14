@@ -242,7 +242,7 @@ def render_dom_grounded_stub(method: str, el: dict[str, Any]) -> str | None:
 
 
 def render_ungrounded_fail_stub(method: str) -> str:
-    """Never empty void — runtime + codegen both treat as failure."""
+    """Fail-closed Act stub — do not soft-skip (hides missing locators until a bogus assert)."""
     name = method or "action"
     return (
         f"\n  async {name}(..._args: unknown[]): Promise<void> {{\n"

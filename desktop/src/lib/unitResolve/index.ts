@@ -19,4 +19,30 @@ export {
   type PickFromShortlistFn,
   type UnitPrimaryShortlistItem,
 } from "./llmPickUnitPrimary";
+export {
+  llmPickUnitField,
+  acceptFieldShortlistPick,
+  buildPickUnitFieldPrompt,
+  type LlmPickUnitFieldInput,
+  type LlmPickUnitFieldResult,
+  type PickFieldFromShortlistFn,
+} from "./llmPickUnitField";
 export { snapshotFromPaths } from "./snapshotFromPaths";
+export {
+  validateUnitPrimaryBeforeWrite,
+  type ValidateUnitPrimaryBeforeWriteInput,
+  type ValidateUnitPrimaryBeforeWriteResult,
+} from "./validateUnitPrimaryBeforeWrite";
+export {
+  checkIndexFileFreshness,
+  looksLikeIndexedContentHash,
+  type CheckIndexFileFreshnessResult,
+  type IndexFreshnessStatus,
+} from "./checkIndexFileFreshness";
+export {
+  resolveFieldFromIndex,
+  bindTargetPropertyInTestData,
+  buildFieldPropertyShortlist,
+  propertiesFromIndex,
+  normFieldLabel,
+} from "./resolveFieldFromIndex";

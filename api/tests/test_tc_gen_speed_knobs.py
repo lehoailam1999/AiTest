@@ -48,15 +48,16 @@ def test_e2e_speed_env_default_fast():
         assert resolve_tc_speed_mode("e2e") == "full"
 
 
-def test_unit_speed_default_full_and_no_implicit_fast_cap():
+def test_unit_speed_default_full_and_fast_soft_cap():
     from app.llm.tc_speed import resolve_max_tc_per_module, resolve_tc_speed_mode
 
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AITEST_TC_UNIT_SPEED", None)
         os.environ.pop("AITEST_TC_UNIT_MAX_PER_MODULE", None)
+        os.environ.pop("AITEST_TC_UNIT_FAST_MAX_PER_MODULE", None)
         assert resolve_tc_speed_mode("unit") == "full"
-        # No hidden default cap for Unit fast mode.
-        assert resolve_max_tc_per_module("unit", "fast", {}) is None
+        # Unit fast: soft default 10 (Freeze UI sends speed=fast)
+        assert resolve_max_tc_per_module("unit", "fast", {}) == 10
         os.environ["AITEST_TC_UNIT_MAX_PER_MODULE"] = "6"
         assert resolve_max_tc_per_module("unit", "fast", {}) == 6
 

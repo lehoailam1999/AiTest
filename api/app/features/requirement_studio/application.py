@@ -38,6 +38,7 @@ from app.features.requirement_studio.dto import (
     file_ref_dto,
     knowledge_dto,
     snapshot_dto,
+    truncate_extracted_text,
     truncate_preview,
     workspace_dto,
 )
@@ -393,7 +394,9 @@ def ingest_upload(
         content_sha256=sha,
         parse_status="pending",
         storage_kind="inline",
-        content_bytes=raw,
+        # Skip storing raw bytes by default — Phân tích uses extracted_text only.
+        # Keeping multi‑MB docx (+ base64 preview) was hanging first upload / DB commit.
+        content_bytes=None,
     )
 
     try:
@@ -404,18 +407,25 @@ def ingest_upload(
             row.parse_error = parsed.warning or "Không đọc được nội dung file"
             row.parser = parsed.parser
             row.parse_warning = parsed.warning or None
+            # Keep raw only on failure for possible re-parse / support
+            if len(raw) <= 2_000_000:
+                row.content_bytes = raw
         else:
             row.parse_status = "ready"
             row.parser = parsed.parser
             row.parse_warning = parsed.warning or None
-            row.extracted_text = parsed.text
+            row.extracted_text = truncate_extracted_text(parsed.text)
             row.preview_html = truncate_preview(parsed.html)
     except ValueError as e:
         row.parse_status = "error"
         row.parse_error = str(e)
+        if len(raw) <= 2_000_000:
+            row.content_bytes = raw
     except Exception as e:
         row.parse_status = "error"
         row.parse_error = f"Parse failed: {e}"
+        if len(raw) <= 2_000_000:
+            row.content_bytes = raw
 
     db.add(row)
     db.flush()

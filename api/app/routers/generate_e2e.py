@@ -35,7 +35,6 @@ from app.services.e2e_auth_bootstrap import (
 )
 from app.services.e2e_auth_seed import (
     apply_auth_to_testcase,
-    ensure_auth_seed,
     ensure_auth_seed_roles,
     parse_auth_markers,
 )

@@ -200,8 +200,8 @@ export default function KnowledgePanel({
           style={{ marginBottom: 12 }}
           type="info"
           showIcon
-          title="Đang chạy AI enrich…"
-          description="Đang hiển thị bản heuristic tạm. Khi AI xong sẽ merge và cập nhật (builder → llm-cli)."
+          title="Heuristic sẵn sàng — AI đang enrich trong nền"
+          description="Bạn có thể xem bucket hoặc Freeze/Sinh TC ngay (bản heuristic). Khi AI xong, Knowledge sẽ merge và tăng version — nên Freeze lại nếu cần bản giàu hơn."
         />
       ) : null}
       {knowledge?.enrichError ? (
@@ -241,26 +241,37 @@ export default function KnowledgePanel({
           </Typography.Text>
         </Space>
         <Space wrap>
-          {onOpenFreeze && (status === "ready" || status === "stale") ? (
+          {onOpenFreeze &&
+          (status === "ready" || status === "stale" || (enrichPending && Boolean(payload))) ? (
             <Button type="primary" onClick={onOpenFreeze}>
               Tiếp tục: Tạo test case
             </Button>
           ) : null}
-          <Button icon={<ReloadOutlined />} onClick={onRefresh} disabled={building}>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={onRefresh}
+            disabled={Boolean(building) && !payload}
+          >
             Tải lại
           </Button>
           <Button
-            type={onOpenFreeze && (status === "ready" || status === "stale") ? "default" : "primary"}
+            type={
+              onOpenFreeze && (status === "ready" || status === "stale" || enrichPending)
+                ? "default"
+                : "primary"
+            }
             icon={<ThunderboltOutlined />}
-            loading={building || enrichPending}
-            disabled={!canBuild || building || enrichPending}
+            loading={Boolean(building)}
+            disabled={!canBuild || Boolean(building) || enrichPending}
             onClick={onBuild}
           >
-            {building || enrichPending
-              ? "Đang phân tích tài liệu…"
-              : status === "stale" || status === "ready"
-                ? "Phân tích lại"
-                : "Phân tích"}
+            {building
+              ? "Đang phân tích…"
+              : enrichPending
+                ? "Đang enrich AI…"
+                : status === "stale" || status === "ready"
+                  ? "Phân tích lại"
+                  : "Phân tích"}
           </Button>
         </Space>
       </div>

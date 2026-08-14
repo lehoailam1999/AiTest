@@ -11,7 +11,9 @@ from app.models.domain import (
     RequirementWorkspace,
 )
 
-PREVIEW_HTML_MAX = 80_000
+PREVIEW_HTML_MAX = 40_000
+# Cap extracted SRS text stored/returned — enough for Phân tích, avoids huge payloads.
+MAX_EXTRACTED_TEXT_CHARS = 400_000
 
 
 def workspace_dto(
@@ -113,7 +115,10 @@ def knowledge_dto(
         "id": k.id,
         "workspaceId": k.workspace_id,
         "projectId": k.project_id,
-        "status": "building" if enrich_pending else k.status,
+        # Keep DB status (usually ready after heuristic). Do NOT mask as
+        # "building" while enrichPending — that blocked Freeze/Gen on heuristic.
+        # UI uses enrichPending for the AI-enrich banner.
+        "status": k.status,
         "version": k.version,
         "builder": k.builder,
         # Keep heuristic visible while AI enrich runs (UI shows banner).
@@ -203,3 +208,14 @@ def truncate_preview(html: str | None) -> str | None:
     if len(html) <= PREVIEW_HTML_MAX:
         return html
     return html[:PREVIEW_HTML_MAX] + "\n<!-- truncated -->"
+
+
+def truncate_extracted_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    if len(text) <= MAX_EXTRACTED_TEXT_CHARS:
+        return text
+    return (
+        text[: MAX_EXTRACTED_TEXT_CHARS - 80]
+        + "\n\n…[truncated extracted text for storage/speed]"
+    )

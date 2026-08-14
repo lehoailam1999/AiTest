@@ -4,6 +4,11 @@
  * Upgrade path: tree-sitter or typescript.createSourceFile (documented in roadmap).
  */
 import { languageFromPath, normalizeRelPath } from "./constants";
+import {
+  findMatchingBraceClose,
+  lineOfIndex,
+  methodBodyEndLine,
+} from "./braceRange";
 import type {
   ExportInfo,
   FileParseResult,
@@ -22,26 +27,19 @@ function stripCommentsAndStrings(src: string): string {
     .replace(/"(?:\\.|[^"\\])*"/g, '""');
 }
 
-function lineOfIndex(src: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index && i < src.length; i++) {
-    if (src.charCodeAt(i) === 10) line++;
-  }
-  return line;
-}
-
 function pushSymbol(
   out: IndexedSymbol[],
   name: string,
   kind: SymbolKind,
   line: number,
-  opts?: { parent?: string; exported?: boolean }
+  opts?: { parent?: string; exported?: boolean; endLine?: number }
 ) {
   if (!name || !/^[$A-Za-z_][$A-Za-z0-9_]*$/.test(name)) return;
   out.push({
     name,
     kind,
     line,
+    endLine: opts?.endLine,
     parent: opts?.parent,
     exported: opts?.exported,
   });
@@ -145,16 +143,13 @@ function parseTopLevelSymbols(src: string, cleaned: string): IndexedSymbol[] {
   const classHead = /\bclass\s+([$A-Za-z_][$A-Za-z0-9_]*)[^{]*\{/g;
   while ((m = classHead.exec(src))) {
     const parent = m[1];
-    const bodyStart = (m.index || 0) + m[0].length;
-    let depth = 1;
-    let i = bodyStart;
-    for (; i < src.length; i++) {
-      const ch = src[i];
-      if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) break;
-      }
+    const openBrace = (m.index || 0) + m[0].length - 1;
+    const bodyStart = openBrace + 1;
+    const classEnd = findMatchingBraceClose(src, openBrace);
+    const i = classEnd >= 0 ? classEnd : src.length;
+    const typeSym = symbols.find((s) => s.name === parent && s.kind === "class");
+    if (typeSym && classEnd >= 0) {
+      typeSym.endLine = lineOfIndex(src, classEnd);
     }
     const body = src.slice(bodyStart, i);
     const methodRe =
@@ -175,7 +170,10 @@ function parseTopLevelSymbols(src: string, cleaned: string): IndexedSymbol[] {
         continue;
       }
       const abs = bodyStart + (mm.index || 0);
-      pushSymbol(symbols, name, "method", lineOfIndex(src, abs), { parent });
+      pushSymbol(symbols, name, "method", lineOfIndex(src, abs), {
+        parent,
+        endLine: methodBodyEndLine(src, abs),
+      });
     }
   }
 

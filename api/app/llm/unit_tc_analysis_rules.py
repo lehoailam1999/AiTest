@@ -6,13 +6,12 @@ International refs: ISTQB (EP/BVA/Decision Table), ISO/IEC/IEEE 29119-3
 
 Cursor narrative: ``.cursor/rules/unit-tc-from-analysis.mdc`` — keep in sync.
 
-Injection (single place — do NOT restate in system_prompt / freeze / COMPACT):
+Injection (single place — do NOT restate essay in system_prompt / COMPACT / .mdc):
 ``tc_generation_rules.engine_generation_rules("unit")`` prepends this block.
+Cursor pointer only: ``.cursor/rules/unit-tc-from-analysis.mdc``.
+Approve path/code: Desktop ``resolveUnitPrimaryFromIndex`` + ``code-aliases-unit-gen.mdc`` (separate phase).
 
-Contract: UNIVERSAL Backend TC IR — SRS-only (no source required).
-6 gates: Decomposition · Backend Outcome · UNKNOWN≠OUT · Conflict · Implementation-free IR · Coverage/Gap.
-PRIMARY from Analysis; behaviorId + coverage JSON; path/code at Approve.
-Portable — no product nouns.
+Contract: UNIVERSAL Backend TC IR — SRS-only; PRIMARY BR|VAL|ERROR|AC-BE; portable — no product nouns.
 """
 
 from __future__ import annotations
@@ -92,7 +91,14 @@ Root: `testCases`, `coverage` (per PRIMARY: total/covered/missing), `gaps`, `unk
 
 Mỗi TC tối thiểu: `title`, `type=Unit`, `primaryBucket`, `scenario`, `trace.{requirementIds,behaviorId}`, `preconditions`, `testData.{input,target,existingState}`, `steps.{prepare,execute}`, `expectedResult.{type,observable,description}`, `testDataHints.{layerHint,sourceSignal}` (null nếu không biết), `status` READY_FOR_CODEGEN|NOT_READY.
 
-Title VN: `[Feature] - [Hành động BE] - [Kết quả]` — **cấm** Class.Method.  
+**Nguồn cover:** chỉ BUSINESS_RULES · VALIDATION_DATA · ERROR_HANDLING · ACCEPTANCE(BE).  
+FEATURES = tên `module` — **cấm** pad TC từ FEATURES/FLOWS/useCases/UI.
+
+**Approve-ready (bắt buộc — không invent class/method):**  
+- `primaryBucket` + `behaviorId` + `requirementIds`  
+- VALIDATION → `target.field` + `target.constraint` (+ boundary/value khi có)  
+- `expectedResult.observable` ∈ create|update|query|validate|reject|persist|authz|state  
+- Title VN: `[Feature] - [Hành động BE] - [Kết quả]` — động từ nghiệp vụ (tạo/cập nhật/từ chối/lọc/đọc/gán) — **cấm** Class.Method / click / điền form / màn hình.  
 Steps/expected: ngôn ngữ nghiệp vụ BE — không class/repo/HTTP invent.
 
 ### 5. File / incomplete
@@ -104,14 +110,15 @@ SRS cắt/TBD → `unknownBehaviors`, không TC phần thiếu.
 _LEGACY_UNIT_TC_FROM_ANALYSIS_RULES_FAST = """\
 ## UNIT ← PHÂN TÍCH (SPEED) — Backend TC IR (SRS-only)
 
-SoT = Knowledge/Freeze. **PRIMARY** từ Phân tích (giữ nguyên bucket): BR · VALIDATION_DATA · ERROR · ACCEPTANCE.  
-**Pha này không cần source.** `path`/`code`/SUT class = Approve/Retrieval sau.
+SoT = Knowledge PRIMARY ONLY: BR · VALIDATION_DATA · ERROR · ACCEPTANCE(BE).  
+FEATURES = tên module; FLOWS/UI → không cover. **Pha này không cần source.** `path`/`code`/SUT class = Approve/Retrieval sau.
 
 **6 gate:** (1) Atomic BE trước scope. (2) Outcome BE từ Knowledge — cấm bỏ BE chỉ vì wording UI; không bắt buộc excerpt. (3) UI-only→OUT; thiếu Knowledge→UNKNOWN (cấm UNKNOWN→OUT). (4) Conflict→conflicts/GAPS. (5) IR implementation-free; layerHint/sourceSignal=null trừ Knowledge/excerpt nói rõ. (6) Coverage: inventory IN (VALIDATION + FILE security)↔TC; output coverage/gaps/unknownBehaviors; cấm dừng sớm happy-path.
 
 Scope IN|OUT|MIXED|UNKNOWN. MIXED→chỉ nhánh BE.  
 `behaviorId`=`<reqId>-B<seq>`. Scenario chỉ chiều relevant. Dedup cùng BE. Cấm invent limit/HTTP/exception/class.  
 Title VN `[Feature]-[Hành động BE]-[Kết quả]`. Steps prepare/execute nghiệp vụ.  
+Approve markers: primaryBucket + behaviorId + target.field/constraint (VALIDATION) + observable BE.  
 JSON: testCases[] + coverage + gaps + unknownBehaviors + conflicts.
 """
 

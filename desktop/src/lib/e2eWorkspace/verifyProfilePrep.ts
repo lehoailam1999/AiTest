@@ -54,10 +54,7 @@ export async function prepareVerifySession(
   }
 
   const files = applyStorageStateToVerifyFiles(input.files, profileCtx);
-  const useUiLogin =
-    profileCtx.authStrategy === "uiLogin" ||
-    profileCtx.storageStateSource === "auth-seed" ||
-    profileCtx.storageStateSource === "ui";
+  const useUiLogin = profileCtx.authStrategy === "uiLogin";
   const storageStateRel = useUiLogin
     ? undefined
     : resolveVerifyStorageStateRel(profileCtx, input.storageStateRel);

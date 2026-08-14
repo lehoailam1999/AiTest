@@ -11,6 +11,37 @@ from app.features.requirement_studio.enrich_cache import pop_enrich_payload_cach
 from app.features.requirement_studio.knowledge_builder import merge_knowledge_payloads
 
 
+def test_knowledge_dto_keeps_ready_while_enrich_pending():
+    """Do not mask status=building during enrich — Freeze needs ready+heuristic."""
+    from types import SimpleNamespace
+
+    from app.features.requirement_studio.dto import knowledge_dto
+
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        status="ready",
+        version=3,
+        builder="heuristic-v1",
+        summary="sum",
+        payload_json='{"summary":"sum","features":[{"name":"X"}]}',
+        coverage_json=None,
+        source_file_count=1,
+        source_chunk_count=2,
+        error=None,
+        built_at=None,
+        updated_at=None,
+    )
+    dto = knowledge_dto(
+        row,
+        enrich={"enrichPending": True, "enrichError": None, "cacheHit": False},
+    )
+    assert dto["status"] == "ready"
+    assert dto["enrichPending"] is True
+    assert dto["payload"] is not None
+
+
 def test_enrich_state_roundtrip():
     wid = uuid.uuid4()
     pipe_svc.clear_enrich_state(wid)
@@ -262,7 +293,7 @@ def test_enrich_oneshot_single_cli_call():
 
     assert len(chat_calls) == 1
     assert chat_calls[0]["resume"] is None
-    assert chat_calls[0]["create"] is True
+    assert chat_calls[0]["create"] is False  # oneshot thuần — không create-chat
     assert persisted
     final = persisted[-1]["payload"]
     assert final.get("summary") == "S"

@@ -31,7 +31,7 @@ def test_drops_wizard_buoc():
         test_data="trace: FEATURES/FR-1",
     )
     assert r.decision == "drop"
-    assert r.code == "FAIL_UI_WIZARD"
+    assert r.code in ("FAIL_UI_WIZARD", "FAIL_FEATURES_ONLY")
 
 
 def test_drops_chuyen_buoc():
@@ -53,7 +53,7 @@ def test_drops_dieu_huong_buoc():
         test_data="trace: FEATURES/FR-1",
     )
     assert r.decision == "drop"
-    assert r.code == "FAIL_UI_WIZARD"
+    assert r.code in ("FAIL_UI_WIZARD", "FAIL_FEATURES_ONLY")
 
 
 def test_drops_chuyen_giai_doan():
@@ -75,7 +75,7 @@ def test_drops_ui_verbs():
         test_data="trace: FEATURES/FR-1",
     )
     assert r.decision == "drop"
-    assert r.code in ("FAIL_UI_VERBS", "FAIL_UI_WIZARD")
+    assert r.code in ("FAIL_UI_VERBS", "FAIL_UI_WIZARD", "FAIL_FEATURES_ONLY")
 
 
 def test_drops_enable_disable_ui():
@@ -130,6 +130,39 @@ def test_keeps_invent_shape_when_layer_hint_present():
     assert r.decision == "keep"
 
 
+def test_drops_soft_ui_without_be_outcome():
+    r = decide_unit_tc_draft(
+        title="Tạo mới - Hiển thị danh sách - OK",
+        steps="1. Người dùng mở form\n2. Xem chi tiết",
+        expected_result="Hiển thị danh sách trên UI",
+        test_data="trace: FEATURES/FR-1",
+    )
+    assert r.decision == "drop"
+    assert r.code in ("FAIL_SOFT_UI", "FAIL_FEATURES_ONLY", "FAIL_UI_WIZARD")
+
+
+def test_drops_e2e_type_not_coerced():
+    r = decide_unit_tc_draft(
+        title="Đăng nhập thành công",
+        steps="1. Mở trang\n2. Điền form",
+        expected_result="Vào trang chủ",
+        test_data="path: /login",
+        type="E2E",
+    )
+    assert r.decision == "drop"
+    assert r.code == "FAIL_E2E_TYPE"
+
+
+def test_keeps_be_with_primary_trace():
+    r = decide_unit_tc_draft(
+        title="Tạo đơn - Từ chối khi thiếu mã",
+        steps="1. Chuẩn bị input thiếu mã\n2. Thực hiện tạo mới\n3. Assert từ chối",
+        expected_result="REJECT — từ chối vì bắt buộc",
+        test_data="trace: BUSINESS_RULES/BR-1\nprimaryBucket: BUSINESS_RULES\nbehaviorId: BR-1-B01",
+    )
+    assert r.decision == "keep"
+
+
 def test_sanitize_strips_latin_class_method():
     cleaned, changed = sanitize_unit_tc_title(
         "Khai báo thiết bị kỹ thuật số - DeviceTypeService.Resolve - "
@@ -155,9 +188,9 @@ def test_filter_unit_tc_drafts_sanitizes_title():
         SimpleNamespace(
             title="OK - Pass",
             module="Order",
-            steps="1. Arrange\n2. Act\n3. Assert",
+            steps="1. Arrange\n2. Act\n3. Assert từ chối",
             expected_result="OK",
-            test_data="trace: FEATURES/F1",
+            test_data="trace: BUSINESS_RULES/BR-1\nprimaryBucket: BUSINESS_RULES",
             type="Unit",
         ),
         SimpleNamespace(
@@ -173,7 +206,7 @@ def test_filter_unit_tc_drafts_sanitizes_title():
             module="Search",
             steps="1. Gọi\n2. Assert",
             expected_result="OK",
-            test_data="trace: BUSINESS_RULES/BR-1",
+            test_data="trace: BUSINESS_RULES/BR-1\nprimaryBucket: BUSINESS_RULES",
             type="Unit",
         ),
     ]

@@ -34,6 +34,49 @@ export function e2eTcFolderKey(path: string): string | null {
   return null;
 }
 
+export function e2eSpecWorkCwd(specPath: string): string {
+  const p = (specPath || "").replace(/\\/g, "/");
+  const idx = p.toLowerCase().lastIndexOf("/specs/");
+  if (idx > 0) return p.slice(0, idx);
+  const parts = p.split("/");
+  if (parts.length > 1) return parts.slice(0, -1).join("/");
+  return ".";
+}
+
+export function e2eSpecArgFromCwd(specPath: string): string {
+  const p = (specPath || "").replace(/\\/g, "/");
+  const cwd = e2eSpecWorkCwd(p);
+  if (p.toLowerCase().startsWith(`${cwd.toLowerCase()}/`)) {
+    return p.slice(cwd.length + 1);
+  }
+  return p.split("/").pop() || p;
+}
+
+export function absUnderProject(projectRoot: string, relOrAbs: string): string {
+  const root = (projectRoot || "").replace(/\\/g, "/").replace(/\/$/, "");
+  const p = (relOrAbs || "").replace(/\\/g, "/");
+  if (!p) return root;
+  if (/^[A-Za-z]:\//.test(p) || p.startsWith("/")) return p;
+  return `${root}/${p.replace(/^\//, "")}`;
+}
+
+export function buildIdePlaywrightCommand(opts: {
+  packageRootAbs: string;
+  specArg: string;
+  headed?: boolean;
+}): string[] {
+  const cmd = [
+    "npx",
+    "--prefix",
+    opts.packageRootAbs,
+    "playwright",
+    "test",
+    opts.specArg,
+  ];
+  if (opts.headed) cmd.push("--headed");
+  return cmd;
+}
+
 export function e2eSpecPathsMatch(a: string, b: string): boolean {
   const na = normalizeE2eSpecPath(a);
   const nb = normalizeE2eSpecPath(b);

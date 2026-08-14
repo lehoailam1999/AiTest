@@ -114,7 +114,7 @@ export function parseApprovedTcGrounding(md: string | null | undefined): {
 }
 
 export function renderUnitGroundingBlock(
-  tc: Pick<TestCase, "title" | "module" | "testData">,
+  tc: Pick<TestCase, "title" | "module" | "testData" | "testCaseId" | "id" | "type">,
   requirementTitle?: string | null
 ): string {
   const modDoc = (requirementTitle || "").trim() || "—";
@@ -132,6 +132,15 @@ export function renderUnitGroundingBlock(
     if (markers.codes[0]) resolvedLines.push(`code: ${markers.codes[0]}`);
     if (markers.related.length) {
       resolvedLines.push(`related: ${markers.related.join(", ")}`);
+    }
+    try {
+      const mdRel = approvedTcMarkdownRelPath(tc);
+      const contractBase = mdRel.replace(/\.md$/i, ".grounding.json").split("/").pop() || "";
+      if (contractBase) {
+        resolvedLines.push(`contract: ${contractBase}`);
+      }
+    } catch {
+      /* path jail — skip contract pointer */
     }
   } else if (skip) {
     resolvedLines.push(`_(unresolved)_ ${skip}`);
@@ -299,9 +308,13 @@ export function renderApprovedTestCaseMarkdown(
   const groundingTag = isE2e
     ? "<!-- aitest:e2e-grounding — Route path + auth context for E2E Codegen -->"
     : "<!-- aitest:unit-grounding — Module (requirement) → Function (module) → title for SUT resolve -->";
+  const contractTag = isE2e
+    ? ""
+    : "<!-- aitest:grounding-contract — companion .grounding.json (Layer 5 Source Grounding Contract) -->";
   lines.push(
     "<!-- aitest:approved-tc-artifact — SoT Gen vẫn là DB Approved; file này đồng bộ cho Agent/IDE -->",
     groundingTag,
+    ...(contractTag ? [contractTag] : []),
     ""
   );
   return lines.join("\n");

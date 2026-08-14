@@ -16,8 +16,8 @@ from typing import Any
 from app.llm.base import strip_code_fences
 
 MAX_CHUNK_CHARS_FOR_BUILD = 24_000
-# Oneshot enrich excerpt budget (smaller than full build for CLI latency).
-MAX_CHUNK_CHARS_ONESHOT_ENRICH = 12_000
+# Oneshot enrich excerpt budget (CLI latency). Override: AITEST_KNOWLEDGE_ENRICH_MAX_CHARS.
+MAX_CHUNK_CHARS_ONESHOT_ENRICH = 7_000
 MAX_ITEMS = 40
 MAX_GAPS = 20
 MAX_EVIDENCE_PER_ITEM = 3

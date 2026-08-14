@@ -745,3 +745,23 @@ test('t', async ({ page }) => {
     assert "(steps:" in blob
     assert "Alpha fill" in blob
     assert "Beta Feature entry" in blob or "Feature entry" in blob
+
+
+def test_auth_step_detects_vietnamese_xac_thuc_title():
+    spec = """\
+import { test } from '@playwright/test';
+test('t', async ({ page }) => {
+  await test.step('0. Feature entry', async () => {
+    await page.goto('/admin/evidence');
+  });
+  await test.step('1. Xác thực người dùng admin', async () => {
+    await page.getByRole('button', { name: 'Đăng nhập' }).click();
+  });
+  await test.step('2. Không chọn hồ sơ vụ án', async () => {
+    await page.getByRole('button', { name: 'Bước 2' }).click();
+    await expect(page.getByText(/không được để trống/i)).toBeVisible();
+  });
+});
+"""
+    errs = validate_feature_journey_order(spec, mode="ui_helper")
+    assert "missing Auth (ensureAuthenticated step 0)" not in " ".join(errs)

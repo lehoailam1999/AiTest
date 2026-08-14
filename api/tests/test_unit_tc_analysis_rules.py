@@ -168,6 +168,17 @@ def test_system_prompt_unit_defers_to_analysis_block():
     assert "UNIT ← PHÂN TÍCH" in p
     assert p.count("VALIDATION_DATA") >= 1
     assert "PRIMARY" in p or "MIXED" in p or "behaviorId" in p
+    assert "steps" in p and "prepare" in p and "execute" in p
     low = p.lower()
     assert "be_fe" not in low
     assert "clientapp" not in low
+    assert "không sinh tc từ features" in low or "primary be" in low
+
+
+def test_system_prompt_e2e_untouched_by_unit_ir_schema():
+    """E2E must keep flat journey schema — Unit IR must not leak."""
+    p = system_prompt(GenerateContext(preferred_engine="e2e"))
+    assert "PHIÊN ENGINE = E2E" in p
+    assert '"steps":"1.' in p or "steps\": \"1." in p or 'steps":"1.' in p.replace(" ", "")
+    assert "primaryBucket" not in p
+    assert "BUSINESS_FLOWS" in p or "E2E ← PHÂN TÍCH" in p or "journey" in p.lower() or "E2E" in p

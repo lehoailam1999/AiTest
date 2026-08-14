@@ -1,6 +1,6 @@
 /**
- * Phase B entry — Extension Gen + mandatory API post-guard (E2E).
- * Unit: Extension local AI CLI (Forensic cwd); Desktop fail-closed (no silent API fallback).
+ * Phase B entry — Extension Gen (Unit + E2E via Agent CLI).
+ * Desktop fail-closed (no silent API fallback). E2E still runs API post-guard.
  */
 import { UNIT_GEN_LIMITS } from "@aitest/ide-protocol";
 import type {
@@ -20,32 +20,94 @@ import {
 import { useCodegenUiStore } from "./codegenUiStore";
 import { guardE2eFilesViaApi } from "./guardE2eFiles";
 
-export async function tryExtensionGenerateE2eBatch(params: {
-  commandId: string;
-  projectId: string;
-  projectRoot: string;
-  projectRules: string;
-  projectRulesSource?: CodegenProjectRulesSource;
-  items: CodegenE2eItem[];
-}): Promise<CodegenResultCallback | null> {
-  const client = getIdeRpcClientOrNull();
-  if (!client?.isConnected) return null;
-  return client.codegenGenerateE2eBatch({
-    commandId: params.commandId,
-    action: "GENERATE_E2E_BATCH",
-    projectId: params.projectId,
-    projectRoot: params.projectRoot,
-    projectRules: params.projectRules,
-    projectRulesSource: params.projectRulesSource ?? "none",
-    items: params.items,
-  });
-}
-
 function isTransportError(e: unknown): boolean {
   const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
   return /websocket|ws\b|econnreset|econnrefused|disconnect|not connected|timed out|timeout|socket/.test(
     msg
   );
+}
+
+/**
+ * E2E Gen on Extension (local AI CLI in SUT workspace).
+ * Returns null when IDE offline. Caller must fail-closed (no silent API fallback).
+ */
+export async function tryExtensionGenerateE2eBatch(opts: {
+  projectId: string;
+  projectRoot: string;
+  projectRules?: string;
+  projectRulesSource?: CodegenProjectRulesSource;
+  items: CodegenE2eItem[];
+  handlers?: CodegenSessionHandlers;
+  transportRetryMax?: number;
+  sessionId?: string | null;
+}): Promise<CodegenResultCallback | null> {
+  const client = getIdeRpcClientOrNull();
+  if (!client?.isConnected) return null;
+  if (!opts.items.length) return null;
+
+  const { assertIdeE2eCapabilities, ensureUnitGenSession } = await import(
+    "./capabilitySession"
+  );
+  const { useIdeBridgeSession } = await import("../ideBridge/session");
+  const caps = useIdeBridgeSession.getState().capabilities;
+  const neg = assertIdeE2eCapabilities(caps);
+  if (!neg.ok) {
+    throw new Error(
+      `IDE thiếu capability: ${neg.missing.join(", ")}. Cập nhật / Reload extension AITest.`
+    );
+  }
+
+  let sessionId = opts.sessionId ?? null;
+  if (!sessionId) {
+    sessionId = await ensureUnitGenSession(opts.projectRoot, "e2e");
+  }
+
+  const maxRetry = opts.transportRetryMax ?? UNIT_GEN_LIMITS.transportRetryMax;
+  let lastErr: unknown = null;
+
+  for (let attempt = 0; attempt <= maxRetry; attempt++) {
+    const commandId = newCodegenCommandId("e2e-gen");
+    const handlers: CodegenSessionHandlers = {
+      onProgress: (p) => {
+        const msg = p.message || p.phase || "";
+        useCodegenUiStore.getState().setProgress(msg);
+        opts.handlers?.onProgress?.(p);
+      },
+      onResult: (r) => {
+        rememberCodegenResult(r);
+        useCodegenUiStore.getState().setFromResult(r);
+        opts.handlers?.onResult?.(r);
+      },
+    };
+    const unsub = subscribeCodegenNotifications(commandId, handlers);
+    try {
+      const live = getIdeRpcClientOrNull();
+      if (!live?.isConnected) {
+        throw new Error("IDE not connected");
+      }
+      const result = await live.codegenGenerateE2eBatch({
+        commandId,
+        action: "GENERATE_E2E_BATCH",
+        projectId: opts.projectId,
+        projectRoot: opts.projectRoot,
+        projectRules: opts.projectRules ?? "",
+        projectRulesSource: opts.projectRulesSource ?? "e2e-conventions",
+        items: opts.items,
+        ...(sessionId ? { sessionId } : {}),
+      });
+      rememberCodegenResult(result);
+      useCodegenUiStore.getState().setFromResult(result);
+      return result;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < maxRetry && isTransportError(e)) continue;
+      throw e;
+    } finally {
+      unsub();
+    }
+  }
+  if (lastErr) throw lastErr;
+  return null;
 }
 
 /**

@@ -5,7 +5,7 @@ Portable signals + fail-closed when ground truth is missing.
 NOT app-specific routes, roles, or data-cy strings.
 
 Auth/locator detail → ``e2e_codegen_rules.py`` (E2ECG).
-Feature entry priority → ``e2e_journey_rules.py`` (Phase C).
+Feature entry priority → ``e2e_codegen_rules.py`` (E2ECG Phase C).
 TC ``path:`` contract → ``e2e_tc_analysis_rules.py``.
 
 Cursor: ``.cursor/rules/e2e-grounding.mdc`` — keep in sync.
@@ -22,13 +22,13 @@ E2E_GROUNDING_RULES = """\
 2. FEATURE ENTRY: after auth → `goto(canonicalPath)` + landmark (heading|testid|table from DOM/FE).
    Menu only if path unknown. `gotoFeature` ≠ auto-Create.
 3. AUTH: prefer per-role storageState; feature Specs no UI login. Login-wall Inspect ≠ feature locators.
-4. LOCATORS: data-cy|data-testid → #id|formControlName → name → role+name → visible text last.
+4. LOCATORS: data-cy|data-testid → label → role+name → #id|formControlName|name → visible text last.
    Prefer a single hook. Fallback via Playwright `.or(...)`, not CSS comma-OR lists.
    Never invent testids.
 5. CREATE/EDIT: list Create control + modal visible BEFORE fill (openCreateModal pattern).
 6. POM VERBS: gotoFeature / openCreate* / fill* / save* / expect* — Spec `test.step` calls verbs.
 7. VALIDATION: disable/error/cancel — never force happy-submit.
-8. FAIL-CLOSED: no DOM/FE hook for a verb → Phase-3 ungrounded (no `button.first()` invent).
+8. FAIL-CLOSED: no DOM/FE hook for a verb → Phase-3 ungrounded **throw** (no `button.first()` invent, no warn+return Act skip).
 9. SPEC HYGIENE: `*.spec.ts` + aligned primarySpec (avoid "No tests found").
 10. HOST OPS: Cursor timeout/concurrency = env/desktop knobs — not LLM prompt bulk.
 """

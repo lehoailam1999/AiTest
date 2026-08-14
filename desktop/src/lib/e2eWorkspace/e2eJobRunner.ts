@@ -20,19 +20,22 @@ import {
   type FeSourceListCache,
 } from "./resolveE2eFeSources";
 import {
+  e2eSpecArgFromCwd,
   e2eSpecPathsMatch,
+  e2eSpecWorkCwd,
+  absUnderProject,
+  buildIdePlaywrightCommand,
   findSpecReportForPrimary,
 } from "./e2eSpecPathMatch";
 import { deriveAuthContextFromTestCase } from "./deriveAuthContextFromTc";
 import { deriveFeaturePathFromTc } from "./deriveFeaturePathFromTc";
 import {
-  buildGenerateE2eRunBody,
   type GenerateGroundingLoadMeta,
   loadGenerateGroundingProfile,
   resolveFeaturePathSeed,
   lookupModuleMapPath,
 } from "./generateGrounding";
-import { isIdeCodegenReady } from "../ideProtocol";
+import { isIdeCodegenReady, postGuardE2eDraftFiles, tryExtensionGenerateE2eBatch } from "../ideProtocol";
 import { derivePomScaffoldFromTc } from "./derivePomScaffoldFromTc";
 import {
   assertTcReadyForE2eGen,
@@ -67,18 +70,8 @@ import {
   syncE2eWorkspaceRun,
 } from "./auditSync";
 import { newE2eRunId } from "./stagingApply";
+import { e2eModuleRoot } from "../testOutputLayout";
 import { enforceExecutionGateFailure } from "./executionGate";
-
-/** Parallel oneshot / TC — default pool 3 (was 4) to cut Cursor/API wall-clock contention. */
-const E2E_GEN_CONCURRENCY = 3;
-/** Cursor oneshot is wall-clock heavy — keep pool smaller to cut stream timeouts. */
-const E2E_GEN_CONCURRENCY_CURSOR = 2;
-
-function e2eGenConcurrency(provider?: string | null): number {
-  const p = (provider || "").toLowerCase();
-  if (p.includes("cursor")) return E2E_GEN_CONCURRENCY_CURSOR;
-  return E2E_GEN_CONCURRENCY;
-}
 
 function isLikelyPublicTestCase(tc: {
   title?: string | null;
@@ -546,8 +539,6 @@ export async function generateE2eForTestCase(opts: {
   let sourceFileName: string | undefined;
   let sourceCode: string | undefined;
   let relatedSources: { path: string; content: string }[] | undefined;
-  let phase5Planner: Record<string, unknown> | undefined;
-  let phase5IndexVersion: string | undefined;
   let phase5FeaturePathHint: string | undefined;
   // Phase 4: prefer Code Index → Retrieve → budgeted FE context
   try {
@@ -563,8 +554,6 @@ export async function generateE2eForTestCase(opts: {
         syncIfMissing: true,
         forceTestType: "E2E",
       });
-      phase5Planner = built.plan as unknown as Record<string, unknown>;
-      phase5IndexVersion = built.snapshot.meta.schema;
       phase5FeaturePathHint = isUsableFeaturePath(built.plan.hints.featurePath)
         ? built.plan.hints.featurePath!.trim()
         : undefined;
@@ -956,39 +945,95 @@ export async function generateE2eForTestCase(opts: {
     provider: opts.provider,
   });
 
-  log(`→ Generate: ${tc.title}\n`);
+  log(`→ Generate (Extension Agent CLI): ${tc.title}\n`);
+  if (!isIdeCodegenReady()) {
+    throw new Error(
+      "Chưa Connect IDE — Gen E2E dùng Extension + Agent CLI (cùng luồng Unit). Mở Cursor/VS Code trên repo SUT rồi Connect IDE."
+    );
+  }
 
-  const runBody = buildGenerateE2eRunBody({
-    projectId: opts.projectId,
-    testCaseId: tc.id,
-    targetUrl: env.targetUrl,
-    domSnapshot,
-    sourceFileName,
-    sourceCode,
-    relatedSources,
-    module: moduleName,
+  const specRoot = e2eModuleRoot(moduleName, {
     requirementTitle,
-    projectRoot: opts.projectRoot,
-    storageStateRel: env.storageStateRel,
-    seedCommand: env.seedCommand,
-    teardownCommand: env.teardownCommand,
-    existingFiles: opts.existingFiles,
-    testData: tcForGate.testData || undefined,
-    executionContext: authCtx.executionContext || undefined,
-    featurePath: featurePath || undefined,
-    locatorContract,
-    pomScaffold: pomScaffold || undefined,
-    projectRules: opts.projectRules,
-    skipAuthSeed: opts.skipAuthSeed,
-    planner: phase5Planner,
-    indexVersion: phase5IndexVersion,
+    testCaseTitle: tc.title,
+    sourceFileName,
   });
-  const gen = await generateE2e.run(runBody);
-  const files = gen.files || [];
+  const slug =
+    (tc.title || "journey")
+      .replace(/[^\w]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 40) || "journey";
+  const shortId = (tc.id || "").replace(/-/g, "").slice(0, 8);
+  const suggestedSpecPath = `${specRoot}/specs/${slug}.${shortId}.spec.ts`.replace(
+    /\/+/g,
+    "/"
+  );
+
+  const ide = await tryExtensionGenerateE2eBatch({
+    projectId: opts.projectId,
+    projectRoot: opts.projectRoot,
+    projectRules: opts.projectRules,
+    projectRulesSource: "e2e-conventions",
+    items: [
+      {
+        testCaseId: tc.id,
+        title: tc.title,
+        module: moduleName,
+        requirementTitle,
+        featurePath: featurePath || undefined,
+        authRole: authCtx.role,
+        locatorContract,
+        pomScaffold: pomScaffold || undefined,
+        storageStateRel: env.storageStateRel,
+        executionContext: authCtx.executionContext || undefined,
+        testData: tcForGate.testData || undefined,
+        steps: tc.steps || undefined,
+        expectedOutcome: tc.expectedResult || undefined,
+        sourceFileName,
+        sourceCode,
+        relatedSources,
+        suggestedSpecPath,
+        existingFiles: opts.existingFiles?.map((f) => ({
+          path: f.path,
+          content: f.content || "",
+          kind: (f.kind as "spec" | "page" | "fixture" | "config" | "other") || "other",
+        })),
+      },
+    ],
+    handlers: {
+      onProgress: (p) => {
+        if (p.message) log(`  cli: ${p.message}\n`);
+      },
+    },
+  });
+  if (!ide) {
+    throw new Error("IDE không nhận Gen E2E — kiểm tra Connect IDE / Reload extension AITest.");
+  }
+  if (ide.status === "FAILED" || ide.status === "CANCELLED") {
+    throw new Error(ide.error || `E2E Gen ${ide.status}`);
+  }
+  let files: E2EFileDto[] = (ide.files || []).map((f) => ({
+    path: f.path,
+    content: f.content || "",
+    kind: f.kind || "spec",
+  }));
+  if (!files.length) {
+    throw new Error("Agent CLI không trả file E2E");
+  }
+  try {
+    files = await postGuardE2eDraftFiles({
+      projectId: opts.projectId,
+      files,
+      featurePath: featurePath || undefined,
+      locatorContract,
+      executionContext: authCtx.executionContext || undefined,
+      title: tc.title,
+      testData: tcForGate.testData || undefined,
+    });
+  } catch (e) {
+    log(`  codegen-guard warn: ${String(e)}\n`);
+  }
   const primarySpecPath =
-    gen.primarySpecPath ||
-    files.find((f) => f.kind === "spec" || /specs\//.test(f.path))?.path ||
-    "";
+    files.find((f) => f.kind === "spec" || /specs\//.test(f.path))?.path || "";
   // Refine from Spec comments after Generate (AI often writes Feature entry: /admin/…)
   let resolvedFeaturePath = featurePath;
   if (!resolvedFeaturePath && files.length) {
@@ -1016,14 +1061,14 @@ export async function generateE2eForTestCase(opts: {
     testCaseId: tc.id,
     module: moduleName,
     status: "generated",
-    provider: gen.runnerUsed || opts.provider,
+    provider: "agent-cli",
   });
 
   return {
     runId,
     files,
     primarySpecPath,
-    provider: gen.runnerUsed || opts.provider,
+    provider: "agent-cli",
     authRole: authCtx.role,
     featurePath: resolvedFeaturePath || undefined,
     domSnapshot: domSnapshot || undefined,
@@ -1141,16 +1186,12 @@ export async function generateE2eBatch(opts: {
   // Pause control is cooperative between items. To keep semantics predictable
   // ("current TC finishes, next TC waits"), force sequential mode when a
   // pause gate is provided by UI.
-  const concurrency = opts.waitIfPaused ? 1 : e2eGenConcurrency(opts.provider);
+  const concurrency = 1;
 
-  // Parallel codegen: auth seed is serialized server-side (per-role locks).
-  // Each TC still gets its own chat/request; POM API snapshot is merge-locked below.
   log(
-    inspectPerTc
-      ? `→ Generate batch parallel ×${Math.min(concurrency, total)} · ${total} TC · Inspect per route/FE (cache shared)` +
-        `${opts.waitIfPaused ? " · pause-safe sequential gate" : ""}\n`
-      : `→ Generate batch parallel ×${Math.min(concurrency, total)} · ${total} TC (shared DOM)` +
-        `${opts.waitIfPaused ? " · pause-safe sequential gate" : ""}\n`
+    `→ Generate batch sequential ×1 · ${total} TC · Extension Agent CLI` +
+      `${inspectPerTc ? " · Inspect per route/FE" : ""}` +
+      `${opts.waitIfPaused ? " · pause-safe" : ""}\n`
   );
 
   let routeCatalog: E2eRouteCatalog | undefined;
@@ -1359,6 +1400,56 @@ type VerifyOpts = {
   priorRows?: E2eBatchItemResult[];
 };
 
+async function resolveVerifySession(opts: {
+  projectRoot: string;
+  files: E2EFileDto[];
+  targetUrl: string;
+  module?: string;
+  useStorageState?: boolean;
+  storageStateRel?: string;
+  username?: string;
+  password?: string;
+  roleCredentials?: Record<string, { username: string; password: string }>;
+  seedCommand?: string;
+  teardownCommand?: string;
+  role?: string;
+  featurePath?: string;
+  onLog?: (line: string) => void;
+}) {
+  const prep = await prepareVerifySession({
+    projectRoot: opts.projectRoot,
+    files: opts.files,
+    targetUrl: opts.targetUrl,
+    module: opts.module,
+    useStorageState: opts.useStorageState || Boolean(opts.storageStateRel?.trim()),
+    storageStateRel: opts.storageStateRel,
+    username: opts.username,
+    password: opts.password,
+    roleCredentials: opts.roleCredentials,
+    seedCommand: opts.seedCommand,
+    teardownCommand: opts.teardownCommand,
+    role: opts.role,
+    featurePath: opts.featurePath,
+  });
+  opts.onLog?.(`  verify profile: ${prep.profileLog}\n`);
+  if (prep.preflightError) {
+    opts.onLog?.(`  ✗ ${prep.preflightError}\n`);
+  } else {
+    if (prep.env.storageStateRel) {
+      opts.onLog?.(`  verify env: E2E_STORAGE_STATE=${prep.env.storageStateRel}\n`);
+    } else {
+      opts.onLog?.(
+        "  verify env: no storageState — feature Specs may hit login wall (Auth Discover / credentials)\n"
+      );
+    }
+    if (prep.env.role) opts.onLog?.(`  verify env: E2E_ROLE=${prep.env.role}\n`);
+    if (prep.env.testIdAttribute) {
+      opts.onLog?.(`  verify env: E2E_TEST_ID_ATTRIBUTE=${prep.env.testIdAttribute}\n`);
+    }
+  }
+  return prep;
+}
+
 /** Step: Playwright module run. Heal only when healFailures=true. */
 export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
   rows: E2eBatchItemResult[];
@@ -1454,64 +1545,15 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
     }
   }
 
-  // Before Heal: re-inspect feature DOM when Gen cleared login-wall / empty snapshot
-  if (healFailures) {
-    for (const g of generatedOk) {
-      if ((g.domSnapshot || "").trim()) continue;
-      const fp = (g.featurePath || sharedFeaturePath || "").trim();
-      if (!fp && !g.sourceCode) continue;
-      try {
-        log(`  heal re-inspect: ${g.title} path=${fp || "(none)"}\n`);
-        const inspected = await inspectE2eDom({
-          targetUrl: opts.targetUrl,
-          projectRoot: opts.projectRoot,
-          usePlaywrightInspect: true,
-          sourceCode: g.sourceCode,
-          sourcePaths: g.sourceCode
-            ? [
-                { path: g.sourceFileName || "fe", content: g.sourceCode },
-                ...(g.relatedSources || []),
-              ]
-            : undefined,
-          featurePath: fp || undefined,
-          username: opts.username,
-          password: opts.password,
-          storageStateRel:
-            opts.storageStateRel?.trim() ||
-            (opts.useStorageState ? "./fixtures/storageState.json" : undefined),
-          module: opts.module,
-          role: g.authRole,
-          onLog: log,
-        });
-        if (
-          inspected.domSnapshot &&
-          !isLikelyLoginWallDom(inspected.domSnapshot)
-        ) {
-          g.domSnapshot = inspected.domSnapshot;
-          g.locatorContract = buildLocatorContract({
-            sourceCode: g.sourceCode,
-            relatedSources: g.relatedSources,
-            domSnapshot: g.domSnapshot,
-            featurePath: fp,
-            testCaseTitle: g.title,
-          });
-          log(`  heal re-inspect OK elements≈DOM grounded\n`);
-        } else {
-          log(`  heal re-inspect: still login-wall or empty — keep FE-only grounding\n`);
-        }
-      } catch (e) {
-        log(`  heal re-inspect warn: ${String(e)}\n`);
-      }
-    }
-  }
+  // Deferred: heal re-inspect DOM runs lazily after first verify failure,
+  // not before verify — avoids 10-20s/TC Playwright overhead on the happy path.
 
-  const verifyPrep = await prepareVerifySession({
+  const verifyPrep = await resolveVerifySession({
     projectRoot: opts.projectRoot,
     files: opts.files,
     targetUrl: opts.targetUrl,
     module: opts.module,
-    useStorageState:
-      opts.useStorageState || Boolean(opts.storageStateRel?.trim()),
+    useStorageState: opts.useStorageState,
     storageStateRel: opts.storageStateRel,
     username: opts.username,
     password: opts.password,
@@ -1523,10 +1565,9 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
       opts.genItems.find((g) => g.authRole)?.authRole ||
       opts.defaultAuthRole,
     featurePath: sharedFeaturePath,
+    onLog: log,
   });
-  log(`  verify profile: ${verifyPrep.profileLog}\n`);
   if (verifyPrep.preflightError) {
-    log(`  ✗ ${verifyPrep.preflightError}\n`);
     const failMsg = verifyPrep.preflightError;
     const failRows: E2eBatchItemResult[] = generatedOk.map((g) => ({
       testCaseId: g.testCaseId,
@@ -1551,17 +1592,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
 
   const env = verifyPrep.env;
   const verifyFiles = verifyPrep.files;
-  if (env.storageStateRel) {
-    log(`  verify env: E2E_STORAGE_STATE=${env.storageStateRel}\n`);
-  } else {
-    log(
-      "  verify env: no storageState — feature Specs may hit login wall (Auth Discover / credentials)\n"
-    );
-  }
-  if (env.role) log(`  verify env: E2E_ROLE=${env.role}\n`);
-  if (env.testIdAttribute) {
-    log(`  verify env: E2E_TEST_ID_ATTRIBUTE=${env.testIdAttribute}\n`);
-  }
+
   const total = Math.max(generatedOk.length, opts.priorRows?.length || 0, 1);
   const rows: E2eBatchItemResult[] = (opts.priorRows || []).map((r) => ({ ...r }));
   for (const g of generatedOk) {
@@ -1621,60 +1652,88 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
 
   try {
     // Phase A: prefer IDE Extension runTests when bridge connected.
+    let ideRunOk = false;
     if (isIdeCodegenReady()) {
-      const { ideRunTests, rememberCodegenResult } = await import("../ideProtocol");
-      const specs = generatedOk
-        .map((g) => g.primarySpecPath)
-        .filter(Boolean) as string[];
-      const ideRun = await ideRunTests({
-        projectId: opts.projectId,
-        projectRoot: opts.projectRoot,
-        runner: "playwright",
-        cwd: opts.projectRoot,
-        specs: specs.length ? specs : undefined,
-        env: playwrightEnvFromConfig(env),
-        headed: showBrowser,
-        handlers: {
-          onProgress: (p) => log(`  ide-run: ${p.message || p.phase}\n`),
-        },
-      });
-      rememberCodegenResult(ideRun);
-      moduleStatus =
-        ideRun.status === "COMPLETED"
-          ? "PASSED"
-          : ideRun.status === "PARTIAL"
-            ? "FAILED"
-            : "FAILED";
-      log(`  module-status=${moduleStatus} (via IDE Extension)\n`);
-      if (ideRun.testRunReport.failed > 0 || ideRun.status !== "COMPLETED") {
-        log(`  --- Nguyên nhân Verify FAIL (IDE) ---\n`);
-        for (const err of ideRun.testRunReport.errors) {
-          log(`  ✗ ${err.title || err.testCaseId || "spec"}\n`);
-          log(`    ${(err.stacktrace || "").slice(0, 500)}\n`);
-          if (err.screenshotPath) log(`    screenshot=${err.screenshotPath}\n`);
+      try {
+        const { ideRunTests, rememberCodegenResult } = await import("../ideProtocol");
+        const packageRootAbs = absUnderProject(
+          opts.projectRoot,
+          verifyPrep.profileCtx.packageRoot || ""
+        );
+        const perTcTimeout = Math.max(
+          showBrowser ? 240_000 : 180_000,
+          Number(verifyPrep.profileCtx.profile?.playwrightRun?.run?.timeoutMs || 0) +
+            120_000
+        );
+        log(
+          `  IDE connected — Playwright per TC (prefix=${packageRootAbs || "(project)"}, timeout=${perTcTimeout}ms)\n`
+        );
+        let ideFailed = 0;
+        let ideBridgeTimeout = false;
+        for (const g of generatedOk) {
+          const spec = (g.primarySpecPath || "").replace(/\\/g, "/");
+          if (!spec) continue;
+          const tcCwdRel = e2eSpecWorkCwd(spec);
+          const tcCwdAbs = absUnderProject(opts.projectRoot, tcCwdRel);
+          const specArg = e2eSpecArgFromCwd(spec);
+          const command = buildIdePlaywrightCommand({
+            packageRootAbs: packageRootAbs || opts.projectRoot,
+            specArg,
+            headed: showBrowser,
+          });
+          log(`  ide-run: ${g.title} cwd=${tcCwdRel}\n`);
+          const ideRun = await ideRunTests({
+            projectId: opts.projectId,
+            projectRoot: opts.projectRoot,
+            runner: "custom",
+            cwd: tcCwdAbs,
+            command,
+            env: playwrightEnvFromConfig(env),
+            headed: showBrowser,
+            timeoutMs: perTcTimeout,
+            handlers: {
+              onProgress: (p) => log(`  ide-run: ${p.message || p.phase}\n`),
+            },
+          });
+          rememberCodegenResult(ideRun);
+          const ok =
+            ideRun.status === "COMPLETED" && ideRun.testRunReport.failed === 0;
+          const stack =
+            ideRun.testRunReport.errors[0]?.stacktrace ||
+            ideRun.artifacts?.logExcerpt ||
+            "";
+          if (!ok) {
+            ideFailed += 1;
+            log(`  --- Nguyên nhân Verify FAIL (IDE) ${g.title} ---\n`);
+            log(`    ${String(stack).slice(0, 800)}\n`);
+          }
+          if (/\[timeout\]|rpc timed out|IDE bridge offline/i.test(String(stack))) {
+            ideBridgeTimeout = true;
+          }
+          const idx = rows.findIndex((r) => r.testCaseId === g.testCaseId);
+          const next = {
+            testCaseId: g.testCaseId,
+            title: g.title,
+            status: (ok ? "ok" : "fail") as "ok" | "fail",
+            runId: g.runId,
+            files: g.files.length,
+            error: ok ? undefined : String(stack).slice(0, 800),
+            failCategory: ok ? undefined : classifyE2eFailure(String(stack)),
+          };
+          if (idx >= 0) rows[idx] = { ...rows[idx], ...next };
+          else rows.push(next);
         }
+        moduleStatus = ideFailed === 0 ? "PASSED" : "FAILED";
+        log(`  module-status=${moduleStatus} (via IDE Extension)\n`);
+        ideRunOk = generatedOk.length > 0 && !ideBridgeTimeout;
+        if (ideBridgeTimeout) {
+          log("  IDE verify process timeout — retry via API sandbox...\n");
+        }
+      } catch (ideErr) {
+        log(`  IDE runTests failed/timeout — fallback to API sandbox: ${String(ideErr).slice(0, 300)}\n`);
       }
-      // Map results onto rows
-      for (const g of generatedOk) {
-        const idx = rows.findIndex((r) => r.testCaseId === g.testCaseId);
-        const ok = moduleStatus === "PASSED";
-        const next = {
-          testCaseId: g.testCaseId,
-          title: g.title,
-          status: (ok ? "ok" : "fail") as "ok" | "fail",
-          runId: g.runId,
-          files: g.files.length,
-          error: ok
-            ? undefined
-            : ideRun.testRunReport.errors[0]?.stacktrace?.slice(0, 800),
-          failCategory: ok
-            ? undefined
-            : classifyE2eFailure(ideRun.testRunReport.errors[0]?.stacktrace || ""),
-        };
-        if (idx >= 0) rows[idx] = { ...rows[idx], ...next };
-        else rows.push(next);
-      }
-    } else {
+    }
+    if (!ideRunOk) {
       const mod = await generateE2e.sandboxModule({
         projectId: opts.projectId,
         projectRoot: opts.projectRoot,
@@ -1981,13 +2040,12 @@ export async function verifyE2eForTestCase(opts: {
   const authCtx = deriveAuthContextFromTestCase(tc, {
     fallbackRole: opts.defaultAuthRole,
   });
-  const verifyPrep = await prepareVerifySession({
+  const verifyPrep = await resolveVerifySession({
     projectRoot: opts.projectRoot,
     files: opts.files,
     targetUrl: opts.targetUrl,
     module: moduleName,
-    useStorageState:
-      opts.useStorageState || Boolean(opts.storageStateRel?.trim()),
+    useStorageState: opts.useStorageState,
     storageStateRel: opts.storageStateRel,
     username: opts.username,
     password: opts.password,
@@ -1996,10 +2054,9 @@ export async function verifyE2eForTestCase(opts: {
     teardownCommand: opts.teardownCommand,
     role: authCtx.role,
     featurePath,
+    onLog: log,
   });
-  log(`  verify profile: ${verifyPrep.profileLog}\n`);
   if (verifyPrep.preflightError) {
-    log(`  ✗ ${verifyPrep.preflightError}\n`);
     return {
       passed: false,
       files: verifyPrep.files,
@@ -2010,13 +2067,7 @@ export async function verifyE2eForTestCase(opts: {
   }
   const env = verifyPrep.env;
   const verifyFiles = verifyPrep.files;
-  if (env.storageStateRel) {
-    log(`  verify env: E2E_STORAGE_STATE=${env.storageStateRel}\n`);
-  }
-  if (env.role) log(`  verify env: E2E_ROLE=${env.role}\n`);
-  if (env.testIdAttribute) {
-    log(`  verify env: E2E_TEST_ID_ATTRIBUTE=${env.testIdAttribute}\n`);
-  }
+
 
   log(
     healFailures
@@ -2103,197 +2154,3 @@ export async function verifyE2eForTestCase(opts: {
   };
 }
 
-/**
- * @deprecated Prefer step APIs (inspect / generate / verify / heal).
- * Kept for callers that still want one-shot pipeline — Phase 1 FE + featurePath wired.
- */
-export async function runE2eJobForTestCase(opts: {
-  projectId: string;
-  projectRoot: string;
-  testCase: TestCase;
-  targetUrl: string;
-  useStorageState?: boolean;
-  username?: string;
-  password?: string;
-  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
-  roleCredentials?: Record<string, { username: string; password: string }>;
-  seedCommand?: string;
-  teardownCommand?: string;
-  usePlaywrightInspect?: boolean;
-  showBrowser?: boolean;
-  provider?: string | null;
-  featurePath?: string;
-  onLog?: (line: string) => void;
-  domSnapshot?: string;
-  skipInspect?: boolean;
-}): Promise<{
-  passed: boolean;
-  runId: string;
-  files: E2EFileDto[];
-  error?: string;
-  primarySpecPath?: string;
-  domSnapshot?: string;
-}> {
-  const log = (line: string) => opts.onLog?.(line);
-  let domSnapshot = opts.domSnapshot || "";
-  let featurePath = opts.featurePath?.trim() || undefined;
-  let sourceCode: string | undefined;
-  let sourcePaths: { path: string; content: string }[] | undefined;
-  try {
-    const fe = await resolveE2eFeSources({
-      projectRoot: opts.projectRoot,
-      testCase: opts.testCase,
-    });
-    if (fe) {
-      sourceCode = fe.sourceCode;
-      sourcePaths = [
-        { path: fe.sourceFileName, content: fe.sourceCode },
-        ...fe.relatedSources,
-      ];
-      featurePath =
-        featurePath ||
-        deriveFeaturePathFromTc({
-          title: opts.testCase.title,
-          precondition: opts.testCase.precondition,
-          testData: opts.testCase.testData,
-          steps: opts.testCase.steps,
-          feSource: [fe.sourceCode, ...fe.relatedSources.map((r) => r.content)].join(
-            "\n"
-          ),
-        });
-    }
-  } catch (e) {
-    log(`  fe-context warn: ${String(e)}\n`);
-  }
-  if (!opts.skipInspect) {
-    try {
-      const inspected = await inspectE2eDom({
-        targetUrl: opts.targetUrl,
-        projectRoot: opts.projectRoot,
-        usePlaywrightInspect: opts.usePlaywrightInspect,
-        sourceCode,
-        sourcePaths,
-        featurePath,
-        username: opts.username,
-        password: opts.password,
-        storageStateRel: opts.useStorageState
-          ? "./fixtures/storageState.json"
-          : undefined,
-        module: opts.testCase.module || undefined,
-        onLog: log,
-      });
-      domSnapshot = inspected.domSnapshot;
-      if (!featurePath && inspected.routes?.length) {
-        featurePath = deriveFeaturePathFromTc({
-          title: opts.testCase.title,
-          precondition: opts.testCase.precondition,
-          testData: opts.testCase.testData,
-          steps: opts.testCase.steps,
-          routes: inspected.routes,
-          feSource: sourceCode,
-        });
-      }
-    } catch (e) {
-      log(`  inspect warn: ${String(e)}\n`);
-    }
-  } else {
-    log("→ Inspect skipped\n");
-  }
-
-  const gen = await generateE2eForTestCase({
-    ...opts,
-    domSnapshot,
-    featurePath,
-    onLog: log,
-  });
-
-  const verified = await verifyE2eForTestCase({
-    ...opts,
-    files: gen.files,
-    primarySpecPath: gen.primarySpecPath,
-    runId: gen.runId,
-    domSnapshot,
-    featurePath: gen.featurePath || featurePath,
-    healFailures: false,
-    maxRetries: 1,
-    onLog: log,
-  });
-
-  return {
-    passed: verified.passed,
-    runId: gen.runId,
-    files: verified.files,
-    error: verified.error,
-    primarySpecPath: verified.primarySpecPath,
-    domSnapshot,
-  };
-}
-
-/**
- * @deprecated Prefer step APIs. Full pipeline kept for compatibility.
- */
-export async function runE2eModuleBatch(opts: {
-  projectId: string;
-  projectRoot: string;
-  testCases: TestCase[];
-  targetUrl: string;
-  module: string;
-  useStorageState?: boolean;
-  username?: string;
-  password?: string;
-  /** Multi-role → E2E_<ROLE>_USERNAME|PASSWORD */
-  roleCredentials?: Record<string, { username: string; password: string }>;
-  seedCommand?: string;
-  teardownCommand?: string;
-  usePlaywrightInspect?: boolean;
-  showBrowser?: boolean;
-  provider?: string | null;
-  onLog?: (line: string) => void;
-  onProgress?: (p: E2eBatchProgress) => void;
-  waitIfPaused?: () => Promise<void>;
-  /** Pre-inspected DOM — skip Inspect when set. */
-  domSnapshot?: string;
-}): Promise<{
-  rows: E2eBatchItemResult[];
-  okCount: number;
-  files: E2EFileDto[];
-}> {
-  const log = (line: string) => opts.onLog?.(line);
-  const progress = (p: E2eBatchProgress) => opts.onProgress?.(p);
-  let domSnapshot = opts.domSnapshot || "";
-
-  if (!domSnapshot) {
-    progress({
-      phase: "inspect",
-      current: 0,
-      total: opts.testCases.length,
-      label: "Inspect Target URL…",
-    });
-    try {
-      const inspected = await inspectE2eDom({
-        targetUrl: opts.targetUrl,
-        projectRoot: opts.projectRoot,
-        usePlaywrightInspect: opts.usePlaywrightInspect,
-        onLog: log,
-      });
-      domSnapshot = inspected.domSnapshot;
-    } catch (e) {
-      log(`  inspect warn: ${String(e)}\n`);
-    }
-  }
-
-  const gen = await generateE2eBatch({
-    ...opts,
-    domSnapshot,
-  });
-
-  return verifyE2eModuleBatch({
-    ...opts,
-    files: gen.files,
-    genItems: gen.genItems,
-    domSnapshot,
-    priorRows: gen.rows,
-    healFailures: false,
-    maxRetries: 1,
-  });
-}

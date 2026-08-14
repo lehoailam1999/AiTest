@@ -291,6 +291,23 @@ export const agentApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  pickUnitField: (body: {
+    projectId: string;
+    fieldLabel: string;
+    inputKeys?: string[];
+    title?: string;
+    steps?: string;
+    primaryPath?: string;
+    candidates: Array<{ property: string } | string>;
+  }) =>
+    authFetch<{
+      property?: string | null;
+      confidence?: number | null;
+      source?: string;
+    }>("/agent/pick-unit-field", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };
 
 export const generateApiTest = {

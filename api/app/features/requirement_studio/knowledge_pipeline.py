@@ -182,6 +182,7 @@ async def enrich_knowledge_background(
     """Background LLM enrich after heuristic ready. Own DB session.
 
     Single oneshot CLI call — merge onto heuristic; prefer richer useCases on collision.
+    No create-chat / --resume (single-turn JSON enrich).
     """
     from app.database import SessionLocal
     from app.services.ai_service import RUNNER_AI_CLI, chat_for_connection
@@ -289,13 +290,14 @@ async def enrich_knowledge_background(
                 pairs, file_names=file_names
             )
             prompt_chars = len(oneshot_sys) + len(oneshot_user)
+            # Pure oneshot — no create-chat / --resume (enrich is single-turn JSON).
             raw_one, meta_one = await asyncio.wait_for(
                 chat_for_connection(
                     conn,
                     oneshot_sys,
                     oneshot_user,
                     resume_chat_id=None,
-                    create_chat=True,
+                    create_chat=False,
                 ),
                 timeout=max(45.0, enrich_timeout_sec),
             )

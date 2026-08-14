@@ -109,6 +109,21 @@ describe("approvedTcMarkdown", () => {
     assert.match(md, /module: Chọn vị trí lưu trữ vật chứng/);
   });
 
+  it("includes contract: pointer when Unit has path/code markers", () => {
+    const md = renderApprovedTestCaseMarkdown(
+      sample({
+        type: "Unit",
+        testCaseId: "TC-U-99",
+        module: "Tạo mới",
+        testData:
+          "path: src/App/WidgetCreateCommandHandler.cs\ncode: WidgetCreateCommandHandler",
+      }),
+      { requirementTitle: "Widget" }
+    );
+    assert.match(md, /contract: TC-U-99\.grounding\.json/);
+    assert.match(md, /path: src\/App\/WidgetCreateCommandHandler\.cs/);
+  });
+
   it("parses function alias from grounding", () => {
     const g = parseApprovedTcGrounding(`## Grounding (Unit Gen)
 

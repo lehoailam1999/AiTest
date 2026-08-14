@@ -2,6 +2,7 @@
  * Pure Unit Gen preflight decisions (Node-testable).
  * Phase 5: after IDE + Approved MD, require path:+code: before CLI.
  */
+import { isUnitTcBlockedForGen } from "./parseUnitTcMarkers.ts";
 export type UnitGenGateOk = { ok: true; mdPath?: string };
 export type UnitGenGateFail = {
   ok: false;
@@ -11,7 +12,8 @@ export type UnitGenGateFail = {
     | "no_sync_md"
     | "no_root"
     | "needs_marker"
-    | "needs_language";
+    | "needs_language"
+    | "not_ready";
   message: string;
   cta?: "connect_ide" | "sync_md";
 };
@@ -58,6 +60,8 @@ export function decideUnitGenGate(input: {
   hasSourceMarkers?: boolean;
   /** Approve wrote sut-resolve skipped without markers. */
   sutResolveSkipped?: boolean;
+  /** Test Data + MD blob for NOT_READY / VALIDATION IR gate. */
+  markerBlob?: string | null;
 }): UnitGenGateResult {
   if (!input.isTauri) {
     return {
@@ -104,6 +108,15 @@ export function decideUnitGenGate(input: {
       message:
         `FAIL_NEEDS_MARKER — «${input.tcLabel}» chưa có path: + code: đáng tin. ` +
         `Approve lại (Connect IDE + index) hoặc thêm path:/code: thủ công vào Test Data, rồi Gen.`,
+      cta: "sync_md",
+    };
+  }
+  const block = isUnitTcBlockedForGen(input.markerBlob);
+  if (block.blocked) {
+    return {
+      ok: false,
+      code: "not_ready",
+      message: `${block.reason} — «${input.tcLabel}». Sửa TC IR / Re-gen / Re-Approve trước khi Gen.`,
       cta: "sync_md",
     };
   }

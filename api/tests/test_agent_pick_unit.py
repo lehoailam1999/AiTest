@@ -1,8 +1,13 @@
-"""Tests for grounded pick-unit-primary helpers."""
+"""Tests for grounded pick-unit-primary / pick-unit-field helpers."""
 
 from __future__ import annotations
 
-from app.routers.agent_pick_unit import accept_shortlist_pick, parse_pick_unit_json
+from app.routers.agent_pick_unit import (
+    accept_field_shortlist_pick,
+    accept_shortlist_pick,
+    parse_pick_field_json,
+    parse_pick_unit_json,
+)
 
 
 def test_parse_pick_unit_json_plain():
@@ -53,3 +58,30 @@ def test_accept_shortlist_pick_low_confidence():
         "confidence": 0.4,
     }
     assert accept_shortlist_pick(pick, cands) is None
+
+
+def test_parse_pick_field_json_plain():
+    raw = '{"property":"EvidenceCode","confidence":0.91}'
+    got = parse_pick_field_json(raw)
+    assert got["property"] == "EvidenceCode"
+    assert got["confidence"] == 0.91
+
+
+def test_accept_field_shortlist_pick_ok():
+    cands = ["EvidenceCode", "Name", "CaseCode"]
+    pick = {"property": "EvidenceCode", "confidence": 0.88}
+    got = accept_field_shortlist_pick(pick, cands)
+    assert got is not None
+    assert got["property"] == "EvidenceCode"
+
+
+def test_accept_field_shortlist_pick_rejects_invented():
+    cands = ["EvidenceCode", "Name"]
+    pick = {"property": "HackField", "confidence": 0.99}
+    assert accept_field_shortlist_pick(pick, cands) is None
+
+
+def test_accept_field_shortlist_pick_low_confidence():
+    cands = ["EvidenceCode"]
+    pick = {"property": "EvidenceCode", "confidence": 0.5}
+    assert accept_field_shortlist_pick(pick, cands) is None

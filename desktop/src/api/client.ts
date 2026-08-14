@@ -102,20 +102,44 @@ export async function authUpload<T>(path: string, form: FormData): Promise<T> {
   const headers = new Headers({ Accept: "application/json" });
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  let res = await fetch(`${API_URL}${path}`, { method: "POST", headers, body: form });
-  if (res.status === 401) {
-    token = await tryRefresh();
-    if (token) {
-      const retryHeaders = new Headers({ Accept: "application/json" });
-      retryHeaders.set("Authorization", `Bearer ${token}`);
-      res = await fetch(`${API_URL}${path}`, { method: "POST", headers: retryHeaders, body: form });
-    } else {
-      session.clear();
-      onUnauthorized?.();
-      throw new Error("Phiên đăng nhập đã hết hạn — hãy đăng nhập lại.");
+  const ctrl = new AbortController();
+  // First docx+images used to hang past browser defaults — fail with clear message.
+  const timer = window.setTimeout(() => ctrl.abort(), 120_000);
+  try {
+    let res = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers,
+      body: form,
+      signal: ctrl.signal,
+    });
+    if (res.status === 401) {
+      token = await tryRefresh();
+      if (token) {
+        const retryHeaders = new Headers({ Accept: "application/json" });
+        retryHeaders.set("Authorization", `Bearer ${token}`);
+        res = await fetch(`${API_URL}${path}`, {
+          method: "POST",
+          headers: retryHeaders,
+          body: form,
+          signal: ctrl.signal,
+        });
+      } else {
+        session.clear();
+        onUnauthorized?.();
+        throw new Error("Phiên đăng nhập đã hết hạn — hãy đăng nhập lại.");
+      }
     }
+    return await parse<T>(res);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(
+        "Upload quá lâu (>120s) — thử .md/.txt hoặc Word ít ảnh, rồi Phân tích lại."
+      );
+    }
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
   }
-  return parse<T>(res);
 }
 
 /** Authenticated call — injects access token, refreshes once on 401. */

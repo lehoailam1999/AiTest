@@ -134,7 +134,11 @@ export default function FreezePanel({
   const logBodyRef = useRef<HTMLPreElement | null>(null);
 
   const knowledgeOk =
-    knowledge?.status === "ready" || knowledge?.status === "stale";
+    knowledge?.status === "ready" ||
+    knowledge?.status === "stale" ||
+    (Boolean(knowledge?.enrichPending) && Boolean(knowledge?.payload));
+
+  const enrichPending = Boolean(knowledge?.enrichPending);
 
   const livePageData = useMemo(() => {
     const start = (livePage - 1) * 20;
@@ -363,6 +367,15 @@ export default function FreezePanel({
 
   return (
     <div className="freeze-panel">
+      {enrichPending ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          showIcon
+          title="Đang Freeze trên bản heuristic"
+          description="AI enrich chưa xong — TC có thể thiếu chi tiết. Có thể Sinh TC ngay, hoặc đợi enrich xong rồi Freeze lại để dùng Knowledge đầy đủ hơn."
+        />
+      ) : null}
       <Alert
         type="info"
         showIcon

@@ -180,6 +180,8 @@ def build_unit_ir_test_data(obj: dict[str, Any]) -> str:
         target = td.get("target") if isinstance(td.get("target"), dict) else {}
         if target.get("field"):
             lines.append(f"target.field: {target.get('field')}")
+        if target.get("property"):
+            lines.append(f"target.property: {target.get('property')}")
         if target.get("constraint"):
             lines.append(f"target.constraint: {target.get('constraint')}")
         if target.get("boundary"):
@@ -220,7 +222,11 @@ def build_unit_ir_test_data(obj: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def flatten_unit_tc_ir(obj: dict[str, Any]) -> dict[str, Any]:
+def flatten_unit_tc_ir(
+    obj: dict[str, Any],
+    *,
+    field_aliases: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
     """
     Normalize one TC object to the flat shape expected by TestCaseDraft / DB.
     Legacy flat TCs pass through with light enrichment when IR keys exist.
@@ -228,9 +234,14 @@ def flatten_unit_tc_ir(obj: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(obj, dict):
         return {}
 
+    from app.services.unit_tc_field_bind import bind_unit_tc_field
+    from app.services.unit_tc_ir_ready import apply_unit_tc_ir_readiness
+
     out = dict(obj)
 
     if looks_like_unit_tc_ir(obj):
+        bind_unit_tc_field(out, field_aliases=field_aliases)
+        apply_unit_tc_ir_readiness(out)
         out["steps"] = _join_steps(obj.get("steps"))
         out["expectedResult"] = _join_expected(
             obj.get("expectedResult") or obj.get("expected_result") or obj.get("expected")

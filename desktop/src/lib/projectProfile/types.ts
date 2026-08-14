@@ -37,7 +37,10 @@ export type PlaywrightRunProfile = {
 export type AuthProfile = {
   strategy: AuthStrategy;
   storageDir: string;
+  /** Roles to seed/persist. Empty → only admin/default from mine. */
   roles: string[];
+  /** Optional extra files (project-relative) with username/password. */
+  seedFiles?: string[];
   loginPath?: string;
 };
 

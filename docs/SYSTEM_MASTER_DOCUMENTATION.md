@@ -7,7 +7,9 @@
 | **Mô hình Kiến trúc** | **Hybrid Architecture** (Desktop App + Tauri FS + **IDE Extension Bridge** + Python REST Backend + PostgreSQL + AI CLI) |
 | **Stack Sản phẩm** | **Frontend:** React 19 (Vite, TypeScript) + **Tauri v1** (Rust Native Bridge)<br>**Backend:** Python 3.12 (FastAPI, Uvicorn, Pydantic v2, SQLAlchemy 2.0, Alembic)<br>**IDE Bridge:** VS Code / Cursor extension (`aitest-ide`, JSON-RPC WebSocket)<br>**Shared protocol:** `@aitest/ide-protocol`<br>**Database:** PostgreSQL 16 (Port host **5433**)<br>**AI Engine:** AI CLI trên **SUT workspace** (Cursor Agent) cho Unit IDE Gen; Backend CLI adapters cho legacy / E2E / Studio |
 | **Stack Dự án Người dùng** | **Không ràng buộc (Stack-Agnostic)** — C# (.NET), TypeScript/JavaScript (React/Vue/Angular), Python, Go, Java, v.v. |
-| **Trạng thái Document** | **Single Source of Truth (SoT)** — đồng bộ code (Unit IDE Gen, Implementation Planner P1, Capability/Session P2, E2E layout `_shared`) — cập nhật **2026-08** |
+| **Trạng thái Document** | **Single Source of Truth (SoT)** — đồng bộ code (Unit IDE Gen, Implementation Planner P1, Capability/Session P2, E2E layout `_shared`, Approve field LLM shortlist) — cập nhật **2026-08** |
+
+> **Kiến trúc tổng thể (báo cáo / Architect overview):** [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
@@ -23,6 +25,7 @@
 
 ## MỤC LỤC TỔNG QUAN
 
+- [Kiến trúc tổng thể](./ARCHITECTURE.md) — báo cáo Architect (boundaries, pha, SoT)
 - [Chương 1: Tổng Quan & Triết Lý Kiến Trúc System](#chương-1-tổng-quan--triết-lý-kiến-trúc-system)
 - [Chương 2: Design vs Automate](#chương-2-kiến-trúc-phân-tách-hai-phase-độc-lập-design-vs-automate)
 - [Chương 3: Requirement Studio & Coverage](#chương-3-requirement-studio--ma-trận-bao-phủ-coverage-matrix)
@@ -119,7 +122,7 @@ Chi tiết protocol Unit: `packages/ide-protocol/` + `ide-plugins/vscode/` (brid
 
 ### 2.1 Phase 1: Design (Requirement Studio)
 1. **Upload Tài liệu:** `.md`, `.docx`, `.pdf`, `.txt` → parse `extracted_text` (SRS).
-2. **Phân tích (Knowledge):** LLM hoặc Heuristic → FEATURES, ACTORS, FLOWS, BR, FR, …
+2. **Phân tích (Knowledge - Freeze 1 bản duy nhất):** Thực hiện **duy nhất 1 lần Phân tích Knowledge tập trung** (LLM/Heuristic → FEATURES, ACTORS, FLOWS, BR, FR...) và **Freeze thành 1 phiên bản Knowledge Snapshot duy nhất** trên PostgreSQL. Mọi kịch bản Test Case (Unit & E2E) đều dùng chung bản Knowledge Snapshot đã Freeze này.
 3. **Sinh & Duyệt Test Case:** `Draft` → Review → `Approved` (Coverage Board / Review Queue).
 
 ### 2.2 Phase 2: Automate (Unit & E2E Engines)
@@ -158,14 +161,18 @@ Khi LLM lỗi/quota: Heuristic/Regex nội bộ vẫn bóc khung TC cơ bản.
 
 ### 3.4 Grounding markers trên TC (Unit)
 
-Để Gen Unit ổn định **mọi dự án**, Test Data / Steps nên có:
+Approve Desktop resolve từ `index.db` (Module → Function → Title + CRUD verb) rồi sync MD:
 
 ```text
 path: src/.../EvidenceImageUploadService.cs
 code: EvidenceImageUploadService
+related: …   # optional
 ```
 
 Thiếu marker + không resolve được entry → fail-closed `needs_marker` (Implementation Planner), không bịa SUT.
+
+**As-built vs roadmap** (symbol range, confidence HIGH/MED/LOW, STALE_INDEX, Source Grounding Contract, field LLM shortlist):  
+→ [`docs/UNIT_APPROVE_SOURCE_GROUNDING.md`](UNIT_APPROVE_SOURCE_GROUNDING.md) · Architect overview → [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 

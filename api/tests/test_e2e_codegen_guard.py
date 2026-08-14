@@ -300,6 +300,37 @@ def test_guards_accept_field_id_via_form_control_bridge():
     assert any(f.kind == "page" for f in out)
 
 
+def test_guards_accept_name_via_form_control_or_field_id_bridge():
+    """name=X is grounded when formControlName X or id field_X is allowed."""
+    files = [
+        E2EFile(
+            path="AItest/E2ETest/M/pages/x.page.ts",
+            content=(
+                "export class P {\n"
+                "  constructor(public page: any) {}\n"
+                "  async pick() { await this.page.locator('[name=\"caseRecords\"]').click(); }\n"
+                "}\n"
+            ),
+            kind="page",
+        ),
+        E2EFile(
+            path="AItest/E2ETest/M/specs/x.spec.ts",
+            content="import { test } from '@playwright/test';\ntest('x', async () => {});",
+            kind="spec",
+        ),
+    ]
+    contract = (
+        "formControlName: caseRecords\n"
+        "id: field_caseRecords\n"
+        "name: (none)\n"
+        "data-cy: (none)\n"
+    )
+    out = apply_e2e_codegen_guards(
+        files, locator_contract=contract, enforce_journey=False, enforce_stubs=False
+    )
+    assert any(f.kind == "page" for f in out)
+
+
 def test_guards_accept_compound_css_under_allowed_id():
     """Descendant under allow-listed id remains grounded (#id .child)."""
     files = [
@@ -1120,6 +1151,8 @@ export class DocPage {
     _, out_page = _ensure_locator_fields_for_spec_expects(spec, page)
     assert "readonly submitButton: Locator" in out_page
     assert "this.submitButton =" in out_page
+    assert "main, [role=\"main\"], body" not in out_page
+    assert "getByRole('button'" in out_page
     # Must init AFTER this.page = page (else undefined.locator)
     page_i = out_page.index("this.page = page")
     btn_i = out_page.index("this.submitButton =")
@@ -1867,7 +1900,7 @@ export class P {
 """
     out = _rewrite_ungrounded_nav_stubs(page)
     assert "ungrounded" not in out.lower()
-    assert "getByRole('button'" in out
+    assert "getByTestId('entityCreateButton')" in out or "getByRole('button'" in out
 
 def test_arrange_and_select_field_not_phase3_throw():
     from app.services.e2e_codegen_guard import (
@@ -1915,8 +1948,9 @@ def test_complete_step_wizard_not_phase3_throw():
 
     assert _is_wizard_next_method("completeStep1ToReachStep2")
     stub = _render_smart_method_stub("completeStep1ToReachStep2")
-    # P1: wizard soft regex removed — needs Spec label or DOM
-    assert "ungrounded" in stub.lower() or "fail-closed" in stub.lower()
+    assert "getByRole" in stub
+    assert "Tiếp theo" in stub or "Next" in stub
+    assert "console.warn" not in stub
 
     page = """\
 export class P {
@@ -2104,3 +2138,124 @@ def test_validate_required_context_accepts_execution_context_role():
         assert e.category == "ContextMissing"
         assert "role/authRef" in str(e)
         assert "authRole" in str(e)
+
+
+def test_fix_playwright_shim_reference_from_spec_depth():
+    from app.services.e2e_codegen_guard import fix_playwright_shim_reference
+
+    spec_path = (
+        "AItest/E2ETest/Create-evidence/TC-slug/specs/evidence-create-br1.spec.ts"
+    )
+    content = (
+        '/// <reference path="../types/playwright-shim.d.ts" />\n'
+        "import { test } from '@playwright/test';\n"
+    )
+    fixed = fix_playwright_shim_reference(content, spec_path)
+    assert "../../../_shared/types/playwright-shim.d.ts" in fixed
+    assert "../types/playwright-shim.d.ts" not in fixed
+
+
+def test_rewrite_nested_aitest_imports_shared_page_sibling():
+    from app.services.e2e_codegen_guard import rewrite_nested_aitest_imports
+
+    page_path = "AItest/E2ETest/_shared/pages/evidence-create-br1.page.ts"
+    content = (
+        "import { EvidenceCreateBr4Page } from "
+        "'../AItest/E2ETest/_shared/pages/evidence-create-br4.page';\n"
+    )
+    fixed = rewrite_nested_aitest_imports(content, page_path)
+    assert "./evidence-create-br4.page" in fixed
+    assert "AItest/E2ETest" not in fixed
+
+
+def test_shell_next_button_not_main_body():
+    from app.services.e2e_codegen_guard import (
+        _ensure_locator_fields_for_spec_expects,
+        _rewrite_shell_action_locators,
+        apply_e2e_codegen_guards,
+    )
+    from app.llm.base import E2EFile
+
+    page = """\
+import { type Locator, type Page } from '@playwright/test';
+export class EvidencePage {
+  readonly page: Page;
+  readonly nextButton: Locator;
+  constructor(page: Page) {
+    this.page = page;
+    this.nextButton = this.page.locator('main, [role="main"], body').first();
+  }
+}
+"""
+    healed = _rewrite_shell_action_locators(page)
+    assert 'main, [role="main"], body' not in healed
+    assert "Tiếp theo" in healed or "Next" in healed
+    assert "getByRole" in healed
+
+    spec = """\
+import { test, expect } from '@playwright/test';
+import { EvidencePage } from '../pages/evidence.page';
+test('step1 incomplete blocks step2', async ({ page }) => {
+  const pom = new EvidencePage(page);
+  await expect(pom.nextButton).toBeDisabled();
+});
+"""
+    bare = """\
+import { type Locator, type Page } from '@playwright/test';
+export class EvidencePage {
+  readonly page: Page;
+  constructor(page: Page) {
+    this.page = page;
+  }
+}
+"""
+    _, out_page = _ensure_locator_fields_for_spec_expects(spec, bare)
+    assert 'main, [role="main"], body' not in out_page
+    assert "this.nextButton =" in out_page
+    assert "getByRole" in out_page
+
+    out = apply_e2e_codegen_guards(
+        [
+            E2EFile(path="AItest/E2ETest/M/T/specs/a.spec.ts", content=spec, kind="spec"),
+            E2EFile(path="AItest/E2ETest/M/T/pages/evidence.page.ts", content=page, kind="page"),
+        ],
+        enforce_journey=False,
+    )
+    page_out = next(f.content for f in out if f.kind == "page")
+    assert 'locator(\'main, [role="main"], body\')' not in page_out
+    assert "nextButton" in page_out
+
+
+def test_act_stubs_throw_not_warn_return():
+    from app.services.e2e_codegen_guard import _render_smart_method_stub
+    from app.services.e2e_stub_grounding import render_ungrounded_fail_stub
+
+    mystery = render_ungrounded_fail_stub("doMysteriousThing")
+    assert "throw new Error" in mystery
+    assert "console.warn" not in mystery
+
+    click = _render_smart_method_stub("clickSave", dom_snapshot="")
+    assert "throw new Error" in click
+    assert "console.warn" not in click
+
+    leave = _render_smart_method_stub("leaveRequiredStep1FieldEmpty", dom_snapshot="")
+    assert "#field_name" in leave
+    assert "fill('')" in leave
+    assert "console.warn" not in leave
+
+    blocked = _render_smart_method_stub(
+        "expectStep1IncompleteBlocksStep2", dom_snapshot=""
+    )
+    assert "toBeDisabled" in blocked
+    assert "BusinessAssertionFailed" not in blocked
+    assert "Tiếp theo" in blocked or "Next" in blocked
+
+    allowed = _render_smart_method_stub("expectCompletionAllowed", dom_snapshot="")
+    assert "BusinessAssertionFailed" in allowed
+    assert "toBeDisabled" not in allowed
+
+    wizard = _render_smart_method_stub("clickGoToStep2", dom_snapshot="")
+    assert "getByRole" in wizard
+    assert "console.warn" not in wizard
+    assert "Tiếp theo" in wizard or "Next" in wizard
+

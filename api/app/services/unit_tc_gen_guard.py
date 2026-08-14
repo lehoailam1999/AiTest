@@ -2,7 +2,10 @@
 Post-gen guard for Unit TC drafts (preferred_engine=unit).
 
 Drop presentation / interaction-only drafts (portable heuristics — no product nouns).
+Drop FEATURES-only / missing primaryBucket when IR markers present.
 Strip Latin Class.Method segments from title (SUT = Approve path:/code: only).
+
+E2E path must not call this module.
 """
 
 from __future__ import annotations
@@ -38,6 +41,30 @@ _UI_VERB_RE = re.compile(
     r")\b"
 )
 
+# Soft UI narrative without backend outcome (still looks like E2E)
+_SOFT_UI_RE = re.compile(
+    r"(?i)("
+    r"người\s*dùng\s+(nhấn|bấm|click|chọn|điền|mở|xem|kéo)|"
+    r"\b(nhấn|bấm)\s+(nút|button|link)|"
+    r"hiển\s*thị\s+(danh\s*sách|form|màn|popup|toast|dialog|nút|button)|"
+    r"xem\s+chi\s*tiết|"
+    r"mở\s+(màn\s*hình|form|trang)|"
+    r"điền\s+(form|thông\s*tin\s*trên)|"
+    r"chọn\s+từ\s+(dropdown|danh\s*sách)"
+    r")"
+)
+
+_BE_OUTCOME_RE = re.compile(
+    r"(?i)("
+    r"từ\s*chối|reject|validate|validation|persist|"
+    r"lưu\s*(thành\s*công|bản\s*ghi|entity)|"
+    r"authz|không\s*cho\s*phép|bắt\s*buộc|unique|trùng|"
+    r"exception|handler|query|filter\s*(theo|dữ\s*liệu)|"
+    r"cập\s*nhật\s*trạng\s*thái|state\s*transition|"
+    r"primaryBucket|behaviorId|target\.(field|constraint)"
+    r")"
+)
+
 # Enable/disable control (presentation state)
 _UI_ENABLE_RE = re.compile(
     r"(?i)("
@@ -58,6 +85,15 @@ _INVENT_HTTP_RE = re.compile(
 # (trace/behaviorId/primaryBucket alone = SRS IR; vẫn cấm invent HTTP status / MaxLength(n)).
 _SOURCE_SIGNAL_RE = re.compile(
     r"(?i)\blayerHint\s*:|\bsourceSignal\s*:|\bpath\s*:|\bcode\s*:"
+)
+
+_TRACE_FEATURES_RE = re.compile(r"(?i)\btrace\s*:\s*FEATURES\b")
+_TRACE_PRIMARY_RE = re.compile(
+    r"(?i)\btrace\s*:\s*(BUSINESS_RULES|VALIDATION_DATA|ERROR_HANDLING|ACCEPTANCE)\b"
+)
+_PRIMARY_BUCKET_RE = re.compile(r"(?i)\bprimaryBucket\s*:")
+_IR_MARKER_RE = re.compile(
+    r"(?i)\b(behaviorId\s*:|target\.(field|constraint)\s*:)"
 )
 
 # Middle segment: Feature - Class.Method - Result → strip Class.Method
@@ -100,7 +136,29 @@ def decide_unit_tc_draft(
     type: str | None = None,  # noqa: A002 — draft field name
 ) -> UnitTcGuardResult:
     """Fail-closed for clear presentation/interaction Unit drafts."""
+    # Never keep E2E/UI engine labels as Unit (do not coerce UI → Unit).
+    typ = str(type or "").strip().upper()
+    if typ in ("E2E", "E2E_UI", "UI"):
+        return UnitTcGuardResult("drop", "FAIL_E2E_TYPE")
+
     text = _blob(title, module, steps, expected_result, test_data)
+    td = test_data or ""
+
+    if _TRACE_FEATURES_RE.search(td):
+        return UnitTcGuardResult("drop", "FAIL_FEATURES_ONLY")
+    # IR-shaped drafts must carry primaryBucket (or recoverable PRIMARY trace)
+    if _IR_MARKER_RE.search(td) and not (
+        _PRIMARY_BUCKET_RE.search(td) or _TRACE_PRIMARY_RE.search(td)
+    ):
+        return UnitTcGuardResult("drop", "FAIL_NO_PRIMARY_BUCKET")
+    # FEATURES-only without any PRIMARY marker
+    if (
+        re.search(r"(?i)\btrace\s*:", td)
+        and not _TRACE_PRIMARY_RE.search(td)
+        and not _PRIMARY_BUCKET_RE.search(td)
+        and re.search(r"(?i)\bFEATURES\b", td)
+    ):
+        return UnitTcGuardResult("drop", "FAIL_FEATURES_ONLY")
 
     if _WIZARD_RE.search(text):
         return UnitTcGuardResult("drop", "FAIL_UI_WIZARD")
@@ -108,10 +166,56 @@ def decide_unit_tc_draft(
         return UnitTcGuardResult("drop", "FAIL_UI_VERBS")
     if _UI_ENABLE_RE.search(text):
         return UnitTcGuardResult("drop", "FAIL_UI_ENABLE")
+    if _SOFT_UI_RE.search(text) and not _BE_OUTCOME_RE.search(text):
+        return UnitTcGuardResult("drop", "FAIL_SOFT_UI")
     # Invented HTTP/MaxLength without path/layerHint/sourceSignal grounding
-    if _INVENT_HTTP_RE.search(text) and not _SOURCE_SIGNAL_RE.search(test_data or ""):
+    if _INVENT_HTTP_RE.search(text) and not _SOURCE_SIGNAL_RE.search(td):
         return UnitTcGuardResult("drop", "FAIL_NO_SOURCE_SIGNAL")
     return UnitTcGuardResult("keep")
+
+
+def apply_unit_tc_readiness_to_draft(draft: Any) -> bool:
+    """
+    Downgrade automation_ready when flat test_data markers fail readiness.
+    Returns True when draft was downgraded.
+    """
+    from app.services.unit_tc_ir_ready import decide_unit_tc_markers_ready
+
+    test_data = getattr(draft, "test_data", None) or (
+        draft.get("test_data") if isinstance(draft, dict) else None
+    )
+    if test_data is None and isinstance(draft, dict):
+        test_data = draft.get("testData")
+    steps = getattr(draft, "steps", None) or (
+        draft.get("steps") if isinstance(draft, dict) else None
+    )
+    expected = getattr(draft, "expected_result", None) or (
+        draft.get("expected_result") if isinstance(draft, dict) else None
+    )
+    if expected is None and isinstance(draft, dict):
+        expected = draft.get("expectedResult")
+
+    ready, reasons = decide_unit_tc_markers_ready(
+        test_data=test_data,
+        steps=steps,
+        expected_result=expected,
+    )
+    if ready:
+        return False
+
+    if isinstance(draft, dict):
+        draft["automation_ready"] = False
+        draft["automationReady"] = False
+        td = str(draft.get("test_data") or draft.get("testData") or "")
+        if "status: NOT_READY" not in td:
+            draft["test_data"] = f"{td}\nstatus: NOT_READY".strip()
+            draft["testData"] = draft["test_data"]
+    else:
+        draft.automation_ready = False
+        td = str(getattr(draft, "test_data", None) or "")
+        if "status: NOT_READY" not in td:
+            draft.test_data = f"{td}\nstatus: NOT_READY".strip()
+    return True
 
 
 def filter_unit_tc_drafts(
@@ -125,6 +229,7 @@ def filter_unit_tc_drafts(
     kept: list[Any] = []
     dropped = 0
     sanitized = 0
+    downgraded = 0
     for d in drafts:
         title = getattr(d, "title", None) or (d.get("title") if isinstance(d, dict) else None)
         module = getattr(d, "module", None) or (d.get("module") if isinstance(d, dict) else None)
@@ -132,9 +237,13 @@ def filter_unit_tc_drafts(
         expected = getattr(d, "expected_result", None) or (
             d.get("expected_result") if isinstance(d, dict) else None
         )
+        if expected is None and isinstance(d, dict):
+            expected = d.get("expectedResult")
         test_data = getattr(d, "test_data", None) or (
             d.get("test_data") if isinstance(d, dict) else None
         )
+        if test_data is None and isinstance(d, dict):
+            test_data = d.get("testData")
         typ = getattr(d, "type", None) or (d.get("type") if isinstance(d, dict) else None)
 
         result = decide_unit_tc_draft(
@@ -156,5 +265,7 @@ def filter_unit_tc_drafts(
                 d["title"] = new_title
             else:
                 d.title = new_title
+        if apply_unit_tc_readiness_to_draft(d):
+            downgraded += 1
         kept.append(d)
     return kept, dropped, sanitized

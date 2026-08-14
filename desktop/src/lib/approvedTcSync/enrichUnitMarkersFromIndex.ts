@@ -27,8 +27,11 @@ import {
   softCrossCuttingDenied,
   tcImpliesBehaviorPrimary,
   UNIT_BODY_RULE,
+  detectUnitCrudVerb,
+  confidenceMdWarning,
   type BodyRuleScoredCandidate,
   type UnitIntent,
+  type UnitApproveConfidence,
 } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import { isTauri, listSourceFiles, readTextFile } from "../../tauri/bridge";
@@ -48,14 +51,19 @@ import { sourceExtensionsForLanguage } from "../stackHints";
 import {
   buildUnitApproveQuery,
   llmPickUnitPrimary,
+  llmPickUnitField,
   LLM_PICK_RETRY_TIMEOUT_MS,
   resolveUnitPrimaryFromIndex,
   snapshotFromPaths,
+  bindTargetPropertyInTestData,
+  buildFieldPropertyShortlist,
+  resolveFieldFromIndex,
   type PickFromShortlistFn,
+  type PickFieldFromShortlistFn,
 } from "../unitResolve";
 import { isUnitTestCaseType } from "../testEngine";
 import {
-  preferredSymbolFromCodeIndex,
+  preferredCodeMarkerFromIndex,
   resolveSeedsFromCodeIndex,
 } from "./progressiveSeedFromCodeIndex";
 import {
@@ -76,6 +84,87 @@ export const UNIT_AUTO_MARKER = {
   softMinMargin: 8,
   softMinRatio: 1.15,
 } as const;
+
+function codeMarkerForEnrich(
+  codeIndex: CodeIndexSnapshot | null | undefined,
+  pathRel: string,
+  preferTokens: string[],
+  tc: Pick<TestCase, "title" | "module">,
+  intent?: UnitIntent | null
+): string | null {
+  if (!codeIndex) return null;
+  const shapeBlob = [tc.module, tc.title].filter(Boolean).join("\n");
+  const verb = intent ? detectUnitCrudVerb(intent, shapeBlob) : null;
+  return preferredCodeMarkerFromIndex(codeIndex, pathRel, {
+    preferTokens,
+    crudVerb: verb,
+    title: tc.title,
+    functionTitle: tc.module,
+  });
+}
+
+/**
+ * Deterministic bind first; if VI label unbound, LLM picks property ∈ index shortlist.
+ */
+async function resolvePropertyOverrideForBind(
+  testData: string | null | undefined,
+  opts: {
+    primaryPath: string;
+    relatedPaths?: string[] | null;
+    codeIndex?: CodeIndexSnapshot | null;
+    projectId?: string | null;
+    title?: string | null;
+    steps?: string | null;
+    pickFieldFromShortlist?: PickFieldFromShortlistFn | null;
+  }
+): Promise<string | null> {
+  const raw = (testData || "").trim();
+  if (!raw) return null;
+  const propM = raw.match(/^\s*target\.property\s*:\s*(\S+)/im);
+  if (propM?.[1] && /^[A-Za-z_][\w]*$/.test(propM[1])) return null;
+  const fieldM = raw.match(/^\s*target\.field\s*:\s*(.+)$/im);
+  if (!fieldM) return null;
+  const fieldLabel = fieldM[1].trim();
+  if (!fieldLabel) return null;
+
+  let inputKeys: string[] = [];
+  const inputM = raw.match(/^\s*input\s*:\s*(\{[\s\S]*?\})\s*$/im);
+  if (inputM) {
+    try {
+      inputKeys = Object.keys(JSON.parse(inputM[1]) as Record<string, unknown>);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const det = resolveFieldFromIndex({
+    fieldLabel,
+    inputKeys,
+    primaryPath: opts.primaryPath,
+    relatedPaths: opts.relatedPaths || [],
+    codeIndex: opts.codeIndex,
+  });
+  if (det) return det;
+
+  const shortlist = buildFieldPropertyShortlist({
+    codeIndex: opts.codeIndex,
+    primaryPath: opts.primaryPath,
+    relatedPaths: opts.relatedPaths || [],
+  });
+  if (!shortlist.length || !opts.projectId) return null;
+
+  const pickFn = opts.pickFieldFromShortlist || llmPickUnitField;
+  const picked = await pickFn({
+    projectId: opts.projectId,
+    fieldLabel,
+    inputKeys,
+    title: opts.title,
+    steps: opts.steps,
+    primaryPath: opts.primaryPath,
+    candidates: shortlist,
+  });
+  return picked?.property || null;
+}
 
 function uniqTokens(xs: string[]): string[] {
   const seen = new Set<string>();
@@ -116,6 +205,8 @@ export type UnitMarkerEnrichResult = {
   writeBack?: boolean;
   /** Compact body-rule log line */
   bodyRuleLog?: string;
+  /** Layer 2 — HIGH|MEDIUM|LOW */
+  confidence?: UnitApproveConfidence;
 };
 
 export type ReadSourceExcerpt = (pathRel: string) => Promise<string | null>;
@@ -340,7 +431,10 @@ export function enrichTestDataWithUnitMarkers(
   sourceNote = "ProjectFileIndex",
   projectRoot?: string | null,
   codeOverride?: string | null,
-  relatedPaths?: string[] | null
+  relatedPaths?: string[] | null,
+  confidence?: UnitApproveConfidence | null,
+  codeIndex?: CodeIndexSnapshot | null,
+  propertyOverride?: string | null
 ): UnitMarkerEnrichResult {
   let existing = (testData || "").trim();
   if (hasManualUnitSourceMarkers(existing)) {
@@ -348,6 +442,19 @@ export function enrichTestDataWithUnitMarkers(
   }
   if (AUTO_ENRICHED_RE.test(existing)) {
     existing = stripAutoEnrichedMarkers(existing);
+  }
+  // BE field bind — deterministic and/or LLM override (must ∈ index shortlist)
+  if (
+    (codeIndex && Object.keys(codeIndex.files || {}).length) ||
+    (propertyOverride && /^[A-Za-z_][\w]*$/.test(propertyOverride))
+  ) {
+    const bound = bindTargetPropertyInTestData(existing, {
+      primaryPath: seed.pathRel,
+      relatedPaths: relatedPaths || [],
+      codeIndex,
+      propertyOverride,
+    });
+    if (bound.bound) existing = bound.testData.trim();
   }
   const pathRel = toRepoRelativePath(seed.pathRel, projectRoot);
   const code = (codeOverride || "").trim() || symbolCodeFromPathRel(pathRel);
@@ -367,11 +474,21 @@ export function enrichTestDataWithUnitMarkers(
     .filter((p) => p && p !== pathRel);
   const rulePart = ruleHits.length ? ` ruleHits=${ruleHits.join("+")}` : "";
   const relatedPart = related.length ? ` related=${related.length}` : "";
+  const parsedCode = code.includes(".") ? code.split(".").pop() : "";
+  const methodPart =
+    parsedCode && /^[A-Za-z_][A-Za-z0-9_]*$/.test(parsedCode) && code.includes(".")
+      ? ` method=${parsedCode}`
+      : "";
+  const confBand: UnitApproveConfidence =
+    confidence === "HIGH" || confidence === "MEDIUM" || confidence === "LOW"
+      ? confidence
+      : "HIGH";
+  const confPart = confidenceMdWarning(confBand);
   const block = [
     `path: ${pathRel}`,
     `code: ${code}`,
     ...formatRelatedMarkerLines(related),
-    `# auto-enriched from ${sourceNote} (score=${seed.score}${rulePart}${relatedPart} writeBack=yes)`,
+    `# auto-enriched from ${sourceNote} (score=${seed.score}${rulePart}${relatedPart}${methodPart}${confPart} writeBack=yes)`,
   ].join("\n");
   const next = existing ? `${existing}\n${block}` : block;
   return {
@@ -385,6 +502,7 @@ export function enrichTestDataWithUnitMarkers(
     ruleHits,
     relatedPaths: related,
     writeBack: true,
+    confidence: confBand,
   };
 }
 
@@ -534,10 +652,18 @@ export function enrichTcTestDataFromIndex(
     return { testData: rawTd, enriched: false, writeBack: false };
   }
   const tcForResolve = prepareTcForEnrich(tc);
-  const intent = extractUnitIntent(tcForResolve, {
+  const rawTestData = String(tcForResolve.testData || "").trim();
+  const validationBucket =
+    /primaryBucket:\s*VALIDATION_DATA/i.test(rawTestData) ||
+    /trace:\s*VALIDATION_DATA/i.test(rawTestData);
+  const baseIntent = extractUnitIntent(tcForResolve, {
     projectAliases: opts?.projectAliases,
     requirementTitle: opts?.requirementTitle,
   });
+  const intent =
+    validationBucket && !baseIntent.requiresBodyRule
+      ? { ...baseIntent, requiresBodyRule: true }
+      : baseIntent;
   const hadIndex =
     Boolean(opts?.codeIndex && Object.keys(opts.codeIndex.files || {}).length) ||
     index.files.length > 0;
@@ -673,7 +799,7 @@ export function enrichTcTestDataFromIndex(
     preferTokens,
     (pathRel) =>
       source === "index.db" && opts?.codeIndex
-        ? preferredSymbolFromCodeIndex(opts.codeIndex, pathRel, preferTokens)
+        ? codeMarkerForEnrich(opts.codeIndex, pathRel, preferTokens, tc, intent)
         : null
   );
   return enrichTestDataWithUnitMarkers(
@@ -682,7 +808,9 @@ export function enrichTcTestDataFromIndex(
     source === "index.db" ? "index.db" : "ProjectFileIndex",
     opts?.projectRoot,
     promoted.symbol,
-    promoted.relatedPaths
+    promoted.relatedPaths,
+    null,
+    opts?.codeIndex
   );
 }
 
@@ -700,6 +828,7 @@ export async function enrichTcTestDataFromIndexAsync(
     readExcerpt?: ReadSourceExcerpt | null;
     enrichProfile?: UnitEnrichProfileKnobs | null;
     pickFromShortlist?: PickFromShortlistFn | null;
+    pickFieldFromShortlist?: PickFieldFromShortlistFn | null;
   }
 ): Promise<UnitMarkerEnrichResult> {
   const rawTd = (tc.testData || "").trim();
@@ -783,9 +912,7 @@ export async function enrichTcTestDataFromIndexAsync(
     const excerpt = await opts.readExcerpt(pinPath);
     if (excerpt?.trim()) {
       const code =
-        (opts.codeIndex
-          ? preferredSymbolFromCodeIndex(opts.codeIndex, pinPath, preferTokens)
-          : null) ||
+        codeMarkerForEnrich(opts.codeIndex, pinPath, preferTokens, tc, intent) ||
         pinPath.split("/").pop()?.replace(/\.[^.]+$/, "") ||
         "Sut";
       const relatedPaths = expandUnitRelatedPaths({
@@ -815,13 +942,28 @@ export async function enrichTcTestDataFromIndexAsync(
         hits: ["sutMap"],
         reason: `sutMap:${applied.preferSutMapKey || applied.matchedIds[0] || "pin"}`,
       };
+      const propertyOverride = await resolvePropertyOverrideForBind(
+        tcForResolve.testData,
+        {
+          primaryPath: pinPath,
+          relatedPaths,
+          codeIndex: opts?.codeIndex,
+          projectId: opts?.projectId,
+          title: tc.title,
+          steps: tc.steps,
+          pickFieldFromShortlist: opts?.pickFieldFromShortlist,
+        }
+      );
       return enrichTestDataWithUnitMarkers(
         tcForResolve.testData,
         { ...seed, ruleHits: ["sutMap"] },
         "sutMap",
         opts?.projectRoot,
         code,
-        relatedPaths
+        relatedPaths,
+        null,
+        opts?.codeIndex,
+        propertyOverride
       );
     }
   }
@@ -905,7 +1047,7 @@ export async function enrichTcTestDataFromIndexAsync(
         preferTokens,
         (pathRel) =>
           opts?.codeIndex
-            ? preferredSymbolFromCodeIndex(opts.codeIndex, pathRel, preferTokens)
+            ? codeMarkerForEnrich(opts.codeIndex, pathRel, preferTokens, tc, intent)
             : null
       );
       relatedPaths = filterCandidatesByDomainGuards(
@@ -913,6 +1055,18 @@ export async function enrichTcTestDataFromIndexAsync(
         moduleText,
         profile?.domainGuards
       ).map((c) => c.pathRel);
+      const propertyOverride = await resolvePropertyOverrideForBind(
+        tcForResolve.testData,
+        {
+          primaryPath: promoted.seed.pathRel,
+          relatedPaths,
+          codeIndex: opts?.codeIndex,
+          projectId: opts?.projectId,
+          title: tc.title,
+          steps: tc.steps,
+          pickFieldFromShortlist: opts?.pickFieldFromShortlist,
+        }
+      );
       const hit = enrichTestDataWithUnitMarkers(
         tcForResolve.testData,
         {
@@ -924,7 +1078,10 @@ export async function enrichTcTestDataFromIndexAsync(
         "index.db",
         opts?.projectRoot,
         promoted.symbol || resolved.symbol,
-        relatedPaths
+        relatedPaths,
+        resolved.confidence,
+        opts?.codeIndex,
+        propertyOverride
       );
       return {
         ...hit,
@@ -933,6 +1090,7 @@ export async function enrichTcTestDataFromIndexAsync(
         candidatesTop3: resolved.candidatesTop3,
         writeBack: true,
         bodyRuleLog: resolved.bodyRuleLog,
+        confidence: resolved.confidence || hit.confidence,
       };
     }
 
@@ -1273,10 +1431,13 @@ export async function enrichTcTestDataFromIndexAsync(
       [...preferTokens, ...(seed.ruleHits || [])],
       (pathRel) =>
         source === "index.db" && opts?.codeIndex
-          ? preferredSymbolFromCodeIndex(opts.codeIndex, pathRel, [
-              ...preferTokens,
-              ...(seed.ruleHits || []),
-            ])
+          ? codeMarkerForEnrich(
+              opts.codeIndex,
+              pathRel,
+              [...preferTokens, ...(seed.ruleHits || [])],
+              tc,
+              intent
+            )
           : null
     );
     relatedPaths = filterCandidatesByDomainGuards(
@@ -1284,6 +1445,18 @@ export async function enrichTcTestDataFromIndexAsync(
       moduleText,
       profile?.domainGuards
     ).map((c) => c.pathRel);
+    const propertyOverride = await resolvePropertyOverrideForBind(
+      tcForResolve.testData,
+      {
+        primaryPath: promoted.seed.pathRel,
+        relatedPaths,
+        codeIndex: opts?.codeIndex,
+        projectId: opts?.projectId,
+        title: tc.title,
+        steps: tc.steps,
+        pickFieldFromShortlist: opts?.pickFieldFromShortlist,
+      }
+    );
     const hit = enrichTestDataWithUnitMarkers(
       tcForResolve.testData,
       {
@@ -1295,7 +1468,10 @@ export async function enrichTcTestDataFromIndexAsync(
       source === "index.db" ? "index.db" : "ProjectFileIndex",
       opts?.projectRoot,
       promoted.symbol,
-      relatedPaths
+      relatedPaths,
+      null,
+      opts?.codeIndex,
+      propertyOverride
     );
     return {
       ...hit,
@@ -1398,6 +1574,18 @@ function makePickFromShortlist(
     });
 }
 
+function makePickFieldFromShortlist(
+  projectId: string,
+  pickTimeoutMs?: number
+): PickFieldFromShortlistFn {
+  return (input) =>
+    llmPickUnitField({
+      ...input,
+      projectId,
+      pickTimeoutMs,
+    });
+}
+
 type EnrichOneHit = {
   idx: number;
   tc: TestCase;
@@ -1416,6 +1604,7 @@ async function enrichOneApprovedUnitCase(
     codeIndex: CodeIndexSnapshot | null;
     readExcerpt: ReadSourceExcerpt | null;
     pickFromShortlist: PickFromShortlistFn | null;
+    pickFieldFromShortlist: PickFieldFromShortlistFn | null;
   }
 ): Promise<EnrichOneHit> {
   if (!shouldEnrichUnitTc(tc)) {
@@ -1432,6 +1621,7 @@ async function enrichOneApprovedUnitCase(
     enrichProfile: ctx.enrichProfile,
     unitScope: ctx.enrichProfile.scope,
     pickFromShortlist: ctx.pickFromShortlist,
+    pickFieldFromShortlist: ctx.pickFieldFromShortlist,
   });
   if (!hit.enriched) {
     return {
@@ -1501,6 +1691,9 @@ export async function enrichApprovedCasesWithUnitMarkers(
   const pickFromShortlist: PickFromShortlistFn | null = opts.projectId
     ? makePickFromShortlist(opts.projectId)
     : null;
+  const pickFieldFromShortlist: PickFieldFromShortlistFn | null = opts.projectId
+    ? makePickFieldFromShortlist(opts.projectId)
+    : null;
 
   const enrichCtx = {
     pathIndex,
@@ -1510,6 +1703,7 @@ export async function enrichApprovedCasesWithUnitMarkers(
     codeIndex,
     readExcerpt,
     pickFromShortlist,
+    pickFieldFromShortlist,
   };
 
   const CONCURRENCY = 6;
@@ -1529,7 +1723,14 @@ export async function enrichApprovedCasesWithUnitMarkers(
   const retryPick = opts.projectId
     ? makePickFromShortlist(opts.projectId, LLM_PICK_RETRY_TIMEOUT_MS)
     : null;
-  const retryCtx = { ...enrichCtx, pickFromShortlist: retryPick };
+  const retryFieldPick = opts.projectId
+    ? makePickFieldFromShortlist(opts.projectId, LLM_PICK_RETRY_TIMEOUT_MS)
+    : null;
+  const retryCtx = {
+    ...enrichCtx,
+    pickFromShortlist: retryPick,
+    pickFieldFromShortlist: retryFieldPick,
+  };
 
   for (const r of results) {
     const original = opts.cases[r.idx];

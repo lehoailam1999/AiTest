@@ -398,6 +398,43 @@ def _engine_readiness_warnings(bundle: dict | None, preferred: str | None) -> li
     return out[:6]
 
 
+def _allow_e2e_source_scan(engine_hint: dict | None) -> bool:
+    """
+    E2E TC gen policy is analysis-first. Source scan is opt-in to avoid prompt bloat
+    and drift with e2e-tc-from-analysis rules.
+    Enable by:
+      - engineHint.includeSourceScan = true
+      - env AITEST_TC_E2E_FORCE_SOURCE_SCAN=1
+    """
+    if os.environ.get("AITEST_TC_E2E_FORCE_SOURCE_SCAN", "").strip() == "1":
+        return True
+    if isinstance(engine_hint, dict):
+        v = engine_hint.get("includeSourceScan")
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _allow_unit_source_scan(engine_hint: dict | None) -> bool:
+    """
+    Unit TC gen is Knowledge-PRIMARY / analysis-first (path/code = Approve).
+    Source scan is opt-in:
+      - engineHint.includeSourceScan = true
+      - env AITEST_TC_UNIT_FORCE_SOURCE_SCAN=1
+    """
+    if os.environ.get("AITEST_TC_UNIT_FORCE_SOURCE_SCAN", "").strip() == "1":
+        return True
+    if isinstance(engine_hint, dict):
+        v = engine_hint.get("includeSourceScan")
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def _analysis_records_prompt_block(
     db: Session,
     *,
@@ -417,13 +454,21 @@ def _analysis_records_prompt_block(
     if not rows:
         return ""
     eng = (preferred_engine or "").strip().lower()
+    # Unit: PRIMARY BE only — never dump FEATURES/FLOWS/API_UI (E2E keeps full dump).
+    if eng == "unit":
+        from app.services.unit_tc_be_context import is_unit_analysis_type
+
+        rows = [r for r in rows if is_unit_analysis_type(getattr(r, "type", None))]
+        if not rows:
+            return ""
     parts: list[str] = [
         "## KẾT QUẢ PHÂN TÍCH ĐÃ LƯU DB (NGUỒN CHÍNH ĐỂ SINH TEST CASE)",
         "Output Phân tích đã persist — bám itemCount>0; [] → bỏ (không invent). "
         + (
-            "Unit UNIVERSAL BE: classify BE|FE|BE_FE|UNKNOWN (behavior+outcome). "
-            "PRIMARY: BUSINESS_RULES · VALIDATION · ERROR_HANDLING · ACCEPTANCE (BE only). "
-            "Categories A–I + coverage/trace → khối UNIT ← PHÂN TÍCH."
+            "Unit BE PRIMARY ONLY: BUSINESS_RULES · VALIDATION_DATA · ERROR_HANDLING · "
+            "ACCEPTANCE(BE). FEATURES/FLOWS/UI không inject — chỉ dùng tên Feature làm module. "
+            "AC UI-only → OUT. Markers Approve: primaryBucket + behaviorId + target.* → "
+            "khối UNIT ← PHÂN TÍCH."
             if eng == "unit"
             else "Mọi TC truy vết ≥1 mục bên dưới."
         ),
@@ -762,11 +807,20 @@ async def _retry_unit_primary_coverage(
     is_cursor: bool,
     cursor_hidden: bool,
     fan_errors: list[str],
+    speed_mode: str = "fast",
 ) -> None:
     """After Unit TC gen: retry CLI for Knowledge PRIMARY still missing markers."""
+    from app.llm.tc_speed import resolve_unit_primary_retry_rounds
     from app.services.job_progress import set_job_progress
 
     if (preferred_engine or "").strip().lower() != "unit":
+        return
+    max_rounds = resolve_unit_primary_retry_rounds(speed_mode)
+    if max_rounds <= 0:
+        set_job_progress(
+            job_id,
+            f"[primary-cover] bỏ qua (speed={speed_mode or 'fast'} · rounds=0)",
+        )
         return
     kw = _knowledge_from_snap_bundle(snap_bundle)
     inventory = build_primary_inventory(kw)
@@ -781,15 +835,7 @@ async def _retry_unit_primary_coverage(
         return
 
     summary = coverage_summary(inventory, missing)
-    max_rounds = 2
     batch_size = 10
-    try:
-        max_rounds = max(
-            1,
-            min(4, int(os.environ.get("AITEST_TC_UNIT_PRIMARY_RETRY_ROUNDS", "2"))),
-        )
-    except ValueError:
-        max_rounds = 2
     try:
         batch_size = max(
             4,
@@ -804,10 +850,14 @@ async def _retry_unit_primary_coverage(
         f"(BR={summary['perBucket']['BUSINESS_RULES']['missing']} "
         f"VAL={summary['perBucket']['VALIDATION_DATA']['missing']} "
         f"ERR={summary['perBucket']['ERROR_HANDLING']['missing']} "
-        f"AC={summary['perBucket']['ACCEPTANCE']['missing']}) → retry…",
+        f"AC={summary['perBucket']['ACCEPTANCE']['missing']}) → retry ≤{max_rounds}…",
     )
 
     from app.llm.base import GenerateContext
+
+    retry_speed = (speed_mode or "fast").strip().lower()
+    if retry_speed not in ("fast", "full"):
+        retry_speed = "fast"
 
     for round_i in range(1, max_rounds + 1):
         missing = missing_primary_signals(inventory, drafts)
@@ -838,8 +888,8 @@ async def _retry_unit_primary_coverage(
             user_rules=ctx.user_rules,
             feature_titles=list(ctx.feature_titles or [])[:8],
             preferred_engine="unit",
-            speed_mode="full",
-            max_tc_per_module=None,
+            speed_mode=retry_speed,
+            max_tc_per_module=getattr(ctx, "max_tc_per_module", None),
         )
         set_job_progress(
             job_id,
@@ -1066,7 +1116,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         }
 
         # Source scan: tighter budgets (token/speed). Prefer UI paths for E2E.
-        # Skip entirely for E2E when freeze Knowledge already has enough UI/AC signals.
+        # Skip when freeze Knowledge already has enough signals (Unit PRIMARY / E2E UI).
         skip_source_scan = False
         snap_bundle_early = None
         if snap is not None:
@@ -1083,7 +1133,27 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         elif preferred_engine == "unit":
             scan_files, scan_budget = (24, 28_000)
 
-        if skip_source_scan:
+        if preferred_engine == "e2e" and not _allow_e2e_source_scan(engine_hint):
+            source_scan_ctx = ""
+            skip_source_scan = True
+            set_job_progress(
+                job_id,
+                "[hệ thống] Bỏ qua source scan (E2E analysis-first). "
+                "Bật engineHint.includeSourceScan=true hoặc AITEST_TC_E2E_FORCE_SOURCE_SCAN=1 để ép scan.",
+            )
+        elif preferred_engine == "unit" and _allow_unit_source_scan(engine_hint):
+            # Opt-in: always scan even when Knowledge is rich
+            skip_source_scan = False
+            source_scan_ctx = await asyncio.to_thread(
+                _source_scan_prompt_block,
+                job.project_id,
+                max_files=scan_files,
+                module_hint=default_module or focus_modules or None,
+                char_budget=scan_budget,
+                prefer_ui=False,
+                prefer_logic=True,
+            )
+        elif skip_source_scan:
             source_scan_ctx = ""
             eng_label = (preferred_engine or "").upper() or "TC"
             if preferred_engine == "e2e":
@@ -1093,11 +1163,16 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     f"[hệ thống] Bỏ qua source scan ({eng_label}) — Knowledge freeze đủ feature/rule "
                     f"({force_env}=1 để ép scan)",
                 )
+            elif preferred_engine == "unit":
+                set_job_progress(
+                    job_id,
+                    f"[hệ thống] Bỏ qua source scan ({eng_label}) — Knowledge PRIMARY đủ "
+                    "(path/code = Approve; AITEST_TC_UNIT_FORCE_SOURCE_SCAN=1 để ép scan)",
+                )
             else:
                 set_job_progress(
                     job_id,
-                    f"[hệ thống] Bỏ qua source scan ({eng_label}) — "
-                    "AITEST_TC_UNIT_SKIP_SOURCE_SCAN=1",
+                    f"[hệ thống] Bỏ qua source scan ({eng_label})",
                 )
         else:
             # File scan can read dozens of files — keep event loop free for parallel fan-out.
@@ -1483,13 +1558,8 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         )
                     except ValueError:
                         concurrency = 4
-                    # Slimmer per-module budgets (module-scoped freeze slice)
-                    # Per-module budgets — Unit full keeps more PRIMARY in slice
-                    content_soft_max = (
-                        16_000
-                        if preferred_engine == "unit" and speed_mode == "full"
-                        else 12_000
-                    )
+                    # Per-module budgets. Unit MSC: ranked retrieve (not blind 16k).
+                    content_soft_max = 12_000
                     source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
                     analysis_soft_max = 6_000
                 else:
@@ -1499,11 +1569,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         )
                     except ValueError:
                         concurrency = 3
-                    content_soft_max = (
-                        16_000
-                        if preferred_engine == "unit" and speed_mode == "full"
-                        else 12_000
-                    )
+                    content_soft_max = 12_000
                     source_soft_max = 8_000 if preferred_engine != "e2e" else 6_000
                     analysis_soft_max = 6_000
 
@@ -1511,11 +1577,23 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     parse_json_field,
                     slice_freeze_content_for_module,
                 )
+                from app.services.unit_tc_context_builder import (
+                    default_unit_msc_budget,
+                    slice_unit_freeze_msc,
+                    unit_msc_enabled,
+                )
+
+                use_unit_msc = preferred_engine == "unit" and unit_msc_enabled()
+                if use_unit_msc:
+                    content_soft_max = default_unit_msc_budget(speed_mode=speed_mode)
 
                 snap_bundle = parse_json_field(snap.payload_json) if snap else None
                 snap_title = (snap.title if snap else None) or title
                 snap_summary = getattr(snap, "summary", None) if snap else None
                 snap_kv = int(getattr(snap, "knowledge_version", 0) or 0) if snap else 0
+                snap_ws = (
+                    str(getattr(snap, "workspace_id", "") or "") if snap else ""
+                )
 
                 sem = asyncio.Semaphore(concurrency)
                 warm_key = f"tc-job-{job_id}"
@@ -1540,6 +1618,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     + f" · concurrency={concurrency}"
                     + f" · batch={batch_size}"
                     + f" · speed={speed_mode}"
+                    + (f" · context=MSC/{content_soft_max}" if use_unit_msc else " · context=slice")
                     + f" · {cursor_mode_label}"
                     + " — bắt đầu…",
                 )
@@ -1569,15 +1648,28 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     )
                     slices: list[str] = []
                     for feat_title in feat_titles:
-                        scoped_one = slice_freeze_content_for_module(
-                            content,
-                            feat_title,
-                            soft_max=per_budget,
-                            snap_payload=snap_bundle,
-                            title=snap_title,
-                            summary=snap_summary,
-                            knowledge_version=snap_kv,
-                        )
+                        if use_unit_msc:
+                            scoped_one = slice_unit_freeze_msc(
+                                content,
+                                feat_title,
+                                soft_max=per_budget,
+                                snap_payload=snap_bundle,
+                                title=snap_title,
+                                summary=snap_summary,
+                                knowledge_version=snap_kv,
+                                workspace_id=snap_ws or None,
+                                speed_mode=speed_mode,
+                            )
+                        else:
+                            scoped_one = slice_freeze_content_for_module(
+                                content,
+                                feat_title,
+                                soft_max=per_budget,
+                                snap_payload=snap_bundle,
+                                title=snap_title,
+                                summary=snap_summary,
+                                knowledge_version=snap_kv,
+                            )
                         if not scoped_one.strip():
                             scoped_one = _filter_text_for_module(
                                 content, feat_title, soft_max=per_budget
@@ -1603,10 +1695,11 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             " ".join(feat_titles),
                             soft_max=analysis_soft_max,
                         )
+                    ctx_mode = "MSC" if use_unit_msc else "slice"
                     set_job_progress(
                         job_id,
                         f"[hệ thống] Batch «{label}»: "
-                        f"content_slice={len(scoped_content):,} chars | "
+                        f"context={ctx_mode} content={len(scoped_content):,} chars | "
                         f"source_ctx={len(scoped_src):,} chars — build prompt…",
                     )
                     scoped = GenerateContext(
@@ -1782,12 +1875,23 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                         set_job_progress(
                             job_id,
                             f"[anti-miss] thiếu {len(missing_mods)} module chưa có TC "
-                            f"→ retry nhẹ {len(retry_mods)} module: "
+                            f"→ retry song song {len(retry_mods)} module "
+                            f"(×{min(concurrency, len(retry_mods))}): "
                             f"{', '.join(retry_mods[:6])}{'…' if len(retry_mods) > 6 else ''}",
                         )
                         retry_base = total
-                        for r_idx, mod in enumerate(retry_mods, 1):
-                            await _run_claimed(retry_base + r_idx, [mod])
+                        retry_sem = asyncio.Semaphore(concurrency)
+
+                        async def _anti_miss_one(r_idx: int, mod: str) -> None:
+                            async with retry_sem:
+                                await _run_claimed(retry_base + r_idx, [mod])
+
+                        await asyncio.gather(
+                            *[
+                                _anti_miss_one(r_idx, mod)
+                                for r_idx, mod in enumerate(retry_mods, 1)
+                            ]
+                        )
                         remain_missing = _missing_modules_for_retry(titles_for_fan, drafts)
                         if remain_missing:
                             fan_errors.append(
@@ -1833,6 +1937,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     is_cursor=is_cursor,
                     cursor_hidden=cursor_hidden,
                     fan_errors=fan_errors,
+                    speed_mode=speed_mode,
                 )
 
                 set_job_progress(
@@ -1969,6 +2074,7 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     connection_is_cursor_cli(conn) and cursor_tc_hidden_chat_enabled()
                 ),
                 fan_errors=fan_errors,
+                speed_mode=speed_mode,
             )
 
         total_ms = elapsed_ms(t0)

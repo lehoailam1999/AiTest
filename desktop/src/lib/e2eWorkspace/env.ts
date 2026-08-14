@@ -91,20 +91,23 @@ export function buildE2EEnvWithProfile(
 ): E2EEnvConfig {
   const pw = profile?.playwrightRun;
   const authStrategy = profile?.auth?.strategy;
-  const useStorage =
-    input.useStorageState === true ||
-    (input.useStorageState !== false && authStrategy === "storageState") ||
-    Boolean(input.storageStateRel?.trim());
+  const explicitDisableStorage = input.useStorageState === false;
+  const useStorage = explicitDisableStorage
+    ? false
+    : input.useStorageState === true ||
+      (input.useStorageState !== false && authStrategy === "storageState") ||
+      Boolean(input.storageStateRel?.trim());
 
   const targetUrl =
     (input.targetUrl || "").trim() ||
     pw?.defaultBaseURL ||
     undefined;
 
-  const storageStateRel =
-    input.storageStateRel?.trim() ||
-    pw?.storageState?.canonicalRel ||
-    undefined;
+  const storageStateRel = explicitDisableStorage
+    ? undefined
+    : input.storageStateRel?.trim() ||
+      pw?.storageState?.canonicalRel ||
+      undefined;
 
   return buildE2EEnvConfig({
     ...input,
@@ -135,6 +138,12 @@ export function playwrightEnvFromConfig(env: E2EEnvConfig): Record<string, strin
     const slug = roleEnvSlug(role);
     out[`E2E_${slug}_USERNAME`] = u;
     out[`E2E_${slug}_PASSWORD`] = p;
+  }
+  // auth.helper: cred-only verify (no storageState cookies) requires explicit UI login mode.
+  const hasCreds = Boolean((env.username || "").trim() && (env.password || "").trim());
+  const hasStorage = Boolean((env.storageStateRel || "").trim());
+  if (hasCreds && !hasStorage) {
+    out.E2E_FORCE_UI_LOGIN = "1";
   }
   return out;
 }

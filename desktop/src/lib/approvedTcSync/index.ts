@@ -20,6 +20,9 @@ import { createTauriProfileIo } from "../projectProfile/tauriIo";
 import { loadGenerateGroundingProfile } from "../e2eWorkspace/generateGrounding";
 import { loadOrBuildE2eRouteCatalog } from "../e2eWorkspace/e2eRouteCatalogCache";
 import type { E2eRouteCatalog } from "../e2eWorkspace/e2eRouteCatalog";
+import { loadIndexSnapshot } from "../codeIndex/indexStore";
+import { createTauriCodeIndexIo } from "../codeIndex/tauriIo";
+import { buildUnitGroundingContractFiles } from "./unitSourceGroundingContract";
 
 export {
   parseApprovedTcGrounding,
@@ -32,6 +35,17 @@ export {
   type ApprovedTcMdFile,
   type ApprovedTcMdRenderOpts,
 } from "./approvedTcMarkdown";
+
+export {
+  buildUnitSourceGroundingContract,
+  buildUnitGroundingContractFiles,
+  unitGroundingContractRelPath,
+  serializeUnitSourceGroundingContract,
+  parseConfidenceFromTestData,
+  UNIT_GROUNDING_CONTRACT_SCHEMA,
+  type UnitSourceGroundingContract,
+  type BuildUnitSourceGroundingContractInput,
+} from "./unitSourceGroundingContract";
 
 export {
   enrichApprovedCasesWithUnitMarkers,
@@ -395,11 +409,30 @@ export async function syncApprovedTestCasesMd(opts: {
   }
   enrichNote = `${reqNote}${enrichNote}`;
 
-  const files = buildApprovedTcMarkdownFiles(casesToWrite, {
+  const mdFiles = buildApprovedTcMarkdownFiles(casesToWrite, {
     requirementTitle: opts.requirementTitle,
     requirementTitleByCaseKey,
     fallbackRole: e2eFallbackRole,
   });
+
+  // Layer 5 — companion .grounding.json beside Unit MD (when path:/code: present)
+  let contractFiles: ApprovedTcMdFile[] = [];
+  try {
+    let snap = null;
+    if (isTauri() && root) {
+      snap = await loadIndexSnapshot(root, createTauriCodeIndexIo());
+    }
+    contractFiles = buildUnitGroundingContractFiles(casesToWrite, {
+      codeIndex: snap,
+    });
+  } catch {
+    contractFiles = buildUnitGroundingContractFiles(casesToWrite, {
+      codeIndex: null,
+    });
+  }
+  const files = [...mdFiles, ...contractFiles];
+  const contractNote =
+    contractFiles.length > 0 ? ` · grounding:${contractFiles.length}` : "";
 
 
   // 1) Tauri disk first (renderer-safe)
@@ -426,7 +459,7 @@ export async function syncApprovedTestCasesMd(opts: {
         projectRoot: root,
         warning,
         dbSyncedCount,
-        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/{UnitTest|E2ETest}/${enrichNote}${dbNote}`,
+        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/{UnitTest|E2ETest}/${enrichNote}${contractNote}${dbNote}`,
       };
     }
     // Tauri failed — try IDE
@@ -443,7 +476,7 @@ export async function syncApprovedTestCasesMd(opts: {
             ...ide,
             dbSyncedCount,
             warning,
-            message: `${ide.message || ""}${enrichNote}${
+            message: `${ide.message || ""}${enrichNote}${contractNote}${
               dbSyncedCount > 0 ? ` · DB markers ${dbSyncedCount}` : ""
             }`.trim(),
           };
@@ -498,7 +531,7 @@ export async function syncApprovedTestCasesMd(opts: {
           ...ide,
           dbSyncedCount,
           warning,
-          message: `${ide.message || ""}${enrichNote}${
+          message: `${ide.message || ""}${enrichNote}${contractNote}${
             dbSyncedCount > 0 ? ` · DB markers ${dbSyncedCount}` : ""
           }`.trim(),
         };
@@ -506,7 +539,7 @@ export async function syncApprovedTestCasesMd(opts: {
       return {
         ...ide,
         warning,
-        message: `${ide.message || ""}${enrichNote}`.trim(),
+        message: `${ide.message || ""}${enrichNote}${contractNote}`.trim(),
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

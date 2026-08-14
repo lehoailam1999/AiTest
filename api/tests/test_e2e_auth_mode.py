@@ -91,3 +91,32 @@ def test_wants_helpers():
     assert not wants_ui_auth_helper("storage")
     assert not wants_ui_auth_helper("none")
     assert wants_no_auth_artifacts("none")
+
+
+def test_ensure_auth_env_sets_force_ui_login_without_storage(tmp_path):
+    from app.services.e2e_orchestrator import _ensure_auth_env_from_project
+
+    env: dict[str, str] = {"E2E_USERNAME": "admin", "E2E_PASSWORD": "admin"}
+    _ensure_auth_env_from_project(str(tmp_path), env)
+    assert env.get("E2E_FORCE_UI_LOGIN") == "1"
+
+    # Stale/missing storageState path is dropped → cred-only UI login.
+    env2: dict[str, str] = {
+        "E2E_USERNAME": "admin",
+        "E2E_PASSWORD": "admin",
+        "E2E_STORAGE_STATE": "./fixtures/storageState.json",
+    }
+    _ensure_auth_env_from_project(str(tmp_path), env2)
+    assert env2.get("E2E_FORCE_UI_LOGIN") == "1"
+    assert "E2E_STORAGE_STATE" not in env2
+
+    ss = tmp_path / "fixtures" / "storageState.json"
+    ss.parent.mkdir(parents=True, exist_ok=True)
+    ss.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+    env3: dict[str, str] = {
+        "E2E_USERNAME": "admin",
+        "E2E_PASSWORD": "admin",
+        "E2E_STORAGE_STATE": "./fixtures/storageState.json",
+    }
+    _ensure_auth_env_from_project(str(tmp_path), env3)
+    assert env3.get("E2E_FORCE_UI_LOGIN") != "1"

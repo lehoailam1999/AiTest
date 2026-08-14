@@ -17,7 +17,7 @@ _FEATURE_ENTRY_STEP_RE = re.compile(
 # Auth step titles — NEVER match bare ``0.`` alone (renumber makes Feature entry ``0.`` too).
 # Vietnamese «Đăng» uses U+0110 Đ — not ASCII D.
 _AUTH_STEP_RE = re.compile(
-    r"test\.step\s*\(\s*['\"][^'\"]*(?:[ĐđDd]ăng\s*nhập|[Ll]ogin|[Aa]uthenticat|[Aa]uth\b)",
+    r"test\.step\s*\(\s*['\"][^'\"]*(?:[ĐđDd]ăng\s*nhập|[Xx]ác\s*thực|xac\s*thuc|[Ll]ogin|[Aa]uthenticat|[Aa]uth\b)",
     re.IGNORECASE,
 )
 _TEST_STEP_TITLE_RE = re.compile(
@@ -33,8 +33,8 @@ _ACT_SIGNAL_RE = re.compile(
 )
 _META_STEP_TITLE_RE = re.compile(
     r"(?:Feature entry|Vào chức năng|mở màn)|"
-    r"(?:^\d+\.\s*)(?:[ĐđDd]ăng\s*nhập|[Ll]ogin|[Aa]uthenticat|[Aa]uth\b)|"
-    r"(?:^|\s)(?:0\.\s*)?(?:[ĐđDd]ăng\s*nhập|[Ll]ogin|[Aa]uthenticat)\b",
+    r"(?:^\d+\.\s*)(?:[ĐđDd]ăng\s*nhập|[Xx]ác\s*thực|xac\s*thuc|[Ll]ogin|[Aa]uthenticat|[Aa]uth\b)|"
+    r"(?:^|\s)(?:0\.\s*)?(?:[ĐđDd]ăng\s*nhập|[Xx]ác\s*thực|xac\s*thuc|[Ll]ogin|[Aa]uthenticat)\b",
     re.IGNORECASE,
 )
 _GOTO_FEATURE_RE = re.compile(r"\b(?:gotoFeature|openFeature)\s*\(", re.IGNORECASE)
@@ -371,7 +371,7 @@ def _top_level_step_spans(text: str) -> list[_BlockSpan]:
 def _is_auth_step_title(title: str) -> bool:
     return bool(
         re.search(
-            r"(?:[ĐđDd]ăng\s*nhập|[Ll]ogin|[Aa]uthenticat|[Aa]uth\b)",
+            r"(?:[ĐđDd]ăng\s*nhập|[Xx]ác\s*thực|xac\s*thuc|[Ll]ogin|[Aa]uthenticat|[Aa]uth\b)",
             title or "",
             re.IGNORECASE,
         )

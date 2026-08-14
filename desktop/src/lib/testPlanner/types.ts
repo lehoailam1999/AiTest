@@ -84,6 +84,7 @@ export type UnitPlanLayer = {
 export type UnitImplementationPlanStatus =
   | "ready"
   | "needs_marker"
+  | "misaligned_marker"
   | "unresolved";
 
 export type UnitImplementationPlan = {

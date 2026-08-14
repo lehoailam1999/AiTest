@@ -10,6 +10,7 @@ import {
   decideUnitSutGate,
   extractTcSourceMarkers,
   isInterfaceLikePrimaryPath,
+  isValidationDataBucket,
   primaryMatchesMarkers,
   stemOfPath,
   type UnitDomainGuardRule,
@@ -41,6 +42,7 @@ import { recordUnitJobMetric } from "../unitJobMetrics";
 import { syncWorkspaceRun } from "./auditSync";
 import { assertTcReadyForUnitGen } from "./assertTcReadyForUnitGen";
 import { decideUnitLanguageGate } from "./unitGenGates";
+import { canSoftBypassUnitSutGate } from "./unitSutSoftBypass";
 import {
   addArtifactToWorkspace,
   createUnitWorkspaceRun,
@@ -439,6 +441,11 @@ export async function startUnitIdeGenJob(opts: {
       : undefined;
     const primaryPath = (primaryRel || primary?.pathRel || "").replace(/\\/g, "/");
     const excerpt = (primary?.content || "").trim();
+    const relatedExcerpt = (packet?.files || [])
+      .filter((f) => f.role === "dependency")
+      .map((f) => f.content || "")
+      .filter(Boolean)
+      .join("\n\n");
     const knobs = await loadUnitProfileGateKnobs(projectRoot);
     const tcBlob = [
       approvedTcMd,
@@ -454,6 +461,7 @@ export async function startUnitIdeGenJob(opts: {
       tcText: tcBlob,
       primaryPath: primaryPath || null,
       sourceExcerpt: excerpt || null,
+      relatedExcerpt: relatedExcerpt || null,
       codeAliases,
       moduleText: [tc.module, tc.title, (approvedTcMd || "").slice(0, 1500)]
         .filter(Boolean)
@@ -465,9 +473,23 @@ export async function startUnitIdeGenJob(opts: {
       minAlignment: knobs.minAlignment,
     });
     const groundedForGen = hasGroundedSourceForGen(primaryPath, excerpt);
+    const markerSet = extractTcSourceMarkers(tcBlob);
+    const markersMatch = primaryMatchesMarkers(primaryPath, markerSet);
+    const softBypassOk =
+      sutGate.decision === "block" &&
+      groundedForGen &&
+      canSoftBypassUnitSutGate({
+        code: sutGate.code,
+        primaryPath,
+        sourceExcerpt: excerpt,
+        tcBlob,
+        alignmentScore: sutGate.alignmentScore,
+        minAlignment: sutGate.minAlignment,
+        markersMatch,
+      });
     if (
       sutGate.decision === "block" &&
-      !groundedForGen &&
+      !softBypassOk &&
       !canBypassFeatureGapWithAuthoritativeSut({
         code: sutGate.code,
         primaryPath,
@@ -476,7 +498,8 @@ export async function startUnitIdeGenJob(opts: {
       }) &&
       !(
         knobs.genMode === "always_generate" &&
-        /FEATURE_GAP/i.test(String(sutGate.code || ""))
+        /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
+        !isValidationDataBucket(tcBlob)
       )
     ) {
       const code = sutGate.code || "FAIL_NEEDS_MARKER";
@@ -511,15 +534,16 @@ export async function startUnitIdeGenJob(opts: {
         manifest,
       };
     }
-    if (sutGate.decision === "block" && groundedForGen) {
+    if (softBypassOk) {
       deps.onProgress?.(
-        `gate soft-bypass ${String(sutGate.code || "FAIL_SUT_GATE")} — generate from TC + source; verify decides mismatch`
+        `gate soft-bypass ${String(sutGate.code || "FAIL_SUT_GATE")} — confidence/alignment ok; generate from TC + source`
       );
     }
     if (
       sutGate.decision === "block" &&
       knobs.genMode === "always_generate" &&
-      /FEATURE_GAP/i.test(String(sutGate.code || ""))
+      /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
+      !isValidationDataBucket(tcBlob)
     ) {
       deps.onProgress?.("fallback mode: FEATURE_GAP → always_generate");
     }

@@ -151,6 +151,15 @@ export function buildUnitApproveQuery(
     ...intent.featureTokens,
   ]);
 
+  const testData = String(tc.testData || "").trim();
+  const validationBucket =
+    /primaryBucket:\s*VALIDATION_DATA/i.test(testData) ||
+    /trace:\s*VALIDATION_DATA/i.test(testData);
+  const resolvedIntent =
+    validationBucket && !intent.requiresBodyRule
+      ? { ...intent, requiresBodyRule: true }
+      : intent;
+
   const plan: TestPlan = {
     testType: "Unit",
     module: aliasDomain[0] || module,
@@ -166,17 +175,17 @@ export function buildUnitApproveQuery(
   };
 
   return {
-    intent,
+    intent: resolvedIntent,
     keywords,
     module,
     title: String(tc.title || "").trim(),
     action,
     requirementTitle,
     projectAliases,
-    requiresBodyRule: intent.requiresBodyRule,
+    requiresBodyRule: resolvedIntent.requiresBodyRule,
     codeFieldCreate,
     tcBlob,
-    testData: String(tc.testData || "").trim(),
+    testData,
     preferTokens,
     preferTokensStrong,
     plan,

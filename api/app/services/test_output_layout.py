@@ -888,6 +888,9 @@ def resolve_e2e_file_paths(
         "  const _default: any;\n"
         "  export default _default;\n"
         "}\n"
+        "declare const process: {\n"
+        "  env: Record<string, string | undefined>;\n"
+        "};\n"
     )
     if shim_path not in seen:
         seen[shim_path] = len(out)

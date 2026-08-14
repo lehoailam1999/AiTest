@@ -86,9 +86,10 @@ _LEGACY_E2E_CODEGEN_SPEC = """\
 15. CONVENTION: AItest/E2ETest/{Req}/{TC}/specs + config; POM/auth/shim under
     AItest/E2ETest/_shared/; reuse existing _shared/pages/*.page.ts, fixtures and helpers
     first. Only create new helper/page when reuse is impossible with explicit reason.
-16. SELF-CHECK: no invented route/role/credential · DOM/FE locators · **no Phase-3
-    ungrounded throw stubs** (they abort Playwright mid-run / close browser before
-    later TC steps) · no expect(await expect*) · Rules 18–19.
+16. SELF-CHECK: no invented route/role/credential · DOM/FE locators · **Act stubs
+    click/fill or throw** — never `console.warn`+return (silent no-op hides missing
+    locators until a bogus assert) · never bind *Button to `main|body` · no
+    expect(await expect*) · Rules 18–19.
 17. NO DUPLICATE: one path per page/spec/config; overwrite same path — no hash twins.
 18. RUNNABLE: test(/describe; *.spec.ts+*.page.ts; import ExactClass = export class;
     `new ExactClass(page)` never static; Spec+POM one shot; one canonical spec; FE labels.
@@ -96,10 +97,12 @@ _LEGACY_E2E_CODEGEN_SPEC = """\
     Prefer E2E_FEATURE_PATH deep-link (gotoFeature ≠ auto-Create); menu no-op if
     shell/dialog visible; Create via openCreate* + modal before fill when precondition
     requires popup; fill/select/open*Combobox via getByRole|Label|testid from DOM/FE;
-    wizard Next from Spec/DOM. Spec passes values; unpack object asserts.
+    wizard Next = dialog button Tiếp theo|Next|Continue (not main|body); Create =
+    getByTestId('entityCreateButton') / #jh-create-entity / Create|Add. Spec passes
+    values + expected text into expect*; unpack object asserts.
     Guard heal = safety net only.
-    Missing DOM/FE hook → Phase-3 ungrounded (E2E_GROUNDING fail-closed) — never
-    invent `button.first()` / Save-regex click.
+    Missing DOM/FE hook → Phase-3 ungrounded throw (E2E_GROUNDING fail-closed) — never
+    invent `button.first()` / Save-regex click; never soft-skip Act.
 
 ## III. Definition of Ready (hard gate before writing/running tests)
 20. REQUIRED CONTEXT: must have `featurePath`, `role/authRef`, landmark (screen/dialog),

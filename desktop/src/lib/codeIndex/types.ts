@@ -15,6 +15,11 @@ export type IndexedSymbol = {
   kind: SymbolKind;
   /** 1-based line in file */
   line: number;
+  /**
+   * 1-based inclusive end line when brace body is known (optional).
+   * Layer 1 symbol-level — absent on older snapshots / expression-bodied members.
+   */
+  endLine?: number;
   /** Parent class/interface when kind=method */
   parent?: string;
   exported?: boolean;
@@ -96,6 +101,7 @@ export type SymbolLookupHit = {
   kind: SymbolKind;
   pathRel: string;
   line: number;
+  endLine?: number;
   parent?: string;
 };
 
