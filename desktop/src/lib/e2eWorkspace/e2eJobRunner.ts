@@ -35,6 +35,7 @@ import {
   resolveFeaturePathSeed,
   lookupModuleMapPath,
 } from "./generateGrounding";
+import { ensureCursorAgentReady } from "../aiCli/gate";
 import { isIdeCodegenReady, postGuardE2eDraftFiles, tryExtensionGenerateE2eBatch } from "../ideProtocol";
 import { derivePomScaffoldFromTc } from "./derivePomScaffoldFromTc";
 import {
@@ -527,6 +528,13 @@ export async function generateE2eForTestCase(opts: {
     opts.requirementTitle?.trim() || opts.module?.trim() || undefined;
   const moduleName = requirementTitle || tc.module || undefined;
   const log = (line: string) => opts.onLog?.(line);
+  if (!isIdeCodegenReady()) {
+    throw new Error(
+      "Chưa Connect IDE — Gen E2E dùng Extension + Agent CLI (cùng luồng Unit). Mở Cursor/VS Code trên repo SUT rồi Connect IDE."
+    );
+  }
+  const cursorCliEarly = await ensureCursorAgentReady();
+  const agentExecutable = cursorCliEarly.executablePath?.trim() || undefined;
   let authCtx = deriveAuthContextFromTestCase(tc, {
     fallbackRole: opts.defaultAuthRole,
     analysisActors: opts.analysisActors,
@@ -973,6 +981,7 @@ export async function generateE2eForTestCase(opts: {
     projectRoot: opts.projectRoot,
     projectRules: opts.projectRules,
     projectRulesSource: "e2e-conventions",
+    agentExecutable,
     items: [
       {
         testCaseId: tc.id,

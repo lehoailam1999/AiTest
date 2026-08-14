@@ -16,6 +16,7 @@ import {
   type UnitDomainGuardRule,
 } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
+import { ensureCursorAgentReady } from "../aiCli/gate";
 import {
   isIdeCodegenReady,
   tryExtensionGenerateUnitBatch,
@@ -267,6 +268,26 @@ export async function startUnitIdeGenJob(opts: {
       error: langGate.message,
       code: langGate.code,
     };
+  }
+
+  let agentExecutable: string | undefined;
+  try {
+    const cli = await ensureCursorAgentReady();
+    agentExecutable = cli.executablePath?.trim() || undefined;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    recordUnitJobMetric({
+      projectId,
+      contextSource: "unknown",
+      runnerUsed: "IDE_EXTENSION",
+      ideConnected: isIdeCodegenReady(),
+      jobId,
+      via: "ide-extension",
+      durationMs: Date.now() - started,
+      failReason: "ai_cli_not_ready",
+      ok: false,
+    });
+    return { ok: false, error: msg, code: "ai_cli_not_ready" };
   }
 
   const packagePrefix = await resolvePackagePrefix(projectRoot, "");
@@ -562,6 +583,7 @@ export async function startUnitIdeGenJob(opts: {
       projectRules: unitProjectRules,
       projectRulesSource: unitProjectRules ? "unit-conventions" : "none",
       codeAliases,
+      agentExecutable,
       items: [
         {
           testCaseId: tc.testCaseId || tc.id,

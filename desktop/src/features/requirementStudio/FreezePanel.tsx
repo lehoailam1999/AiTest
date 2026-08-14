@@ -22,7 +22,7 @@ import {
   PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { jobs, requirementStudio, testcases } from "../../api";
+import { jobs, requirementStudio, testcases, connection } from "../../api";
 import type {
   KnowledgeWorkspaceView,
   RequirementSnapshot,
@@ -30,6 +30,8 @@ import type {
 } from "../../api/types";
 import { EnginePicker } from "../../components/EnginePicker";
 import { waitForJob } from "../../lib/waitForJob";
+import { ensureTcGenCliReady } from "../../lib/aiCli/gate";
+import { useProject } from "../../state/ProjectContext";
 import { labelOf, priorityLabel, typeLabel } from "../../i18n/labels";
 
 type PreferredEngine = "unit" | "e2e";
@@ -104,6 +106,7 @@ export default function FreezePanel({
   onGenerated,
   onPartialGenerated,
 }: Props) {
+  const { project } = useProject();
   const [snapshots, setSnapshots] = useState<RequirementSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
@@ -269,6 +272,10 @@ export default function FreezePanel({
     setActiveJob(null);
     partialNotified.current = false;
     try {
+      if (project?.id) {
+        const conn = await connection.get(project.id).catch(() => null);
+        await ensureTcGenCliReady(conn?.cliType);
+      }
       const res = await requirementStudio.freezeAndGenerate(workspaceId, {
         acknowledgeMissing: true,
         note: note.trim() || undefined,

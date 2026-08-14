@@ -40,6 +40,8 @@ export async function tryExtensionGenerateE2eBatch(opts: {
   handlers?: CodegenSessionHandlers;
   transportRetryMax?: number;
   sessionId?: string | null;
+  /** Desktop-resolved Cursor Agent path (user machine). */
+  agentExecutable?: string | null;
 }): Promise<CodegenResultCallback | null> {
   const client = getIdeRpcClientOrNull();
   if (!client?.isConnected) return null;
@@ -59,7 +61,11 @@ export async function tryExtensionGenerateE2eBatch(opts: {
 
   let sessionId = opts.sessionId ?? null;
   if (!sessionId) {
-    sessionId = await ensureUnitGenSession(opts.projectRoot, "e2e");
+    sessionId = await ensureUnitGenSession(
+      opts.projectRoot,
+      "e2e",
+      opts.agentExecutable
+    );
   }
 
   const maxRetry = opts.transportRetryMax ?? UNIT_GEN_LIMITS.transportRetryMax;
@@ -94,6 +100,9 @@ export async function tryExtensionGenerateE2eBatch(opts: {
         projectRulesSource: opts.projectRulesSource ?? "e2e-conventions",
         items: opts.items,
         ...(sessionId ? { sessionId } : {}),
+        ...(opts.agentExecutable?.trim()
+          ? { agentExecutable: opts.agentExecutable.trim() }
+          : {}),
       });
       rememberCodegenResult(result);
       useCodegenUiStore.getState().setFromResult(result);
@@ -129,6 +138,8 @@ export async function tryExtensionGenerateUnitBatch(opts: {
   sessionId?: string | null;
   /** Project VI→code aliases for Extension SUT resolve */
   codeAliases?: Record<string, string[]> | null;
+  /** Desktop-resolved Cursor Agent path (user machine). */
+  agentExecutable?: string | null;
 }): Promise<CodegenResultCallback | null> {
   const client = getIdeRpcClientOrNull();
   if (!client?.isConnected) return null;
@@ -148,7 +159,11 @@ export async function tryExtensionGenerateUnitBatch(opts: {
 
   let sessionId = opts.sessionId ?? null;
   if (!sessionId) {
-    sessionId = await ensureUnitGenSession(opts.projectRoot);
+    sessionId = await ensureUnitGenSession(
+      opts.projectRoot,
+      "unit",
+      opts.agentExecutable
+    );
   }
 
   const maxRetry = opts.transportRetryMax ?? UNIT_GEN_LIMITS.transportRetryMax;
@@ -185,6 +200,9 @@ export async function tryExtensionGenerateUnitBatch(opts: {
         items: opts.items,
         ...(sessionId ? { sessionId } : {}),
         ...(opts.codeAliases ? { codeAliases: opts.codeAliases } : {}),
+        ...(opts.agentExecutable?.trim()
+          ? { agentExecutable: opts.agentExecutable.trim() }
+          : {}),
       });
       rememberCodegenResult(result);
       useCodegenUiStore.getState().setFromResult(result);

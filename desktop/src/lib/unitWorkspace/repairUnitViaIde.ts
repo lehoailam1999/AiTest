@@ -2,6 +2,7 @@
  * Unit Repair via Extension → Cursor AI CLI (same engine as Gen).
  * AITest orchestrates only — no API /generate-unit UUTGS path for Unit Repair.
  */
+import { ensureCursorAgentReady } from "../aiCli/gate";
 import type { CodegenUnitItem } from "@aitest/ide-protocol";
 import type { UnitWorkspaceManifest } from "./types";
 import { tryExtensionGenerateUnitBatch } from "../ideProtocol/phaseBGen";
@@ -68,6 +69,17 @@ export async function repairUnitViaIdeExtension(opts: {
     ],
   };
 
+  let agentExecutable: string | undefined;
+  try {
+    const cli = await ensureCursorAgentReady();
+    agentExecutable = cli.executablePath?.trim() || undefined;
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
   const result = await tryExtensionGenerateUnitBatch({
     projectId: input.projectId,
     projectRoot: input.projectRoot,
@@ -76,6 +88,7 @@ export async function repairUnitViaIdeExtension(opts: {
     packagePrefix: input.packagePrefix || undefined,
     items: [item],
     codeAliases: input.codeAliases,
+    agentExecutable,
   });
 
   if (!result) {

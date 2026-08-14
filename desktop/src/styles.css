@@ -3187,6 +3187,61 @@ label textarea:disabled,
   line-height: 1.35;
 }
 
+.ai-cli-env {
+  display: grid;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.ai-cli-env-lead {
+  font-size: 0.82rem;
+}
+
+.ai-cli-env-alert {
+  margin: 0;
+}
+
+.ai-cli-env-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-cli-env-row {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+  background: #f7fafc;
+}
+
+.ai-cli-env-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-cli-env-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.ai-cli-env-meta {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.ai-cli-env-path {
+  word-break: break-all;
+}
+
+.ai-cli-env-row-actions {
+  margin-top: 2px;
+}
+
 @media (max-width: 720px) {
   .settings-engine-grid {
     grid-template-columns: 1fr;

@@ -25,6 +25,7 @@ import { useProject } from "../state/ProjectContext";
 import { Link } from "react-router-dom";
 import { ROUTES } from "../lib/productRoutes";
 import { aiConnectionDisplayLabel } from "../lib/aiConnectionLabel";
+import { AiCliEnvironmentPanel } from "../components/AiCliEnvironmentPanel";
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -336,6 +337,7 @@ export default function SettingsPage() {
             </Text>
           </div>
         </Form>
+        <AiCliEnvironmentPanel />
       </section>
     </div>
   );

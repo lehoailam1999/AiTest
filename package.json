@@ -4,9 +4,15 @@
   "private": true,
   "description": "AITest — Postgres + Python API + React/Tauri Desktop",
   "scripts": {
+    "setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1",
+    "setup:no-ext": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -SkipExtension",
     "db": "docker compose up -d postgres",
     "db:down": "docker compose stop postgres",
-    "api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./api/run.ps1",
+    "db:migrate": "cd api && .venv\\Scripts\\python.exe -c \"from app.database import Base, engine; import app.models; Base.metadata.create_all(bind=engine); print('schema synced')\" && .venv\\Scripts\\alembic.exe revision --autogenerate -m autogen",
+    "db:up": "cd api && .venv\\Scripts\\alembic.exe upgrade head",
+    "db:status": "cd api && .venv\\Scripts\\alembic.exe current",
+    "db:stamp": "cd api && .venv\\Scripts\\alembic.exe stamp head",
+    "api": "cd api && .venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 5088",
     "start": "npm run api",
     "desktop": "npm run dev --prefix desktop",
     "desktop:build": "npm run build --prefix desktop",
@@ -21,9 +27,9 @@
     "mock-ide": "npm run mock-ide --prefix packages/ide-protocol",
     "up": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-up.ps1",
     "dev": "npm run up",
-    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-all.ps1",
+    "test": "npm run test:protocol && npm run test:desktop",
     "test:protocol": "npm test --prefix packages/ide-protocol",
     "test:desktop": "npm run test:unit --prefix desktop",
-    "test:api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-api.ps1"
+    "test:api": "cd api && .venv\\Scripts\\python.exe -m pytest tests -q --tb=line"
   }
 }

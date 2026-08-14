@@ -337,7 +337,7 @@ export async function startIdeBridgeServer(opts?: {
           }
           try {
             const { openAgentCliSession } = await import("./agentCliSession");
-            const session = openAgentCliSession(root);
+            const session = openAgentCliSession(root, p.agentExecutable);
             reply(
               makeSuccess(msg.id, {
                 ok: true,

@@ -29,7 +29,8 @@ export function assertIdeE2eCapabilities(
  */
 export async function ensureUnitGenSession(
   projectRoot: string,
-  kind: "unit" | "e2e" = "unit"
+  kind: "unit" | "e2e" = "unit",
+  agentExecutable?: string | null
 ): Promise<string | null> {
   const client = getIdeRpcClientOrNull();
   if (!client?.isConnected) return null;
@@ -44,6 +45,7 @@ export async function ensureUnitGenSession(
     const opened = await client.codegenOpenSession({
       projectRoot,
       kind,
+      ...(agentExecutable?.trim() ? { agentExecutable: agentExecutable.trim() } : {}),
     });
     if (opened?.ok && opened.sessionId) {
       useIdeBridgeSession.getState().setUnitGenSession(opened.sessionId);

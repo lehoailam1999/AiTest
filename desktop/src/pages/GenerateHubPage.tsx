@@ -34,6 +34,7 @@ import { resolveTopicsForSystemFanOut } from "../lib/resolveTcFanOut";
 import { applyFanOutProgressToQueue } from "../lib/applyFanOutProgressToQueue";
 import { tcGenerateModeSummary, type TcGenerateMode } from "../lib/tcGenerateMode";
 import { waitForJob } from "../lib/waitForJob";
+import { ensureTcGenCliReady } from "../lib/aiCli/gate";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
 import { requirementUrl, ROUTES } from "../lib/productRoutes";
@@ -198,6 +199,13 @@ export default function GenerateHubPage() {
     }
     if (aiReady === false) {
       message.error("AI chưa Ready — vào Cấu hình AI.");
+      return;
+    }
+    try {
+      const conn = await connection.get(project.id);
+      await ensureTcGenCliReady(conn.cliType);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
       return;
     }
     if (scopeLevel === "module" && topics.length > 0 && !selectedTopic) {

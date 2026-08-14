@@ -17,10 +17,12 @@ x64/
 _ReSharper*/
 *.DotSettings.user
 
-# NuGet
+# NuGet (project-local Packages folders — NOT repo root packages/ide-protocol)
 *.nupkg
-**/packages/*
-!**/packages/build/
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+!/packages/
+!/packages/**
 
 # Node
 node_modules/

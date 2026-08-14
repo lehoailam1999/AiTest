@@ -1,0 +1,259 @@
+{
+  "_comment": "Portable Unit intent skeleton — IT cues/patterns only. Per-SUT overrides: .ai-test/unit-intent-rules.json",
+  "uiMasterStrongRe": "master\\s*data|gia\\s*tri\\s*master|loai\\s*(thiet\\s*bi|device)|dropdown|combobox|autocomplete|keo\\s*tha|drag\\s*(and\\s*)?drop|\\bdnd\\b|wizard|buoc\\s*\\d|step\\s*\\d|them\\s*vao\\s*(dropdown|combobox|danh\\s*sach\\s*chon)|hien\\s*thi\\s*(tren\\s*)?(dropdown|combobox|danh\\s*sach\\s*chon)",
+  "intents": [
+    {
+      "id": "upload_size_limit",
+      "priority": 100,
+      "cues": [
+        "vuot\\s*dung\\s*luong",
+        "qua\\s*dung\\s*luong",
+        "dung\\s*luong\\s*(toi\\s*da|max|cho\\s*phep)",
+        "max\\s*(file\\s*)?(size|config)",
+        "\\bfilesize\\b",
+        "file\\s*size",
+        "too\\s*large",
+        "file\\s*too\\s*big",
+        "exceed\\w*\\s*(size|limit|max)",
+        "size\\s*limit",
+        "\\bmaxconfig\\b"
+      ],
+      "codePatterns": ["MaxFileSize", "FileSize", "exceed", "ArgumentException"],
+      "rulePatterns": ["MaxFileSize", "FileSize", "exceed", "ArgumentException"],
+      "featureTokens": ["Upload", "MaxFileSize", "FileSize", "InitUpload"],
+      "requiresBodyRule": true
+    },
+    {
+      "id": "ui_master_create",
+      "priority": 90,
+      "uiOnly": true,
+      "cues": [
+        "master\\s*data",
+        "gia\\s*tri\\s*master",
+        "loai\\s*(thiet\\s*bi|device)",
+        "dropdown|combobox|autocomplete",
+        "them\\s*vao\\s*(dropdown|combobox|danh\\s*sach\\s*chon)",
+        "hien\\s*thi\\s*(tren\\s*)?(dropdown|combobox|danh\\s*sach\\s*chon)",
+        "keo\\s*tha|drag\\s*(and\\s*)?drop|\\bdnd\\b",
+        "\\bwizard\\b",
+        "buoc\\s*\\d",
+        "step\\s*\\d"
+      ],
+      "codePatterns": [],
+      "featureTokens": []
+    },
+    {
+      "id": "validate_reject",
+      "priority": 80,
+      "cues": [
+        "tu\\s*choi",
+        "khong\\s*cho\\s*phep",
+        "khong\\s*duoc(\\s*phep)?",
+        "khong\\s*cho\\b",
+        "\\breject(ed|ion)?\\b",
+        "\\bdeny\\b",
+        "\\bdenied\\b",
+        "\\bforbidden\\b",
+        "validate\\s+(fail|error|reject)|validation\\s+(fail|error|reject)",
+        "xac\\s*thuc",
+        "bat\\s*buoc",
+        "\\brequired\\b",
+        "de\\s*trong(?!\\s*ma)",
+        "kiem\\s*tra\\s*(hop\\s*le|du\\s*lieu)",
+        "kiem\\s*tra\\s*ma",
+        "trung\\s*(ma|code)",
+        "duplicate\\s*(code|id|key)?",
+        "ma\\s*(da\\s*)?(ton\\s*tai|trung)",
+        "code\\s*(already\\s*)?exists",
+        "empty\\s*code|blank\\s*code|ma\\s*(rong|trong|trong\\s*rong)"
+      ],
+      "codePatterns": [
+        "throw",
+        "BadRequest",
+        "ArgumentException",
+        "CheckCode",
+        "AlreadyExists",
+        "Duplicate",
+        "Required",
+        "NotEmpty",
+        "NotNull"
+      ],
+      "rulePatterns": [
+        "throw",
+        "BadRequest",
+        "ArgumentException",
+        "CheckCode",
+        "AlreadyExists",
+        "Duplicate",
+        "Required",
+        "NotEmpty",
+        "NotNull"
+      ],
+      "featureTokens": ["Reject", "Deny", "CheckCode", "Duplicate", "Required"],
+      "requiresBodyRule": true
+    },
+    {
+      "id": "auto_generate_code",
+      "priority": 72,
+      "cues": [
+        "tu\\s*sinh(\\s*ma)?",
+        "he\\s*thong\\s*tu\\s*sinh",
+        "auto[- ]?generat(e|ed|ion)?(\\s*(code|id|key))?",
+        "system\\s*(auto[- ]?)?generat",
+        "de\\s*trong\\s*ma",
+        "leave\\s*(the\\s*)?(code|id)\\s*(empty|blank)",
+        "empty\\s*(code|id).*(auto|generat|sinh|assign)",
+        "(auto|generat|sinh).*(empty|blank|missing|trong)\\s*(code|ma|id)"
+      ],
+      "codePatterns": ["userProvidedCode", "IsNullOrWhiteSpace", "IsNullOrEmpty"],
+      "rulePatterns": ["userProvidedCode", "IsNullOrWhiteSpace", "IsNullOrEmpty"],
+      "featureTokens": ["userProvidedCode", "IsNullOrWhiteSpace"],
+      "requiresBodyRule": true
+    },
+    {
+      "id": "state_enable",
+      "priority": 75,
+      "cues": [
+        "chi\\s*enable",
+        "enable.*(disable|ngan|slot|compartment)",
+        "disable.*(enable|ngan|slot|compartment)",
+        "ngan\\s*trong",
+        "ngan\\s*(da\\s*)?(chua|occupied)",
+        "loc\\s*ngan",
+        "ngan\\s*luu\\s*tru",
+        "\\bisoccupied\\b",
+        "\\biscompartmentdisabled\\b",
+        "compartment.*(empty|occupied|enable|disable)",
+        "empty\\s*(slot|bin|compartment)"
+      ],
+      "codePatterns": [
+        "IsOccupied",
+        "isOccupied",
+        "Enable",
+        "Disable",
+        "CanSelect",
+        "IsEnabled",
+        "IsDisabled"
+      ],
+      "rulePatterns": [
+        "IsOccupied",
+        "isOccupied",
+        "CanSelect",
+        "IsEnabled",
+        "IsDisabled"
+      ],
+      "featureTokens": ["IsOccupied", "Occupied", "Enable", "Disable"],
+      "requiresBodyRule": true
+    },
+    {
+      "id": "filter_list",
+      "priority": 70,
+      "cues": [
+        "loc\\s*(danh\\s*sach|list|ngan)",
+        "bo\\s*loc",
+        "danh\\s*sach\\s*(loc|filter)",
+        "\\bfilter(ed|ing)?\\b",
+        "chi\\s*(hien|lay)\\s*(nhung\\s*)?(ban\\s*ghi|item|row)"
+      ],
+      "codePatterns": ["Where", "Filter", "Any", "IsOccupied"],
+      "rulePatterns": ["Where", "Filter", "Any", "IsOccupied"],
+      "featureTokens": ["List", "Filter", "Query", "IsOccupied"],
+      "requiresBodyRule": true
+    },
+    {
+      "id": "search_lookup",
+      "priority": 72,
+      "cues": [
+        "tim\\s*kiem",
+        "tim\\s*theo",
+        "theo\\s*ma",
+        "\\bsearch\\b",
+        "gan\\s*dung",
+        "fuzzy",
+        "khong\\s*phan\\s*biet\\s*hoa",
+        "case\\s*insensitive",
+        "to\\s*lower",
+        "autocomplete|typeahead|suggest",
+        "cho\\s*(phep\\s*)?tao\\s*moi.*(tim|search|danh\\s*sach)"
+      ],
+      "codePatterns": ["Search", "SearchTerm", "Contains", "ToLower"],
+      "rulePatterns": ["SearchTerm", "Contains", "ToLower", "Search"],
+      "featureTokens": ["Search", "SearchTerm", "Contains", "ToLower"],
+      "requiresBodyRule": true
+    },
+    {
+      "id": "persist_read",
+      "priority": 68,
+      "cues": [
+        "hien\\s*thi",
+        "tai\\s*du\\s*lieu",
+        "tai\\s*chi\\s*tiet",
+        "lay\\s*chi\\s*tiet",
+        "lay\\s*theo\\s*(id|dinh\\s*danh)",
+        "chi\\s*tiet\\s*(da\\s*luu|ban\\s*ghi)",
+        "tra\\s*ve\\s*(day\\s*du|dung)",
+        "quan\\s*sat[:\\s]*read",
+        "\\bget\\s*(by\\s*)?(id|detail)\\b",
+        "\\bgetquery\\b",
+        "\\bload\\s*(detail|entity|record|data)\\b",
+        "display\\s*(detail|full|info)",
+        "\\bread\\b.*(detail|entity|record)"
+      ],
+      "codePatterns": ["GetQuery", "GetHandler", "FindById", "GetById"],
+      "featureTokens": ["Get", "Query", "Detail"],
+      "requiresBodyRule": false
+    },
+    {
+      "id": "persist_create",
+      "priority": 60,
+      "cues": ["tao\\s*moi", "\\bcreate\\b", "\\badd\\s*new\\b", "them\\s*moi"],
+      "codePatterns": ["Create", "Add", "Insert"],
+      "featureTokens": []
+    },
+    {
+      "id": "persist_update",
+      "priority": 60,
+      "cues": ["cap\\s*nhat", "\\bupdate\\b", "\\bedit\\b", "sua\\s*(doi)?"],
+      "codePatterns": ["Update", "Edit", "Save"],
+      "featureTokens": []
+    },
+    {
+      "id": "upload_resource",
+      "priority": 50,
+      "cues": [
+        "tep\\s*ky\\s*thuat\\s*so",
+        "file\\s*ky\\s*thuat\\s*so",
+        "digital\\s*(file|asset)",
+        "ky\\s*thuat\\s*so",
+        "digital\\s*file"
+      ],
+      "codePatterns": ["Upload", "InitUpload"],
+      "featureTokens": ["Upload", "InitUpload", "Digital"]
+    },
+    {
+      "id": "reject",
+      "priority": 40,
+      "cues": [
+        "tu\\s*choi",
+        "khong\\s*cho\\s*phep",
+        "\\breject(ed|ion)?\\b",
+        "\\bdeny\\b",
+        "\\bdenied\\b"
+      ],
+      "codePatterns": ["throw", "BadRequest", "ArgumentException"],
+      "featureTokens": ["Reject", "Deny"]
+    },
+    {
+      "id": "upload",
+      "priority": 30,
+      "cues": [
+        "tai\\s*len",
+        "\\bupload(s|ed|ing)?\\b",
+        "init\\s*upload",
+        "\\bupload\\b"
+      ],
+      "codePatterns": ["Upload", "InitUpload"],
+      "featureTokens": ["Upload", "InitUpload"]
+    }
+  ]
+}

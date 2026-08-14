@@ -60,6 +60,16 @@ pub fn pick_project_folder() -> Option<String> {
 }
 
 #[tauri::command]
+pub fn pick_executable_file() -> Option<String> {
+    tauri::api::dialog::blocking::FileDialogBuilder::new()
+        .set_title("Select AI CLI executable")
+        .add_filter("Executable", &["exe", "cmd", "bat", "ps1"])
+        .add_filter("All files", &["*"])
+        .pick_file()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 pub fn scan_project(project_path: String) -> Result<ProjectScan, String> {
     let root = PathBuf::from(project_path.trim());
     if !root.is_dir() {

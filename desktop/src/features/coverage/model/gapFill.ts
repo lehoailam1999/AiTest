@@ -1,9 +1,10 @@
-import { jobs, requirements, testcases, audit } from "../../../api";
+import { jobs, requirements, testcases, audit, connection } from "../../../api";
 import type { CoverageModuleRow } from "./coverageTypes";
 import { UNMODULED } from "./coverageTypes";
 import { normalizeFunctionLabel } from "../../../lib/normalizeFunctionLabel";
 import { topicScopeForJob } from "../../../components/RequirementTopicsPanel";
 import { waitForJob } from "../../../lib/waitForJob";
+import { ensureTcGenCliReady } from "../../../lib/aiCli/gate";
 import type { BatchRunControl } from "../../../lib/batchRunControl";
 
 export type TcGapTarget = {
@@ -118,6 +119,9 @@ export async function runTcGapFillCampaign(opts: {
 }): Promise<{ ok: number; fail: number; campaignId?: string }> {
   const { projectId, targets, onProgress, control } = opts;
   if (targets.length === 0) return { ok: 0, fail: 0 };
+
+  const conn = await connection.get(projectId).catch(() => null);
+  await ensureTcGenCliReady(conn?.cliType);
 
   let campaignId: string | undefined;
   try {

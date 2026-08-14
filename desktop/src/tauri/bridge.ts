@@ -239,3 +239,9 @@ export async function openPathInOs(path: string): Promise<void> {
   ensureTauri();
   await invoke<void>("open_path_in_os", { path });
 }
+
+export async function pickExecutableFile(): Promise<string | null> {
+  ensureTauri();
+  const res = await invoke<string | null>("pick_executable_file");
+  return res ?? null;
+}

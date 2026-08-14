@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod ai_cli;
 
 fn main() {
     tauri::Builder::default()
@@ -17,6 +18,11 @@ fn main() {
             commands::run_dotnet_test,
             commands::run_test_command,
             commands::open_path_in_os,
+            commands::pick_executable_file,
+            ai_cli::ai_cli_which,
+            ai_cli::ai_cli_is_file,
+            ai_cli::ai_cli_run_version,
+            ai_cli::ai_cli_user_env,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AITest Desktop");

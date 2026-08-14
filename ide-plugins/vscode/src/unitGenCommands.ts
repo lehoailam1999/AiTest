@@ -1100,17 +1100,25 @@ export async function handleCodegenGenerateUnitBatch(
   const conventions = conventionsRaw.trim() || EMBEDDED_UNIT_CONVENTIONS;
   const projectRules = (params.projectRules || "").trim() || conventions;
 
-  const {
-    openAgentCliSession,
-    getAgentCliSession,
-  } = await import("./agentCliSession");
-  let session = params.sessionId
-    ? getAgentCliSession(params.sessionId)
-    : null;
+  let session: import("./agentCliSession").AgentCliSession;
   let ephemeralSession = false;
-  if (!session) {
-    session = openAgentCliSession(root);
-    ephemeralSession = !params.sessionId;
+  try {
+    const { bindAgentCliSession } = await import("./agentCliSession");
+    const bound = bindAgentCliSession({
+      workspaceRoot: root,
+      sessionId: params.sessionId,
+      agentExecutable: params.agentExecutable,
+    });
+    session = bound.session;
+    ephemeralSession = bound.ephemeral;
+  } catch (e) {
+    const failed: CodegenResultCallback = {
+      commandId: params.commandId,
+      status: "FAILED",
+      error: e instanceof Error ? e.message : String(e),
+    };
+    notifyResult(notify, failed);
+    return failed;
   }
   const runPrompt = (
     prompt: string,

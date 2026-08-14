@@ -1,37 +1,40 @@
 # AITest Desktop (React + Tauri)
 
-Desktop shell: **Tauri v1** + **React (Vite)** gọi **Python API**.
+UI + Tauri bridge; gọi Python API tại **`http://127.0.0.1:5088/api`** (mặc định trong code).
 
-## Scope
-
-- **M4:** Desktop scaffold, Startup / Login / Home
-- **M5+:** Import source, Generate Unit, Run Test (Tauri commands đã có sẵn trong Rust)
+Người mới: từ gốc repo `npm run setup` rồi `npm run up` (hoặc `npm run desktop`).
 
 ## Dev
 
-Prerequisites:
+**Cần:** Node 20+, Rust (Tauri), API đang chạy trên **5088**.
 
-- Rust toolchain
-- Node.js 20+
-- Python API trên `http://localhost:5000`
-
-```bash
-cd desktop
-npm install
-npm run dev:ui          # chỉ React (http://localhost:5173)
-npm run dev             # Tauri + React
+```powershell
+# Gốc repo
+npm run desktop:install
+npm run desktop          # Tauri + Vite
+npm run desktop:ui       # chỉ browser http://localhost:5173
 ```
 
-`VITE_API_URL` mặc định: `http://localhost:5000/api` (file `.env`).
+Hoặc trong `desktop/`:
+
+```powershell
+npm install
+npm run dev
+npm run dev:ui
+```
+
+Tuỳ chọn: tạo `desktop/.env` với `VITE_API_URL=http://127.0.0.1:5088/api` nếu cần đổi host/port.
 
 ## Build
 
-```bash
-cd desktop
-npm run build:ui
-npm run build
+```powershell
+npm run desktop:build
+# hoặc: cd desktop && npm run build
 ```
 
-## Tauri commands (Rust)
+## Test
 
-`src-tauri/src/commands.rs`: `pick_project_folder`, `scan_project`, `list_cs_files`, `read_text_file`, `write_text_file`, `run_dotnet_test`.
+```powershell
+npm run test:desktop
+# (cần packages/ide-protocol đã npm install — setup làm sẵn)
+```

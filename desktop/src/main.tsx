@@ -7,6 +7,7 @@ import viVN from "antd/locale/vi_VN";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { ProjectProvider } from "./state/ProjectContext";
+import { AiCliProvider } from "./state/AiCliContext";
 import "./styles.css";
 
 function Root() {
@@ -36,7 +37,9 @@ function Root() {
             <BrowserRouter>
               <AuthProvider>
                 <ProjectProvider>
-                  <App />
+                  <AiCliProvider>
+                    <App />
+                  </AiCliProvider>
                 </ProjectProvider>
               </AuthProvider>
             </BrowserRouter>

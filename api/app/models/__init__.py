@@ -11,6 +11,7 @@ from app.models.domain import (
     KnowledgeWorkspace,
     Project,
     ReportRecord,
+    RequirementAnalysisRecord,
     RequirementFile,
     RequirementSnapshot,
     RequirementTopic,
@@ -42,6 +43,7 @@ __all__ = [
     "ChatSession",
     "ChatMessage",
     "RequirementSnapshot",
+    "RequirementAnalysisRecord",
     "CoverageUpload",
     "ReportRecord",
 ]
