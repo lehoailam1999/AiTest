@@ -299,7 +299,18 @@ function normalizeUnitGenErrorForUi(errMsg: string): string {
   }
 
   if (/FAIL_FEATURE_GAP|feature_gap/i.test(msg)) {
-    return "Thiếu backend feature / gap (FEATURE_GAP)";
+    const detail = msg.match(/FAIL_FEATURE_GAP\s*[—:-]\s*([^.]+(?:\.[^ ]+)*)/i)?.[1];
+    return detail
+      ? `Behavior không có trong source: ${detail.trim()}`
+      : "Behavior không có trong source — đổi TC hoặc sửa BE (FEATURE_GAP)";
+  }
+
+  if (/FAIL_FIELD_UNBOUND|field_unbound/i.test(msg)) {
+    return "Field chưa bind sang property BE — bổ sung code-aliases.fields hoặc target.property";
+  }
+
+  if (/FAIL_OP_CONTRADICT|op_contradict/i.test(msg)) {
+    return "Intent permission không khớp SUT — với duplicate hãy bỏ Permission tokens và dùng intent rule/sutMap";
   }
 
   if (/FAIL_SUT_MISMATCH|sut_mismatch/i.test(msg)) {
@@ -543,7 +554,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     null;
   const syncedAt = metaSyncedAt(meta ?? undefined);
   const aiReady =
-    conn?.status === "Ready" || conn?.status === "Connected" || Boolean(conn?.hasApiKey);
+    conn?.status === "Ready" || conn?.status === "Connected";
 
   const fwOptions = useMemo(
     () => testFrameworkOptions(language, meta),

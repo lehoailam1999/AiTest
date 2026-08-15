@@ -33,6 +33,7 @@ describe("unitSourceGroundingContract (Layer 5)", () => {
     const pathRel = "src/App/Commands/Widget/WidgetCreateCommandHandler.cs";
     const related = "src/App/Commands/Widget/WidgetCreateCommand.cs";
     const snap = snapshotFromPaths([pathRel, related]);
+    snap.files[pathRel]!.contentHash = "a".repeat(64);
     snap.dependencyGraph[pathRel] = [related];
     snap.symbolsByFile[pathRel] = [
       {
@@ -58,7 +59,7 @@ describe("unitSourceGroundingContract (Layer 5)", () => {
       codeIndex: snap,
       confidence: "HIGH",
       freshness: "fresh",
-      validateChecks: ["indexFile", "moduleGate"],
+      validateChecks: ["indexFile", "moduleGate", "crudVerb", "symbolCoLocated"],
       testCaseId: "TC-001",
       score: 120,
       source: "index.db",
@@ -73,6 +74,7 @@ describe("unitSourceGroundingContract (Layer 5)", () => {
     assert.ok(c!.deps.includes(related));
     assert.equal(c!.confidence, "HIGH");
     assert.equal(c!.freshness, "fresh");
+    assert.equal(c!.authoritative, true);
   });
 
   it("buildUnitGroundingContractFiles emits companion for Unit with markers", () => {

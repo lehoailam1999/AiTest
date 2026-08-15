@@ -83,8 +83,9 @@ async def create_project(request: Request, db: Annotated[Session, Depends(get_db
     db.add(
         AiBackendConnection(
             project_id=p.id,
-            backend_type=C.PROVIDER_OLLAMA,
-            status=C.STATUS_DISCONNECTED,
+            status=C.STATUS_NOT_CONFIGURED,
+            cli_type="cursor-cli",
+            cli_path="agent",
         )
     )
     db.commit()

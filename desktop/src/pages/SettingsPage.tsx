@@ -26,25 +26,20 @@ import { Link } from "react-router-dom";
 import { ROUTES } from "../lib/productRoutes";
 import { aiConnectionDisplayLabel } from "../lib/aiConnectionLabel";
 import { AiCliEnvironmentPanel } from "../components/AiCliEnvironmentPanel";
+import { clearAiCliReadyCache } from "../lib/aiCli/gate";
+import { parseAiCliId } from "../lib/aiCli/registry";
 
 const { Title, Paragraph, Text } = Typography;
 
 /** Path ngầm theo vendor — không hiện trên UI; resolve qua PATH hệ thống. */
 const CLI_DEFAULT_PATH: Record<string, string> = {
-  "gemini-cli": "gemini",
   "cursor-cli": "agent",
   "claude-cli": "claude",
   "antigravity-cli": "agy",
   ollama: "ollama",
-  "custom-script": "gemini",
 };
 
 const CLI_TYPES = [
-  {
-    value: "gemini-cli",
-    label: "Gemini CLI",
-    hint: "Lệnh: gemini (trên PATH)",
-  },
   {
     value: "cursor-cli",
     label: "Cursor Agent CLI",
@@ -65,18 +60,7 @@ const CLI_TYPES = [
     label: "Ollama CLI",
     hint: "Lệnh: ollama (trên PATH)",
   },
-  {
-    value: "custom-script",
-    label: "Custom Script",
-    hint: "Dùng vendor khác nếu cần CLI tùy chỉnh trên PATH",
-  },
 ] as const;
-
-function providerForCliType(cliType: string): string {
-  if (cliType === "ollama") return "ollama";
-  if (cliType === "antigravity-cli") return "antigravity";
-  return "openai";
-}
 
 function statusTone(status?: string | null): "success" | "warning" | "error" | "default" {
   const s = (status || "").toLowerCase();
@@ -87,7 +71,7 @@ function statusTone(status?: string | null): "success" | "warning" | "error" | "
 }
 
 function defaultCliPath(cliType: string): string {
-  return CLI_DEFAULT_PATH[cliType] || "gemini";
+  return CLI_DEFAULT_PATH[cliType] || "agent";
 }
 
 function applyConnectionToForm(
@@ -98,7 +82,7 @@ function applyConnectionToForm(
     setCliType: (v: string) => void;
   }
 ) {
-  const type = c.cliType || "gemini-cli";
+  const type = c.cliType || "cursor-cli";
   setters.setConn(c);
   setters.setModelName(c.modelName ?? "");
   setters.setCliType(type);
@@ -112,9 +96,8 @@ export default function SettingsPage() {
   const projectId = project?.id ?? null;
   const [conn, setConn] = useState<Connection | null>(null);
   const [modelName, setModelName] = useState("");
-  const [cliType, setCliType] = useState("gemini-cli");
+  const [cliType, setCliType] = useState("cursor-cli");
   const [busy, setBusy] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const loadSeq = useRef(0);
 
@@ -147,31 +130,16 @@ export default function SettingsPage() {
 
   function buildSaveBody() {
     return {
-      provider: providerForCliType(cliType),
       modelName: modelName.trim(),
-      runnerMode: "AI_CLI" as const,
       cliType,
       // Path ẩn: luôn tên lệnh mặc định theo vendor (gemini / agent / …)
       cliPath: defaultCliPath(cliType),
     };
   }
 
-  async function onSaveOnly() {
-    if (!projectId) return;
-    setSaving(true);
-    // Chặn load() đang bay đè form trong lúc save
-    loadSeq.current += 1;
-    try {
-      const body = buildSaveBody();
-      const c = await connection.save(projectId, body);
-      applyConnectionToForm(c, { setConn, setModelName, setCliType });
-      message.success("Đã lưu cấu hình AI CLI");
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "Lưu thất bại");
-    } finally {
-      setSaving(false);
-    }
-  }
+  const locked = busy || verifying;
+  const savedCliType = conn?.cliType || "cursor-cli";
+  const selectionChanged = cliType !== savedCliType;
 
   /** Lưu cấu hình rồi verify CLI — một bước đến Ready. */
   async function onSaveAndTestCli() {
@@ -181,15 +149,17 @@ export default function SettingsPage() {
     try {
       const body = buildSaveBody();
       await connection.save(projectId, body);
+      // Settings verify must invalidate Gen READY cache (Unit + E2E share it).
+      clearAiCliReadyCache(parseAiCliId(body.cliType) ?? undefined);
       const c = await connection.verify(projectId);
       applyConnectionToForm(c, { setConn, setModelName, setCliType });
       if (c.status === "Ready") {
-        message.success("Đã lưu · CLI Ready");
+        message.success("Đã lưu cấu hình · CLI Ready");
       } else {
-        message.warning(`Đã lưu · trạng thái: ${c.status}`);
+        message.warning(`Đã lưu cấu hình · Trạng thái: ${c.status}`);
       }
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "Lưu & Test CLI thất bại");
+      message.error(err instanceof Error ? err.message : "Lưu & Xác minh CLI thất bại");
     } finally {
       setVerifying(false);
     }
@@ -218,10 +188,6 @@ export default function SettingsPage() {
       </div>
     );
   }
-
-  const locked = busy || saving || verifying;
-  const savedCliType = conn?.cliType || "gemini-cli";
-  const selectionChanged = cliType !== savedCliType;
 
   return (
     <div className="page settings-ai-page">
@@ -325,18 +291,9 @@ export default function SettingsPage() {
                 htmlType="submit"
                 icon={<SafetyCertificateOutlined />}
                 loading={verifying}
-                disabled={locked && !verifying}
+                disabled={locked}
               >
-                Lưu &amp; Test CLI
-              </Button>
-              <Button
-                type="text"
-                size="small"
-                onClick={() => void onSaveOnly()}
-                loading={saving}
-                disabled={locked && !saving}
-              >
-                Chỉ lưu
+                Lưu cấu hình
               </Button>
               <Button
                 type="text"
@@ -349,7 +306,7 @@ export default function SettingsPage() {
               </Button>
             </Space>
             <Text type="secondary" className="settings-ai-actions-hint">
-              Một bước: lưu cấu hình + xác minh CLI đến Ready trước khi Sinh TC / Phân tích
+              Tự động lưu và xác minh CLI đến Ready trước khi Sinh TC / Phân tích
             </Text>
           </div>
         </Form>

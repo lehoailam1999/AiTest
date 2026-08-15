@@ -105,9 +105,9 @@
         "empty\\s*(code|id).*(auto|generat|sinh|assign)",
         "(auto|generat|sinh).*(empty|blank|missing|trong)\\s*(code|ma|id)"
       ],
-      "codePatterns": ["userProvidedCode", "IsNullOrWhiteSpace", "IsNullOrEmpty"],
-      "rulePatterns": ["userProvidedCode", "IsNullOrWhiteSpace", "IsNullOrEmpty"],
-      "featureTokens": ["userProvidedCode", "IsNullOrWhiteSpace"],
+      "codePatterns": ["IsNullOrWhiteSpace", "IsNullOrEmpty", "Generate"],
+      "rulePatterns": ["IsNullOrWhiteSpace", "IsNullOrEmpty", "Generate"],
+      "featureTokens": ["IsNullOrWhiteSpace", "Generate"],
       "requiresBodyRule": true
     },
     {
@@ -122,7 +122,6 @@
         "loc\\s*ngan",
         "ngan\\s*luu\\s*tru",
         "\\bisoccupied\\b",
-        "\\biscompartmentdisabled\\b",
         "compartment.*(empty|occupied|enable|disable)",
         "empty\\s*(slot|bin|compartment)"
       ],
@@ -221,14 +220,16 @@
       "id": "upload_resource",
       "priority": 50,
       "cues": [
-        "tep\\s*ky\\s*thuat\\s*so",
-        "file\\s*ky\\s*thuat\\s*so",
-        "digital\\s*(file|asset)",
-        "ky\\s*thuat\\s*so",
-        "digital\\s*file"
+        "tai\\s*len",
+        "\\bupload\\b",
+        "hinh\\s*anh",
+        "\\bimage\\b",
+        "\\bmedia\\b",
+        "\\bphoto\\b",
+        "digital\\s*(file|asset)"
       ],
       "codePatterns": ["Upload", "InitUpload"],
-      "featureTokens": ["Upload", "InitUpload", "Digital"]
+      "featureTokens": ["Upload", "InitUpload"]
     },
     {
       "id": "reject",

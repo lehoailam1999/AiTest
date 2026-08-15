@@ -70,7 +70,7 @@ describe("approvedTcMarkdown", () => {
     assert.match(md, /module: Phân loại VTKT/);
     assert.match(md, /\| Module \| Vật chứng \|/);
     assert.match(md, /\| Function \| Phân loại VTKT \|/);
-    assert.match(md, /Primary SUT below is authoritative for Gen/);
+    assert.match(md, /only when the companion grounding contract is authoritative/);
     assert.match(md, /### Resolved SUT/);
     assert.match(md, /Module → Function → Title/);
     const g = parseApprovedTcGrounding(md);

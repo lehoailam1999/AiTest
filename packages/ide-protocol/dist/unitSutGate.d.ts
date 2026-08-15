@@ -81,6 +81,8 @@ export declare function decideUnitSutGate(opts: {
     tcText: string;
     primaryPath?: string | null;
     sourceExcerpt?: string | null;
+    /** Related DTO/validator excerpts — combined for body-rule + VALIDATION gap checks. */
+    relatedExcerpt?: string | null;
     codeAliases?: CodeAliasMap | null;
     alignmentScore?: number | null;
     markersHit?: number | null;

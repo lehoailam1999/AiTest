@@ -536,7 +536,7 @@ def _dedupe_apis(items: list[dict]) -> list[dict]:
     return out
 
 
-def _api_key(row: dict) -> str:
+def _api_signature(row: dict) -> str:
     return f"{str(row.get('method') or '').strip().upper()}|{str(row.get('path') or '').strip()}".lower()
 
 
@@ -1161,8 +1161,8 @@ def _promote_apis_from_text(apis: list[dict], text: str, *, note: str = "") -> N
             "path": m.group(2),
             "note": (note or text)[:200],
         }
-        key = _api_key(row)
-        if any(_api_key(a) == key for a in apis):
+        signature = _api_signature(row)
+        if any(_api_signature(a) == signature for a in apis):
             continue
         if len(apis) < MAX_ITEMS:
             apis.append(row)
@@ -1639,7 +1639,10 @@ def _enforce_criteria_split(payload: dict[str, Any]) -> dict[str, Any]:
                 "path": m.group(2),
                 "note": frag[:200],
             }
-            if not any(_api_key(a) == _api_key(row) for a in apis) and len(apis) < MAX_ITEMS:
+            if (
+                not any(_api_signature(a) == _api_signature(row) for a in apis)
+                and len(apis) < MAX_ITEMS
+            ):
                 apis.append(row)
         # 2) Actors / permissions
         m_actor = _ACTOR_LINE_RE.match(frag)

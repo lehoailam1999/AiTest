@@ -50,11 +50,7 @@ export const connection = {
   save: (
     projectId: string,
     body: {
-      provider: string;
       modelName?: string | null;
-      baseUrl?: string;
-      apiKey?: string;
-      runnerMode?: string;
       cliType?: string;
       cliPath?: string;
       cliArgsJson?: string;

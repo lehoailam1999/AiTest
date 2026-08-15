@@ -11,6 +11,9 @@ import {
   findBodyRuleHits,
   formatBodyRuleLog,
   functionOpPathShapeAdjust,
+  extractOpPreferTokens,
+  queryImpliesAuthzIntent,
+  queryImpliesUploadIntent,
   orderCandidatesForBodyRuleOpen,
   pathContradictsSearchVerb,
   pathContradictsUploadVerb,
@@ -466,6 +469,41 @@ describe("unitBodyRuleScore", () => {
     assert.ok(demote < 0, String(demote));
   });
 
+  it("duplicate intent can forbid permission op without swallowing real authz", () => {
+    const base = extractUnitIntent({
+      title: "Từ chối tạo khi trùng mã",
+      module: "Tạo mới",
+      steps: "evidenceCodeExists",
+      expectedResult: "BadRequest",
+    });
+    const duplicate = {
+      ...base,
+      forbiddenOpTokens: ["Permission", "CanWrite", "Authorize", "Deny"],
+    };
+    assert.equal(queryImpliesAuthzIntent(duplicate, "từ chối trùng mã"), false);
+    assert.deepEqual(extractOpPreferTokens(duplicate, "từ chối trùng mã"), []);
+    assert.ok(
+      functionOpPathShapeAdjust(
+        "src/App/EvidenceCreateCommandHandler.cs",
+        duplicate,
+        "từ chối trùng mã"
+      ) >= 0
+    );
+
+    const permission = extractUnitIntent({
+      title: "Từ chối khi không có quyền ghi",
+      module: "Phân quyền",
+      steps: "CanWriteCase false",
+      expectedResult: "Forbidden",
+    });
+    assert.equal(queryImpliesAuthzIntent(permission, "CanWriteCase permission"), true);
+    assert.ok(
+      extractOpPreferTokens(permission, "CanWriteCase permission").includes(
+        "Permission"
+      )
+    );
+  });
+
   it("functionOpPathShapeAdjust storage demotes AssignCase without Storage stem", () => {
     const intent = extractUnitIntent({
       title: "Chọn vị trí lưu trữ - ngăn không tồn tại - từ chối",
@@ -550,6 +588,24 @@ describe("unitBodyRuleScore", () => {
       !decision.writeBack ||
         !/Delete/i.test(decision.seed?.pathRel || ""),
       JSON.stringify(decision)
+    );
+  });
+
+  it("digital classification does not imply Upload op without upload cue", () => {
+    const intent = extractUnitIntent({
+      title: "Phân loại vật chứng kỹ thuật số",
+      module: "Phân loại",
+      expectedResult: "Checked mặc định",
+    });
+    assert.equal(
+      queryImpliesUploadIntent(intent, "Phân loại vật chứng kỹ thuật số"),
+      false
+    );
+    assert.equal(
+      extractOpPreferTokens(intent, "Phân loại vật chứng kỹ thuật số").includes(
+        "Upload"
+      ),
+      false
     );
   });
 

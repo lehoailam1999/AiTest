@@ -787,7 +787,6 @@ async def _retry_unit_primary_coverage(
     db: Session,
     job_id: uuid.UUID,
     conn: AiBackendConnection,
-    api_key: str | None,
     title: str,
     content: str,
     ctx,
@@ -902,7 +901,6 @@ async def _retry_unit_primary_coverage(
                 title,
                 fill_content,
                 fill_ctx,
-                api_key=api_key,
                 on_progress=on_progress,
                 prefer_oneshot=True,
                 session_topic_key=f"{warm_key}-primary-{round_i}",
@@ -1028,8 +1026,6 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
         if conn is None:
             _fail_job(db, job_id, "connection not found")
             return
-        # AI CLI only — no API key required
-        api_key = ""
 
         title, content = "Requirement", ""
         doc_hash: str | None = None
@@ -1731,7 +1727,6 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                             title,
                             scoped_content,
                             scoped,
-                            api_key=api_key,
                             on_progress=_cli_progress,
                             prefer_oneshot=True,
                             session_topic_key=f"{warm_key}-{idx}",
@@ -1915,7 +1910,6 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     db=db,
                     job_id=job_id,
                     conn=conn,
-                    api_key=api_key,
                     title=title,
                     content=content,
                     ctx=ctx,
@@ -2005,7 +1999,6 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                     title,
                     content,
                     ctx,
-                    api_key=api_key,
                     on_progress=_cli_progress,
                     prefer_oneshot=True if is_cursor else None,
                     create_chat=cursor_hidden,
@@ -2050,7 +2043,6 @@ async def process_generate_job(job_id: uuid.UUID) -> None:
                 db=db,
                 job_id=job_id,
                 conn=conn,
-                api_key=api_key,
                 title=title,
                 content=content,
                 ctx=ctx,
@@ -2176,7 +2168,7 @@ async def create_job(request: Request, db: Annotated[Session, Depends(get_db)]):
         project_id=pid,
         source_id=source_id,
         status=C.JOB_QUEUED,
-        backend_type=conn.backend_type,
+        backend_type=(getattr(conn, "cli_type", None) or "ai-cli"),
         generate_strategy=mode,
         requirement_version=req_version,
     )

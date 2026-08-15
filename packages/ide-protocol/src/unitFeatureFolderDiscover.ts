@@ -181,7 +181,7 @@ export function titleCueBridgeStems(titleTokens: string[]): string[] {
   }
 
   if (
-    /isoccupied|compartment|cabinet|vitriluutru|luutru/.test(compact) ||
+    /isoccupied|compartment|vitriluutru|luutru/.test(compact) ||
     /\b(isoccupied|compartment|vi\s*tri|luu\s*tru)\b/.test(blob)
   ) {
     out.push("IsOccupied");
@@ -189,8 +189,7 @@ export function titleCueBridgeStems(titleTokens: string[]): string[] {
 
   if (
     /assign|attach|link|gan\b|gắn|gán/.test(blob.replace(/\s+/g, " ")) ||
-    /\b(assign|attach|gan)\b/.test(blob) ||
-    /\b(ho\s*so|vu\s*an|dossier)\b/.test(blob)
+    /\b(assign|attach|gan)\b/.test(blob)
   ) {
     out.push("Assign");
   }
@@ -439,7 +438,7 @@ function narrowBridgesByActiveNeedles(
     const hit = out.filter(
       (p) =>
         /IsOccupied/i.test(p) ||
-        /\/[^/]*(Storage|Cabinet|Compartment)[^/]*\//i.test(p)
+        /\/[^/]*(Storage|Compartment)[^/]*\//i.test(p)
     );
     if (hit.length) out = hit;
   }

@@ -43,6 +43,8 @@ export type UnitSourceGroundingContract = {
   validateChecks?: string[];
   source?: string;
   score?: number;
+  /** Only authoritative contracts may bypass Gen retrieval/ranking. */
+  authoritative: boolean;
 };
 
 export type BuildUnitSourceGroundingContractInput = {
@@ -106,7 +108,7 @@ function pickSymbolRange(
       (s) =>
         s.kind === "method" &&
         s.name.toLowerCase() === mLow &&
-        (!s.parent || s.parent.toLowerCase() === typeLow)
+        s.parent?.toLowerCase() === typeLow
     );
     if (method) return { line: method.line, endLine: method.endLine };
   }
@@ -136,6 +138,18 @@ export function buildUnitSourceGroundingContract(
   const pathKey = resolveFileKey(snap, pathRel) || pathRel;
   const range = pickSymbolRange(snap, pathKey, typeName, methodName);
   const fileRec = snap?.files[pathKey];
+  const symbols = snap?.symbolsByFile[pathKey] || [];
+  const typeCoLocated = symbols.some(
+    (s) => s.kind !== "method" && s.kind !== "variable" && s.name.toLowerCase() === typeName.toLowerCase()
+  );
+  const methodCoLocated =
+    !methodName ||
+    symbols.some(
+      (s) =>
+        s.kind === "method" &&
+        s.name.toLowerCase() === methodName.toLowerCase() &&
+        s.parent?.toLowerCase() === typeName.toLowerCase()
+    );
 
   const relatedRaw = rankUnitRelatedPaths(
     pathRel,
@@ -161,6 +175,15 @@ export function buildUnitSourceGroundingContract(
     input.confidence === "LOW"
       ? input.confidence
       : undefined;
+  const checks = input.validateChecks?.length ? [...input.validateChecks] : [];
+  const requiredChecks = ["indexFile", "moduleGate", "crudVerb", "symbolCoLocated"];
+  const authoritative =
+    Boolean(fileRec?.contentHash) &&
+    typeCoLocated &&
+    methodCoLocated &&
+    (confidence === "HIGH" || confidence === "MEDIUM") &&
+    input.freshness === "fresh" &&
+    requiredChecks.every((check) => checks.includes(check));
 
   return {
     schema: UNIT_GROUNDING_CONTRACT_SCHEMA,
@@ -179,14 +202,13 @@ export function buildUnitSourceGroundingContract(
     deps,
     confidence,
     freshness: input.freshness || "unknown",
-    validateChecks: input.validateChecks?.length
-      ? [...input.validateChecks]
-      : undefined,
+    validateChecks: checks.length ? checks : undefined,
     source: input.source?.trim() || undefined,
     score:
       typeof input.score === "number" && Number.isFinite(input.score)
         ? input.score
         : undefined,
+    authoritative,
   };
 }
 
@@ -248,6 +270,8 @@ export function buildUnitGroundingContractFiles(
       relatedPaths: markers.related,
       codeIndex: opts?.codeIndex,
       confidence: parseConfidenceFromTestData(tc.testData),
+      freshness: parseFreshnessFromTestData(tc.testData),
+      validateChecks: parseValidateChecksFromTestData(tc.testData),
       testCaseId: tc.testCaseId,
       source: /index\.db/i.test(tc.testData || "") ? "index.db" : undefined,
       score: parseScoreFromTestData(tc.testData),
@@ -260,6 +284,22 @@ export function buildUnitGroundingContractFiles(
     });
   }
   return out;
+}
+
+function parseFreshnessFromTestData(
+  testData: string | null | undefined
+): IndexFreshnessStatus | undefined {
+  const m = String(testData || "").match(
+    /\bfreshness=(fresh|stale|missing_file|skipped)\b/i
+  );
+  return m?.[1]?.toLowerCase() as IndexFreshnessStatus | undefined;
+}
+
+function parseValidateChecksFromTestData(
+  testData: string | null | undefined
+): string[] {
+  const m = String(testData || "").match(/\bchecks=([A-Za-z0-9_+-]+)/);
+  return m?.[1] ? m[1].split("+").filter(Boolean) : [];
 }
 
 function parseScoreFromTestData(testData: string | null | undefined): number | undefined {

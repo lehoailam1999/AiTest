@@ -137,7 +137,6 @@ def _ensure_project_meta_columns() -> None:
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS progress_message TEXT",
     ]
     conn_stmts = [
-        "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS runner_mode VARCHAR(20)",
         "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS cli_type VARCHAR(40)",
         "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS cli_path VARCHAR(500)",
         "ALTER TABLE ai_backend_connections ADD COLUMN IF NOT EXISTS cli_args_json TEXT",

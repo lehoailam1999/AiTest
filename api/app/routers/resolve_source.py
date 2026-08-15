@@ -11,10 +11,9 @@ from sqlalchemy.orm import Session
 from app import constants as C
 from app.database import get_db
 from app.deps import get_current_user
-from app.llm import LLMError
 from app.models.domain import AiBackendConnection, Project, TestCase
 from app.responses import errors, ok
-from app.services.connection_service import connection_api_key, llm_from_connection
+from app.services.ai_service import chat_for_connection
 from app.services.resolve_source_scope import (
     build_resolve_scope_prompts,
     build_resolve_tokens_prompts,
@@ -75,12 +74,7 @@ async def resolve_source_scope(request: Request, db: Annotated[Session, Depends(
         .first()
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — vào Settings cấu hình và Verify")
-    try:
-        api_key = connection_api_key(conn)
-        provider = llm_from_connection(conn)
-    except (ValueError, LLMError) as exc:
-        return errors(400, str(exc))
+        return errors(400, "AI chưa Ready — vào Settings cấu hình AI CLI và Verify")
 
     system, user = build_resolve_scope_prompts(
         title=tc.title or "",
@@ -92,7 +86,7 @@ async def resolve_source_scope(request: Request, db: Annotated[Session, Depends(
         candidates=candidates,
     )
     try:
-        raw = await provider.chat(api_key, system, user)
+        raw, _meta = await chat_for_connection(conn, system, user)
         result = parse_resolve_scope_json(raw, candidates)
     except Exception as exc:  # noqa: BLE001
         return errors(400, f"Không xếp hạng được file: {exc}")
@@ -130,12 +124,7 @@ async def resolve_source_tokens(request: Request, db: Annotated[Session, Depends
         .first()
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — vào Settings cấu hình và Verify")
-    try:
-        api_key = connection_api_key(conn)
-        provider = llm_from_connection(conn)
-    except (ValueError, LLMError) as exc:
-        return errors(400, str(exc))
+        return errors(400, "AI chưa Ready — vào Settings cấu hình AI CLI và Verify")
 
     system, user = build_resolve_tokens_prompts(
         title=tc.title or "",
@@ -146,7 +135,7 @@ async def resolve_source_tokens(request: Request, db: Annotated[Session, Depends
         test_data=tc.test_data,
     )
     try:
-        raw = await provider.chat(api_key, system, user)
+        raw, _meta = await chat_for_connection(conn, system, user)
         result = parse_resolve_tokens_json(raw)
     except Exception as exc:  # noqa: BLE001
         return errors(400, f"Không map token được: {exc}")

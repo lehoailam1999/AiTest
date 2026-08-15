@@ -69,16 +69,10 @@ export type ProjectMeta = {
 export type Connection = {
   id: string;
   projectId: string;
-  backendType: string;
-  provider: string;
   modelName?: string | null;
-  baseUrl?: string | null;
   status: string;
-  hasApiKey: boolean;
   lastVerifiedAt?: string | null;
   lastError?: string | null;
-  /** AI_CLI only */
-  runnerMode?: string | null;
   cliType?: string | null;
   cliPath?: string | null;
   cliArgsJson?: string | null;

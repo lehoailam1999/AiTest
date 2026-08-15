@@ -1,5 +1,5 @@
 /** Intent classes — portable IT shapes (Approve R1 + Gen gate). */
-export type UnitIntentClass = "upload" | "upload_size_limit" | "upload_resource" | "persist_create" | "persist_update" | "validate_reject" | "auto_generate_code" | "state_enable" | "filter_list" | "search_lookup" | "ui_master_create" | "reject";
+export type UnitIntentClass = "upload" | "upload_size_limit" | "upload_resource" | "persist_read" | "persist_create" | "persist_update" | "validate_reject" | "auto_generate_code" | "state_enable" | "filter_list" | "search_lookup" | "ui_master_create" | "reject";
 export type IntentDefJson = {
     id: UnitIntentClass;
     priority: number;

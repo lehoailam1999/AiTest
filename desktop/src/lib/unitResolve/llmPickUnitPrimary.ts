@@ -7,6 +7,17 @@ export type UnitPrimaryShortlistItem = {
   pathRel: string;
   code?: string;
   score?: number;
+  /** Bounded source owned by this exact candidate path. */
+  excerpt?: string;
+  /** Types defined by this exact candidate path. */
+  symbols?: string[];
+  /** DTO/input properties reachable from this candidate. */
+  properties?: Array<{
+    name: string;
+    ownerPath: string;
+    ownerType?: string;
+    excerpt?: string;
+  }>;
 };
 
 export type LlmPickUnitPrimaryInput = {
@@ -24,6 +35,8 @@ export type LlmPickUnitPrimaryInput = {
 export type LlmPickUnitPrimaryResult = {
   pathRel: string;
   code: string;
+  property?: string;
+  evidence?: string;
   confidence: number;
   source: "llm" | "mock";
 };
@@ -34,24 +47,8 @@ const PICK_TIMEOUT_MS = 14_000;
 /** Retry pass (batch Approve) — allow extra time after first concurrent wave. */
 const PICK_RETRY_TIMEOUT_MS = 28_000;
 const SHORTLIST_CAP = 8;
-/** Cap parallel LLM picks — bulk Approve timeouts when 6+ fire at once. */
-const LLM_PICK_MAX_INFLIGHT = 2;
-let llmPickInflight = 0;
-const llmPickWaiters: Array<() => void> = [];
-
-async function withLlmPickSlot<T>(fn: () => Promise<T>): Promise<T> {
-  while (llmPickInflight >= LLM_PICK_MAX_INFLIGHT) {
-    await new Promise<void>((resolve) => llmPickWaiters.push(resolve));
-  }
-  llmPickInflight += 1;
-  try {
-    return await fn();
-  } finally {
-    llmPickInflight -= 1;
-    const next = llmPickWaiters.shift();
-    if (next) next();
-  }
-}
+const BATCH_WINDOW_MS = 20;
+const BATCH_CAP = 10;
 
 function normPath(p: string): string {
   return (p || "").replace(/\\/g, "/").toLowerCase();
@@ -69,6 +66,8 @@ export function acceptShortlistPick(
   pick: {
     path?: string | null;
     code?: string | null;
+    property?: string | null;
+    evidence?: string | null;
     confidence?: number | null;
   } | null | undefined,
   shortlist: UnitPrimaryShortlistItem[],
@@ -85,13 +84,31 @@ export function acceptShortlistPick(
     return p === want || p.endsWith(`/${want}`) || want.endsWith(`/${p}`);
   });
   if (!hit) return null;
-  const code =
-    String(pick.code || "").trim() ||
-    String(hit.code || "").trim() ||
-    symbolFromPath(hit.pathRel);
+  const code = String(pick.code || "").trim() || String(hit.code || "").trim();
+  const allowedSymbols = new Set(
+    [hit.code, ...(hit.symbols || [])]
+      .map((s) => String(s || "").trim().split(".")[0]?.toLowerCase())
+      .filter(Boolean)
+  );
+  const typeName = code.split(".")[0]?.trim().toLowerCase();
+  if (!code || !typeName || !allowedSymbols.has(typeName)) return null;
+  const evidence = String(pick.evidence || "").trim();
+  if (hit.excerpt?.trim()) {
+    if (!evidence || !hit.excerpt.toLowerCase().includes(evidence.toLowerCase())) {
+      return null;
+    }
+  }
+  const propertyWant = String(pick.property || "").trim();
+  const property = propertyWant
+    ? hit.properties?.find((p) => p.name.toLowerCase() === propertyWant.toLowerCase())
+        ?.name
+    : undefined;
+  if (propertyWant && !property) return null;
   return {
     pathRel: hit.pathRel.replace(/\\/g, "/"),
     code,
+    property,
+    evidence: evidence || undefined,
     confidence: conf,
     source: "llm",
   };
@@ -103,14 +120,24 @@ export function buildPickUnitPrimaryPrompt(input: LlmPickUnitPrimaryInput): {
 } {
   const lines = input.shortlist.slice(0, SHORTLIST_CAP).map((s, i) => {
     const code = s.code || symbolFromPath(s.pathRel);
-    return `${i + 1}. path=${s.pathRel.replace(/\\/g, "/")} code=${code}`;
+    const properties = (s.properties || []).map((p) => p.name).join(", ");
+    return [
+      `${i + 1}. path=${s.pathRel.replace(/\\/g, "/")} code=${code}`,
+      s.excerpt ? `SOURCE:\n${s.excerpt.slice(0, 2200)}` : "",
+      properties ? `PROPERTIES: ${properties}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
   });
   const system =
     "You pick the best Unit test primary SUT handler/service for a Test Case.\n" +
     "You MUST choose exactly one path from the candidate list. Never invent paths.\n" +
     "Prefer CommandHandler/Service matching Module/Title domain over Query/User/Account unless TC is about users.\n" +
-    "Return ONLY JSON: {\"path\":\"...\",\"code\":\"...\",\"confidence\":0.0-1.0}\n" +
-    "If none fit, return {\"path\":null,\"code\":null,\"confidence\":0}.";
+    "Choose code only when that type is defined in the same candidate path.\n" +
+    "Choose property only from PROPERTIES belonging to the chosen candidate. Do not guess translations.\n" +
+    "Evidence must be a short exact quote copied from the chosen SOURCE.\n" +
+    "Return ONLY JSON: {\"path\":\"...\",\"code\":\"...\",\"property\":\"...|null\",\"evidence\":\"exact quote\",\"confidence\":0.0-1.0}\n" +
+    "If none fit, return {\"path\":null,\"code\":null,\"property\":null,\"evidence\":null,\"confidence\":0}.";
   const user = [
     `Module (requirement): ${input.requirementTitle || "—"}`,
     `Function: ${input.module || "—"}`,
@@ -127,6 +154,8 @@ export function buildPickUnitPrimaryPrompt(input: LlmPickUnitPrimaryInput): {
 type ApiPickResponse = {
   path?: string | null;
   code?: string | null;
+  property?: string | null;
+  evidence?: string | null;
   confidence?: number | null;
   source?: string;
 };
@@ -139,39 +168,112 @@ export async function llmPickUnitPrimary(
 ): Promise<LlmPickUnitPrimaryResult | null> {
   if (!input.shortlist.length) return null;
   if (!input.projectId) return null;
-  const timeoutMs = input.pickTimeoutMs ?? PICK_TIMEOUT_MS;
-  return withLlmPickSlot(async () => {
+  return enqueuePrimaryPick(input);
+}
+
+type PendingPrimaryPick = {
+  input: LlmPickUnitPrimaryInput;
+  resolve: (result: LlmPickUnitPrimaryResult | null) => void;
+};
+
+const primaryPickQueues = new Map<string, PendingPrimaryPick[]>();
+const primaryPickTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function candidatePayload(s: UnitPrimaryShortlistItem) {
+  return {
+    path: s.pathRel.replace(/\\/g, "/"),
+    code: s.code || symbolFromPath(s.pathRel),
+    score: s.score ?? 0,
+    symbols: s.symbols || [],
+    excerpt: (s.excerpt || "").slice(0, 1200),
+    properties: (s.properties || []).slice(0, 24).map((p) => ({
+      name: p.name,
+      ownerPath: p.ownerPath.replace(/\\/g, "/"),
+      ownerType: p.ownerType || "",
+    })),
+  };
+}
+
+function enqueuePrimaryPick(
+  input: LlmPickUnitPrimaryInput
+): Promise<LlmPickUnitPrimaryResult | null> {
+  const key = String(input.projectId);
+  return new Promise((resolve) => {
+    const queue = primaryPickQueues.get(key) || [];
+    queue.push({ input, resolve });
+    primaryPickQueues.set(key, queue);
+    if (queue.length >= BATCH_CAP) {
+      const timer = primaryPickTimers.get(key);
+      if (timer) clearTimeout(timer);
+      primaryPickTimers.delete(key);
+      void flushPrimaryPickQueue(key);
+    } else if (!primaryPickTimers.has(key)) {
+      primaryPickTimers.set(
+        key,
+        setTimeout(() => {
+          primaryPickTimers.delete(key);
+          void flushPrimaryPickQueue(key);
+        }, BATCH_WINDOW_MS)
+      );
+    }
+  });
+}
+
+async function flushPrimaryPickQueue(projectId: string): Promise<void> {
+  const queued = primaryPickQueues.get(projectId) || [];
+  const batch = queued.splice(0, BATCH_CAP);
+  if (queued.length) {
+    primaryPickQueues.set(projectId, queued);
+    primaryPickTimers.set(
+      projectId,
+      setTimeout(() => {
+        primaryPickTimers.delete(projectId);
+        void flushPrimaryPickQueue(projectId);
+      }, BATCH_WINDOW_MS)
+    );
+  } else {
+    primaryPickQueues.delete(projectId);
+  }
+  if (!batch.length) return;
+  try {
+    const { authFetch } = await import("../../api/client");
+    const controller = new AbortController();
+    const timeoutMs = Math.max(
+      40_000,
+      ...batch.map((item) => item.input.pickTimeoutMs || PICK_TIMEOUT_MS)
+    );
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      // Lazy import — keep unitResolve tests free of Vite import.meta.env
-      const { authFetch } = await import("../../api/client");
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const raw = await authFetch<ApiPickResponse>("/agent/pick-unit-primary", {
+      const response = await authFetch<{ results?: ApiPickResponse[] }>(
+        "/agent/pick-unit-grounding-batch",
+        {
           method: "POST",
           signal: controller.signal,
           body: JSON.stringify({
-            projectId: input.projectId,
-            requirementTitle: input.requirementTitle || "",
-            module: input.module || "",
-            title: input.title || "",
-            steps: (input.steps || "").slice(0, 600),
-            expectedResult: (input.expectedResult || "").slice(0, 300),
-            candidates: input.shortlist.slice(0, SHORTLIST_CAP).map((s) => ({
-              path: s.pathRel.replace(/\\/g, "/"),
-              code: s.code || symbolFromPath(s.pathRel),
-              score: s.score ?? 0,
+            projectId,
+            items: batch.map(({ input }, id) => ({
+              id,
+              requirementTitle: input.requirementTitle || "",
+              module: input.module || "",
+              title: input.title || "",
+              steps: (input.steps || "").slice(0, 600),
+              expectedResult: (input.expectedResult || "").slice(0, 300),
+              candidates: input.shortlist.slice(0, 5).map(candidatePayload),
             })),
           }),
-        });
-        return acceptShortlistPick(raw, input.shortlist);
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch {
-      return null;
+        }
+      );
+      batch.forEach((pending, id) => {
+        pending.resolve(
+          acceptShortlistPick(response.results?.[id], pending.input.shortlist)
+        );
+      });
+    } finally {
+      clearTimeout(timer);
     }
-  });
+  } catch {
+    batch.forEach((pending) => pending.resolve(null));
+  }
 }
 
 /** Longer timeout for batch Approve retry pass (after concurrent wave). */

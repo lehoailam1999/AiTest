@@ -22,6 +22,10 @@ export const EXTENSION_CAPABILITIES = [
 export const DESKTOP_REQUIRED_UNIT_CAPS = [
     IdeCapabilities.unit,
 ];
+/** Desktop requires these before IDE E2E Gen (Agent CLI). */
+export const DESKTOP_REQUIRED_E2E_CAPS = [
+    IdeCapabilities.e2e,
+];
 export function negotiateCapabilities(offered, required) {
     const list = (offered || []).map((c) => c.trim()).filter(Boolean);
     // Legacy bridges (no capabilities field): do not block — Desktop falls back to method probe.

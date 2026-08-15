@@ -825,6 +825,7 @@ describe("resolveUnitPrimaryFromIndex", () => {
         return {
           pathRel: hit.pathRel,
           code: "WidgetCreateCommandHandler",
+          evidence: "Create();",
           confidence: 0.92,
           source: "mock",
         };
@@ -930,6 +931,7 @@ describe("resolveUnitPrimaryFromIndex", () => {
         return {
           pathRel: hit.pathRel,
           code: "GenerateUploadUrlCommandHandler",
+          evidence: "Generate();",
           confidence: 0.99,
           source: "mock",
         };
@@ -1093,5 +1095,45 @@ describe("acceptShortlistPick", () => {
       list
     );
     assert.equal(bad, null);
+  });
+
+  it("requires exact source quote and owned property for evidence packets", async () => {
+    const { acceptShortlistPick } = await import("./llmPickUnitPrimary.js");
+    const list = [
+      {
+        pathRel: "src/App/CreateWidgetHandler.cs",
+        code: "CreateWidgetHandler",
+        symbols: ["CreateWidgetHandler"],
+        excerpt: "public class CreateWidgetHandler { public Task Handle() => Save(); }",
+        properties: [
+          { name: "CaseFileId", ownerPath: "src/App/CreateWidgetCommand.cs" },
+        ],
+      },
+    ];
+    assert.ok(
+      acceptShortlistPick(
+        {
+          path: list[0]!.pathRel,
+          code: "CreateWidgetHandler",
+          property: "CaseFileId",
+          evidence: "public Task Handle() => Save();",
+          confidence: 0.9,
+        },
+        list
+      )
+    );
+    assert.equal(
+      acceptShortlistPick(
+        {
+          path: list[0]!.pathRel,
+          code: "CreateWidgetHandler",
+          property: "InventedField",
+          evidence: "public Task Handle() => Save();",
+          confidence: 0.99,
+        },
+        list
+      ),
+      null
+    );
   });
 });

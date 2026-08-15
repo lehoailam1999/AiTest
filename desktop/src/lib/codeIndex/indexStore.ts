@@ -1,4 +1,8 @@
-import { CODE_INDEX_REL_PATH, CODE_INDEX_SCHEMA } from "./constants";
+import {
+  CODE_INDEX_REL_PATH,
+  CODE_INDEX_SCHEMA,
+  toProjectRelativePath,
+} from "./constants";
 import type { CodeIndexIo, CodeIndexSnapshot } from "./types";
 
 /** In-memory cache — Approve/enrich often reloads the same JSON snapshot. */
@@ -55,6 +59,53 @@ export function parseSnapshotJson(raw: string): CodeIndexSnapshot | null {
   }
 }
 
+function normalizeSnapshotPaths(
+  snap: CodeIndexSnapshot,
+  projectRoot: string
+): CodeIndexSnapshot {
+  const keyMap = new Map<string, string>();
+  for (const key of Object.keys(snap.files || {})) {
+    const rel = toProjectRelativePath(projectRoot, key);
+    if (rel) keyMap.set(key, rel);
+  }
+  const remapKeyed = <T>(source: Record<string, T>): Record<string, T> => {
+    const out: Record<string, T> = {};
+    for (const [key, value] of Object.entries(source || {})) {
+      const rel = keyMap.get(key) || toProjectRelativePath(projectRoot, key);
+      if (rel) out[rel] = value;
+    }
+    return out;
+  };
+  const files = remapKeyed(snap.files);
+  for (const [pathRel, record] of Object.entries(files)) {
+    files[pathRel] = { ...record, pathRel };
+  }
+  const remapValue = (value: string): string =>
+    toProjectRelativePath(projectRoot, value) || value.replace(/\\/g, "/");
+  return {
+    ...snap,
+    meta: { ...snap.meta, projectRootHint: undefined },
+    files,
+    symbolsByFile: remapKeyed(snap.symbolsByFile || {}),
+    importsByFile: remapKeyed(snap.importsByFile || {}),
+    exportsByFile: remapKeyed(snap.exportsByFile || {}),
+    symbolIndex: Object.fromEntries(
+      Object.entries(snap.symbolIndex || {}).map(([symbol, paths]) => [
+        symbol,
+        paths.map(remapValue).filter((path) => !/^[A-Za-z]:\//.test(path)),
+      ])
+    ),
+    dependencyGraph: Object.fromEntries(
+      Object.entries(snap.dependencyGraph || {}).flatMap(([key, paths]) => {
+        const rel = keyMap.get(key) || toProjectRelativePath(projectRoot, key);
+        return rel
+          ? [[rel, paths.map(remapValue).filter((path) => !/^[A-Za-z]:\//.test(path))]]
+          : [];
+      })
+    ),
+  };
+}
+
 export async function loadIndexSnapshot(
   projectRoot: string,
   io: CodeIndexIo,
@@ -77,7 +128,8 @@ export async function loadIndexSnapshot(
       }
     }
     if (!raw?.trim()) return null;
-    const snap = parseSnapshotJson(raw);
+    const parsed = parseSnapshotJson(raw);
+    const snap = parsed ? normalizeSnapshotPaths(parsed, projectRoot) : null;
     if (snap) {
       INDEX_SNAP_CACHE.set(key, { snap, at: Date.now() });
     }

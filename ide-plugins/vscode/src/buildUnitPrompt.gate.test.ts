@@ -23,4 +23,13 @@ describe("buildUnitPrompt gatePassed", () => {
     const { prompt } = buildUnitPrompt({ ...base, gatePassed: true });
     assert.match(prompt, /only allowed primary SUT/i);
   });
+
+  it("omits Request meta when slim MD already has title and id", () => {
+    const { prompt } = buildUnitPrompt({
+      ...base,
+      gatePassed: true,
+      tcMd: "# Room reset\nid: TC-1\ntestCaseId: TC-1\n## Steps\n1. Change room\n",
+    });
+    assert.doesNotMatch(prompt, /## Request meta/);
+  });
 });

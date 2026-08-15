@@ -63,6 +63,7 @@ export type CodegenE2eItem = {
     testCaseId: string;
     title: string;
     module?: string;
+    requirementTitle?: string;
     featurePath?: string;
     authRole?: string;
     locatorContract: string;
@@ -72,6 +73,16 @@ export type CodegenE2eItem = {
     testData?: string;
     steps?: string;
     expectedOutcome?: string;
+    /** FE primary for Agent CLI grounding */
+    sourceFileName?: string;
+    sourceCode?: string;
+    relatedSources?: {
+        path: string;
+        content: string;
+    }[];
+    /** Target spec under AItest/E2ETest/{Req}/{TC}/specs/ */
+    suggestedSpecPath?: string;
+    existingFiles?: CodegenFileDto[];
 };
 export type CodegenGenerateUnitBatchParams = CodegenCommandBase & {
     action: "GENERATE_UNIT_BATCH";
@@ -80,17 +91,26 @@ export type CodegenGenerateUnitBatchParams = CodegenCommandBase & {
     sessionId?: string;
     /** Project VI→code aliases (meta.codeAliases) for SUT resolve */
     codeAliases?: Record<string, string[]>;
+    /**
+     * Desktop-resolved AI CLI executable on the user machine.
+     * Extension must spawn this path — not a bare command name.
+     */
+    agentExecutable?: string;
 };
 export type CodegenGenerateE2eBatchParams = CodegenCommandBase & {
     action: "GENERATE_E2E_BATCH";
     items: CodegenE2eItem[];
     sessionId?: string;
+    /** Desktop-resolved AI CLI executable on the user machine. */
+    agentExecutable?: string;
 };
 export type CodegenOpenSessionParams = {
     projectRoot: string;
     projectId?: string;
     /** unit | e2e — which engine pool */
     kind?: "unit" | "e2e";
+    /** Desktop-resolved AI CLI executable — bind once per session. */
+    agentExecutable?: string;
 };
 export type CodegenOpenSessionResult = {
     ok: boolean;

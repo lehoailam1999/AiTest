@@ -41,6 +41,7 @@ import { slimTcMdForGen } from "./slimTcMdForGen";
 import {
   groundingRelatedPaths,
   inferDtoCandidatePaths,
+  isAuthoritativeUnitGrounding,
   loadUnitGroundingContract,
   plainRelatedExcerpt,
   resolveTestDataForGen,
@@ -89,15 +90,27 @@ async function readSourceExcerpt(
 function formatRelatedBlocks(
   root: string,
   rels: string[],
-  maxCharsEach: number
+  maxCharsEach: number,
+  targetProperty?: string
 ): Promise<string> {
   return (async () => {
-    const blocks: string[] = [];
-    for (const rel of rels) {
-      const body = await readSourceExcerpt(root, rel, maxCharsEach);
-      if (body) blocks.push(`### ${rel}\n\`\`\`\n${body}\n\`\`\``);
-    }
-    return blocks.join("\n\n");
+    const loaded = await Promise.all(
+      rels.map(async (rel) => ({
+        rel,
+        body: await readSourceExcerpt(root, rel, maxCharsEach),
+      }))
+    );
+    const property = String(targetProperty || "").trim().toLowerCase();
+    return loaded
+      .filter((item): item is { rel: string; body: string } => Boolean(item.body))
+      .sort((a, b) => {
+        if (!property) return 0;
+        const ah = a.body.toLowerCase().includes(property) ? 1 : 0;
+        const bh = b.body.toLowerCase().includes(property) ? 1 : 0;
+        return bh - ah;
+      })
+      .map(({ rel, body }) => `### ${rel}\n\`\`\`\n${body}\n\`\`\``)
+      .join("\n\n");
   })();
 }
 
@@ -135,6 +148,7 @@ function canSoftBypassGateForGroundedSource(opts: {
   minAlignment?: number;
 }): boolean {
   if (!/FEATURE_GAP|SUT_MISMATCH/i.test(opts.code || "")) return false;
+  if (isValidationDataBucket(opts.tcBlob || "")) return false;
   if (!opts.primaryPath || !opts.source?.trim()) return false;
   if (isNonProductionUnitPath(opts.primaryPath)) return false;
   if (isBlockedUnitPrimaryPath(opts.primaryPath, opts.markers)) return false;
@@ -416,19 +430,49 @@ async function genOneItem(
   const groundingPaths = groundingRelatedPaths(groundingContract);
   const profileGate = await loadUnitProfileGate(root);
   const allowDisk = profileGate.allowDiskReresolve;
+  const groundingPrimary = groundingContract?.primary?.pathRel
+    ? toRepoRelativePath(root, groundingContract.primary.pathRel)
+    : "";
+  const packetPrimary = fromPacket.primaryPath
+    ? toRepoRelativePath(root, fromPacket.primaryPath)
+    : "";
 
-  // Exact marker path reads only (not fuzzy rank) — orchestration trusts Desktop packet.
+  // Prefer Desktop packet when it already matches authoritative grounding + markers.
+  const groundingAuthoritative =
+    isAuthoritativeUnitGrounding(groundingContract) &&
+    Boolean(groundingPrimary) &&
+    Boolean(fromPacket.source?.trim()) &&
+    (!packetPrimary ||
+      packetPrimary.toLowerCase() === groundingPrimary.toLowerCase()) &&
+    (markers.paths.length + markers.codes.length === 0 ||
+      primaryMatchesMarkers(groundingPrimary, markers));
+
   let markerResolved = false;
-  for (const mp of markers.paths) {
-    const want = toRepoRelativePath(root, mp);
-    if (!want || isNonProductionUnitPath(want)) continue;
-    const body = await readSourceExcerpt(root, want);
-    if (!body) continue;
-    primaryPath = want;
-    source = body;
-    primarySource = "marker";
+  if (groundingAuthoritative) {
+    primaryPath = groundingPrimary;
+    source = fromPacket.source;
+    primarySource = "packet";
     markerResolved = true;
-    break;
+  } else {
+    // Exact marker/grounding path reads only (not fuzzy rank).
+    const preferPaths = [
+      groundingPrimary,
+      ...markers.paths.map((p) => toRepoRelativePath(root, p)),
+    ].filter(Boolean);
+    const seen = new Set<string>();
+    for (const want of preferPaths) {
+      const key = want.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (isNonProductionUnitPath(want)) continue;
+      const body = await readSourceExcerpt(root, want);
+      if (!body) continue;
+      primaryPath = want;
+      source = body;
+      primarySource = "marker";
+      markerResolved = true;
+      break;
+    }
   }
 
   // Reject non-production / Phase-2-denied packet primary (unless marker points there)
@@ -704,8 +748,8 @@ async function genOneItem(
     ];
   }
 
-  // Related: grounding.json + markers + packet expand (no disk pool unless allowDisk)
-  {
+  // Related: prefer packet when grounding authoritative; else rebuild from paths
+  if (!(groundingAuthoritative && related?.trim())) {
     const dtoBoost = primaryPath
       ? inferDtoCandidatePaths(primaryPath, [
           ...groundingPaths,
@@ -740,7 +784,8 @@ async function genOneItem(
       const merged = await formatRelatedBlocks(
         root,
         uniqRelated,
-        PERF_MAX_RELATED_CHARS_EACH
+        PERF_MAX_RELATED_CHARS_EACH,
+        tcBlob.match(/^\s*target\.property\s*:\s*(\S+)/im)?.[1]
       );
       if (merged.trim()) related = merged;
     } else if (allowDisk && disk?.related?.trim()) {
@@ -846,6 +891,7 @@ async function genOneItem(
     if (
       !scopedRecoveryUsed &&
       /FEATURE_GAP|SUT_MISMATCH/i.test(code) &&
+      !isValidationDataBucket(tcBlob) &&
       primaryPath
     ) {
       const recovered = await scopedFamilyReresolveFromDisk(root, {
@@ -953,7 +999,11 @@ async function genOneItem(
         genOk: false,
         error:
           `${code} — ${gate.reason}. ` +
-          `Thêm path:/code: đúng domain, Approve lại, rồi Gen.` +
+          (code === "FAIL_NEEDS_MARKER"
+            ? "Thêm path:/code: đúng domain, Approve lại, rồi Gen."
+            : code === "FAIL_FEATURE_GAP"
+              ? "Behavior không có trong source — đổi TC hoặc sửa BE rồi Re-Approve."
+              : "Re-Approve TC với SUT đúng intent rồi Gen.") +
           (debugRel ? ` Debug: ${debugRel}` : ""),
         sourceFileName: primaryPath,
       },

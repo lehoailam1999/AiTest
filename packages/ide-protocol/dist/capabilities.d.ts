@@ -15,6 +15,8 @@ export type IdeCapability = (typeof IdeCapabilities)[keyof typeof IdeCapabilitie
 export declare const EXTENSION_CAPABILITIES: IdeCapability[];
 /** Desktop requires these before IDE Unit Gen. */
 export declare const DESKTOP_REQUIRED_UNIT_CAPS: IdeCapability[];
+/** Desktop requires these before IDE E2E Gen (Agent CLI). */
+export declare const DESKTOP_REQUIRED_E2E_CAPS: IdeCapability[];
 export type CapabilityNegotiation = {
     ok: boolean;
     missing: string[];

@@ -53,4 +53,9 @@ export declare function filterUnitLogicLayerCandidates<T extends {
     score?: number;
 }>(cands: T[], opts?: {
     tcText?: string | null;
+    /**
+     * When TC layerHint is dto|validator: keep DTO/Validator primaries
+     * (do not drop as “anemic” for behavior TCs).
+     */
+    allowValidationLayerPrimary?: boolean;
 }): T[];

@@ -53,6 +53,24 @@ describe("enrichUnitMarkersFromIndex", () => {
     );
   });
 
+  it("refuses code type owned by a different indexed path", () => {
+    const documentPath = "src/App/EvidenceDocumentDto.cs";
+    const evidencePath = "src/App/EvidenceDto.cs";
+    const snap = snapshotFromPaths([documentPath, evidencePath]);
+    const hit = enrichTestDataWithUnitMarkers(
+      "trace: VALIDATION_DATA",
+      { pathRel: documentPath, score: 100 },
+      "index.db",
+      undefined,
+      "EvidenceDto",
+      [],
+      "HIGH",
+      snap
+    );
+    assert.equal(hit.enriched, false);
+    assert.match(hit.reason || "", /not co-located/);
+  });
+
   it("pickConfidentUnitSeed requires score + margin", () => {
     assert.equal(pickConfidentUnitSeed([]), null);
     assert.equal(
@@ -84,6 +102,37 @@ describe("enrichUnitMarkersFromIndex", () => {
     });
     assert.equal(r.enriched, false);
     assert.match(r.testData, /path: src\/A\.ts/);
+  });
+
+  it("Re-Approve auto-binds fields aliases without replacing manual path/code", async () => {
+    const tc = sample({
+      testData:
+        "primaryBucket: VALIDATION_DATA\n" +
+        "target.field: Mã mục\n" +
+        'input: {"maMuc":""}\n' +
+        "path: src/Items/ItemCreateHandler.ts\n" +
+        "code: ItemCreateHandler",
+    });
+    const r = await enrichTcTestDataFromIndexAsync(
+      tc,
+      buildProjectIndex(["src/Items/ItemCreateHandler.ts"]),
+      {
+        enrichProfile: {
+          scope: "backend",
+          minAlignment: 50,
+          domainGuards: [],
+          sutMap: {},
+          intentRules: [],
+          intentRulesFile: ".ai-test/unit-intent-rules.json",
+          codeAliasesFile: ".ai-test/code-aliases.json",
+          fieldAliases: { maMuc: "ItemCode" },
+          allowDiskReresolve: false,
+        },
+      }
+    );
+    assert.match(r.testData, /target\.property:\s*ItemCode/);
+    assert.match(r.testData, /input:\s*\{"ItemCode":""\}/);
+    assert.match(r.testData, /path:\s*src\/Items\/ItemCreate/);
   });
 
   it("replaces prior auto-enriched markers", () => {
@@ -122,7 +171,7 @@ describe("enrichUnitMarkersFromIndex", () => {
     }
   });
 
-  it("appends markers from confident index seed", () => {
+  it("does not write markers from legacy seed without validated confidence", () => {
     const index = buildProjectIndex([
       "src/Evidence/Classification/DigitalEvidenceClassificationForm.ts",
       "src/Account/AccountCreateCommandHandler.cs",
@@ -135,10 +184,9 @@ describe("enrichUnitMarkersFromIndex", () => {
         "phan loai": ["Classification", "DigitalEvidence"],
       },
     });
-    assert.equal(hit.enriched, true, JSON.stringify(hit));
-    assert.match(hit.testData, /path:\s*src\/Evidence\/Classification\/DigitalEvidence/);
-    assert.match(hit.testData, /code:\s*DigitalEvidenceClassificationForm/);
-    assert.match(hit.testData, /auto-enriched/);
+    assert.equal(hit.enriched, false, JSON.stringify(hit));
+    assert.equal(hit.confidence, "LOW");
+    assert.doesNotMatch(hit.testData, /^\s*path:/im);
   });
 
   it("sync fail-closes size-limit TC without body excerpt", () => {
@@ -399,6 +447,105 @@ describe("enrichUnitMarkersFromIndex", () => {
     assert.ok(!/CheckCode/i.test(primaryLine), primaryLine);
   });
 
+  it("intentRules → sutMap → fields → behavior writes duplicate Create markers", async () => {
+    const handler = "src/App/Items/ItemCreateHandler.ts";
+    const dto = "src/App/Items/ItemDto.ts";
+    const tc = sample({
+      testCaseId: "TC-DUP-BIND",
+      title: "Từ chối tạo mới khi trùng mã",
+      module: "Tạo mục",
+      steps: "Nhập mã đã tồn tại",
+      expectedResult: "BadRequest",
+      testData:
+        "primaryBucket: VALIDATION_DATA\n" +
+        "target.field: Mã mục\n" +
+        "target.constraint: duplicate\n" +
+        'input: {"maMuc":"I-001"}',
+    });
+    const r = await enrichTcTestDataFromIndexAsync(
+      tc,
+      buildProjectIndex([handler, dto]),
+      {
+        codeIndex: snapshotFromPaths([handler, dto]),
+        readExcerpt: async (pathRel) =>
+          pathRel === handler
+            ? "class ItemCreateHandler { async handle(c) { if (await repo.exists(c.itemCode)) throw new Error('duplicate'); } }"
+            : "interface ItemDto { itemCode: string }",
+        enrichProfile: {
+          scope: "backend",
+          minAlignment: 50,
+          domainGuards: [],
+          sutMap: { "item.create": handler },
+          intentRules: [
+            {
+              id: "duplicate_reject",
+              whenTitleOrStepsMatch: "trùng mã|đã tồn tại",
+              requiredBodyPatterns: ["Exists|BadRequest"],
+              preferSutMapKey: "item.create",
+              forbidOpTokens: ["Permission", "CanWrite", "Authorize", "Deny"],
+            },
+          ],
+          intentRulesFile: ".ai-test/unit-intent-rules.json",
+          codeAliasesFile: ".ai-test/code-aliases.json",
+          fieldAliases: { maMuc: "itemCode" },
+          allowDiskReresolve: false,
+        },
+      }
+    );
+    assert.equal(r.enriched, true, r.skipReason || r.testData);
+    assert.match(r.testData, /target\.property:\s*itemCode/);
+    assert.match(r.testData, /input:\s*\{"itemCode":"I-001"\}/);
+    assert.match(r.testData, /path:\s*src\/App\/Items\/ItemCreate/);
+    assert.doesNotMatch(r.testData, /FAIL_OP_CONTRADICT/);
+  });
+
+  it("sutMap MaxLength gap refuses markers with field-specific FEATURE_GAP", async () => {
+    const handler = "src/App/Items/ItemCreateHandler.ts";
+    const dto = "src/App/Items/ItemDto.ts";
+    const tc = sample({
+      testCaseId: "TC-MAX-GAP",
+      title: "Từ chối mã vượt 200 ký tự",
+      module: "Tạo mục",
+      testData:
+        "primaryBucket: VALIDATION_DATA\n" +
+        "target.field: Mã mục\n" +
+        "target.constraint: maxLength 200\n" +
+        'input: {"maMuc":""}',
+    });
+    const r = await enrichTcTestDataFromIndexAsync(
+      tc,
+      buildProjectIndex([handler, dto]),
+      {
+        codeIndex: snapshotFromPaths([handler, dto]),
+        readExcerpt: async (pathRel) =>
+          pathRel === handler
+            ? "class ItemCreateHandler { async handle(c) { await repo.add(c); } }"
+            : "interface ItemDto { itemCode: string }",
+        enrichProfile: {
+          scope: "backend",
+          minAlignment: 50,
+          domainGuards: [],
+          sutMap: { "item.create": handler },
+          intentRules: [
+            {
+              id: "maxlength_item",
+              whenTitleOrStepsMatch: "200 ký tự|maxLength",
+              preferSutMapKey: "item.create",
+            },
+          ],
+          intentRulesFile: ".ai-test/unit-intent-rules.json",
+          codeAliasesFile: ".ai-test/code-aliases.json",
+          fieldAliases: { maMuc: "itemCode" },
+          allowDiskReresolve: false,
+        },
+      }
+    );
+    assert.equal(r.enriched, false);
+    assert.match(r.testData, /target\.property:\s*itemCode/);
+    assert.match(r.testData, /FAIL_FEATURE_GAP.*itemCode.*MaxLength/);
+    assert.doesNotMatch(r.testData, /^path:/m);
+  });
+
   it("TC-039 style: alias domain keeps CreateHandler; refuses Image/Auth/Mail latch", async () => {
     const tc = sample({
       testCaseId: "TC-039",
@@ -457,6 +604,42 @@ describe("enrichUnitMarkersFromIndex", () => {
     assert.ok(!/ImageProcessing|Authentication|Mail/i.test(
       (hit.testData || "").split(/\r?\n/).find((l) => /^\s*path\s*:/i.test(l)) || ""
     ));
+  });
+
+  it("keeps validated path/code when field binding is unresolved", async () => {
+    const handler = "src/App/Commands/Widget/WidgetCreateCommandHandler.cs";
+    const tc = sample({
+      testCaseId: "TC-FIELD-GAP",
+      title: "Create widget with display name",
+      module: "Create widget",
+      steps: "Create a widget",
+      expectedResult: "Widget is saved",
+      testData:
+        "target.field: tenHienThi\n" +
+        "target.property: tenHienThi\n" +
+        'input: {"tenHienThi":"A"}',
+    });
+    const hit = await enrichTcTestDataFromIndexAsync(
+      tc,
+      buildProjectIndex([handler]),
+      {
+        requirementTitle: "Widget",
+        projectRoot: "/proj",
+        projectAliases: { widget: ["Widget"] },
+        readExcerpt: async () =>
+          "public class WidgetCreateCommandHandler { public void Handle() { Save(); } }",
+        pickFieldFromShortlist: async () => null,
+      }
+    );
+
+    assert.equal(hit.enriched, true, JSON.stringify(hit));
+    assert.equal(hit.writeBack, true);
+    assert.equal(hit.confidence, "LOW");
+    assert.match(hit.testData, new RegExp(`path:\\s*${handler}`));
+    assert.match(hit.testData, /code:\s*WidgetCreateCommandHandler/);
+    assert.match(hit.testData, /field-resolve:\s*skipped.*FAIL_FIELD_UNBOUND/);
+    assert.match(hit.testData, /\bconfidence=LOW\b/);
+    assert.doesNotMatch(hit.testData, /^target\.property\s*:/im);
   });
 
   it("TC-041 style: DigitalFile family tie writes Handler path/code", async () => {
@@ -564,7 +747,13 @@ describe("enrichUnitMarkersFromIndex", () => {
             line: 1,
             exported: true,
           },
-          { name: "Handle", kind: "method" as const, line: 5, exported: true },
+          {
+            name: "Handle",
+            kind: "method" as const,
+            line: 5,
+            parent: "ContactSearchQueryHandler",
+            exported: true,
+          },
         ],
         "src/App/Commands/Contact/ContactCreateCommandHandler.cs": [
           {

@@ -197,6 +197,7 @@ export function applyProjectIntentRules(base, rules, opts) {
     let requiresBodyRule = base.requiresBodyRule;
     let uiOnly = base.uiOnly;
     let preferSutMapKey;
+    const forbiddenOpTokens = [...(base.forbiddenOpTokens || [])];
     for (const r of matched) {
         const action = r.scopeAction?.[scope] ||
             (scope === "backend" || scope === "frontend" || scope === "any"
@@ -227,6 +228,11 @@ export function applyProjectIntentRules(base, rules, opts) {
         }
         if (r.preferSutMapKey?.trim())
             preferSutMapKey = r.preferSutMapKey.trim();
+        for (const token of r.forbidOpTokens || []) {
+            const t = String(token || "").trim();
+            if (t)
+                forbiddenOpTokens.push(t);
+        }
         // Project ids are free-form — map known portable ids onto UnitIntentClass when possible
         if (r.id === "ui_master_create" || r.id.startsWith("ui_")) {
             if (!classes.includes("ui_master_create"))
@@ -255,6 +261,7 @@ export function applyProjectIntentRules(base, rules, opts) {
         featureTokens: base.featureTokens,
         classFeatureTokens: base.classFeatureTokens,
         requiresBodyRule,
+        forbiddenOpTokens: [...new Set(forbiddenOpTokens)],
     };
     // Recompute primary after class merge (prefer ui / validate)
     if (intent.uiOnly) {

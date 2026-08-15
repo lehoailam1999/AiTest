@@ -3,8 +3,9 @@
  * Desktop + Extension MUST consume this module for conventions, guards,
  * prompt contract lines, and shared rank-policy constants — do not fork wording.
  */
+export { behaviorEvidenceInExcerpt, isValidationDataBucket, } from "./behaviorEvidenceInExcerpt.js";
 export { UNIT_CONVENTIONS_CORE, UNIT_GEN_LIMITS, UNIT_LAYOUT_RULE, } from "./unitConventions.js";
-export { UNIT_SUT_ALIGN_MIN, UNIT_SUT_ALIGN_MIN_NO_MARKER, PATH_RANK_STOP, unitSutAlignMin, isSutAlignedEnough, significantTokens, extractTcSourceMarkers, sutTcAlignmentScore, expectedDomainTokensFromTc, extractPathDomainHints, sutDomainConflict, isPacketSutAcceptable, detectCodeStack, stackForPath, assertStackMatchesPath, findInventedRuleSmells, assertUnitGenQuality, detectCsharpPackagesFromTestCode, CSHARP_USING_TO_PACKAGE, type UnitCodeStack, type SutDomainConflict, } from "./unitGenGuards.js";
+export { UNIT_SUT_ALIGN_MIN, UNIT_SUT_ALIGN_MIN_NO_MARKER, PATH_RANK_STOP, unitSutAlignMin, isSutAlignedEnough, significantTokens, extractTcSourceMarkers, sutTcAlignmentScore, expectedDomainTokensFromTc, extractPathDomainHints, sutDomainConflict, isPacketSutAcceptable, detectCodeStack, stackForPath, assertStackMatchesPath, findInventedRuleSmells, findNonPortableTestHarnessSmells, assertUnitGenQuality, detectCsharpPackagesFromTestCode, CSHARP_USING_TO_PACKAGE, type UnitCodeStack, type SutDomainConflict, } from "./unitGenGuards.js";
 export { assertSafeAitestTargetRel, isAllowedUnitLayoutPath, } from "./codegenPathJail.js";
 /**
  * Shared rank / retrieve policy (Desktop index + Extension disk resolve).

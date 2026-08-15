@@ -59,11 +59,6 @@ function resolveIndexPath(
   return null;
 }
 
-function fileStem(pathRel: string): string {
-  const base = normPath(pathRel).split("/").pop() || "";
-  return base.replace(/\.[^.]+$/, "") || "";
-}
-
 /**
  * Fail-closed checks before syncing path:/code: markers.
  */
@@ -105,7 +100,7 @@ export function validateUnitPrimaryBeforeWrite(
   }
   checks.push("crudVerb");
 
-  const rawCode = String(input.code || "").trim() || fileStem(pathKey);
+  const rawCode = String(input.code || "").trim();
   const { typeName, methodName } = parseCodeMarker(rawCode);
   if (!typeName) {
     return {
@@ -120,17 +115,15 @@ export function validateUnitPrimaryBeforeWrite(
   const typeInSymbols = symbols.some(
     (s) => s.name.toLowerCase() === typeLow && s.kind !== "method"
   );
-  const anyNameHit = symbols.some((s) => s.name.toLowerCase() === typeLow);
-  const stemOk = fileStem(pathKey).toLowerCase() === typeLow;
-
-  if (!typeInSymbols && !anyNameHit && !stemOk) {
+  if (!typeInSymbols) {
     return {
       ok: false,
-      skipReason: `FAIL_VALIDATE — code «${typeName}» not in symbolsByFile`,
+      skipReason:
+        `FAIL_VALIDATE — code «${typeName}» is not a type defined by path «${pathKey}»`,
       checks,
     };
   }
-  checks.push(typeInSymbols || anyNameHit ? "symbolType" : "symbolStem");
+  checks.push("symbolCoLocated");
 
   if (methodName) {
     const mLow = methodName.toLowerCase();
@@ -138,10 +131,17 @@ export function validateUnitPrimaryBeforeWrite(
       (s) =>
         s.kind === "method" &&
         s.name.toLowerCase() === mLow &&
-        (!s.parent || s.parent.toLowerCase() === typeLow)
+        s.parent?.toLowerCase() === typeLow
     );
-    // Lightweight snapshots often omit methods — soft pass if type/stem ok
-    checks.push(methodHit ? "symbolMethod" : "methodSoft");
+    if (!methodHit) {
+      return {
+        ok: false,
+        skipReason:
+          `FAIL_VALIDATE — method «${methodName}» not defined under «${typeName}»`,
+        checks,
+      };
+    }
+    checks.push("symbolMethod");
   }
 
   if (input.excerpt !== undefined && input.excerpt !== null) {
@@ -154,7 +154,17 @@ export function validateUnitPrimaryBeforeWrite(
     }
     checks.push("excerpt");
     const tcBlob = [input.testData || "", input.shapeBlob || ""].join("\n");
-    const beh = behaviorEvidenceInExcerpt(tcBlob, String(input.excerpt));
+    let beh = behaviorEvidenceInExcerpt(tcBlob, String(input.excerpt));
+    if (!beh.ok && /FAIL_FIELD_UNBOUND/i.test(beh.skipReason || "")) {
+      // Primary validation happens before semantic field binding. Validate the
+      // behavior shape generically here; the enrichment stage separately
+      // requires target.property to be an owned index/DTO property.
+      const withoutUnboundField = tcBlob.replace(
+        /^\s*target\.(?:field|property)\s*:.*$/gim,
+        ""
+      );
+      beh = behaviorEvidenceInExcerpt(withoutUnboundField, String(input.excerpt));
+    }
     if (!beh.ok) {
       return {
         ok: false,

@@ -15,6 +15,8 @@ export type UnitProjectIntentRule = {
     whenTitleOrStepsMatch?: string;
     requiredBodyPatterns?: string[];
     preferSutMapKey?: string;
+    /** Portable operation stems to remove from path-ranking / contradiction gates. */
+    forbidOpTokens?: string[];
     scopeAction?: UnitProjectIntentScopeAction;
 };
 export type UnitProjectIntentRulesFile = {

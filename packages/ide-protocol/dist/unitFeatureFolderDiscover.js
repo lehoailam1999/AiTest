@@ -131,13 +131,12 @@ export function titleCueBridgeStems(titleTokens) {
         /\b(kiem\s*tra|validator|maxlength|trung|duplicate|unique|mo\s*ta|description)\b/.test(blob)) {
         out.push("CheckCode", "Duplicate", "AlreadyExists");
     }
-    if (/isoccupied|compartment|cabinet|vitriluutru|luutru/.test(compact) ||
+    if (/isoccupied|compartment|vitriluutru|luutru/.test(compact) ||
         /\b(isoccupied|compartment|vi\s*tri|luu\s*tru)\b/.test(blob)) {
         out.push("IsOccupied");
     }
     if (/assign|attach|link|gan\b|gắn|gán/.test(blob.replace(/\s+/g, " ")) ||
-        /\b(assign|attach|gan)\b/.test(blob) ||
-        /\b(ho\s*so|vu\s*an|dossier)\b/.test(blob)) {
+        /\b(assign|attach|gan)\b/.test(blob)) {
         out.push("Assign");
     }
     // Role / asset IT stems (EN) — hit *Person* / *Device* folders on index if present
@@ -307,7 +306,7 @@ function narrowBridgesByActiveNeedles(bridges, needles) {
     }
     if (has("isoccupied")) {
         const hit = out.filter((p) => /IsOccupied/i.test(p) ||
-            /\/[^/]*(Storage|Cabinet|Compartment)[^/]*\//i.test(p));
+            /\/[^/]*(Storage|Compartment)[^/]*\//i.test(p));
         if (hit.length)
             out = hit;
     }

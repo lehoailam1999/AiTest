@@ -102,6 +102,26 @@ describe("decideUnitGenGate", () => {
     if (!r.ok) assert.equal(r.code, "needs_marker");
   });
 
+  it("preserves FEATURE_GAP instead of collapsing to missing markers", () => {
+    const r = decideUnitGenGate({
+      isTauri: true,
+      projectRoot: "D:/forensic",
+      ideReady: true,
+      mdPath: ".ai-test/test-cases/m/TC-005.md",
+      tcLabel: "TC-005",
+      hasSourceMarkers: false,
+      sutResolveSkipped: true,
+      markerBlob:
+        "# sut-resolve skipped: FAIL_FEATURE_GAP — «EvidenceCode» không có MaxLength trong source",
+    });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.code, "not_ready");
+      assert.match(r.message, /FAIL_FEATURE_GAP/);
+      assert.doesNotMatch(r.message, /Thêm path/);
+    }
+  });
+
   it("Phase 5: passes with markers", () => {
     const r = decideUnitGenGate({
       isTauri: true,

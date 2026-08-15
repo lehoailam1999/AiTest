@@ -187,12 +187,12 @@ def test_exc_detail_notimplemented():
 def test_cli_adapter_has_chat():
     import asyncio
 
-    from app.llm.cli.adapters.cursor_cli import CursorCLIAdapter
+    from app.llm.cli.adapters.gemini_cli import GeminiCLIAdapter
 
-    adapter = CursorCLIAdapter("00000000-0000-0000-0000-000000000001")
+    adapter = GeminiCLIAdapter("00000000-0000-0000-0000-000000000001")
     assert callable(adapter.chat)
 
-    async def fake_run(prompt, *, topic_key=None):
+    async def fake_run(prompt, *, topic_key=None, **kwargs):
         assert "SYS" in prompt and "USER" in prompt
         assert topic_key == "knowledge-chat"
         return '{"summary":"ok"}'
@@ -210,7 +210,7 @@ def test_cli_adapter_generate_unit():
 
     adapter = CursorCLIAdapter("00000000-0000-0000-0000-000000000001")
 
-    async def fake_run(prompt, *, topic_key=None):
+    async def fake_run(prompt, *, topic_key=None, **kwargs):
         assert topic_key == "unit_test_gen"
         assert "unit" in prompt.lower() or "test" in prompt.lower()
         return "```typescript\nexport function testOk() { expect(1).toBe(1); }\n```"
@@ -247,42 +247,30 @@ def test_cli_adapter_generate_e2e_two_pass_with_scaffold():
     adapter = CursorCLIAdapter("00000000-0000-0000-0000-000000000001")
     calls: list[str | None] = []
 
-    async def fake_run(prompt, *, topic_key=None, prefer_oneshot=None, resume_chat_id=None):
+    spec_code = (
+        "### FILE: pages/todo.page.ts\n```ts\n"
+        "export class TodoPage { constructor(public page: any) {} async gotoFeature() { await this.page.goto('/todos'); } async submitForm() { await this.page.locator('button').click(); } async expectExpectedState() { await this.page.locator('body').waitFor(); } }\n```\n"
+        "### FILE: specs/todo.spec.ts\n```ts\n"
+        "import { test, expect } from '@playwright/test';\n"
+        "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
+        "import { TodoPage } from '../pages/todo.page';\n"
+        "// featurePath: /todos\n"
+        "// authRole: guest\n"
+        "// landmark: todo form\n"
+        "test('x', async ({ page }) => {\n"
+        "  const pom = new TodoPage(page);\n"
+        "  await test.step('0. Đăng nhập / authenticate', async () => { await ensureAuthenticated(page); });\n"
+        "  await test.step('1. Feature entry', async () => { await pom.gotoFeature(); });\n"
+        "  await test.step('2. Act', async () => { await pom.submitForm(); await page.locator('button').click(); });\n"
+        "  await test.step('3. Assert', async () => { await expect(page.locator('body')).toBeVisible(); });\n"
+        "});\n"
+        "```\n"
+    )
+
+    async def fake_run(prompt, *, topic_key=None, prefer_oneshot=None, resume_chat_id=None, **kwargs):
         del prefer_oneshot, resume_chat_id
         calls.append(topic_key)
-        if topic_key == "e2e_test_gen_p1":
-            return (
-                "### FILE: pages/todo.page.ts\n```ts\n"
-                "export class TodoPage { constructor(public page: any) {} async gotoFeature() {} async submitForm() {} async expectExpectedState() {} }\n```\n"
-                "### FILE: specs/todo.spec.ts\n```ts\n"
-                "import { test } from '@playwright/test';\n"
-                "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
-                "import { TodoPage } from '../pages/todo.page';\n"
-                "test('x', async ({ page }) => {\n"
-                "  const pom = new TodoPage(page);\n"
-                "  await test.step('0. Đăng nhập / authenticate', async () => { await ensureAuthenticated(page); });\n"
-                "  await test.step('1. Feature entry', async () => { await pom.gotoFeature(); });\n"
-                "  await test.step('2. Act', async () => { await pom.submitForm(); });\n"
-                "  await test.step('3. Assert', async () => { await pom.expectExpectedState(); });\n"
-                "});\n"
-                "```\n"
-            )
-        return (
-            "### FILE: pages/todo.page.ts\n```ts\n"
-            "export class TodoPage { constructor(public page: any) {} async gotoFeature() { await this.page.goto('/'); } async submitForm() { await this.page.locator('form button[type=\"submit\"]').first().click(); } async expectExpectedState() { await this.page.locator('body').first().waitFor(); } }\n```\n"
-            "### FILE: specs/todo.spec.ts\n```ts\n"
-            "import { test } from '@playwright/test';\n"
-            "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
-            "import { TodoPage } from '../pages/todo.page';\n"
-            "test('x', async ({ page }) => {\n"
-            "  const pom = new TodoPage(page);\n"
-            "  await test.step('0. Đăng nhập / authenticate', async () => { await ensureAuthenticated(page); });\n"
-            "  await test.step('1. Feature entry', async () => { await pom.gotoFeature(); });\n"
-            "  await test.step('2. Act', async () => { await pom.submitForm(); });\n"
-            "  await test.step('3. Assert', async () => { await pom.expectExpectedState(); });\n"
-            "});\n"
-            "```\n"
-        )
+        return spec_code
 
     adapter._run_prompt = fake_run  # type: ignore[method-assign]
     req = E2ERequest(
@@ -291,6 +279,9 @@ def test_cli_adapter_generate_e2e_two_pass_with_scaffold():
         priority="High",
         steps="1. Mo man hinh\n2. Luu",
         expected_result="Thanh cong",
+        feature_path="/todos",
+        test_data="featurePath: /todos",
+        precondition="authRole: guest\nlandmark: todo form",
         pom_scaffold="# class: TodoPage\nrequiredMethods:\n- gotoFeature(...args: unknown[]): Promise<void>",
     )
     out = asyncio.run(adapter.generate_e2e(req))
@@ -307,13 +298,22 @@ def test_cli_adapter_generate_e2e_single_pass_without_scaffold():
     adapter = CursorCLIAdapter("00000000-0000-0000-0000-000000000001")
     calls: list[str | None] = []
 
-    async def fake_run(prompt, *, topic_key=None, prefer_oneshot=None, resume_chat_id=None):
+    async def fake_run(prompt, *, topic_key=None, prefer_oneshot=None, resume_chat_id=None, **kwargs):
         del prompt, prefer_oneshot, resume_chat_id
         calls.append(topic_key)
         return (
             "### FILE: specs/todo.spec.ts\n```ts\n"
-            "import { test } from '@playwright/test';\n"
-            "test('x', async () => {});\n"
+            "import { test, expect } from '@playwright/test';\n"
+            "import { ensureAuthenticated } from '../fixtures/auth.helper';\n"
+            "// featurePath: /todos\n"
+            "// authRole: guest\n"
+            "// landmark: todo form\n"
+            "test('x', async ({ page }) => {\n"
+            "  await test.step('0. Đăng nhập / authenticate', async () => { await ensureAuthenticated(page); });\n"
+            "  await test.step('1. Feature entry', async () => { await page.goto('/todos'); });\n"
+            "  await test.step('2. Act', async () => { await page.locator('button').click(); });\n"
+            "  await test.step('3. Assert', async () => { await expect(page.locator('body')).toBeVisible(); });\n"
+            "});\n"
             "```\n"
         )
 
@@ -324,7 +324,9 @@ def test_cli_adapter_generate_e2e_single_pass_without_scaffold():
         priority="High",
         steps="1. Mo man hinh",
         expected_result="Thanh cong",
+        feature_path="/todos",
+        test_data="featurePath: /todos",
+        precondition="authRole: guest\nlandmark: todo form",
     )
     _ = asyncio.run(adapter.generate_e2e(req))
     assert calls == ["e2e_test_gen"]
-

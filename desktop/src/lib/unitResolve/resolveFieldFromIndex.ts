@@ -22,7 +22,7 @@ function toPascalCase(id: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/** EvidenceCreateCommandHandler → Evidence */
+/** EntityCreateCommandHandler → Entity */
 function entityStemFromPrimary(primaryPath: string | null | undefined): string {
   const base = ((primaryPath || "").replace(/\\/g, "/").split("/").pop() || "")
     .replace(/\.[^.]+$/, "")
@@ -44,9 +44,11 @@ function dtoPathsNearPrimary(
   for (const k of Object.keys(snap.files || {})) {
     const rel = k.replace(/\\/g, "/");
     const low = rel.toLowerCase();
-    if (!/dto/i.test(low)) continue;
-    if (!/dto\.cs$/i.test(low) && !/\/dto\//i.test(low) && !/\.dto\//i.test(low)) {
-      if (!/dto\.cs$/i.test(low)) continue;
+    if (
+      !/(dto|request|input|validator)/i.test(low) ||
+      !/\.(cs|ts|tsx|js|jsx|java|kt|py|go)$/i.test(low)
+    ) {
+      continue;
     }
     let ok = false;
     for (const seg of parts) {
@@ -59,7 +61,7 @@ function dtoPathsNearPrimary(
       const primaryStem = (parts[parts.length - 1] || "")
         .replace(/\.[^.]+$/, "")
         .replace(/(commandhandler|handler|service|controller)$/i, "");
-      const fileStem = (rel.split("/").pop() || "").replace(/\.cs$/i, "");
+      const fileStem = (rel.split("/").pop() || "").replace(/\.[^.]+$/, "");
       if (
         primaryStem.length >= 4 &&
         fileStem.toLowerCase().includes(primaryStem.toLowerCase().slice(0, 8))
@@ -82,23 +84,33 @@ function dtoPathsNearPrimary(
     const bExact =
       entity && bn === `${entity}dto.cs` ? 0 : entity && bn.startsWith(entity) ? 1 : 2;
     if (aExact !== bExact) return aExact - bExact;
-    const as = /dto\.cs$/i.test(a) ? 0 : 1;
-    const bs = /dto\.cs$/i.test(b) ? 0 : 1;
+    const as = /dto\.(cs|ts|tsx|js|jsx|java|kt|py|go)$/i.test(a) ? 0 : 1;
+    const bs = /dto\.(cs|ts|tsx|js|jsx|java|kt|py|go)$/i.test(b) ? 0 : 1;
     return as - bs || a.length - b.length;
   });
   return out.slice(0, 24);
 }
 
-function propertiesInCsharpSource(src: string): string[] {
+function propertiesInSource(src: string): string[] {
   const props: string[] = [];
-  const re =
-    /(?:\[.*?\]\s*)*(?:public|internal)\s+[\w<>,\s\[\]?]+\s+(\w+)\s*\{\s*get/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src))) {
-    const name = m[1];
-    if (name && LATIN_ID_RE.test(name)) props.push(name);
+  const patterns = [
+    // C# / Java / Kotlin fields and auto-properties.
+    /(?:\[.*?\]\s*)*(?:public|internal|private|protected)?\s*(?:readonly\s+)?[\w<>,.\s\[\]?]+\s+(\w+)\s*(?:\{\s*get|[;=])/gi,
+    // TypeScript interface/class properties.
+    /(?:^|\n)\s*(?:public|private|protected|readonly|declare)?\s*(\w+)\??\s*:\s*[\w<>{}\[\]|&.,\s]+[;=]?/gi,
+    // Python/dataclass/Pydantic annotated fields.
+    /(?:^|\n)\s*(\w+)\s*:\s*[\w.\[\]|, ]+(?:\s*=\s*[^\n]+)?/gi,
+    // Go struct fields.
+    /(?:^|\n)\s*(\w+)\s+[\w*\[\].]+(?:\s+`[^`]*`)?/gi,
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src))) {
+      const name = m[1];
+      if (name && LATIN_ID_RE.test(name)) props.push(name);
+    }
   }
-  return props;
+  return [...new Set(props)];
 }
 
 /** Properties from index symbols (kind=variable under a type) for DTO paths. */
@@ -151,7 +163,7 @@ export type ResolveFieldFromIndexInput = {
   codeIndex?: CodeIndexSnapshot | null;
 };
 
-function collectDtoPaths(input: {
+export function fieldEvidencePaths(input: {
   primaryPath?: string | null;
   relatedPaths?: string[] | null;
   dtoExcerpts?: Record<string, string>;
@@ -187,7 +199,7 @@ export function buildFieldPropertyShortlist(opts: {
   relatedPaths?: string[] | null;
   dtoExcerpts?: Record<string, string>;
 }): string[] {
-  const dtoPaths = collectDtoPaths(opts);
+  const dtoPaths = fieldEvidencePaths(opts);
   const fromIndex = propertiesFromIndex(opts.codeIndex, dtoPaths);
   const fromExcerpt = new Set<string>();
   const excerpts = opts.dtoExcerpts || {};
@@ -200,14 +212,80 @@ export function buildFieldPropertyShortlist(opts: {
         ) || ""
       ];
     if (!body) continue;
-    for (const p of propertiesInCsharpSource(body)) fromExcerpt.add(p);
+    for (const p of propertiesInSource(body)) fromExcerpt.add(p);
   }
   return [...new Set([...fromIndex, ...fromExcerpt])].slice(0, SHORTLIST_CAP);
+}
+
+export type FieldPropertyEvidence = {
+  name: string;
+  ownerPath: string;
+  ownerType?: string;
+  excerpt?: string;
+};
+
+/** Owned property records; unlike a flat list these cannot drift across DTO candidates. */
+export function buildFieldPropertyEvidence(opts: {
+  codeIndex?: CodeIndexSnapshot | null;
+  primaryPath?: string | null;
+  relatedPaths?: string[] | null;
+  dtoExcerpts?: Record<string, string>;
+}): FieldPropertyEvidence[] {
+  const paths = fieldEvidencePaths(opts);
+  const out: FieldPropertyEvidence[] = [];
+  const seen = new Set<string>();
+  for (const path of paths) {
+    const pathKey =
+      Object.keys(opts.codeIndex?.symbolsByFile || {}).find(
+        (k) => k.replace(/\\/g, "/").toLowerCase() === path.toLowerCase()
+      ) || path;
+    const symbols = opts.codeIndex?.symbolsByFile?.[pathKey] || [];
+    const excerpt =
+      opts.dtoExcerpts?.[path] ||
+      opts.dtoExcerpts?.[
+        Object.keys(opts.dtoExcerpts || {}).find(
+          (k) => k.replace(/\\/g, "/").toLowerCase() === path.toLowerCase()
+        ) || ""
+      ];
+    for (const symbol of symbols) {
+      if (symbol.kind !== "variable" || !symbol.parent || !LATIN_ID_RE.test(symbol.name)) {
+        continue;
+      }
+      const key = `${path.toLowerCase()}:${symbol.parent.toLowerCase()}:${symbol.name.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        name: symbol.name,
+        ownerPath: path,
+        ownerType: symbol.parent,
+        excerpt: excerpt?.slice(0, 1000),
+      });
+    }
+    for (const name of propertiesInSource(excerpt || "")) {
+      const key = `${path.toLowerCase()}::${name.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ name, ownerPath: path, excerpt: excerpt?.slice(0, 1000) });
+    }
+  }
+  return out.slice(0, SHORTLIST_CAP);
+}
+
+/** True when property is already a known index/DTO shortlist member. */
+export function isIndexedPropertyName(
+  property: string | null | undefined,
+  shortlist: string[]
+): boolean {
+  const want = String(property || "").trim();
+  if (!want || !LATIN_ID_RE.test(want) || !shortlist.length) return false;
+  const wantL = want.toLowerCase();
+  return shortlist.some((p) => p.trim().toLowerCase() === wantL);
 }
 
 /**
  * Deterministic resolve only: Latin exact, input key ∈ props, Display attrs.
  * No VI role heuristics — use LLM shortlist when this returns null.
+ * Never echo unbound TC labels (e.g. hoSoVuAn) as if they were BE properties.
  */
 export function resolveFieldFromIndex(
   input: ResolveFieldFromIndexInput
@@ -216,16 +294,15 @@ export function resolveFieldFromIndex(
   const inputKeys = (input.inputKeys || []).map((k) => k.trim()).filter(Boolean);
 
   const props = buildFieldPropertyShortlist(input);
+  if (!props.length) return null;
 
   if (label && LATIN_ID_RE.test(label)) {
-    if (!props.length) return label;
     const exact = props.find((p) => p.toLowerCase() === label.toLowerCase());
     if (exact) return exact;
   }
 
   for (const k of inputKeys) {
     if (LATIN_ID_RE.test(k) && /^[A-Z]/.test(k)) {
-      if (!props.length) return k;
       const hit = props.find((p) => p.toLowerCase() === k.toLowerCase());
       if (hit) return hit;
     }
@@ -275,6 +352,38 @@ export type BindTargetPropertyResult = {
   bound: boolean;
   property?: string;
 };
+
+/** Resolve profile `code-aliases.fields` by target.field label or input key. */
+export function resolvePropertyFromFieldAliases(
+  testData: string | null | undefined,
+  fieldAliases: Record<string, string | string[]> | null | undefined
+): string | null {
+  const raw = String(testData || "");
+  if (!raw.trim() || !fieldAliases || typeof fieldAliases !== "object") return null;
+  const field =
+    raw.match(/^\s*target\.field\s*:\s*(.+)$/im)?.[1]?.trim() || "";
+  const inputRaw = raw.match(/^\s*input\s*:\s*(\{[\s\S]*?\})\s*$/im)?.[1];
+  let inputKeys: string[] = [];
+  if (inputRaw) {
+    try {
+      inputKeys = Object.keys(JSON.parse(inputRaw) as Record<string, unknown>);
+    } catch {
+      /* ignore */
+    }
+  }
+  const wanted = new Set(
+    [field, ...inputKeys].map(normFieldLabel).filter(Boolean)
+  );
+  for (const [alias, mapped] of Object.entries(fieldAliases)) {
+    if (!wanted.has(normFieldLabel(alias))) continue;
+    const values = Array.isArray(mapped) ? mapped : [mapped];
+    const property = values
+      .map((value) => String(value || "").trim())
+      .find((value) => LATIN_ID_RE.test(value));
+    if (property) return property;
+  }
+  return null;
+}
 
 function applyPropertyToTestData(
   raw: string,
@@ -351,8 +460,16 @@ export function bindTargetPropertyInTestData(
   const propM = raw.match(/^\s*target\.property\s*:\s*(.+)$/im);
   if (!fieldM) return { testData: raw, bound: false };
   const fieldLabel = fieldM[1].trim();
-  if (propM?.[1]?.trim() && LATIN_ID_RE.test(propM[1].trim())) {
-    return { testData: raw, bound: false, property: propM[1].trim() };
+  const shortlist = buildFieldPropertyShortlist({
+    primaryPath: opts.primaryPath,
+    relatedPaths: opts.relatedPaths,
+    codeIndex: opts.codeIndex,
+    dtoExcerpts: opts.dtoExcerpts,
+  });
+  const existingProp = propM?.[1]?.trim() || "";
+  // Skip only when target.property is already a real index/DTO member.
+  if (existingProp && isIndexedPropertyName(existingProp, shortlist)) {
+    return { testData: raw, bound: false, property: existingProp };
   }
 
   let inputKeys: string[] = [];
@@ -369,8 +486,12 @@ export function bindTargetPropertyInTestData(
   const override = (opts.propertyOverride || "").trim();
   let property: string | null = null;
   if (override && LATIN_ID_RE.test(override)) {
-    property = override;
-  } else {
+    // Prefer override when it is in shortlist, or shortlist is unavailable.
+    if (!shortlist.length || isIndexedPropertyName(override, shortlist)) {
+      property = shortlist.find((p) => p.toLowerCase() === override.toLowerCase()) || override;
+    }
+  }
+  if (!property) {
     property = resolveFieldFromIndex({
       fieldLabel,
       inputKeys,

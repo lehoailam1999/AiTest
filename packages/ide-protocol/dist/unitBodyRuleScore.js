@@ -55,17 +55,35 @@ function isServiceOrHandlerPath(pathRel) {
 export function orderCandidatesForBodyRuleOpen(candidates, intent, topN = UNIT_BODY_RULE.topN) {
     if (!candidates.length)
         return [];
+    const searchOpen = intent?.primaryClass === "search_lookup" ||
+        (intent?.classes || []).includes("search_lookup");
     const preferLogic = Boolean(intent?.requiresBodyRule) ||
         intent?.primaryClass === "validate_reject" ||
         intent?.primaryClass === "auto_generate_code" ||
         intent?.primaryClass === "state_enable" ||
-        intent?.primaryClass === "search_lookup" ||
+        searchOpen ||
         (intent?.classes || []).includes("validate_reject") ||
         (intent?.classes || []).includes("auto_generate_code") ||
-        (intent?.classes || []).includes("state_enable") ||
-        (intent?.classes || []).includes("search_lookup");
+        (intent?.classes || []).includes("state_enable");
     if (!preferLogic)
         return candidates.slice(0, topN);
+    // Search/lookup: open *Query*Handler first so Assign*CommandHandlers do not starve GetAll.
+    if (searchOpen) {
+        const queries = [];
+        const other = [];
+        for (const c of candidates) {
+            if (isQueryLikePath(c.pathRel))
+                queries.push(c);
+            else
+                other.push(c);
+        }
+        queries.sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
+        other.sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
+        const openLimit = intent?.requiresBodyRule
+            ? Math.max(topN, Math.min(candidates.length, topN * 2))
+            : topN;
+        return [...queries, ...other].slice(0, openLimit);
+    }
     const handlers = [];
     const other = [];
     for (const c of candidates) {
@@ -252,19 +270,28 @@ export function queryImpliesUploadIntent(intent, shapeBlob) {
         "upload_resource",
         "upload_size_limit",
     ]);
-    if ((intent.primaryClass && uploadClasses.has(intent.primaryClass)) ||
-        (intent.classes || []).some((c) => uploadClasses.has(c))) {
-        return true;
-    }
     const blob = String(shapeBlob || "")
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .toLowerCase();
-    return /tai\s*len|\bupload\b|hinh\s*anh|\bimage\b|\bmedia\b|\bphoto\b|\bmagic\s*bytes\b|\bantivirus\b|\bscanner\b/.test(blob);
+    const explicitUpload = /tai\s*len|\bupload\b|hinh\s*anh|\bimage\b|\bmedia\b|\bphoto\b|\bmagic\s*bytes\b|\bantivirus\b|\bscanner\b/.test(blob);
+    const hasUploadClass = (intent.primaryClass && uploadClasses.has(intent.primaryClass)) ||
+        (intent.classes || []).some((c) => uploadClasses.has(c));
+    // `digital` may bootstrap upload_resource, but a classification/read TC must
+    // not be forced onto Upload* paths without an explicit upload cue.
+    return (explicitUpload ||
+        (hasUploadClass &&
+            (!String(shapeBlob || "").trim() ||
+                intent.primaryClass === "upload_size_limit")));
+}
+/** Delete / unassign / remove — never primary for upload/reject-format TCs. */
+export function pathIsDeleteLikeUnitPrimary(pathRel) {
+    const p = (pathRel || "").replace(/\\/g, "/");
+    return /(Delete|Unassign|SoftDelete|Remove)(Command)?(Handler)?/i.test(p);
 }
 /**
- * Upload / image-file TCs — boost Upload|Image|Physical*|DigitalFile* paths;
- * demote generic *DocumentCreate* and plain Create handlers without upload shape.
+ * Upload / image-file TCs — boost portable Upload|Image|Media|InitUpload paths;
+ * demote Delete* and generic DocumentCreate. Product stems stay in SUT aliases.
  */
 export function uploadIntentPathShapeAdjust(pathRel, intent, shapeBlob) {
     if (!queryImpliesUploadIntent(intent, shapeBlob))
@@ -275,11 +302,18 @@ export function uploadIntentPathShapeAdjust(pathRel, intent, shapeBlob) {
         .toLowerCase();
     const p = (pathRel || "").replace(/\\/g, "/");
     let adj = 0;
-    if (/(Upload|PhysicalImage|DigitalFile|Image|Media|Photo|FileSignature|Antivirus|Scanner|InitUpload)/i.test(p)) {
+    // Hard demote Delete* — body-rule throw must not rescue them for upload TCs
+    if (pathIsDeleteLikeUnitPrimary(p)) {
+        adj -= 90;
+        return adj;
+    }
+    if (/(Upload|InitUpload|FileSignature|Antivirus|Scanner)/i.test(p) ||
+        (/(Image|Media|Photo|Physical|Attachment)/i.test(p) &&
+            /(Create|Upload|Handler|Service)/i.test(p))) {
         adj += 38;
     }
     if (/Create(Command)?Handler/i.test(p) &&
-        !/(Upload|Image|Physical|Digital|Media|Photo|File|Attachment)/i.test(p)) {
+        !/(Upload|Image|Physical|Media|Photo|File|Attachment)/i.test(p)) {
         adj -= 30;
     }
     if (/DocumentCreate/i.test(p) &&
@@ -288,6 +322,286 @@ export function uploadIntentPathShapeAdjust(pathRel, intent, shapeBlob) {
         adj -= 44;
     }
     return adj;
+}
+/**
+ * Title/steps search/lookup (tim kiem / theo ma / SearchTerm) — stronger than
+ * Function-only Assign when both cue. Portable VI/IT only.
+ */
+export function queryImpliesSearchLookupIntent(intent, shapeBlob) {
+    if (intent.primaryClass === "search_lookup" ||
+        (intent.classes || []).includes("search_lookup")) {
+        return true;
+    }
+    const blob = shapeBlobNorm(shapeBlob);
+    // Strong title/steps cues only — do not use featureTokens (filter_list adds Query)
+    return /tim\s*kiem|tim\s*theo|\bsearch\b|theo\s*ma|search\s*term|searchterm|tra\s*ve\s+.*\bkhop\b|\blookup\b|autocomplete|typeahead|fuzzy/.test(blob);
+}
+/**
+ * Search/lookup TCs — boost *Query* / GetAll / Search; demote Assign*Command.
+ */
+export function searchIntentPathShapeAdjust(pathRel, intent, shapeBlob) {
+    if (!queryImpliesSearchLookupIntent(intent, shapeBlob))
+        return 0;
+    const p = (pathRel || "").replace(/\\/g, "/");
+    let adj = 0;
+    if (isQueryLikePath(p) ||
+        /(GetAll|Search|ListAvailable|FindBy|Lookup)(Query)?(Handler)?/i.test(p)) {
+        adj += 52;
+    }
+    if (/(Assign|Attach|Link)/i.test(p) &&
+        !isQueryLikePath(p) &&
+        !/(GetAll|Search|List|Filter)/i.test(p)) {
+        adj -= 58;
+    }
+    if (pathIsDeleteLikeUnitPrimary(p))
+        adj -= 40;
+    return adj;
+}
+/**
+ * Soft writeBack refuse: upload intent must not latch Delete* even when path
+ * shares Digital / Image tokens or body-rule throw+BadRequest.
+ */
+export function pathContradictsUploadVerb(pathRel, intent, shapeBlob) {
+    if (!queryImpliesUploadIntent(intent, shapeBlob))
+        return false;
+    return pathIsDeleteLikeUnitPrimary(pathRel);
+}
+/**
+ * Soft writeBack refuse: search/lookup title must not latch Assign*Command
+ * when a Query/GetAll-shaped alternative is expected.
+ */
+export function pathContradictsSearchVerb(pathRel, intent, shapeBlob) {
+    if (!queryImpliesSearchLookupIntent(intent, shapeBlob))
+        return false;
+    const p = (pathRel || "").replace(/\\/g, "/");
+    if (isQueryLikePath(p) || /(GetAll|Search|ListAvailable|FindBy)/i.test(p)) {
+        return false;
+    }
+    return /(Assign|Attach|Link)/i.test(p);
+}
+/**
+ * True when Function/title/steps imply load/display/get-detail (read), not create.
+ * Portable VI/IT only — stronger than bare Module «Update …» / Function «chỉnh sửa».
+ */
+export function queryImpliesReadGetDetailIntent(intent, shapeBlob) {
+    if (intent.primaryClass === "persist_read" ||
+        (intent.classes || []).includes("persist_read")) {
+        return true;
+    }
+    const blob = shapeBlobNorm(shapeBlob);
+    // Strong read/load/get-by-id — not list-search (search_lookup) or create
+    return /hien\s*thi|tai\s*(du\s*lieu|chi\s*tiet)|lay\s*(chi\s*tiet|theo\s*(id|dinh\s*danh))|chi\s*tiet\s*(da\s*luu|ban\s*ghi)|tra\s*ve\s*(day\s*du|dung(\s*cac)?)|quan\s*sat[:\s]*read|\bget\s*(by\s*)?(id|detail)\b|\bgetquery\b|\bload\s*(detail|entity|record|data)\b|display\s*(detail|full|info)|\bread\b.*\b(detail|entity|record)\b/.test(blob);
+}
+/** Create*CommandHandler — wrong primary for read/get-detail TCs. */
+export function pathIsCreateLikeUnitPrimary(pathRel) {
+    const p = (pathRel || "").replace(/\\/g, "/");
+    if (isQueryLikePath(p) || /(Get(Query|ById|Detail)|FindById)/i.test(p)) {
+        return false;
+    }
+    return /Create(Command)?Handler/i.test(p) || /\/Create[A-Z]\w*\./i.test(p);
+}
+/** Update / Edit / Patch primary shapes — portable across stacks (path segment / type name). */
+export function pathIsUpdateLikeUnitPrimary(pathRel) {
+    const p = (pathRel || "").replace(/\\/g, "/");
+    if (pathIsCreateLikeUnitPrimary(p) || pathIsDeleteLikeUnitPrimary(p))
+        return false;
+    if (isQueryLikePath(p) || /(Get(Query|ById|Detail)|FindById)/i.test(p))
+        return false;
+    return (/Update(Command)?Handler/i.test(p) ||
+        /Edit(Command)?Handler/i.test(p) ||
+        /Patch(Command)?Handler/i.test(p) ||
+        /\/(Update|Edit|Patch)[A-Z]\w*\./i.test(p));
+}
+export function detectUnitCrudVerb(intent, shapeBlob) {
+    const blob = shapeBlobNorm(shapeBlob);
+    const classes = intent.classes || [];
+    const pc = intent.primaryClass;
+    // IR observable markers (Unit gen Approve-ready)
+    if (/quan\s*sat[:\s]*read\b|\bobservable[:\s\"']*read\b/.test(blob))
+        return "read";
+    if (/quan\s*sat[:\s]*update\b|\bobservable[:\s\"']*update\b/.test(blob)) {
+        return "update";
+    }
+    if (/quan\s*sat[:\s]*create\b|\bobservable[:\s\"']*create\b/.test(blob)) {
+        return "create";
+    }
+    if (/quan\s*sat[:\s]*delete\b|\bobservable[:\s\"']*delete\b/.test(blob)) {
+        return "delete";
+    }
+    // Strong read/load/get-detail (before Module «Update …» false latch)
+    if (pc === "persist_read" ||
+        classes.includes("persist_read") ||
+        queryImpliesReadGetDetailIntent(intent, shapeBlob)) {
+        return "read";
+    }
+    // Search / upload are not CRUD create|update|delete (Module «Create …» must not force Create)
+    if (queryImpliesSearchLookupIntent(intent, shapeBlob))
+        return null;
+    if (queryImpliesUploadIntent(intent, shapeBlob))
+        return null;
+    const deleteCue = /\bxoa\b|\bdelete\b|\bremove\b|soft\s*delete|xoa\s*(ban\s*ghi|dulieu|du\s*lieu|file|item)/.test(blob);
+    const updateCue = pc === "persist_update" ||
+        classes.includes("persist_update") ||
+        /cap\s*nhat|\bupdate\b|\bedit\b|\bpatch\b|sua\s*(doi|ma|ten|thong\s*tin)?/.test(blob);
+    const createCue = pc === "persist_create" ||
+        classes.includes("persist_create") ||
+        classes.includes("auto_generate_code") ||
+        pc === "auto_generate_code" ||
+        /tao\s*moi|\bcreate\b|them\s*moi|\badd\s*new\b|\binsert\b/.test(blob);
+    // Function/Title verb denser than Module alone when both create+update cue
+    if (updateCue && createCue) {
+        if (/cap\s*nhat|\bupdate\b|\bedit\b/.test(blob) &&
+            !/tao\s*moi|\bcreate\b|\badd\s*new\b/.test(blob)) {
+            return "update";
+        }
+        if (/tao\s*moi|\bcreate\b|\badd\s*new\b/.test(blob) &&
+            !/cap\s*nhat|\bupdate\b/.test(blob)) {
+            return "create";
+        }
+        if (/tao\s*moi|\bcreate\b|\badd\s*new\b/.test(blob))
+            return "create";
+        if (/cap\s*nhat|\bupdate\b/.test(blob))
+            return "update";
+    }
+    if (deleteCue && !createCue && !updateCue)
+        return "delete";
+    if (updateCue)
+        return "update";
+    if (createCue)
+        return "create";
+    if (deleteCue)
+        return "delete";
+    // validate_reject / duplicate / từ chối alone → null (do NOT imply create)
+    return null;
+}
+/** Path looks like a CRUD command/query primary (not DTO/entity). */
+export function pathLooksLikeCrudPrimary(pathRel) {
+    const p = (pathRel || "").replace(/\\/g, "/");
+    return (pathIsCreateLikeUnitPrimary(p) ||
+        pathIsUpdateLikeUnitPrimary(p) ||
+        pathIsDeleteLikeUnitPrimary(p) ||
+        isQueryLikePath(p) ||
+        /(Get(Query|ById|Detail)|FindById|Load(Detail|ById)?)/i.test(p) ||
+        /(Create|Update|Delete|Edit|Patch)(Command)?(Handler|Service|Controller|UseCase)?/i.test(p));
+}
+export function pathMatchesCrudVerb(pathRel, verb) {
+    const p = (pathRel || "").replace(/\\/g, "/");
+    switch (verb) {
+        case "create":
+            return pathIsCreateLikeUnitPrimary(p) ||
+                (/\bCreate\b|\bInsert\b|AddNew/i.test(p) &&
+                    !pathIsUpdateLikeUnitPrimary(p) &&
+                    !pathIsDeleteLikeUnitPrimary(p) &&
+                    !isQueryLikePath(p));
+        case "update":
+            return pathIsUpdateLikeUnitPrimary(p) ||
+                (/\bUpdate\b|\bEdit\b|\bPatch\b/i.test(p) &&
+                    !pathIsCreateLikeUnitPrimary(p) &&
+                    !pathIsDeleteLikeUnitPrimary(p) &&
+                    !isQueryLikePath(p));
+        case "delete":
+            return pathIsDeleteLikeUnitPrimary(p);
+        case "read":
+            return (isQueryLikePath(p) ||
+                /(Get(Query|ById|Detail|Handler)?|FindById|Load(Detail|ById)?)(Query)?(Handler)?/i.test(p));
+        default:
+            return false;
+    }
+}
+/**
+ * Boost path matching detected CRUD verb; demote other CRUD primaries.
+ * Stack-agnostic: matches Create|Update|Delete|Get in path/type names.
+ */
+export function crudVerbPathShapeAdjust(pathRel, intent, shapeBlob) {
+    const verb = detectUnitCrudVerb(intent, shapeBlob);
+    // read shape stays in readGetIntentPathShapeAdjust (avoid double-count)
+    if (!verb || verb === "read")
+        return 0;
+    const p = (pathRel || "").replace(/\\/g, "/");
+    let adj = 0;
+    if (pathMatchesCrudVerb(p, verb)) {
+        adj += 52;
+    }
+    else if (pathLooksLikeCrudPrimary(p)) {
+        // Wrong CRUD sibling in same family (Create vs Update vs Delete)
+        adj -= 64;
+        if (verb === "update" && pathIsCreateLikeUnitPrimary(p))
+            adj -= 12;
+        if (verb === "create" && pathIsUpdateLikeUnitPrimary(p))
+            adj -= 12;
+        if (verb === "delete" &&
+            (pathIsCreateLikeUnitPrimary(p) || pathIsUpdateLikeUnitPrimary(p))) {
+            adj -= 8;
+        }
+    }
+    return adj;
+}
+/**
+ * Soft writeBack refuse: detected CRUD verb must not latch a different CRUD primary.
+ * validate_reject alone does not fire (verb null). read → pathContradictsReadGetVerb.
+ */
+export function pathContradictsCrudVerb(pathRel, intent, shapeBlob) {
+    const verb = detectUnitCrudVerb(intent, shapeBlob);
+    if (!verb || verb === "read")
+        return false;
+    if (pathMatchesCrudVerb(pathRel, verb))
+        return false;
+    if (!pathLooksLikeCrudPrimary(pathRel))
+        return false;
+    return true;
+}
+/**
+ * Read/get-detail TCs — boost Get* Query* Queries folder; demote Create*CommandHandler.
+ */
+export function readGetIntentPathShapeAdjust(pathRel, intent, shapeBlob) {
+    if (!queryImpliesReadGetDetailIntent(intent, shapeBlob))
+        return 0;
+    const p = (pathRel || "").replace(/\\/g, "/");
+    let adj = 0;
+    if (isQueryLikePath(p) ||
+        /(Get(Query|ById|Detail|Handler)?|FindById|Load(Detail|ById)?)(Query)?(Handler)?/i.test(p)) {
+        adj += 56;
+    }
+    // Update handler is secondary for pure load/display; demote vs Get*
+    // (Module «Update …» often false-latches Update*CommandHandler).
+    if (/Update(Command)?Handler/i.test(p) &&
+        !/Get|Query|Detail/i.test(p) &&
+        /tai\s*(du\s*lieu|chi\s*tiet)|lay\s*chi\s*tiet|quan\s*sat[:\s]*read|\bget\s*(by\s*)?(id|detail)\b|\bload\s*(detail|data)\b|tra\s*ve\s*(day\s*du|dung)/.test(shapeBlobNorm(shapeBlob))) {
+        adj -= 55;
+    }
+    if (pathIsCreateLikeUnitPrimary(p)) {
+        adj -= 72;
+    }
+    if (/(Assign|Attach|Link)(Case|To)?/i.test(p) &&
+        !isQueryLikePath(p) &&
+        /tai\s*(du\s*lieu|chi\s*tiet)|lay\s*chi\s*tiet|quan\s*sat[:\s]*read|\bget\s*(by\s*)?(id|detail)\b|\bload\s*(detail|data)\b|tra\s*ve\s*(day\s*du|dung)/.test(shapeBlobNorm(shapeBlob))) {
+        adj -= 60;
+    }
+    if (pathIsDeleteLikeUnitPrimary(p))
+        adj -= 40;
+    return adj;
+}
+/**
+ * Soft writeBack refuse: read/get-detail must not latch Create* (or Update*
+ * when title/steps are pure load/display/get-by-id).
+ */
+export function pathContradictsReadGetVerb(pathRel, intent, shapeBlob) {
+    if (!queryImpliesReadGetDetailIntent(intent, shapeBlob))
+        return false;
+    if (pathIsCreateLikeUnitPrimary(pathRel))
+        return true;
+    const blob = shapeBlobNorm(shapeBlob);
+    const loadAction = /tai\s*(du\s*lieu|chi\s*tiet)|lay\s*(chi\s*tiet|theo\s*(id|dinh\s*danh))|tra\s*ve\s*(day\s*du|dung(\s*cac)?)|quan\s*sat[:\s]*read|\bget\s*(by\s*)?(id|detail)\b|\bgetquery\b|\bload\s*(detail|entity|record|data)\b|display\s*(detail|full|info)/.test(blob);
+    if (!loadAction)
+        return false;
+    const p = (pathRel || "").replace(/\\/g, "/");
+    if (isQueryLikePath(p) ||
+        /(Get(Query|ById|Detail)|FindById)/i.test(p)) {
+        return false;
+    }
+    // Module named «Update …» / Assign* must not override Title «Tải dữ liệu / Get by id»
+    return (/Update(Command)?Handler/i.test(p) ||
+        (/(Assign|Attach|Link)(Case|To)?/i.test(p) && !isQueryLikePath(p)));
 }
 /** Strip diacritics for portable VI/IT cue matching. */
 function shapeBlobNorm(shapeBlob) {
@@ -313,6 +627,10 @@ export function queryImpliesStorageStateIntent(intent, shapeBlob) {
  * Authz / permission / CanWrite — Function/Title cues (not bare Module create).
  */
 export function queryImpliesAuthzIntent(intent, shapeBlob) {
+    const forbidden = (intent.forbiddenOpTokens || []).map((t) => String(t || "").toLowerCase());
+    if (forbidden.some((t) => /canwrite|permission|authorization|authorize|authz|deny|forbid/.test(t))) {
+        return false;
+    }
     const blob = shapeBlobNorm(shapeBlob);
     return (/phan\s*quyen|khong\s*quyen|quyen\s*ghi|\bpermission\b|\bauthorize\b|\bauthorization\b|\bcanwrite\b|\bforbidden\b|\bdenied\b|khong\s*(duoc\s*)?(ghi|sua|tao)/.test(blob) ||
         (intent.featureTokens || []).some((t) => /CanWrite|Permission|Authorization|Authorize/i.test(t)));
@@ -339,24 +657,47 @@ export function queryImpliesAssignFilterIntent(intent, shapeBlob) {
  */
 export function extractOpPreferTokens(intent, shapeBlob) {
     const out = [];
+    const searchish = queryImpliesSearchLookupIntent(intent, shapeBlob);
     if (queryImpliesStorageStateIntent(intent, shapeBlob)) {
         out.push("Storage", "Compartment", "Slot", "Occupied", "IsOccupied", "Location");
     }
     if (queryImpliesAuthzIntent(intent, shapeBlob)) {
         out.push("CanWrite", "Permission", "Authorization", "Authorize", "Deny");
     }
-    if (queryImpliesAssignFilterIntent(intent, shapeBlob)) {
+    if (searchish) {
+        out.push("Search", "SearchTerm", "GetAll", "Query", "Contains");
+    }
+    else if (queryImpliesAssignFilterIntent(intent, shapeBlob)) {
+        // Assign only when search/lookup is not the stronger title verb
         out.push("Assign", "Attach", "Link", "Filter");
     }
     if (queryImpliesUploadIntent(intent, shapeBlob)) {
-        out.push("Upload", "Image", "Physical", "Digital", "Media");
+        out.push("Upload", "Image", "Physical", "Media", "Attachment");
     }
     for (const t of intent.classFeatureTokens || []) {
-        if (/IsOccupied|Occupied|CanWrite|Permission|Assign|Upload|Filter|Compartment|Storage/i.test(t)) {
+        if (/Upload|Image|Physical|Media|Attachment/i.test(t)) {
+            if (queryImpliesUploadIntent(intent, shapeBlob))
+                out.push(t);
+            continue;
+        }
+        if (/CanWrite|Permission|Authorization|Authorize/i.test(t)) {
+            if (queryImpliesAuthzIntent(intent, shapeBlob))
+                out.push(t);
+            continue;
+        }
+        if (/IsOccupied|Occupied|Assign|Filter|Compartment|Storage|SearchTerm|GetAll/i.test(t)) {
             out.push(t);
         }
     }
-    return uniq(out);
+    const forbidden = (intent.forbiddenOpTokens || [])
+        .map((t) => String(t || "").trim().toLowerCase())
+        .filter(Boolean);
+    if (!forbidden.length)
+        return uniq(out);
+    return uniq(out).filter((token) => {
+        const low = token.toLowerCase();
+        return !forbidden.some((deny) => low === deny || low.includes(deny) || deny.includes(low));
+    });
 }
 /**
  * Soft writeBack refuse when op tokens from Title/Function miss the candidate path
@@ -381,8 +722,20 @@ export function pathContradictsOpPreferTokens(pathRel, opTokens) {
 export function functionOpPathShapeAdjust(pathRel, intent, shapeBlob) {
     const p = (pathRel || "").replace(/\\/g, "/");
     let adj = 0;
+    // Title search/lookup beats Function-only Assign latch
+    const searchAdj = searchIntentPathShapeAdjust(pathRel, intent, shapeBlob);
+    if (searchAdj !== 0)
+        adj += searchAdj;
+    // Read/get-detail beats Create latch (even when Function also says «chỉnh sửa»)
+    const readAdj = readGetIntentPathShapeAdjust(pathRel, intent, shapeBlob);
+    if (readAdj !== 0)
+        adj += readAdj;
+    // CRUD verb (create|update|delete) — portable path IT stems; not validate_reject alone
+    const crudAdj = crudVerbPathShapeAdjust(pathRel, intent, shapeBlob);
+    if (crudAdj !== 0)
+        adj += crudAdj;
     if (queryImpliesStorageStateIntent(intent, shapeBlob)) {
-        if (/(Storage|Compartment|Slot|Occupied|IsOccupied|Cabinet|Location)/i.test(p)) {
+        if (/(Storage|Compartment|Slot|Occupied|IsOccupied|Location)/i.test(p)) {
             adj += 48;
         }
         // AssignCase without storage/compartment stem — common wrong latch
@@ -409,8 +762,13 @@ export function functionOpPathShapeAdjust(pathRel, intent, shapeBlob) {
         }
         return adj;
     }
+    // Search / read-get already applied; skip Assign boost when those dominate
+    if (queryImpliesSearchLookupIntent(intent, shapeBlob) ||
+        queryImpliesReadGetDetailIntent(intent, shapeBlob)) {
+        return adj;
+    }
     if (!queryImpliesAssignFilterIntent(intent, shapeBlob))
-        return 0;
+        return adj;
     if (/(Assign|Attach|Link|Filter|ListAvailable|List\w*QueryHandler)/i.test(p)) {
         adj += 42;
     }
@@ -770,6 +1128,7 @@ export function decideBodyRuleWriteBack(scored, intent, opts) {
     const minMargin = opts?.minMargin ?? 20;
     const minRatio = opts?.minRatio ?? 1.45;
     const prefer = opts?.preferTokens;
+    const shapeBlob = opts?.shapeBlob ?? null;
     const sorted = [...scored].sort((a, b) => b.score - a.score || a.pathRel.localeCompare(b.pathRel));
     const top3 = sorted.slice(0, 3).map((c) => ({
         pathRel: c.pathRel,
@@ -788,13 +1147,23 @@ export function decideBodyRuleWriteBack(scored, intent, opts) {
             candidatesTop3: [],
         };
     }
-    let usable = sorted;
+    let usable = sorted.filter((c) => !pathContradictsUploadVerb(c.pathRel, intent, shapeBlob) &&
+        !pathContradictsSearchVerb(c.pathRel, intent, shapeBlob) &&
+        !pathContradictsReadGetVerb(c.pathRel, intent, shapeBlob));
+    if (!usable.length) {
+        return {
+            writeBack: false,
+            seed: null,
+            skipReason: `verb contradict (upload≠Delete / search≠Assign / read≠Create); top3: ${formatTop()}`,
+            candidatesTop3: top3,
+        };
+    }
     if (intent.requiresBodyRule) {
-        usable = sorted.filter((c) => c.ruleHits.length >= 1);
+        usable = usable.filter((c) => c.ruleHits.length >= 1);
         // auto_generate_code: require empty-code assign shape (not random IsNullOr* alone)
         if (intent.primaryClass === "auto_generate_code" ||
             (intent.classes || []).includes("auto_generate_code")) {
-            const strong = usable.filter((c) => c.ruleHits.some((h) => /userProvidedCode/i.test(h)));
+            const strong = usable.filter((c) => c.ruleHits.some((h) => /IsNullOrWhiteSpace|IsNullOrEmpty|Generate|Empty|Blank|userProvidedCode/i.test(h)));
             if (strong.length)
                 usable = strong;
         }
@@ -810,6 +1179,17 @@ export function decideBodyRuleWriteBack(scored, intent, opts) {
     // IUploadService vs UploadService (same score) is not ambiguity — prefer impl;
     // GetUploadActivityQuery should not veto UploadService write-back.
     usable = collapseBodyRuleContenders(usable);
+    usable = usable.filter((c) => !pathContradictsUploadVerb(c.pathRel, intent, shapeBlob) &&
+        !pathContradictsSearchVerb(c.pathRel, intent, shapeBlob) &&
+        !pathContradictsReadGetVerb(c.pathRel, intent, shapeBlob));
+    if (!usable.length) {
+        return {
+            writeBack: false,
+            seed: null,
+            skipReason: `verb contradict after collapse; top3: ${formatTop()}`,
+            candidatesTop3: top3,
+        };
+    }
     const best = usable[0];
     if (!best || best.score < minScore) {
         return {
@@ -869,6 +1249,22 @@ export function decideBodyRuleWriteBack(scored, intent, opts) {
                     unitPrimaryShapeRank(second.pathRel)
                     ? best
                     : second;
+                if (pathContradictsUploadVerb(pick.pathRel, intent, shapeBlob) ||
+                    pathContradictsSearchVerb(pick.pathRel, intent, shapeBlob) ||
+                    pathContradictsReadGetVerb(pick.pathRel, intent, shapeBlob)) {
+                    const alt = usable.find((c) => !pathContradictsUploadVerb(c.pathRel, intent, shapeBlob) &&
+                        !pathContradictsSearchVerb(c.pathRel, intent, shapeBlob) &&
+                        !pathContradictsReadGetVerb(c.pathRel, intent, shapeBlob));
+                    if (alt) {
+                        return { writeBack: true, seed: alt, candidatesTop3: top3 };
+                    }
+                    return {
+                        writeBack: false,
+                        seed: null,
+                        skipReason: `same-family verb contradict; top3: ${formatTop()}`,
+                        candidatesTop3: top3,
+                    };
+                }
                 return {
                     writeBack: true,
                     seed: pick,

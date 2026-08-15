@@ -1,4 +1,8 @@
-import { normalizeRelPath, shouldIndexPath, CODE_INDEX_EXTENSIONS } from "./constants";
+import {
+  shouldIndexPath,
+  CODE_INDEX_EXTENSIONS,
+  toProjectRelativePath,
+} from "./constants";
 import type { CodeIndexIo } from "./types";
 
 export type ScanProjectOptions = {
@@ -20,7 +24,7 @@ export async function scanProjectFiles(
   const out: string[] = [];
   const seen = new Set<string>();
   for (const raw of listed) {
-    const pathRel = normalizeRelPath(raw);
+    const pathRel = toProjectRelativePath(projectRoot, raw);
     if (!shouldIndexPath(pathRel)) continue;
     if (seen.has(pathRel)) continue;
     seen.add(pathRel);

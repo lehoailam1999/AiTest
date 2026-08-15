@@ -56,14 +56,15 @@ export const UNIT_CONVENTIONS_CORE = `# Unit test conventions (AITest)
 
 1. Primary SUT in the packet / Test Data \`path:\` + \`code:\` is **authoritative**. Do **not** re-resolve against \`index.db\`, pick another Handler, or invent a different primary.
 2. Approved TC MD = **scenario intent**. Map it to the **closest observable behavior** already in the SUT (+ related) excerpts (throw/BadRequest, duplicate check, permission deny, happy-path create, etc.).
-3. **Prefer generate** when a primary SUT excerpt is provided. Wizard/step/form wording in the TC title alone is **not** a refuse reason if the resolved Handler/Service has related logic to exercise.
-4. Use \`FAIL_FEATURE_GAP\` / \`FAIL_SUT_MISMATCH\` **only** when excerpts contain **no** API/branch that can support any faithful assert for this TC — do not invent BR/MaxLength/stage machines absent from excerpts.
-5. Behavior TCs (validate / reject): never invent anemic entity/POCO behavior; exercise the provided \`*Handler\` / \`*Service\`.
+3. **Prefer generate** when primary + related excerpts support the TC intent. Wizard/step/form wording in the TC title alone is **not** a refuse reason if the resolved Handler/Service (or related DTO/validator) has observable logic to exercise.
+4. For \`primaryBucket: VALIDATION_DATA\`: required / MaxLength / duplicate constraints must appear in **primary or related** excerpts (\`[Required]\`, \`[MaxLength]\`, throw/BadRequest, duplicate check). If absent → \`FAIL_FEATURE_GAP\` — **do not invent** validation asserts.
+5. Use \`FAIL_FEATURE_GAP\` / \`FAIL_SUT_MISMATCH\` **only** when excerpts contain **no** API/branch that can support any faithful assert for this TC — do not invent BR/MaxLength/stage machines absent from excerpts.
+6. Behavior TCs (validate / reject): never invent anemic entity/POCO behavior; exercise the provided \`*Handler\` / \`*Service\` (or DTO when layerHint=dto).
 
 ## 1. Approved Test Case markdown (required)
 
 - Gen **one TC → one unit test file**. Match the Sync MD artifact:
-  - Path: \`.ai-test/test-cases/{module}/{testCaseId}.md\`
+  - Path: \`.ai-test/test-cases/UnitTest/{module}/{testCaseId}.md\` (E2E → \`E2ETest/\`)
 - Treat frontmatter + Grounding + Steps / Expected / Precondition / Test Data as **scenario intent**.
 - Do **not** invent a different scenario. If the MD is missing, **fail** (Approve the TC first).
 
@@ -128,4 +129,5 @@ Unit tests target **production logic**, not UI shells or HTTP clients. Prefer SU
 - Include Spec ID / TC code in a comment or test name when the framework allows.
 - Prefer naming \`{Action}_{Condition}_{Expected}\` when it fits the stack.
 - Structure Arrange / Act / Assert; mock dependencies for layer 8 scenarios.
+- Keep generated tests **portable**: do not import private helper namespaces like \`*.Test.Common\` or custom constants like \`TestTrait\` unless those symbols are already part of the target AItest project.
 `;

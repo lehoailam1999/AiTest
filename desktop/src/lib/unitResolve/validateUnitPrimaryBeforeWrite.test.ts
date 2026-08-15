@@ -36,7 +36,7 @@ describe("validateUnitPrimaryBeforeWrite (Layer 3)", () => {
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.ok(r.checks.includes("indexFile"));
     assert.ok(r.checks.includes("crudVerb"));
-    assert.ok(r.checks.includes("symbolType") || r.checks.includes("symbolStem"));
+    assert.ok(r.checks.includes("symbolCoLocated"));
   });
 
   it("fails when path missing from index", () => {
@@ -76,7 +76,7 @@ describe("validateUnitPrimaryBeforeWrite (Layer 3)", () => {
       shapeBlob,
     });
     assert.equal(r.ok, false);
-    assert.match(r.skipReason || "", /not in symbolsByFile/);
+    assert.match(r.skipReason || "", /not a type defined by path/);
   });
 
   it("fails CRUD contradict — update path for create TC", () => {
@@ -135,11 +135,11 @@ describe("validateUnitPrimaryBeforeWrite (Layer 3)", () => {
         "target.constraint: required",
     });
     assert.equal(r.ok, false);
-    assert.match(r.skipReason || "", /required/);
+    assert.match(r.skipReason || "", /FAIL_FIELD_UNBOUND|required/);
     assert.ok(r.checks.includes("behaviorExcerpt"));
   });
 
-  it("Type.Method soft-passes when method not in lightweight snapshot", () => {
+  it("fails Type.Method when method is absent from the same indexed type", () => {
     const r = validateUnitPrimaryBeforeWrite({
       codeIndex: snap,
       pathRel: paths[0]!,
@@ -148,7 +148,7 @@ describe("validateUnitPrimaryBeforeWrite (Layer 3)", () => {
       intent,
       shapeBlob,
     });
-    assert.equal(r.ok, true, JSON.stringify(r));
-    assert.ok(r.checks.includes("methodSoft"));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(r.skipReason || "", /method .* not defined under/);
   });
 });

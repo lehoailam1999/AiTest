@@ -15,6 +15,7 @@ export {
   AiCliNotReadyError,
   aiCliNotReadyMessage,
   assertGenerationAllowed,
+  clearAiCliReadyCache,
   ensureAiCliReady,
   ensureCursorAgentReady,
   ensureTcGenCliReady,

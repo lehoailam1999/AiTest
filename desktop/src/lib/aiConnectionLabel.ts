@@ -10,11 +10,10 @@ const CLI_LABELS: Record<string, string> = {
 };
 
 /**
- * Label for Ready strip / gate — CLI vendor from cliType.
- * Settings may still store backend_type as a placeholder.
+ * Label for Ready strip / gate — CLI vendor from cliType only.
  */
 export function aiConnectionDisplayLabel(
-  conn: Pick<Connection, "provider" | "backendType" | "runnerMode" | "cliType"> | null | undefined
+  conn: Pick<Connection, "cliType"> | null | undefined
 ): string | null {
   if (!conn) return null;
   const cli = (conn.cliType || "").trim().toLowerCase();

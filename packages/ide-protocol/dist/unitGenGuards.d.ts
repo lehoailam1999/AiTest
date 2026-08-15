@@ -82,6 +82,11 @@ export declare function assertStackMatchesPath(relPath: string, code: string): v
  * Project-agnostic — flags local BR/validator/hardcoded allow-lists not imported from SUT.
  */
 export declare function findInventedRuleSmells(code: string, sutExcerpt: string): string[];
+/**
+ * Heuristics for non-portable test harness dependencies.
+ * Generated tests should compile in plain AItest projects without private helpers.
+ */
+export declare function findNonPortableTestHarnessSmells(code: string): string[];
 export declare function assertUnitGenQuality(opts: {
     relPath: string;
     code: string;

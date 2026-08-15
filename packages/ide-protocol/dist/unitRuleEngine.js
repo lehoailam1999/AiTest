@@ -3,8 +3,9 @@
  * Desktop + Extension MUST consume this module for conventions, guards,
  * prompt contract lines, and shared rank-policy constants — do not fork wording.
  */
+export { behaviorEvidenceInExcerpt, isValidationDataBucket, } from "./behaviorEvidenceInExcerpt.js";
 export { UNIT_CONVENTIONS_CORE, UNIT_GEN_LIMITS, UNIT_LAYOUT_RULE, } from "./unitConventions.js";
-export { UNIT_SUT_ALIGN_MIN, UNIT_SUT_ALIGN_MIN_NO_MARKER, PATH_RANK_STOP, unitSutAlignMin, isSutAlignedEnough, significantTokens, extractTcSourceMarkers, sutTcAlignmentScore, expectedDomainTokensFromTc, extractPathDomainHints, sutDomainConflict, isPacketSutAcceptable, detectCodeStack, stackForPath, assertStackMatchesPath, findInventedRuleSmells, assertUnitGenQuality, detectCsharpPackagesFromTestCode, CSHARP_USING_TO_PACKAGE, } from "./unitGenGuards.js";
+export { UNIT_SUT_ALIGN_MIN, UNIT_SUT_ALIGN_MIN_NO_MARKER, PATH_RANK_STOP, unitSutAlignMin, isSutAlignedEnough, significantTokens, extractTcSourceMarkers, sutTcAlignmentScore, expectedDomainTokensFromTc, extractPathDomainHints, sutDomainConflict, isPacketSutAcceptable, detectCodeStack, stackForPath, assertStackMatchesPath, findInventedRuleSmells, findNonPortableTestHarnessSmells, assertUnitGenQuality, detectCsharpPackagesFromTestCode, CSHARP_USING_TO_PACKAGE, } from "./unitGenGuards.js";
 export { assertSafeAitestTargetRel, isAllowedUnitLayoutPath, } from "./codegenPathJail.js";
 /**
  * Shared rank / retrieve policy (Desktop index + Extension disk resolve).
@@ -45,7 +46,8 @@ export const UNIT_PROMPT_RULES_CORE = [
     "Return ONLY the unit test source inside a single markdown code fence. No explanation outside the fence.",
     "Do NOT write files to disk — return text only.",
     "Policy SoT is the «Project rules / unit-conventions» block below — follow it; do not invent conflicting rules.",
-    "Primary SUT in the packet is authoritative — map TC intent to closest behavior in the excerpts; prefer generate.",
+    "Primary SUT in the packet is authoritative — map TC intent to closest behavior in primary + related excerpts.",
+    "VALIDATION_DATA: assert only constraints evidenced in excerpts ([Required], MaxLength, throw/BadRequest, duplicate) — never invent.",
     "Refuse only if excerpts cannot support any faithful assert without inventing APIs/BRs: empty fence + one line FAIL_NEEDS_MARKER | FAIL_DOMAIN_GUARD | FAIL_FEATURE_GAP | FAIL_SUT_MISMATCH.",
 ];
 /** Rough token estimate when no tokenizer is available (chars/4). */

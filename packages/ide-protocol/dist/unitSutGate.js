@@ -1,7 +1,9 @@
 import { extractTcSourceMarkers, isPacketSutAcceptable, isSutAlignedEnough, sutDomainConflict, sutTcAlignmentScore, unitSutAlignMin, } from "./unitGenGuards.js";
 import { primaryMatchesMarkers, } from "./unitPrimaryPrefer.js";
 import { isAnemicEntityLikePath, tcImpliesBehaviorPrimary, } from "./unitLogicLayerFilter.js";
+import { parseUnitLayerHint } from "./unitLayerHint.js";
 import { extractUnitIntent, } from "./unitIntentAliases.js";
+import { behaviorEvidenceInExcerpt } from "./behaviorEvidenceInExcerpt.js";
 /**
  * When TC has no path:/code: markers, require this alignment floor (stricter than
  * UNIT_SUT_ALIGN_MIN_NO_MARKER) unless profile requireMarkers forces FAIL_NEEDS_MARKER.
@@ -207,6 +209,8 @@ export function applyProfileDomainGuards(opts) {
 export function decideUnitSutGate(opts) {
     const primary = (opts.primaryPath || "").replace(/\\/g, "/").trim();
     const excerpt = (opts.sourceExcerpt || "").trim();
+    const relatedExcerpt = (opts.relatedExcerpt || "").trim();
+    const fullExcerpt = [excerpt, relatedExcerpt].filter(Boolean).join("\n\n");
     const tcText = opts.tcText || "";
     const markers = extractTcSourceMarkers(tcText);
     const hasMarkers = markers.paths.length > 0 || markers.codes.length > 0;
@@ -281,17 +285,21 @@ export function decideUnitSutGate(opts) {
             resolvedSut: primary,
         });
     }
-    // Behavior TC must not Gen against anemic entity/POCO.
+    // Behavior TC must not Gen against anemic entity/POCO —
+    // except when Test Data layerHint is dto|validator (enforce lives on DTO).
     if (tcImpliesBehaviorPrimary(tcText) && isAnemicEntityLikePath(primary)) {
-        return block({
-            decision: "block",
-            code: "FAIL_SUT_MISMATCH",
-            reason: `Primary «${primary}» is entity/POCO — TC implies validate/reject/enable; prefer *Handler/*Service`,
-            alignmentScore: opts.alignmentScore ?? 0,
-            markersHit,
-            domainGuard: "pass",
-            resolvedSut: primary,
-        });
+        const hint = parseUnitLayerHint(tcText);
+        if (hint !== "dto" && hint !== "validator") {
+            return block({
+                decision: "block",
+                code: "FAIL_SUT_MISMATCH",
+                reason: `Primary «${primary}» is entity/POCO — TC implies validate/reject/enable; prefer *Handler/*Service`,
+                alignmentScore: opts.alignmentScore ?? 0,
+                markersHit,
+                domainGuard: "pass",
+                resolvedSut: primary,
+            });
+        }
     }
     const domain = sutDomainConflict({
         tcText,
@@ -325,7 +333,7 @@ export function decideUnitSutGate(opts) {
             resolvedSut: primary,
         });
     }
-    const feat = detectFeatureGap(tcText, excerpt);
+    const feat = detectFeatureGap(tcText, fullExcerpt);
     if (feat.gap) {
         return block({
             decision: "block",
@@ -338,11 +346,25 @@ export function decideUnitSutGate(opts) {
             featureGap: feat.label || null,
         });
     }
+    const beh = behaviorEvidenceInExcerpt(tcText, fullExcerpt);
+    if (!beh.ok) {
+        const reason = String(beh.skipReason || "VALIDATION behavior not evidenced in excerpts").replace(/^FAIL_FEATURE_GAP\s*[—:-]\s*/i, "");
+        return block({
+            decision: "block",
+            code: "FAIL_FEATURE_GAP",
+            reason,
+            alignmentScore: opts.alignmentScore ?? 0,
+            markersHit,
+            domainGuard: "pass",
+            resolvedSut: primary,
+            featureGap: "validation-missing",
+        });
+    }
     // Body-rule intents: Expected rule must appear in excerpt (portable patterns).
-    if (intent.requiresBodyRule && intent.rulePatterns.length && excerpt) {
+    if (intent.requiresBodyRule && intent.rulePatterns.length && fullExcerpt) {
         const hitRule = intent.rulePatterns.some((p) => {
             const re = new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-            return re.test(excerpt);
+            return re.test(fullExcerpt);
         });
         if (!hitRule) {
             return block({

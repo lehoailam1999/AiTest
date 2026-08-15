@@ -479,6 +479,24 @@ export function findInventedRuleSmells(code, sutExcerpt) {
     }
     return smells;
 }
+/**
+ * Heuristics for non-portable test harness dependencies.
+ * Generated tests should compile in plain AItest projects without private helpers.
+ */
+export function findNonPortableTestHarnessSmells(code) {
+    const smells = [];
+    const c = code || "";
+    if (/^\s*using\s+[\w.]*\.Test\.Common\s*;/im.test(c)) {
+        smells.push("Uses project-specific *.Test.Common helper namespace");
+    }
+    if (/\bTestTrait\s*\./.test(c)) {
+        smells.push("Uses custom TestTrait constants not guaranteed in AItest project");
+    }
+    if (/\[(?:Category|TestCategory)\s*\(/.test(c)) {
+        smells.push("Uses framework-specific category attributes outside baseline xUnit");
+    }
+    return smells;
+}
 export function assertUnitGenQuality(opts) {
     assertStackMatchesPath(opts.relPath, opts.code);
     const align = sutTcAlignmentScore({
@@ -501,6 +519,10 @@ export function assertUnitGenQuality(opts) {
     const smells = findInventedRuleSmells(opts.code, opts.sutExcerpt);
     if (smells.length) {
         throw new Error(`Invented production rules in test: ${smells.join("; ")}`);
+    }
+    const harnessSmells = findNonPortableTestHarnessSmells(opts.code);
+    if (harnessSmells.length) {
+        throw new Error(`Non-portable test harness dependency: ${harnessSmells.join("; ")}`);
     }
 }
 /** Map C# usings / common APIs → NuGet packages for AItest.UnitTests.csproj. */

@@ -129,6 +129,14 @@ export async function writeUnitGenDebugDump(opts: {
       "```",
       ""
     );
+  } else if (opts.gateDecision === "gen") {
+    bodyParts.push(
+      "## AI CLI invoked (prompt dump disabled)",
+      "",
+      "Set AITEST_UNIT_GEN_DEBUG_PROMPT=1 to include the full prompt in this artifact.",
+      opts.blockedReason ? `Note: ${opts.blockedReason}` : "",
+      ""
+    );
   } else {
     bodyParts.push(
       "## Gate blocked — AI CLI not invoked",
@@ -381,8 +389,9 @@ export function buildUnitPrompt(opts: {
   gatePassed?: boolean;
 }): { prompt: string; truncated: boolean } {
   let truncated = false;
-  const lim = UNIT_GEN_LIMITS.maxExcerptChars;
-  const slice = (s: string, label: string) => {
+  const excerptLim = UNIT_GEN_LIMITS.maxExcerptChars;
+  const tcLim = UNIT_GEN_LIMITS.maxTcMdChars;
+  const slice = (s: string, label: string, lim = excerptLim) => {
     if (s.length > lim) {
       truncated = true;
       return s.slice(0, lim) + `\n/* …truncated ${label}… */`;
@@ -406,21 +415,32 @@ export function buildUnitPrompt(opts: {
     ""
   );
 
+  const tcMd = opts.tcMd.trim();
   parts.push(
     "## Approved TC markdown (required SoT for this Gen)",
     `Path: ${opts.tcMdPath}`,
     "This file was written when the TC was Approved in AITest — analyze THIS test case only.",
-    slice(opts.tcMd.trim(), "tc-md"),
+    slice(tcMd, "tc-md", tcLim),
     ""
   );
 
-  parts.push(
-    "## Request meta (must match MD)",
-    `Title: ${opts.item.title}`,
-    `Code: ${opts.item.testCaseId}`,
-    opts.item.module ? `Module: ${opts.item.module}` : "",
-    ""
-  );
+  // Skip Request meta when MD already carries title / id (avoids triple title dump).
+  const mdHasTitle =
+    /^#\s+\S/m.test(tcMd) || /\btitle:\s*\S/i.test(tcMd);
+  const mdHasId =
+    /\b(?:testCaseId|Code):\s*`?[\w.-]+/i.test(tcMd) ||
+    /\|\s*Code\s*\|\s*`?[\w.-]+/i.test(tcMd);
+  if (!(mdHasTitle && mdHasId)) {
+    parts.push(
+      "## Request meta (must match MD)",
+      `Title: ${opts.item.title}`,
+      `Code: ${opts.item.testCaseId}`,
+      opts.item.module ? `Module: ${opts.item.module}` : "",
+      ""
+    );
+  } else if (opts.item.module && !/\bmodule:\s*\S/i.test(tcMd)) {
+    parts.push(`Module: ${opts.item.module}`, "");
+  }
 
   if (opts.source?.trim()) {
     parts.push(

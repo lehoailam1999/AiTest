@@ -12,15 +12,14 @@ from sqlalchemy.orm import Session
 from app import constants as C
 from app.database import get_db
 from app.deps import get_current_user
-from app.llm import LLMError
 from app.models.domain import AiBackendConnection, Project, TestCase
 from app.responses import errors, ok
+from app.services.ai_service import chat_for_connection
 from app.services.business_analyzer import (
     build_analyze_intent_prompts,
     heuristic_business_intent,
     parse_business_intent_json,
 )
-from app.services.connection_service import connection_api_key, llm_from_connection
 
 router = APIRouter(prefix="/api", tags=["agent"], dependencies=[Depends(get_current_user)])
 log = logging.getLogger("aitest.agent")
@@ -94,13 +93,6 @@ async def analyze_intent(request: Request, db: Annotated[Session, Depends(get_db
         log.info("P9 analyze-intent: AI not ready — heuristic fallback project=%s", project_id)
         return ok(_heuristic())
 
-    try:
-        api_key = connection_api_key(conn)
-        provider = llm_from_connection(conn)
-    except (ValueError, LLMError) as exc:
-        log.warning("P9 analyze-intent connection error: %s — heuristic", exc)
-        return ok(_heuristic())
-
     system, user = build_analyze_intent_prompts(
         title=title,
         module=module,
@@ -111,14 +103,14 @@ async def analyze_intent(request: Request, db: Annotated[Session, Depends(get_db
         tc_type=tc.type,
     )
     try:
-        raw = await provider.chat(api_key, system, user)
+        raw, _meta = await chat_for_connection(conn, system, user)
         intent = parse_business_intent_json(raw)
         intent["source"] = "llm"
         intent["testCaseId"] = str(tc.id)
         intent["testCaseKey"] = tc.test_case_code
         return ok(intent)
     except Exception as exc:  # noqa: BLE001
-        log.warning("P9 analyze-intent LLM failed: %s — heuristic", exc)
+        log.warning("P9 analyze-intent CLI failed: %s — heuristic", exc)
         intent = _heuristic()
         intent["fallbackReason"] = str(exc)[:200]
         return ok(intent)

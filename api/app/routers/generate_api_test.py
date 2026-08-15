@@ -10,11 +10,19 @@ from sqlalchemy.orm import Session
 from app import constants as C
 from app.database import get_db
 from app.deps import get_current_user
-from app.llm import LLMError, generate_api_test
-from app.llm.base import UnitRequest
+from app.llm.base import (
+    UnitRequest,
+    UnitResult,
+    api_system_prompt,
+    api_user_prompt,
+    guess_class_name,
+    infer_language,
+    strip_code_fences,
+    suggest_api_path,
+)
 from app.models.domain import AiBackendConnection, Project, TestCase
 from app.responses import errors, ok
-from app.services.connection_service import connection_api_key, llm_from_connection
+from app.services.ai_service import chat_for_connection, connection_runner_mode
 from app.services.context_packet import (
     gaps_from_packet,
     source_under_test_summary,
@@ -49,6 +57,38 @@ def _uuid(value: str) -> uuid.UUID | None:
         return uuid.UUID(value)
     except (ValueError, TypeError):
         return None
+
+
+async def _generate_api_test_via_cli(conn: AiBackendConnection, req: UnitRequest) -> UnitResult:
+    if not req.test_case_title.strip():
+        raise ValueError("test case title is required")
+    if not req.source_code.strip() and not req.open_api_spec.strip():
+        raise ValueError("sourceCode or openApiSpec is required for API tests")
+    language = infer_language(req)
+    raw, _meta = await chat_for_connection(
+        conn,
+        api_system_prompt(req.framework, language),
+        api_user_prompt(req),
+    )
+    code = strip_code_fences(raw)
+    if not code.strip():
+        raise ValueError("AI CLI returned empty API test code")
+    class_name = req.class_name or guess_class_name(req.source_file_name, req.source_code)
+    suggested, file_name = suggest_api_path(
+        language,
+        class_name,
+        req.source_file_name,
+        req.framework,
+        module=req.module or "",
+        package_prefix=req.package_prefix,
+    )
+    if req.source_file_name:
+        from app.services.test_output_layout import rewrite_sut_imports
+
+        code = rewrite_sut_imports(
+            code, test_rel=suggested, source_rel=req.source_file_name
+        )
+    return UnitResult(code=code, suggested_path=suggested, file_name=file_name)
 
 
 @router.post("/generate-api-test")
@@ -93,16 +133,7 @@ async def generate_api_test_route(request: Request, db: Annotated[Session, Depen
         .first()
     )
     if conn is None or not C.is_ai_ready(conn.status):
-        return errors(400, "AI chưa Ready — vào Settings cấu hình API Key và Verify")
-    try:
-        api_key = connection_api_key(conn)
-    except ValueError as exc:
-        return errors(400, str(exc))
-
-    try:
-        provider = llm_from_connection(conn)
-    except LLMError as exc:
-        return errors(400, str(exc))
+        return errors(400, "AI chưa Ready — vào Settings cấu hình AI CLI và Verify")
 
     language = (body.get("language") or "").strip() or (project.language or "")
     packet = body.get("contextPacket") if isinstance(body.get("contextPacket"), dict) else None
@@ -229,7 +260,7 @@ async def generate_api_test_route(request: Request, db: Annotated[Session, Depen
         user_rules=usr_rules,
     )
     try:
-        result = await generate_api_test(provider, api_key, req)
+        result = await _generate_api_test_via_cli(conn, req)
     except Exception as exc:  # noqa: BLE001
         return errors(400, f"generate api test failed: {exc}")
 
@@ -240,7 +271,8 @@ async def generate_api_test_route(request: Request, db: Annotated[Session, Depen
             "fileName": result.file_name,
             "testCaseId": str(tc.id),
             "projectId": str(project_id),
-            "provider": provider.name,
+            "provider": (getattr(conn, "cli_type", None) or "ai-cli"),
+            "runnerUsed": connection_runner_mode(conn),
             "contextSource": "packet" if has_packet else ("workspace" if workspace_id else "body"),
         }
     )

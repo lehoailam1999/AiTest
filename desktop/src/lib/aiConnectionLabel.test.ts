@@ -3,12 +3,9 @@ import { describe, it } from "node:test";
 import { aiConnectionDisplayLabel } from "./aiConnectionLabel.ts";
 
 describe("aiConnectionDisplayLabel", () => {
-  it("shows Cursor CLI when cliType is cursor-cli even if provider is openai", () => {
+  it("shows Cursor CLI when cliType is cursor-cli", () => {
     assert.equal(
       aiConnectionDisplayLabel({
-        provider: "openai",
-        backendType: "openai",
-        runnerMode: "AI_CLI",
         cliType: "cursor-cli",
       }),
       "Cursor CLI"
@@ -18,9 +15,6 @@ describe("aiConnectionDisplayLabel", () => {
   it("defaults to AI CLI when cliType missing", () => {
     assert.equal(
       aiConnectionDisplayLabel({
-        provider: "openai",
-        backendType: "openai",
-        runnerMode: "AI_CLI",
         cliType: null,
       }),
       "AI CLI"
@@ -30,9 +24,6 @@ describe("aiConnectionDisplayLabel", () => {
   it("shows Antigravity CLI when cliType is antigravity-cli", () => {
     assert.equal(
       aiConnectionDisplayLabel({
-        provider: "antigravity",
-        backendType: "antigravity",
-        runnerMode: "AI_CLI",
         cliType: "antigravity-cli",
       }),
       "Antigravity CLI"

@@ -68,6 +68,10 @@ import type {
   PickFromShortlistFn,
 } from "./llmPickUnitPrimary";
 import { acceptShortlistPick } from "./llmPickUnitPrimary";
+import {
+  buildFieldPropertyEvidence,
+  fieldEvidencePaths,
+} from "./resolveFieldFromIndex";
 import { validateUnitPrimaryBeforeWrite } from "./validateUnitPrimaryBeforeWrite";
 import { mergeUnitRelatedCandidates } from "./rankUnitRelatedPaths";
 import {
@@ -98,6 +102,8 @@ export type ResolveUnitPrimaryResult = {
   validateChecks?: string[];
   /** Layer 4 — index vs disk hash */
   freshness?: IndexFreshnessStatus;
+  /** Validated property selected from an owned DTO record in the same evidence packet. */
+  property?: string;
 };
 
 export type ResolveUnitPrimaryOpts = {
@@ -117,6 +123,7 @@ export type ResolveUnitPrimaryOpts = {
     projectId?: string | null;
     steps?: string | null;
     expectedResult?: string | null;
+    testData?: string | null;
   } | null;
 };
 
@@ -358,27 +365,35 @@ function queryImpliesCreateShape(query: UnitApproveQuery): boolean {
 }
 
 /** PascalCase stems from TC text that exist in index symbolIndex (never invent). */
+const SYMBOL_NAME_BLOB = new WeakMap<CodeIndexSnapshot, string>();
+
+/** One joined lowercase blob per snapshot — substring scan instead of N×M loops. */
+function symbolNameBlob(snap: CodeIndexSnapshot): string {
+  const cached = SYMBOL_NAME_BLOB.get(snap);
+  if (cached != null) return cached;
+  const names = new Set<string>();
+  for (const syms of Object.values(snap.symbolsByFile || {})) {
+    for (const s of syms) {
+      if (s?.name) names.add(s.name.toLowerCase());
+    }
+  }
+  const blob = names.size ? `\n${[...names].join("\n")}\n` : "";
+  SYMBOL_NAME_BLOB.set(snap, blob);
+  return blob;
+}
+
 function indexBackedTechStems(
   snap: CodeIndexSnapshot,
   tcBlob: string
 ): string[] {
   const stems = extractTechIdentifierStems(tcBlob);
   if (!stems.length) return [];
-  const names = new Set<string>();
-  for (const syms of Object.values(snap.symbolsByFile || {})) {
-    for (const s of syms) {
-      if (s?.name) names.add(s.name);
-    }
-  }
-  if (!names.size) return [];
+  const blob = symbolNameBlob(snap);
+  if (!blob) return [];
   return stems.filter((stem) => {
     const sl = stem.toLowerCase();
     if (sl.length < 4) return false;
-    for (const name of names) {
-      const nl = name.toLowerCase();
-      if (nl === sl || nl.includes(sl)) return true;
-    }
-    return false;
+    return blob.includes(sl);
   });
 }
 
@@ -871,13 +886,68 @@ async function tryLlmShortlistPick(
     notes.push(`llmPick=skip prior=${skipReason.slice(0, 80)}`);
     return null;
   }
-  const shortlist = candidates.slice(0, 8).map((c) => ({
-    pathRel: c.pathRel,
-    code:
-      codeMarkerForResolve(opts.codeIndex, c.pathRel, opts.query, opts.query.preferTokensStrong) ||
-      undefined,
-    score: c.score,
-  }));
+  const shortlist = await Promise.all(
+    candidates.slice(0, 8).map(async (c) => {
+      const pathKey =
+        Object.keys(opts.codeIndex.symbolsByFile || {}).find(
+          (k) =>
+            k.replace(/\\/g, "/").toLowerCase() ===
+            c.pathRel.replace(/\\/g, "/").toLowerCase()
+        ) || c.pathRel;
+      const symbols = (opts.codeIndex.symbolsByFile[pathKey] || [])
+        .filter((s) => s.kind !== "method" && s.kind !== "variable")
+        .map((s) => s.name);
+      const preferred = codeMarkerForResolve(
+        opts.codeIndex,
+        c.pathRel,
+        opts.query,
+        opts.query.preferTokensStrong
+      );
+      const preferredType = String(preferred || "").split(".")[0]?.toLowerCase();
+      const code =
+        symbols.find((s) => s.toLowerCase() === preferredType) ||
+        symbols[0] ||
+        undefined;
+      const excerpt = opts.readExcerpt
+        ? clipBodyExcerpt(await opts.readExcerpt(c.pathRel)).slice(0, 4200)
+        : "";
+      const relatedPaths = relatedFromDeps(
+        opts.codeIndex,
+        c.pathRel,
+        opts.query.preferTokensStrong,
+        6,
+        true
+      );
+      const dtoPaths = fieldEvidencePaths({
+        codeIndex: opts.codeIndex,
+        primaryPath: c.pathRel,
+        relatedPaths,
+      }).slice(0, 4);
+      const dtoExcerpts: Record<string, string> = {};
+      if (opts.readExcerpt) {
+        await Promise.all(
+          dtoPaths.map(async (pathRel) => {
+            dtoExcerpts[pathRel] = clipBodyExcerpt(
+              await opts.readExcerpt!(pathRel)
+            ).slice(0, 1800);
+          })
+        );
+      }
+      return {
+        pathRel: c.pathRel,
+        code,
+        symbols,
+        excerpt,
+        properties: buildFieldPropertyEvidence({
+          codeIndex: opts.codeIndex,
+          primaryPath: c.pathRel,
+          relatedPaths,
+          dtoExcerpts,
+        }),
+        score: c.score,
+      };
+    })
+  );
   const input: LlmPickUnitPrimaryInput = {
     projectId: opts.llmPromptFields?.projectId,
     requirementTitle: opts.query.requirementTitle,
@@ -901,6 +971,8 @@ async function tryLlmShortlistPick(
     {
       path: picked.pathRel,
       code: picked.code,
+      property: picked.property,
+      evidence: picked.evidence,
       confidence: picked.confidence,
     },
     shortlist
@@ -959,6 +1031,27 @@ async function tryLlmShortlistPick(
     finalized.seed.score,
     second?.score
   );
+  const selectedEvidence = shortlist.find(
+    (candidate) =>
+      candidate.pathRel.replace(/\\/g, "/").toLowerCase() ===
+      accepted.pathRel.replace(/\\/g, "/").toLowerCase()
+  );
+  const propertyEvidence = accepted.property
+    ? selectedEvidence?.properties?.find(
+        (property) =>
+          property.name.toLowerCase() === accepted.property?.toLowerCase()
+      )?.excerpt || ""
+    : "";
+  const validationTestData = accepted.property
+    ? String(opts.llmPromptFields?.testData || opts.query.testData || "").match(
+        /^\s*target\.property\s*:/im
+      )
+      ? String(opts.llmPromptFields?.testData || opts.query.testData || "").replace(
+          /^\s*target\.property\s*:.*$/im,
+          `target.property: ${accepted.property}`
+        )
+      : `${String(opts.llmPromptFields?.testData || opts.query.testData || "")}\ntarget.property: ${accepted.property}`
+    : opts.llmPromptFields?.testData || opts.query.testData;
   return await gateWriteResult(
     {
       writeBack: true,
@@ -973,6 +1066,7 @@ async function tryLlmShortlistPick(
       bodyRuleLog: `writeBack=yes source=llm-shortlist conf=${accepted.confidence}`,
       notes,
       source: "llm-shortlist",
+      property: accepted.property,
     },
     {
       score: finalized.seed.score,
@@ -996,6 +1090,10 @@ async function tryLlmShortlistPick(
       ]
         .filter(Boolean)
         .join("\n"),
+      excerpt: [selectedEvidence?.excerpt || "", propertyEvidence]
+        .filter(Boolean)
+        .join("\n"),
+      testData: validationTestData,
       readDisk: opts.readExcerpt || null,
     }
   );

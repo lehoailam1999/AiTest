@@ -1,5 +1,6 @@
 /**
- * Path jail for Approved TC markdown under `.ai-test/test-cases/`.
+ * Path jail for Approved TC markdown under `.ai-test/test-cases/`
+ * (including `UnitTest/` and `E2ETest/` subfolders).
  * Separate from AItest codegen jail.
  */
 export declare function assertSafeAiTestCasesRel(targetRel: string): string;

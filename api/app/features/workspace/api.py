@@ -188,9 +188,8 @@ async def resolve_scope(
     Uses workspace index to find candidates; optionally AI tokens via existing service.
     """
     from app import constants as C
-    from app.llm import LLMError
     from app.models.domain import AiBackendConnection, TestCase
-    from app.services.connection_service import connection_api_key, llm_from_connection
+    from app.services.ai_service import chat_for_connection
     from app.services.resolve_source_scope import (
         build_resolve_scope_prompts,
         build_resolve_tokens_prompts,
@@ -230,8 +229,6 @@ async def resolve_scope(
         )
         if conn and C.is_ai_ready(conn.status):
             try:
-                api_key = connection_api_key(conn)
-                provider = llm_from_connection(conn)
                 system, user = build_resolve_tokens_prompts(
                     title=tc.title or "",
                     module=tc.module,
@@ -240,9 +237,9 @@ async def resolve_scope(
                     precondition=tc.precondition,
                     test_data=tc.test_data,
                 )
-                raw = await provider.chat(api_key, system, user)
+                raw, _meta = await chat_for_connection(conn, system, user)
                 tokens = parse_resolve_tokens_json(raw).get("tokens") or []
-            except (ValueError, LLMError, Exception):  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 tokens = []
 
     if not tokens and tc is not None:
@@ -269,8 +266,6 @@ async def resolve_scope(
             )
             if conn and C.is_ai_ready(conn.status):
                 try:
-                    api_key = connection_api_key(conn)
-                    provider = llm_from_connection(conn)
                     system, user = build_resolve_scope_prompts(
                         title=tc.title or "",
                         module=tc.module,
@@ -280,7 +275,7 @@ async def resolve_scope(
                         test_data=tc.test_data,
                         candidates=ctx.candidates[:60],
                     )
-                    raw = await provider.chat(api_key, system, user)
+                    raw, _meta = await chat_for_connection(conn, system, user)
                     ranked = parse_resolve_scope_json(raw, ctx.candidates)
                     primary = ranked.get("primary") or primary
                     related = ranked.get("related") or related

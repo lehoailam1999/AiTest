@@ -1054,7 +1054,7 @@ def enqueue_generate_from_snapshot(
         source_id=None,
         requirement_snapshot_id=snap.id,
         status=C.JOB_QUEUED,
-        backend_type=conn.backend_type,
+        backend_type=(getattr(conn, "cli_type", None) or "ai-cli"),
         generate_strategy=mode,
         requirement_version=int(snap.knowledge_version or 0),
     )

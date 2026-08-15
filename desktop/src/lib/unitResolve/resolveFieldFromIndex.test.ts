@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   bindTargetPropertyInTestData,
   buildFieldPropertyShortlist,
+  resolvePropertyFromFieldAliases,
   resolveFieldFromIndex,
 } from "./resolveFieldFromIndex.ts";
 import { acceptFieldShortlistPick } from "./llmPickUnitField.ts";
@@ -89,6 +90,48 @@ public class EvidenceDto {
     assert.equal(prop, "SeizureLocation");
   });
 
+  it("does NOT echo unbound Latin-looking labels when shortlist is empty", () => {
+    const prop = resolveFieldFromIndex({
+      fieldLabel: "hoSoVuAn",
+      inputKeys: ["hoSoVuAn"],
+      primaryPath: "src/unknown/Handler.cs",
+      codeIndex: {
+        meta: {
+          schema: "aitest-code-index-v1",
+          createdAt: "",
+          updatedAt: "",
+          fileCount: 0,
+          symbolCount: 0,
+          edgeCount: 0,
+          parser: "test",
+        },
+        files: {},
+        symbolsByFile: {},
+        importsByFile: {},
+        exportsByFile: {},
+        symbolIndex: {},
+        dependencyGraph: { nodes: [], edges: [] },
+      },
+    });
+    assert.equal(prop, null);
+  });
+
+  it("does NOT treat unbound VI camelCase property as already bound", () => {
+    const td =
+      "target.field: hoSoVuAn\n" +
+      "target.property: hoSoVuAn\n" +
+      'input: {"hoSoVuAn":[]}\n';
+    const bound = bindTargetPropertyInTestData(td, {
+      primaryPath:
+        "src/Forensic.Application/Commands/Evidence/EvidenceCreateCommandHandler.cs",
+      codeIndex: snapWithEvidenceDto(),
+      propertyOverride: "CaseCode",
+    });
+    assert.equal(bound.bound, true);
+    assert.equal(bound.property, "CaseCode");
+    assert.match(bound.testData, /target\.property:\s*CaseCode/);
+  });
+
   it("does NOT role-guess VI label without Display (LLM shortlist instead)", () => {
     const prop = resolveFieldFromIndex({
       fieldLabel: "Mã vật chứng",
@@ -120,6 +163,23 @@ public class EvidenceDto {
     assert.ok(list.includes("EvidenceCode"));
     assert.ok(list.includes("Name"));
   });
+
+  it("discovers DTO properties across TypeScript projects", () => {
+    const dtoPath = "src/orders/CreateOrderRequest.ts";
+    const list = buildFieldPropertyShortlist({
+      primaryPath: "src/orders/CreateOrderHandler.ts",
+      relatedPaths: [dtoPath],
+      dtoExcerpts: {
+        [dtoPath]:
+          "export interface CreateOrderRequest {\n" +
+          "  customerReference: string;\n" +
+          "  quantity?: number;\n" +
+          "}",
+      },
+    });
+    assert.ok(list.includes("customerReference"), JSON.stringify(list));
+    assert.ok(list.includes("quantity"), JSON.stringify(list));
+  });
 });
 
 describe("acceptFieldShortlistPick", () => {
@@ -149,6 +209,22 @@ describe("acceptFieldShortlistPick", () => {
 });
 
 describe("bindTargetPropertyInTestData", () => {
+  it("binds code-aliases.fields by input key before index/LLM", () => {
+    const td =
+      "target.field: Mã mục\n" +
+      'input: {"maMuc":""}\n';
+    const property = resolvePropertyFromFieldAliases(td, {
+      maMuc: "ItemCode",
+    });
+    assert.equal(property, "ItemCode");
+    const bound = bindTargetPropertyInTestData(td, {
+      propertyOverride: property,
+    });
+    assert.equal(bound.bound, true);
+    assert.match(bound.testData, /target\.property:\s*ItemCode/);
+    assert.match(bound.testData, /input:\s*\{"ItemCode":""\}/);
+  });
+
   it("applies propertyOverride from LLM shortlist", () => {
     const td =
       "primaryBucket: VALIDATION_DATA\n" +

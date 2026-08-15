@@ -5,14 +5,12 @@ import {
   Button,
   Card,
   Col,
-  Input,
   Row,
   Space,
   Statistic,
   Table,
   Tag,
   Typography,
-  Upload,
 } from "antd";
 import { Link } from "react-router-dom";
 import { executions, reporting } from "../../api";
@@ -31,7 +29,7 @@ type CovRow = {
 };
 
 /**
- * Báo cáo — tổng hợp Execution (Unit/E2E regression) + Coverage phụ.
+ * Báo cáo — tổng hợp Execution (Unit/E2E regression).
  * Không đụng Generate / Verify / Apply.
  */
 export default function ReportsPage() {
@@ -40,7 +38,6 @@ export default function ReportsPage() {
   const [rows, setRows] = useState<CovRow[]>([]);
   const [history, setHistory] = useState<Execution[]>([]);
   const [loading, setLoading] = useState(false);
-  const [title, setTitle] = useState("Báo cáo kiểm thử");
 
   const load = useCallback(async () => {
     if (!project) return;
@@ -196,90 +193,6 @@ export default function ReportsPage() {
             },
           ]}
         />
-      </Card>
-
-      <Card title="Coverage (Unit — phụ)" style={{ marginBottom: 16 }}>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-          Upload LCOV/Cobertura sau khi chạy Unit có coverage, hoặc lấy từ Verify Unit. Không bắt buộc
-          cho E2E.
-        </Typography.Paragraph>
-        <Upload
-          accept=".info,.lcov,.xml,.txt"
-          beforeUpload={async (file) => {
-            try {
-              const content = await file.text();
-              const fmt = file.name.endsWith(".xml") ? "cobertura" : "lcov";
-              await reporting.uploadCoverage(project.id, {
-                format: fmt,
-                content,
-                fileName: file.name,
-              });
-              message.success("Đã upload coverage");
-              await load();
-            } catch (e) {
-              message.error(e instanceof Error ? e.message : "Upload thất bại");
-            }
-            return false;
-          }}
-          showUploadList={false}
-        >
-          <Button>Chọn file coverage</Button>
-        </Upload>
-        <Table
-          style={{ marginTop: 16 }}
-          rowKey="id"
-          loading={loading}
-          dataSource={rows}
-          pagination={false}
-          columns={[
-            { title: "Format", dataIndex: "format", width: 100 },
-            {
-              title: "Line %",
-              dataIndex: "linePct",
-              width: 100,
-              render: (v: number) => `${v}%`,
-            },
-            {
-              title: "Branch %",
-              dataIndex: "branchPct",
-              width: 100,
-              render: (v: number | null | undefined) => (v == null ? "—" : `${v}%`),
-            },
-            { title: "File", dataIndex: "fileName" },
-            { title: "Uploaded", dataIndex: "uploadedAt", width: 200 },
-          ]}
-        />
-      </Card>
-
-      <Card title="Lưu report meta">
-        <Space>
-          <Input
-            style={{ width: 280 }}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Tiêu đề báo cáo"
-          />
-          <Button
-            onClick={async () => {
-              try {
-                await reporting.createReport(project.id, {
-                  title,
-                  format: "html",
-                  meta: {
-                    coverageCount: rows.length,
-                    executionCount: history.length,
-                    ...summary,
-                  },
-                });
-                message.success("Đã tạo report meta");
-              } catch (e) {
-                message.error(e instanceof Error ? e.message : "Tạo report thất bại");
-              }
-            }}
-          >
-            Lưu report
-          </Button>
-        </Space>
       </Card>
     </div>
   );

@@ -69,11 +69,69 @@ export declare function bodyRuleScoreBoost(hitCount: number): number;
  * True when TC Function/title/steps imply file/image upload (not bare Module «tạo mới»).
  */
 export declare function queryImpliesUploadIntent(intent: UnitIntent, shapeBlob?: string | null): boolean;
+/** Delete / unassign / remove — never primary for upload/reject-format TCs. */
+export declare function pathIsDeleteLikeUnitPrimary(pathRel: string): boolean;
 /**
- * Upload / image-file TCs — boost Upload|Image|Physical*|DigitalFile* paths;
- * demote generic *DocumentCreate* and plain Create handlers without upload shape.
+ * Upload / image-file TCs — boost portable Upload|Image|Media|InitUpload paths;
+ * demote Delete* and generic DocumentCreate. Product stems stay in SUT aliases.
  */
 export declare function uploadIntentPathShapeAdjust(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): number;
+/**
+ * Title/steps search/lookup (tim kiem / theo ma / SearchTerm) — stronger than
+ * Function-only Assign when both cue. Portable VI/IT only.
+ */
+export declare function queryImpliesSearchLookupIntent(intent: UnitIntent, shapeBlob?: string | null): boolean;
+/**
+ * Search/lookup TCs — boost *Query* / GetAll / Search; demote Assign*Command.
+ */
+export declare function searchIntentPathShapeAdjust(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): number;
+/**
+ * Soft writeBack refuse: upload intent must not latch Delete* even when path
+ * shares Digital / Image tokens or body-rule throw+BadRequest.
+ */
+export declare function pathContradictsUploadVerb(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): boolean;
+/**
+ * Soft writeBack refuse: search/lookup title must not latch Assign*Command
+ * when a Query/GetAll-shaped alternative is expected.
+ */
+export declare function pathContradictsSearchVerb(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): boolean;
+/**
+ * True when Function/title/steps imply load/display/get-detail (read), not create.
+ * Portable VI/IT only — stronger than bare Module «Update …» / Function «chỉnh sửa».
+ */
+export declare function queryImpliesReadGetDetailIntent(intent: UnitIntent, shapeBlob?: string | null): boolean;
+/** Create*CommandHandler — wrong primary for read/get-detail TCs. */
+export declare function pathIsCreateLikeUnitPrimary(pathRel: string): boolean;
+/** Update / Edit / Patch primary shapes — portable across stacks (path segment / type name). */
+export declare function pathIsUpdateLikeUnitPrimary(pathRel: string): boolean;
+/**
+ * CRUD verb from TC text + intent — portable VI/IT only (no product nouns).
+ * Order: read > delete > update > create. `validate_reject` / trùng mã alone ≠ create.
+ */
+export type UnitCrudVerb = "create" | "read" | "update" | "delete";
+export declare function detectUnitCrudVerb(intent: UnitIntent, shapeBlob?: string | null): UnitCrudVerb | null;
+/** Path looks like a CRUD command/query primary (not DTO/entity). */
+export declare function pathLooksLikeCrudPrimary(pathRel: string): boolean;
+export declare function pathMatchesCrudVerb(pathRel: string, verb: UnitCrudVerb): boolean;
+/**
+ * Boost path matching detected CRUD verb; demote other CRUD primaries.
+ * Stack-agnostic: matches Create|Update|Delete|Get in path/type names.
+ */
+export declare function crudVerbPathShapeAdjust(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): number;
+/**
+ * Soft writeBack refuse: detected CRUD verb must not latch a different CRUD primary.
+ * validate_reject alone does not fire (verb null). read → pathContradictsReadGetVerb.
+ */
+export declare function pathContradictsCrudVerb(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): boolean;
+/**
+ * Read/get-detail TCs — boost Get* Query* Queries folder; demote Create*CommandHandler.
+ */
+export declare function readGetIntentPathShapeAdjust(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): number;
+/**
+ * Soft writeBack refuse: read/get-detail must not latch Create* (or Update*
+ * when title/steps are pure load/display/get-by-id).
+ */
+export declare function pathContradictsReadGetVerb(pathRel: string, intent: UnitIntent, shapeBlob?: string | null): boolean;
 /**
  * Storage / compartment / occupied state — stronger than assign/filter when both cue.
  * Portable IT: Compartment|Storage|Slot|IsOccupied (no product nouns).
@@ -146,6 +204,8 @@ export type PickBodyRuleOpts = {
      * Break cross-family score ties without treating them as ambiguous margin.
      */
     preferTokens?: string[] | null;
+    /** Full TC blob for verb contradiction (upload≠Delete, search≠Assign). */
+    shapeBlob?: string | null;
 };
 /** Count how many prefer tokens hit the path (portable domain nudge). */
 export declare function countPreferTokenHits(pathRel: string, preferTokens: string[] | null | undefined): number;

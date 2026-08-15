@@ -103,15 +103,40 @@ function tokensFrom(
   return [...bag].slice(0, 48);
 }
 
-async function loadModuleMapTokens(root: string): Promise<string[]> {
+type DiskProjectProfile = {
+  moduleMap?: Record<string, string>;
+  unit?: { codeAliasesFile?: string };
+};
+
+const profileCache = new Map<
+  string,
+  { at: number; value: DiskProjectProfile | null }
+>();
+
+async function loadDiskProjectProfile(
+  root: string
+): Promise<DiskProjectProfile | null> {
+  const cached = profileCache.get(root);
+  if (cached && Date.now() - cached.at < 5_000) return cached.value;
   try {
     const raw = await fs.readFile(
-      path.join(root, ".ai-test", "project-profile.json"),
+      path.join(root, ".ai-test", "project.profile.json"),
       "utf8"
     );
-    const parsed = JSON.parse(raw) as { moduleMap?: Record<string, string> };
+    const value = JSON.parse(raw) as DiskProjectProfile;
+    profileCache.set(root, { at: Date.now(), value });
+    return value;
+  } catch {
+    profileCache.set(root, { at: Date.now(), value: null });
+    return null;
+  }
+}
+
+async function loadModuleMapTokens(root: string): Promise<string[]> {
+  try {
+    const parsed = await loadDiskProjectProfile(root);
     const out: string[] = [];
-    for (const [k, v] of Object.entries(parsed.moduleMap || {})) {
+    for (const [k, v] of Object.entries(parsed?.moduleMap || {})) {
       if (k.length >= 3) out.push(k);
       for (const seg of (v || "").split(/[/\\]+/)) {
         if (seg.length >= 3) out.push(seg);
@@ -125,12 +150,19 @@ async function loadModuleMapTokens(root: string): Promise<string[]> {
 
 async function loadDiskCodeAliases(root: string): Promise<CodeAliasMap | null> {
   try {
+    const profile = await loadDiskProjectProfile(root);
+    const rel =
+      profile?.unit?.codeAliasesFile || ".ai-test/code-aliases.json";
     const raw = await fs.readFile(
-      path.join(root, ".ai-test", "code-aliases.json"),
+      path.join(root, rel.replace(/\\/g, "/").replace(/^\.\//, "")),
       "utf8"
     );
-    const parsed = JSON.parse(raw) as CodeAliasMap;
-    if (parsed && typeof parsed === "object") return parsed;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const aliases: CodeAliasMap = {};
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (Array.isArray(value)) aliases[key] = value.map(String).filter(Boolean);
+    }
+    if (Object.keys(aliases).length) return aliases;
   } catch {
     /* optional */
   }

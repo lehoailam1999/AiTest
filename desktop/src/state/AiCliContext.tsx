@@ -13,6 +13,7 @@ import {
   saveAiCliLocalState,
   type AiCliLocalState,
 } from "../lib/aiCli/localStore";
+import { clearAiCliReadyCache } from "../lib/aiCli/gate";
 import type { AiCliDetectResult, AiCliId } from "../lib/aiCli/types";
 import { isTauri, pickExecutableFile } from "../tauri/bridge";
 
@@ -45,6 +46,8 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
       try {
         let next = loadAiCliLocalState();
         if (opts?.clearManual) next = mergeManualPath(next, id, null);
+        // Settings/manual path changes must not reuse a stale READY probe.
+        clearAiCliReadyCache(id);
         const one = await detectOneOnUserMachine(id, next.manualPaths[id] ?? null);
         const lastResults = next.lastResults.filter((r) => r.provider !== id);
         lastResults.push(one);
@@ -73,6 +76,7 @@ export function AiCliProvider({ children }: { children: ReactNode }) {
     setDetecting(true);
     setLastError(null);
     try {
+      clearAiCliReadyCache(id);
       let next = mergeManualPath(loadAiCliLocalState(), id, picked);
       const one = await detectOneOnUserMachine(id, picked);
       const lastResults = next.lastResults.filter((r) => r.provider !== id);

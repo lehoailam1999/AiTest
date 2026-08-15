@@ -32,6 +32,12 @@ import {
 import { forcePacketPrimary } from "../contextPacket/forcePacketPrimary";
 import { primaryFile } from "../contextPacket/serialize";
 import type { AITestContextPacket } from "../contextPacket/types";
+import {
+  buildPacketFromUnitGrounding,
+  isUnitGroundingFastPathEligible,
+  parseUnitSourceGroundingContract,
+} from "./groundingFastPath";
+import { unitGroundingContractRelPath } from "../approvedTcSync/unitSourceGroundingContract";
 import { resolvePackagePrefix } from "../resolvePackagePrefix";
 import {
   buildRequirementTcModule,
@@ -39,6 +45,7 @@ import {
 } from "../testOutputLayout";
 import { sourceExtensionsForLanguage, suggestUnitTestPath } from "../stackHints";
 import type { CodeAliasMap } from "../projectIntelligence/viCodeAliases";
+import { loadUnitEnrichProfileKnobs } from "../approvedTcSync/loadUnitEnrichProfile";
 import { recordUnitJobMetric } from "../unitJobMetrics";
 import { syncWorkspaceRun } from "./auditSync";
 import { assertTcReadyForUnitGen } from "./assertTcReadyForUnitGen";
@@ -112,6 +119,8 @@ function refuseCodeToDesktop(code: string | undefined): string {
     FAIL_DOMAIN_GUARD: "domain_guard",
     FAIL_FEATURE_GAP: "feature_gap",
     FAIL_SUT_MISMATCH: "sut_mismatch",
+    FAIL_FIELD_UNBOUND: "field_unbound",
+    FAIL_OP_CONTRADICT: "op_contradict",
   };
   return map[(code || "").toUpperCase()] || "sut_mismatch";
 }
@@ -123,6 +132,9 @@ function canBypassFeatureGapWithAuthoritativeSut(opts: {
   tcBlob: string;
 }): boolean {
   if (!/FEATURE_GAP/i.test(opts.code || "")) return false;
+  // Authoritative path/code proves identity, not that a requested validation
+  // behavior exists. Never bypass Required/MaxLength/duplicate evidence gaps.
+  if (isValidationDataBucket(opts.tcBlob)) return false;
   if (!opts.primaryPath || !opts.sourceExcerpt.trim()) return false;
   const markers = extractTcSourceMarkers(opts.tcBlob || "");
   if (!(markers.paths.length > 0 || markers.codes.length > 0)) return false;
@@ -131,6 +143,113 @@ function canBypassFeatureGapWithAuthoritativeSut(opts: {
 
 function hasGroundedSourceForGen(primaryPath: string, sourceExcerpt: string): boolean {
   return Boolean((primaryPath || "").trim() && (sourceExcerpt || "").trim());
+}
+
+type DesktopSutGateOutcome =
+  | { ok: true; softBypassCode?: string; alwaysGenerateFeatureGap?: boolean }
+  | { ok: false; code: string; message: string };
+
+async function evaluateDesktopUnitSutGate(opts: {
+  projectRoot: string;
+  tc: TestCase;
+  approvedTcMd: string;
+  codeAliases: CodeAliasMap | null;
+  contextPacket: AITestContextPacket | undefined;
+  primaryRel: string;
+}): Promise<DesktopSutGateOutcome> {
+  const packet = opts.contextPacket;
+  const primary = packet
+    ? packet.files.find((f) => f.role === "primary") || primaryFile(packet)
+    : undefined;
+  const primaryPath = (opts.primaryRel || primary?.pathRel || "").replace(/\\/g, "/");
+  const excerpt = (primary?.content || "").trim();
+  const relatedExcerpt = (packet?.files || [])
+    .filter((f) => f.role === "dependency")
+    .map((f) => f.content || "")
+    .filter(Boolean)
+    .join("\n\n");
+  const knobs = await loadUnitProfileGateKnobs(opts.projectRoot);
+  const tcBlob = [
+    opts.approvedTcMd,
+    opts.tc.title,
+    opts.tc.module,
+    opts.tc.testData,
+    opts.tc.steps,
+    opts.tc.expectedResult,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const sutGate = decideUnitSutGate({
+    tcText: tcBlob,
+    primaryPath: primaryPath || null,
+    sourceExcerpt: excerpt || null,
+    relatedExcerpt: relatedExcerpt || null,
+    codeAliases: opts.codeAliases,
+    moduleText: [opts.tc.module, opts.tc.title, (opts.approvedTcMd || "").slice(0, 1500)]
+      .filter(Boolean)
+      .join("\n"),
+    domainGuards: knobs.domainGuards,
+    requireMarkers: knobs.requireMarkers !== false,
+    unitScope: knobs.unitScope,
+    minAlignment: knobs.minAlignment,
+  });
+  const groundedForGen = hasGroundedSourceForGen(primaryPath, excerpt);
+  const markerSet = extractTcSourceMarkers(tcBlob);
+  const markersMatch = primaryMatchesMarkers(primaryPath, markerSet);
+  const softBypassOk =
+    sutGate.decision === "block" &&
+    groundedForGen &&
+    canSoftBypassUnitSutGate({
+      code: sutGate.code,
+      primaryPath,
+      sourceExcerpt: excerpt,
+      tcBlob,
+      alignmentScore: sutGate.alignmentScore,
+      minAlignment: sutGate.minAlignment,
+      markersMatch,
+    });
+  if (
+    sutGate.decision === "block" &&
+    !softBypassOk &&
+    !canBypassFeatureGapWithAuthoritativeSut({
+      code: sutGate.code,
+      primaryPath,
+      sourceExcerpt: excerpt,
+      tcBlob,
+    }) &&
+    !(
+      knobs.genMode === "always_generate" &&
+      /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
+      !isValidationDataBucket(tcBlob)
+    )
+  ) {
+    const code = sutGate.code || "FAIL_NEEDS_MARKER";
+    const refuseCode = String(code);
+    const cta =
+      refuseCode === "FAIL_NEEDS_MARKER"
+        ? "Thêm path:/code: đúng domain, Approve lại, rồi Gen."
+        : refuseCode === "FAIL_FEATURE_GAP"
+          ? "Behavior không có trong source — đổi TC hoặc sửa BE rồi Re-Approve."
+          : refuseCode === "FAIL_FIELD_UNBOUND"
+            ? "Map field trong code-aliases.fields hoặc thêm target.property rồi Re-Approve."
+            : refuseCode === "FAIL_OP_CONTRADICT"
+              ? "Kiểm tra intent permission; với duplicate hãy dùng forbidOpTokens/preferSutMapKey."
+              : "Re-Approve TC với SUT đúng intent rồi Gen.";
+    return {
+      ok: false,
+      code,
+      message: `${code} — ${sutGate.reason}. ${cta}`,
+    };
+  }
+  return {
+    ok: true,
+    softBypassCode: softBypassOk ? String(sutGate.code || "FAIL_SUT_GATE") : undefined,
+    alwaysGenerateFeatureGap:
+      sutGate.decision === "block" &&
+      knobs.genMode === "always_generate" &&
+      /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
+      !isValidationDataBucket(tcBlob),
+  };
 }
 
 export { canTransitionUnitJob, UNIT_JOB_TRANSITIONS };
@@ -271,24 +390,6 @@ export async function startUnitIdeGenJob(opts: {
   }
 
   let agentExecutable: string | undefined;
-  try {
-    const cli = await ensureCursorAgentReady();
-    agentExecutable = cli.executablePath?.trim() || undefined;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    recordUnitJobMetric({
-      projectId,
-      contextSource: "unknown",
-      runnerUsed: "IDE_EXTENSION",
-      ideConnected: isIdeCodegenReady(),
-      jobId,
-      via: "ide-extension",
-      durationMs: Date.now() - started,
-      failReason: "ai_cli_not_ready",
-      ok: false,
-    });
-    return { ok: false, error: msg, code: "ai_cli_not_ready" };
-  }
 
   const packagePrefix = await resolvePackagePrefix(projectRoot, "");
   let manifest = await createUnitWorkspaceRun({
@@ -312,17 +413,15 @@ export async function startUnitIdeGenJob(opts: {
     projectRoot,
     UNIT_GEN_LIMITS.maxConventionsChars
   ).catch(() => "");
-  let codeAliases = deps.codeAliases || null;
-  if (!codeAliases || !Object.keys(codeAliases).length) {
-    try {
-      const { readTextFile } = await import("../../tauri/bridge");
-      const raw = await readTextFile(projectRoot, ".ai-test/code-aliases.json");
-      const parsed = JSON.parse(raw) as Record<string, string[]>;
-      if (parsed && typeof parsed === "object") codeAliases = parsed;
-    } catch {
-      /* optional */
-    }
-  }
+  // Profile disk aliases win over potentially stale API project meta.
+  const enrichProfile = await loadUnitEnrichProfileKnobs(projectRoot).catch(
+    () => null
+  );
+  let codeAliases =
+    enrichProfile?.codeAliases &&
+    Object.keys(enrichProfile.codeAliases).length
+      ? enrichProfile.codeAliases
+      : deps.codeAliases || null;
   let approvedTcMd = "";
   if (gate.ok && gate.mdPath) {
     try {
@@ -354,91 +453,158 @@ export async function startUnitIdeGenJob(opts: {
   let targetPath = uniquifyTestTargetRel(feHint.relativePath, tc.id);
   let contextPacket: unknown = undefined;
   let sutSourceFile = "";
+  let contextSource = "unknown";
 
   try {
-    const paths =
-      deps.sourceFiles.length > 0
-        ? deps.sourceFiles
-        : await ideListSourceFiles(
-            projectRoot,
-            sourceExtensionsForLanguage(deps.language || "")
-          );
-    const ctx = await buildGenerateContext({
-      projectRoot,
-      projectId,
-      language: deps.language || "",
-      framework: deps.framework === "auto" ? "" : deps.framework || "",
-      testCase: tc,
-      allSourcePaths: paths,
-      manualPrimaryPath: null,
-      forcedRelatedPaths: null,
-      broadLocalContext: deps.broadLocalContext,
-      codeAliases,
-      approvedTcMd: approvedTcMd || null,
-      requirementTitle: reqTitle,
-      preferIndexContext: true,
-      syncIndexIfMissing: true,
-    });
-    const impl = ctx.implementationPlan;
-    // Planner may mark non-ready for strict spec, but Gen should still continue when
-    // we have grounded TC + source; verify stage will judge spec compliance.
-    if (impl && impl.status !== "ready") {
-      const note =
-        `Implementation Planner non-ready: ${impl.status} — continue generate from TC + source; ` +
-        `spec compliance will be evaluated in Verify.`;
-      manifest = {
-        ...manifest,
-        timeline: pushTimeline(manifest.timeline || [], "job.gen.progress", note),
-      };
-      await persist(projectRoot, manifest);
-    }
-    contextPacket = ctx.packetForApi;
-    let primaryRel = (ctx.primaryPath || "").replace(/\\/g, "/");
-    // MD markers are Approve SoT — prefer over planner entry when MD has path:
-    const mdMarkers = extractTcSourceMarkers(approvedTcMd || "");
-    const markerPaths = (
-      mdMarkers.paths.length
-        ? mdMarkers
-        : extractTcSourceMarkers(
-            [approvedTcMd, tc.testData].filter(Boolean).join("\n")
-          )
-    ).paths;
-    if (mdMarkers.paths[0]) {
-      primaryRel = mdMarkers.paths[0].replace(/\\/g, "/");
-    } else if (impl?.entry?.pathRel) {
-      primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
-    } else if (markerPaths[0]) {
-      primaryRel = markerPaths[0].replace(/\\/g, "/");
-    }
-    if (primaryRel && isInterfaceLikePrimaryPath(primaryRel) && impl?.entry?.pathRel) {
-      primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
-    }
-    if (primaryRel) {
-      sutSourceFile = primaryRel;
-      let className =
-        impl?.entry?.symbol ||
-        ctx.packet.sourceUnderTest?.symbol ||
-        stemOfPath(primaryRel) ||
-        "";
-      if (/^I[A-Z]/.test(className) && impl?.entry?.symbol && !/^I[A-Z]/.test(impl.entry.symbol)) {
-        className = impl.entry.symbol;
-      } else if (/^I[A-Z]/.test(className)) {
-        className = stemOfPath(primaryRel);
+    const mdMarkersEarly = extractTcSourceMarkers(
+      [approvedTcMd, tc.testData].filter(Boolean).join("\n")
+    );
+    let groundingContract = null as ReturnType<
+      typeof parseUnitSourceGroundingContract
+    >;
+    if (gate.ok && gate.mdPath) {
+      try {
+        const { readTextFile } = await import("../../tauri/bridge");
+        const gRel = unitGroundingContractRelPath(gate.mdPath);
+        const raw = await readTextFile(projectRoot, gRel);
+        groundingContract = parseUnitSourceGroundingContract(raw);
+      } catch {
+        groundingContract = null;
       }
-      const grounded = suggestUnitTestPath({
-        language: deps.language || "",
-        framework: deps.framework === "auto" ? "" : deps.framework || "",
-        sourceFileName: primaryRel,
-        className,
-        module: tc.module || undefined,
-        requirementTitle: reqTitle,
-        testCaseTitle: tc.title,
-        packagePrefix,
-      });
-      targetPath = uniquifyTestTargetRel(grounded.relativePath, tc.id);
     }
 
-    // Force packet primary = planner/marker impl BEFORE gate (path+excerpt must agree).
+    let primaryRel = "";
+
+    if (isUnitGroundingFastPathEligible(groundingContract, mdMarkersEarly)) {
+      const built = await buildPacketFromUnitGrounding({
+        projectRoot,
+        projectId,
+        testCaseId: tc.id,
+        language: deps.language || "",
+        framework: deps.framework === "auto" ? "" : deps.framework || "",
+        module: tc.module,
+        contract: groundingContract,
+        readFile: ideReadFile,
+        targetProperty:
+          [approvedTcMd, tc.testData]
+            .filter(Boolean)
+            .join("\n")
+            .match(/^\s*target\.property\s*:\s*(\S+)/im)?.[1] || null,
+      });
+      if (built) {
+        contextPacket = built.packet;
+        contextSource = "grounding-contract";
+        primaryRel = built.primaryPath;
+        sutSourceFile = primaryRel;
+        deps.onProgress?.(
+          `grounding fast-path → ${primaryRel} (skip index retrieve/plan)`
+        );
+        const className =
+          groundingContract.primary.typeName || stemOfPath(primaryRel) || "";
+        const grounded = suggestUnitTestPath({
+          language: deps.language || "",
+          framework: deps.framework === "auto" ? "" : deps.framework || "",
+          sourceFileName: primaryRel,
+          className,
+          module: tc.module || undefined,
+          requirementTitle: reqTitle,
+          testCaseTitle: tc.title,
+          packagePrefix,
+        });
+        targetPath = uniquifyTestTargetRel(grounded.relativePath, tc.id);
+      }
+    }
+
+    if (!contextPacket) {
+      const paths =
+        deps.sourceFiles.length > 0
+          ? deps.sourceFiles
+          : await ideListSourceFiles(
+              projectRoot,
+              sourceExtensionsForLanguage(deps.language || "")
+            );
+      const ctx = await buildGenerateContext({
+        projectRoot,
+        projectId,
+        language: deps.language || "",
+        framework: deps.framework === "auto" ? "" : deps.framework || "",
+        testCase: tc,
+        allSourcePaths: paths,
+        manualPrimaryPath: null,
+        forcedRelatedPaths: null,
+        broadLocalContext: deps.broadLocalContext,
+        codeAliases,
+        approvedTcMd: approvedTcMd || null,
+        requirementTitle: reqTitle,
+        preferIndexContext: true,
+        syncIndexIfMissing: true,
+      });
+      contextSource = ctx.contextSource || "implementation-plan";
+      const impl = ctx.implementationPlan;
+      // Planner may mark non-ready for strict spec, but Gen should still continue when
+      // we have grounded TC + source; verify stage will judge spec compliance.
+      if (impl && impl.status !== "ready") {
+        const note =
+          `Implementation Planner non-ready: ${impl.status} — continue generate from TC + source; ` +
+          `spec compliance will be evaluated in Verify.`;
+        manifest = {
+          ...manifest,
+          timeline: pushTimeline(manifest.timeline || [], "job.gen.progress", note),
+        };
+        await persist(projectRoot, manifest);
+      }
+      contextPacket = ctx.packetForApi;
+      primaryRel = (ctx.primaryPath || "").replace(/\\/g, "/");
+      // MD markers are Approve SoT — prefer over planner entry when MD has path:
+      const mdMarkers = extractTcSourceMarkers(approvedTcMd || "");
+      const markerPaths = (
+        mdMarkers.paths.length
+          ? mdMarkers
+          : extractTcSourceMarkers(
+              [approvedTcMd, tc.testData].filter(Boolean).join("\n")
+            )
+      ).paths;
+      if (mdMarkers.paths[0]) {
+        primaryRel = mdMarkers.paths[0].replace(/\\/g, "/");
+      } else if (impl?.entry?.pathRel) {
+        primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
+      } else if (markerPaths[0]) {
+        primaryRel = markerPaths[0].replace(/\\/g, "/");
+      }
+      if (primaryRel && isInterfaceLikePrimaryPath(primaryRel) && impl?.entry?.pathRel) {
+        primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
+      }
+      if (primaryRel) {
+        sutSourceFile = primaryRel;
+        let className =
+          impl?.entry?.symbol ||
+          ctx.packet.sourceUnderTest?.symbol ||
+          stemOfPath(primaryRel) ||
+          "";
+        if (
+          /^I[A-Z]/.test(className) &&
+          impl?.entry?.symbol &&
+          !/^I[A-Z]/.test(impl.entry.symbol)
+        ) {
+          className = impl.entry.symbol;
+        } else if (/^I[A-Z]/.test(className)) {
+          className = stemOfPath(primaryRel);
+        }
+        const grounded = suggestUnitTestPath({
+          language: deps.language || "",
+          framework: deps.framework === "auto" ? "" : deps.framework || "",
+          sourceFileName: primaryRel,
+          className,
+          module: tc.module || undefined,
+          requirementTitle: reqTitle,
+          testCaseTitle: tc.title,
+          packagePrefix,
+        });
+        targetPath = uniquifyTestTargetRel(grounded.relativePath, tc.id);
+      }
+    }
+
+    // Force packet primary = planner/marker/grounding impl BEFORE gate.
     if (contextPacket && primaryRel) {
       contextPacket = await forcePacketPrimary({
         packet: contextPacket as AITestContextPacket,
@@ -455,121 +621,88 @@ export async function startUnitIdeGenJob(opts: {
       }
     }
 
-    // Phase 5 — Desktop hard-gate before Extension Gen (always; unresolved → no CLI).
-    const packet = contextPacket as AITestContextPacket | undefined;
-    const primary = packet
-      ? packet.files.find((f) => f.role === "primary") || primaryFile(packet)
-      : undefined;
-    const primaryPath = (primaryRel || primary?.pathRel || "").replace(/\\/g, "/");
-    const excerpt = (primary?.content || "").trim();
-    const relatedExcerpt = (packet?.files || [])
-      .filter((f) => f.role === "dependency")
-      .map((f) => f.content || "")
-      .filter(Boolean)
-      .join("\n\n");
-    const knobs = await loadUnitProfileGateKnobs(projectRoot);
-    const tcBlob = [
+    const gateOut = await evaluateDesktopUnitSutGate({
+      projectRoot,
+      tc,
       approvedTcMd,
-      tc.title,
-      tc.module,
-      tc.testData,
-      tc.steps,
-      tc.expectedResult,
-    ]
-      .filter(Boolean)
-      .join("\n");
-    const sutGate = decideUnitSutGate({
-      tcText: tcBlob,
-      primaryPath: primaryPath || null,
-      sourceExcerpt: excerpt || null,
-      relatedExcerpt: relatedExcerpt || null,
       codeAliases,
-      moduleText: [tc.module, tc.title, (approvedTcMd || "").slice(0, 1500)]
-        .filter(Boolean)
-        .join("\n"),
-      domainGuards: knobs.domainGuards,
-      // Phase 5 default: path:+code: required unless profile explicitly disables
-      requireMarkers: knobs.requireMarkers !== false,
-      unitScope: knobs.unitScope,
-      minAlignment: knobs.minAlignment,
+      contextPacket: contextPacket as AITestContextPacket | undefined,
+      primaryRel,
     });
-    const groundedForGen = hasGroundedSourceForGen(primaryPath, excerpt);
-    const markerSet = extractTcSourceMarkers(tcBlob);
-    const markersMatch = primaryMatchesMarkers(primaryPath, markerSet);
-    const softBypassOk =
-      sutGate.decision === "block" &&
-      groundedForGen &&
-      canSoftBypassUnitSutGate({
-        code: sutGate.code,
-        primaryPath,
-        sourceExcerpt: excerpt,
-        tcBlob,
-        alignmentScore: sutGate.alignmentScore,
-        minAlignment: sutGate.minAlignment,
-        markersMatch,
-      });
-    if (
-      sutGate.decision === "block" &&
-      !softBypassOk &&
-      !canBypassFeatureGapWithAuthoritativeSut({
-        code: sutGate.code,
-        primaryPath,
-        sourceExcerpt: excerpt,
-        tcBlob,
-      }) &&
-      !(
-        knobs.genMode === "always_generate" &&
-        /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
-        !isValidationDataBucket(tcBlob)
-      )
-    ) {
-      const code = sutGate.code || "FAIL_NEEDS_MARKER";
-      const msg =
-        `${code} — ${sutGate.reason}. ` +
-        `Thêm path:/code: đúng domain, Approve lại, rồi Gen.`;
-      // Strip poisoned packet so we never ship wrong primary to Extension.
+    if (!gateOut.ok) {
       contextPacket = undefined;
       sutSourceFile = "";
       manifest = {
         ...manifest,
         status: "gen_failed",
-        failReason: msg,
-        timeline: pushTimeline(manifest.timeline || [], "job.gen.failed", msg),
+        failReason: gateOut.message,
+        timeline: pushTimeline(
+          manifest.timeline || [],
+          "job.gen.failed",
+          gateOut.message
+        ),
       };
       await persist(projectRoot, manifest);
       recordUnitJobMetric({
         projectId,
-        contextSource: ctx.contextSource || "desktop-sut-gate",
+        contextSource: contextSource || "desktop-sut-gate",
         runnerUsed: "IDE_EXTENSION",
         ideConnected: true,
         jobId,
         via: "ide-extension",
         durationMs: Date.now() - started,
-        failReason: refuseCodeToDesktop(code),
+        failReason: refuseCodeToDesktop(gateOut.code),
         ok: false,
       });
       return {
         ok: false,
-        error: msg,
-        code: refuseCodeToDesktop(code),
+        error: gateOut.message,
+        code: refuseCodeToDesktop(gateOut.code),
         manifest,
       };
     }
-    if (softBypassOk) {
+    if (gateOut.softBypassCode) {
       deps.onProgress?.(
-        `gate soft-bypass ${String(sutGate.code || "FAIL_SUT_GATE")} — confidence/alignment ok; generate from TC + source`
+        `gate soft-bypass ${gateOut.softBypassCode} — confidence/alignment ok; generate from TC + source`
       );
     }
-    if (
-      sutGate.decision === "block" &&
-      knobs.genMode === "always_generate" &&
-      /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
-      !isValidationDataBucket(tcBlob)
-    ) {
+    if (gateOut.alwaysGenerateFeatureGap) {
       deps.onProgress?.("fallback mode: FEATURE_GAP → always_generate");
     }
   } catch {
     /* Extension resolves SUT from disk + TC MD — still blocked by Extension Phase 5 gate */
+  }
+
+  // Probe CLI only after deterministic grounding/gates pass. Invalid TC/SUT
+  // now fails immediately instead of paying version + auth subprocess latency.
+  try {
+    const cli = await ensureCursorAgentReady();
+    agentExecutable = cli.executablePath?.trim() || undefined;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    manifest = {
+      ...manifest,
+      status: "gen_failed",
+      failReason: msg,
+      timeline: pushTimeline(
+        manifest.timeline || [],
+        "job.gen.failed",
+        "ai_cli_not_ready"
+      ),
+    };
+    await persist(projectRoot, manifest);
+    recordUnitJobMetric({
+      projectId,
+      contextSource,
+      runnerUsed: "IDE_EXTENSION",
+      ideConnected: isIdeCodegenReady(),
+      jobId,
+      via: "ide-extension",
+      durationMs: Date.now() - started,
+      failReason: "ai_cli_not_ready",
+      ok: false,
+    });
+    return { ok: false, error: msg, code: "ai_cli_not_ready", manifest };
   }
 
   deps.onProgress?.("IDE Unit Gen…");
@@ -818,7 +951,7 @@ export async function startUnitIdeGenJob(opts: {
     (ide.perTc || []).find((p) => p.metrics)?.metrics;
   recordUnitJobMetric({
     projectId,
-    contextSource: "implementation-plan",
+    contextSource: contextSource || "implementation-plan",
     runnerUsed: "IDE_EXTENSION",
     ideConnected: true,
     jobId,

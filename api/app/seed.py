@@ -33,8 +33,9 @@ def seed_admin(db: Session) -> None:
     db.add(
         AiBackendConnection(
             project_id=project.id,
-            backend_type=C.PROVIDER_OLLAMA,
-            status=C.STATUS_DISCONNECTED,
+            status=C.STATUS_NOT_CONFIGURED,
+            cli_type="cursor-cli",
+            cli_path="agent",
         )
     )
     db.commit()

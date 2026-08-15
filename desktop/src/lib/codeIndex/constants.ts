@@ -38,6 +38,21 @@ export function normalizeRelPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
+/** Normalize scanner/index paths to repository-relative; reject absolute paths outside root. */
+export function toProjectRelativePath(projectRoot: string, pathLike: string): string {
+  const root = projectRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  const raw = String(pathLike || "").replace(/\\/g, "/").trim();
+  if (!raw) return "";
+  const rawLow = raw.toLowerCase();
+  const rootLow = root.toLowerCase();
+  if (rawLow === rootLow) return "";
+  if (rawLow.startsWith(`${rootLow}/`)) {
+    return normalizeRelPath(raw.slice(root.length + 1));
+  }
+  if (/^[A-Za-z]:\//.test(raw) || raw.startsWith("/")) return "";
+  return normalizeRelPath(raw);
+}
+
 export function shouldIndexPath(pathRel: string): boolean {
   const norm = normalizeRelPath(pathRel);
   if (!norm || norm.startsWith(".")) return false;

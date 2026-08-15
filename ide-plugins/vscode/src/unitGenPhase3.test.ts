@@ -26,6 +26,47 @@ describe("slimTcMdForGen", () => {
     assert.match(slim, /## Test Data/);
     assert.match(slim, /path: src\/A\.cs/);
   });
+
+  it("strips YAML frontmatter and Meta table", () => {
+    const raw = [
+      "---",
+      "id: uuid-1",
+      "testCaseId: TC-001",
+      "title: Sample",
+      "---",
+      "",
+      "# Sample",
+      "",
+      "## Meta",
+      "",
+      "| Field | Value |",
+      "| --- | --- |",
+      "| Code | `TC-001` |",
+      "| Module | Storage |",
+      "",
+      "## Steps",
+      "",
+      "1. Do thing",
+      "",
+      "## Expected Result",
+      "",
+      "Ok",
+      "",
+      "## Test Data",
+      "",
+      "path: src/A.cs",
+      "code: A",
+      "path: src/A.cs",
+      "<!-- aitest:approved-tc-artifact — noise -->",
+    ].join("\n");
+    const slim = slimTcMdForGen(raw);
+    assert.doesNotMatch(slim, /^---/m);
+    assert.doesNotMatch(slim, /## Meta/);
+    assert.doesNotMatch(slim, /aitest:approved-tc-artifact/);
+    assert.match(slim, /## Steps/);
+    assert.match(slim, /## Expected Result/);
+    assert.equal((slim.match(/^path:\s*src\/A\.cs$/gim) || []).length, 1);
+  });
 });
 
 describe("resolveTestDataForGen", () => {

@@ -33,7 +33,7 @@ from app.llm.base_adapter import BaseLLMAdapter, ProgressCb
 from app.llm.cli.json_parser import clean_and_parse_json_array
 from app.llm.cli.process_runner import CLIProcessRunner
 from app.llm.cli.session_pool import CLISessionPool
-from app.llm.providers import LLMError
+from app.llm.errors import LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -477,7 +477,7 @@ class BaseCLIAdapter(BaseLLMAdapter):
                     "unauthorized",
                     "not logged",
                     "authentication",
-                    "api key",
+                    "credential",
                     "spend limit",
                 )
                 if any(h in low for h in hard):

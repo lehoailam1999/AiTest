@@ -17,6 +17,8 @@ export type UnitProjectIntentRule = {
   whenTitleOrStepsMatch?: string;
   requiredBodyPatterns?: string[];
   preferSutMapKey?: string;
+  /** Portable operation stems to remove from path-ranking / contradiction gates. */
+  forbidOpTokens?: string[];
   scopeAction?: UnitProjectIntentScopeAction;
 };
 
@@ -255,6 +257,7 @@ export function applyProjectIntentRules(
   let requiresBodyRule = base.requiresBodyRule;
   let uiOnly = base.uiOnly;
   let preferSutMapKey: string | undefined;
+  const forbiddenOpTokens = [...(base.forbiddenOpTokens || [])];
 
   for (const r of matched) {
     const action =
@@ -285,6 +288,10 @@ export function applyProjectIntentRules(
       }
     }
     if (r.preferSutMapKey?.trim()) preferSutMapKey = r.preferSutMapKey.trim();
+    for (const token of r.forbidOpTokens || []) {
+      const t = String(token || "").trim();
+      if (t) forbiddenOpTokens.push(t);
+    }
     // Project ids are free-form — map known portable ids onto UnitIntentClass when possible
     if (r.id === "ui_master_create" || r.id.startsWith("ui_")) {
       if (!classes.includes("ui_master_create")) classes.push("ui_master_create");
@@ -317,6 +324,7 @@ export function applyProjectIntentRules(
     featureTokens: base.featureTokens,
     classFeatureTokens: base.classFeatureTokens,
     requiresBodyRule,
+    forbiddenOpTokens: [...new Set(forbiddenOpTokens)],
   };
 
   // Recompute primary after class merge (prefer ui / validate)

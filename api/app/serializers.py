@@ -77,20 +77,14 @@ def requirement_detail_dto(s: Source) -> dict:
 
 
 def connection_dto(c: AiBackendConnection) -> dict:
-    has_key = bool(c.api_key_ciphertext)
     return {
         "id": str(c.id),
         "projectId": str(c.project_id),
-        "backendType": c.backend_type,
-        "provider": c.backend_type,
         "modelName": c.model_name,
-        "baseUrl": getattr(c, "base_url", None),
         "status": c.status,
-        "hasApiKey": has_key,
         "lastVerifiedAt": _iso(c.last_verified_at),
         "lastError": c.last_error,
-        "runnerMode": "AI_CLI",
-        "cliType": getattr(c, "cli_type", None) or "gemini-cli",
+        "cliType": getattr(c, "cli_type", None) or "cursor-cli",
         "cliPath": getattr(c, "cli_path", None),
         "cliArgsJson": getattr(c, "cli_args_json", None),
     }

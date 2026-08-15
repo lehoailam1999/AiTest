@@ -39,7 +39,6 @@ export async function syncProjectIndex(
   const next: CodeIndexSnapshot = {
     meta: {
       schema: CODE_INDEX_SCHEMA,
-      projectRootHint: projectRoot,
       createdAt: prev.meta.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       fileCount: 0,

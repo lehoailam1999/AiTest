@@ -168,6 +168,7 @@ describe("unitProjectIntentRules", () => {
           whenTitleOrStepsMatch: "(?i)duplicate|trùng",
           requiredBodyPatterns: ["(?i)CheckCode|Exists|BadRequest"],
           preferSutMapKey: "duplicate_reject",
+          forbidOpTokens: ["Permission", "CanWrite", "Authorize", "Deny"],
         },
       ],
       {
@@ -178,6 +179,12 @@ describe("unitProjectIntentRules", () => {
     );
     assert.ok(applied.matchedIds.includes("duplicate_reject"));
     assert.equal(applied.preferSutMapKey, "duplicate_reject");
+    assert.deepEqual(applied.intent.forbiddenOpTokens, [
+      "Permission",
+      "CanWrite",
+      "Authorize",
+      "Deny",
+    ]);
     assert.ok(applied.intent.classes.includes("validate_reject"));
     assert.equal(applied.intent.requiresBodyRule, true);
     assert.ok(

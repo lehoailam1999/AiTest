@@ -106,10 +106,12 @@ export function isUnitTcBlockedForGen(blob: string | null | undefined): {
       !m.targetProperty &&
       /input:\s*\{/.test(raw)
     ) {
+      const inputKey = raw.match(/input:\s*\{\s*["']?([^"':,\s}]+)/i)?.[1];
       return {
         blocked: true,
         reason:
-          "FAIL_FIELD_UNBOUND — target.field VI/label chưa bind target.property; input chưa map BE",
+          `FAIL_FIELD_UNBOUND — ${inputKey ? `Map ${inputKey}→<BEProperty> trong code-aliases.fields; ` : ""}` +
+          "target.field VI/label chưa bind target.property; input chưa map BE",
       };
     }
   }

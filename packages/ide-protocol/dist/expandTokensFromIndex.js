@@ -29,14 +29,25 @@ function splitPascal(stem) {
 /** Cache stems by path-list fingerprint (Approve batch reuses same index). */
 const _stemsCache = new Map();
 const STEMS_CACHE_MAX = 8;
+/** Content hash, memoized per array identity so repeated calls stay O(1). */
+const _fingerprintByArray = new WeakMap();
 function pathsFingerprint(paths) {
     const n = paths.length;
     if (n === 0)
         return "0";
-    const head = paths[0] || "";
-    const mid = paths[Math.floor(n / 2)] || "";
-    const tail = paths[n - 1] || "";
-    return `${n}|${head.length}|${mid.length}|${tail.length}|${head.slice(-24)}|${tail.slice(-24)}`;
+    const memo = _fingerprintByArray.get(paths);
+    if (memo)
+        return memo;
+    let hash = 5381;
+    for (const p of paths) {
+        for (let i = 0; i < p.length; i += 1) {
+            hash = (hash * 33) ^ p.charCodeAt(i);
+        }
+        hash = (hash * 33) ^ 10;
+    }
+    const fp = `${n}|${(hash >>> 0).toString(36)}`;
+    _fingerprintByArray.set(paths, fp);
+    return fp;
 }
 /** Extract searchable stems from indexed paths (folders + file/symbol names). */
 export function extractStemsFromIndexPaths(paths) {
@@ -78,17 +89,37 @@ export function extractStemsFromIndexPaths(paths) {
     _stemsCache.set(fp, out);
     return out;
 }
+const _expandCache = new Map();
+const EXPAND_CACHE_MAX = 512;
 /** Test/helper — clear stem cache. */
 export function clearIndexStemCache() {
     _stemsCache.clear();
+    _expandCache.clear();
+    _pathTokensCache.clear();
+    _corpusCache.clear();
+}
+const _pathTokensCache = new Map();
+const PATH_TOKENS_CACHE_MAX = 40_000;
+function pathTokens(pathRel) {
+    const cached = _pathTokensCache.get(pathRel);
+    if (cached)
+        return cached;
+    const low = pathRel.replace(/\\/g, "/").toLowerCase();
+    const entry = {
+        low,
+        parts: low.split(/[^a-z0-9]+/).filter(Boolean),
+    };
+    if (_pathTokensCache.size >= PATH_TOKENS_CACHE_MAX)
+        _pathTokensCache.clear();
+    _pathTokensCache.set(pathRel, entry);
+    return entry;
 }
 /** Path segment / substring match — shared by Approve rank + index token filter. */
 export function pathHitsIndexToken(pathRel, token) {
-    const low = pathRel.replace(/\\/g, "/").toLowerCase();
     const tl = token.toLowerCase();
     if (tl.length < 2)
         return false;
-    const parts = low.split(/[^a-z0-9]+/).filter(Boolean);
+    const { low, parts } = pathTokens(pathRel);
     if (tl.length <= 3) {
         return parts.some((p) => p === tl);
     }
@@ -96,11 +127,58 @@ export function pathHitsIndexToken(pathRel, token) {
         return true;
     return parts.some((p) => p.includes(tl) || (p.length >= 4 && tl.includes(p)));
 }
+const _corpusCache = new Map();
+const CORPUS_CACHE_MAX = 4;
+function pathCorpus(paths) {
+    const fp = pathsFingerprint(paths);
+    const cached = _corpusCache.get(fp);
+    if (cached)
+        return cached;
+    const lows = [];
+    const parts = new Set();
+    for (const p of paths) {
+        const entry = pathTokens(p);
+        lows.push(entry.low);
+        for (const part of entry.parts)
+            parts.add(part);
+    }
+    const corpus = {
+        joined: `\n${lows.join("\n")}\n`,
+        parts,
+        longParts: [...parts].filter((p) => p.length >= 4),
+        hits: new Map(),
+    };
+    if (_corpusCache.size >= CORPUS_CACHE_MAX)
+        _corpusCache.clear();
+    _corpusCache.set(fp, corpus);
+    return corpus;
+}
+function tokenHitsCorpus(corpus, token) {
+    const tl = token.toLowerCase();
+    if (tl.length < 2)
+        return false;
+    const memo = corpus.hits.get(tl);
+    if (memo !== undefined)
+        return memo;
+    let hit;
+    if (tl.length <= 3) {
+        hit = corpus.parts.has(tl);
+    }
+    else if (corpus.joined.includes(tl)) {
+        hit = true;
+    }
+    else {
+        hit = corpus.longParts.some((p) => tl.includes(p));
+    }
+    corpus.hits.set(tl, hit);
+    return hit;
+}
 /** Keep tokens that hit ≥1 indexed path. */
 export function filterTokensHittingPaths(tokens, paths) {
     if (!tokens.length || !paths.length)
         return [];
-    return tokens.filter((t) => paths.some((p) => pathHitsIndexToken(p, t)));
+    const corpus = pathCorpus(paths);
+    return tokens.filter((t) => tokenHitsCorpus(corpus, t));
 }
 /**
  * Match TC text (VI normalized + Latin identifiers) against index path stems.
@@ -111,6 +189,10 @@ export function expandTokensFromIndex(raw, paths, opts) {
     const minWord = opts?.minWordLen ?? 4;
     if (!raw?.trim() || !paths.length)
         return [];
+    const memoKey = `${pathsFingerprint(paths)}|${minStem}|${minWord}|${raw}`;
+    const memo = _expandCache.get(memoKey);
+    if (memo)
+        return memo;
     const stems = extractStemsFromIndexPaths(paths).filter((s) => s.length >= minStem);
     if (!stems.length)
         return [];
@@ -139,7 +221,11 @@ export function expandTokensFromIndex(raw, paths, opts) {
             }
         }
     }
-    return uniq(out.filter((t) => t.length >= minStem));
+    const expanded = uniq(out.filter((t) => t.length >= minStem));
+    if (_expandCache.size >= EXPAND_CACHE_MAX)
+        _expandCache.clear();
+    _expandCache.set(memoKey, expanded);
+    return expanded;
 }
 /** Alias — same helper used across Desktop rank + legacy seed. */
 export const pathHitsToken = pathHitsIndexToken;

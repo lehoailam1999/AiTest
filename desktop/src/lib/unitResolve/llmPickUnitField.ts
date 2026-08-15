@@ -23,23 +23,11 @@ export type LlmPickUnitFieldResult = {
 const MIN_CONFIDENCE = 0.7;
 const PICK_TIMEOUT_MS = 14_000;
 const SHORTLIST_CAP = 24;
-const LLM_PICK_MAX_INFLIGHT = 2;
-let llmFieldPickInflight = 0;
-const llmFieldPickWaiters: Array<() => void> = [];
-
-async function withLlmFieldPickSlot<T>(fn: () => Promise<T>): Promise<T> {
-  while (llmFieldPickInflight >= LLM_PICK_MAX_INFLIGHT) {
-    await new Promise<void>((resolve) => llmFieldPickWaiters.push(resolve));
-  }
-  llmFieldPickInflight += 1;
-  try {
-    return await fn();
-  } finally {
-    llmFieldPickInflight -= 1;
-    const next = llmFieldPickWaiters.shift();
-    if (next) next();
-  }
-}
+// Primary resolution and source reads finish at slightly different times per
+// TC. A 20 ms window fragmented one Approve wave into concurrent CLI cold
+// starts; 750 ms reliably coalesces the wave while adding negligible latency.
+const BATCH_WINDOW_MS = 750;
+const BATCH_CAP = 10;
 
 /**
  * Validate LLM (or mock) pick against property shortlist — refuse invented names.
@@ -107,36 +95,99 @@ export async function llmPickUnitField(
 ): Promise<LlmPickUnitFieldResult | null> {
   if (!input.candidates.length) return null;
   if (!input.projectId) return null;
-  const timeoutMs = input.pickTimeoutMs ?? PICK_TIMEOUT_MS;
-  return withLlmFieldPickSlot(async () => {
+  return enqueueFieldPick(input);
+}
+
+type PendingFieldPick = {
+  input: LlmPickUnitFieldInput;
+  resolve: (result: LlmPickUnitFieldResult | null) => void;
+};
+
+const fieldPickQueues = new Map<string, PendingFieldPick[]>();
+const fieldPickTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function enqueueFieldPick(
+  input: LlmPickUnitFieldInput
+): Promise<LlmPickUnitFieldResult | null> {
+  const key = String(input.projectId);
+  return new Promise((resolve) => {
+    const queue = fieldPickQueues.get(key) || [];
+    queue.push({ input, resolve });
+    fieldPickQueues.set(key, queue);
+    if (queue.length >= BATCH_CAP) {
+      const timer = fieldPickTimers.get(key);
+      if (timer) clearTimeout(timer);
+      fieldPickTimers.delete(key);
+      void flushFieldPickQueue(key);
+    } else if (!fieldPickTimers.has(key)) {
+      fieldPickTimers.set(
+        key,
+        setTimeout(() => {
+          fieldPickTimers.delete(key);
+          void flushFieldPickQueue(key);
+        }, BATCH_WINDOW_MS)
+      );
+    }
+  });
+}
+
+async function flushFieldPickQueue(projectId: string): Promise<void> {
+  const queued = fieldPickQueues.get(projectId) || [];
+  const batch = queued.splice(0, BATCH_CAP);
+  if (queued.length) fieldPickQueues.set(projectId, queued);
+  else fieldPickQueues.delete(projectId);
+  if (!batch.length) return;
+  try {
+    const { authFetch } = await import("../../api/client");
+    const controller = new AbortController();
+    const timeoutMs = Math.max(
+      40_000,
+      PICK_TIMEOUT_MS,
+      ...batch.map((item) => item.input.pickTimeoutMs || PICK_TIMEOUT_MS)
+    );
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const { authFetch } = await import("../../api/client");
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const raw = await authFetch<ApiPickFieldResponse>("/agent/pick-unit-field", {
+      const response = await authFetch<{ results?: ApiPickFieldResponse[] }>(
+        "/agent/pick-unit-field-batch",
+        {
           method: "POST",
           signal: controller.signal,
           body: JSON.stringify({
-            projectId: input.projectId,
-            fieldLabel: input.fieldLabel || "",
-            inputKeys: (input.inputKeys || []).slice(0, 12),
-            title: input.title || "",
-            steps: (input.steps || "").slice(0, 600),
-            primaryPath: (input.primaryPath || "").replace(/\\/g, "/"),
-            candidates: input.candidates.slice(0, SHORTLIST_CAP).map((property) => ({
-              property,
+            projectId,
+            items: batch.map(({ input }, id) => ({
+              id,
+              fieldLabel: input.fieldLabel || "",
+              inputKeys: (input.inputKeys || []).slice(0, 12),
+              title: input.title || "",
+              steps: (input.steps || "").slice(0, 600),
+              primaryPath: (input.primaryPath || "").replace(/\\/g, "/"),
+              candidates: input.candidates
+                .slice(0, SHORTLIST_CAP)
+                .map((property) => ({ property })),
             })),
           }),
-        });
-        return acceptFieldShortlistPick(raw, input.candidates);
-      } finally {
-        clearTimeout(timer);
+        }
+      );
+      if (!Array.isArray(response.results)) {
+        console.warn(
+          `[Approve field pick] batch returned no results (size=${batch.length})`
+        );
       }
-    } catch {
-      return null;
+      batch.forEach((pending, id) =>
+        pending.resolve(
+          acceptFieldShortlistPick(response.results?.[id], pending.input.candidates)
+        )
+      );
+    } finally {
+      clearTimeout(timer);
     }
-  });
+  } catch (error) {
+    console.warn(
+      `[Approve field pick] batch failed (size=${batch.length}):`,
+      error instanceof Error ? error.message : String(error)
+    );
+    batch.forEach((pending) => pending.resolve(null));
+  }
 }
 
 export type PickFieldFromShortlistFn = (

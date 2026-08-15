@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildDependencyGraph, resolveRelativeImport, resolveImportSpecifier } from "./buildDependencyGraph.js";
 import { buildSymbolIndex } from "./buildSymbolIndex.js";
-import { shouldIndexPath } from "./constants.js";
+import { shouldIndexPath, toProjectRelativePath } from "./constants.js";
 import { syncProjectIndex } from "./incrementalSync.js";
+import { loadIndexSnapshot } from "./indexStore.js";
 import { lookupSymbol } from "./lookup.js";
 import { parseTsJsSource } from "./parseTsAst.js";
 import { parseCsharpSource } from "./parseCsharp.js";
@@ -32,6 +33,54 @@ describe("codeIndex Phase 1", () => {
     assert.equal(shouldIndexPath("node_modules/foo/index.ts"), false);
     assert.equal(shouldIndexPath("dist/app.js"), false);
     assert.equal(shouldIndexPath(".ai-test/index.db"), false);
+  });
+
+  it("normalizes scanner and legacy index keys to repository-relative paths", async () => {
+    assert.equal(
+      toProjectRelativePath("D:\\Repo", "D:\\Repo\\src\\Foo.cs"),
+      "src/Foo.cs"
+    );
+    assert.equal(toProjectRelativePath("D:\\Repo", "C:\\Other\\Foo.cs"), "");
+    const absolute = "D:/Repo/src/Foo.cs";
+    const raw = JSON.stringify({
+      meta: {
+        schema: "aitest-code-index-v1",
+        projectRootHint: "D:/Repo",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        fileCount: 1,
+        symbolCount: 1,
+        edgeCount: 0,
+        parser: "lightweight-ts-js-cs-v1",
+      },
+      files: {
+        [absolute]: {
+          pathRel: absolute,
+          language: "cs",
+          contentHash: "a".repeat(64),
+          byteSize: 10,
+          symbolCount: 1,
+          importCount: 0,
+          indexedAt: "2026-01-01T00:00:00Z",
+        },
+      },
+      symbolsByFile: {
+        [absolute]: [{ name: "Foo", kind: "class", line: 1 }],
+      },
+      importsByFile: { [absolute]: [] },
+      exportsByFile: { [absolute]: [] },
+      symbolIndex: { foo: [absolute] },
+      dependencyGraph: { [absolute]: [] },
+    });
+    const snap = await loadIndexSnapshot("D:\\Repo", {
+      listFiles: async () => [],
+      readFile: async () => raw,
+      writeFile: async () => undefined,
+      readFileOptional: async () => raw,
+    });
+    assert.ok(snap?.files["src/Foo.cs"]);
+    assert.equal(snap?.files["src/Foo.cs"]?.pathRel, "src/Foo.cs");
+    assert.deepEqual(snap?.symbolIndex.foo, ["src/Foo.cs"]);
   });
 
   it("parses C# class/handler methods for Approve symbol rank", () => {

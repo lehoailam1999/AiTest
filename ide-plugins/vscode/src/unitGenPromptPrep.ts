@@ -9,9 +9,13 @@ export type UnitGroundingContract = {
     code?: string;
     line?: number;
     endLine?: number;
+    contentHash?: string;
   };
-  related?: Array<{ pathRel: string }>;
+  related?: Array<{ pathRel: string; contentHash?: string }>;
   deps?: string[];
+  confidence?: "HIGH" | "MEDIUM" | "LOW";
+  freshness?: string;
+  authoritative?: boolean;
 };
 
 export async function loadUnitGroundingContract(
@@ -34,6 +38,17 @@ export function groundingRelatedPaths(contract: UnitGroundingContract | null): s
   const related = (contract.related || []).map((r) => r.pathRel).filter(Boolean);
   const deps = (contract.deps || []).filter(Boolean);
   return [...related, ...deps];
+}
+
+/** True when companion contract can authoritatively pin primary without disk re-rank. */
+export function isAuthoritativeUnitGrounding(
+  contract: UnitGroundingContract | null | undefined
+): boolean {
+  if (!contract?.primary?.pathRel?.trim()) return false;
+  if (contract.authoritative !== true) return false;
+  if (contract.freshness !== "fresh") return false;
+  if (!contract.primary.contentHash?.trim()) return false;
+  return contract.confidence === "HIGH" || contract.confidence === "MEDIUM";
 }
 
 function extractMarker(blob: string, key: string): string {

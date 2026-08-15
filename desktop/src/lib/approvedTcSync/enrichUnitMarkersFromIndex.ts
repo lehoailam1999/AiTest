@@ -22,13 +22,13 @@ import {
   orderCandidatesForBodyRuleOpen,
   preferDtoValidatorForHints,
   applyLayerHintPrimaryPromotion,
-  parseUnitLayerHint,
   resolveSutMapPin,
   softCrossCuttingDenied,
   tcImpliesBehaviorPrimary,
   UNIT_BODY_RULE,
   detectUnitCrudVerb,
   confidenceMdWarning,
+  behaviorEvidenceInExcerpt,
   type BodyRuleScoredCandidate,
   type UnitIntent,
   type UnitApproveConfidence,
@@ -38,6 +38,8 @@ import { isTauri, listSourceFiles, readTextFile } from "../../tauri/bridge";
 import { loadIndexSnapshot } from "../codeIndex/indexStore";
 import { createTauriCodeIndexIo } from "../codeIndex/tauriIo";
 import type { CodeIndexSnapshot } from "../codeIndex/types";
+import type { IndexFreshnessStatus } from "../unitResolve/checkIndexFileFreshness";
+import { fieldEvidencePaths } from "../unitResolve/resolveFieldFromIndex";
 import { buildProjectIndexCached } from "../projectIntelligence/projectIndex";
 import {
   extractMatchTokens,
@@ -52,17 +54,19 @@ import {
   buildUnitApproveQuery,
   llmPickUnitPrimary,
   llmPickUnitField,
-  LLM_PICK_RETRY_TIMEOUT_MS,
   resolveUnitPrimaryFromIndex,
   snapshotFromPaths,
   bindTargetPropertyInTestData,
   buildFieldPropertyShortlist,
   resolveFieldFromIndex,
+  resolvePropertyFromFieldAliases,
+  isIndexedPropertyName,
   type PickFromShortlistFn,
   type PickFieldFromShortlistFn,
 } from "../unitResolve";
 import { isUnitTestCaseType } from "../testEngine";
 import {
+  parseCodeMarker,
   preferredCodeMarkerFromIndex,
   resolveSeedsFromCodeIndex,
 } from "./progressiveSeedFromCodeIndex";
@@ -116,16 +120,45 @@ async function resolvePropertyOverrideForBind(
     title?: string | null;
     steps?: string | null;
     pickFieldFromShortlist?: PickFieldFromShortlistFn | null;
+    fieldAliases?: Record<string, string | string[]> | null;
+    readExcerpt?: ReadSourceExcerpt | null;
   }
 ): Promise<string | null> {
   const raw = (testData || "").trim();
   if (!raw) return null;
-  const propM = raw.match(/^\s*target\.property\s*:\s*(\S+)/im);
-  if (propM?.[1] && /^[A-Za-z_][\w]*$/.test(propM[1])) return null;
   const fieldM = raw.match(/^\s*target\.field\s*:\s*(.+)$/im);
   if (!fieldM) return null;
   const fieldLabel = fieldM[1].trim();
   if (!fieldLabel) return null;
+
+  const dtoPaths = fieldEvidencePaths({
+    codeIndex: opts.codeIndex,
+    primaryPath: opts.primaryPath,
+    relatedPaths: opts.relatedPaths || [],
+  });
+  const dtoExcerpts: Record<string, string> = {};
+  if (opts.readExcerpt) {
+    await Promise.all(
+      dtoPaths.slice(0, 6).map(async (pathRel) => {
+        dtoExcerpts[pathRel] = (await opts.readExcerpt!(pathRel)) || "";
+      })
+    );
+  }
+  const shortlist = buildFieldPropertyShortlist({
+    codeIndex: opts.codeIndex,
+    primaryPath: opts.primaryPath,
+    relatedPaths: opts.relatedPaths || [],
+    dtoExcerpts,
+  });
+  const propM = raw.match(/^\s*target\.property\s*:\s*(\S+)/im);
+  const existingProp = propM?.[1]?.trim() || "";
+  // Existing Latin-looking labels (hoSoVuAn) are NOT bound until ∈ index shortlist.
+  if (existingProp && isIndexedPropertyName(existingProp, shortlist)) {
+    return null;
+  }
+
+  const aliased = resolvePropertyFromFieldAliases(raw, opts.fieldAliases);
+  if (aliased) return aliased;
 
   let inputKeys: string[] = [];
   const inputM = raw.match(/^\s*input\s*:\s*(\{[\s\S]*?\})\s*$/im);
@@ -142,15 +175,11 @@ async function resolvePropertyOverrideForBind(
     inputKeys,
     primaryPath: opts.primaryPath,
     relatedPaths: opts.relatedPaths || [],
+    dtoExcerpts,
     codeIndex: opts.codeIndex,
   });
   if (det) return det;
 
-  const shortlist = buildFieldPropertyShortlist({
-    codeIndex: opts.codeIndex,
-    primaryPath: opts.primaryPath,
-    relatedPaths: opts.relatedPaths || [],
-  });
   if (!shortlist.length || !opts.projectId) return null;
 
   const pickFn = opts.pickFieldFromShortlist || llmPickUnitField;
@@ -434,7 +463,11 @@ export function enrichTestDataWithUnitMarkers(
   relatedPaths?: string[] | null,
   confidence?: UnitApproveConfidence | null,
   codeIndex?: CodeIndexSnapshot | null,
-  propertyOverride?: string | null
+  propertyOverride?: string | null,
+  groundingMeta?: {
+    freshness?: IndexFreshnessStatus;
+    validateChecks?: string[];
+  } | null
 ): UnitMarkerEnrichResult {
   let existing = (testData || "").trim();
   if (hasManualUnitSourceMarkers(existing)) {
@@ -442,6 +475,17 @@ export function enrichTestDataWithUnitMarkers(
   }
   if (AUTO_ENRICHED_RE.test(existing)) {
     existing = stripAutoEnrichedMarkers(existing);
+  }
+  const confBand: UnitApproveConfidence =
+    confidence === "HIGH" || confidence === "MEDIUM" ? confidence : "LOW";
+  if (confBand === "LOW") {
+    return {
+      testData: existing,
+      enriched: false,
+      writeBack: false,
+      confidence: "LOW",
+      reason: "FAIL_CONFIDENCE_LOW — missing or LOW validated Approve confidence",
+    };
   }
   // BE field bind — deterministic and/or LLM override (must ∈ index shortlist)
   if (
@@ -461,6 +505,39 @@ export function enrichTestDataWithUnitMarkers(
   if (!pathRel || !code || /^[A-Za-z]:/.test(pathRel) || pathRel.includes(":/")) {
     return { testData: existing, enriched: false };
   }
+  if (codeIndex) {
+    const pathKey = Object.keys(codeIndex.files || {}).find(
+      (key) =>
+        key.replace(/\\/g, "/").toLowerCase() === pathRel.toLowerCase()
+    );
+    const { typeName, methodName } = parseCodeMarker(code);
+    const symbols = pathKey ? codeIndex.symbolsByFile[pathKey] || [] : [];
+    const typeCoLocated =
+      Boolean(typeName) &&
+      symbols.some(
+        (symbol) =>
+          symbol.kind !== "method" &&
+          symbol.kind !== "variable" &&
+          symbol.name.toLowerCase() === typeName.toLowerCase()
+      );
+    const methodCoLocated =
+      !methodName ||
+      symbols.some(
+        (symbol) =>
+          symbol.kind === "method" &&
+          symbol.name.toLowerCase() === methodName.toLowerCase() &&
+          symbol.parent?.toLowerCase() === typeName.toLowerCase()
+      );
+    if (!pathKey || !typeCoLocated || !methodCoLocated) {
+      return {
+        testData: existing,
+        enriched: false,
+        writeBack: false,
+        confidence: "LOW",
+        reason: "FAIL_VALIDATE — path/code are not co-located in index.db",
+      };
+    }
+  }
   if (isUnsuitableUnitPrimary(pathRel)) {
     return { testData: existing, enriched: false };
   }
@@ -479,16 +556,18 @@ export function enrichTestDataWithUnitMarkers(
     parsedCode && /^[A-Za-z_][A-Za-z0-9_]*$/.test(parsedCode) && code.includes(".")
       ? ` method=${parsedCode}`
       : "";
-  const confBand: UnitApproveConfidence =
-    confidence === "HIGH" || confidence === "MEDIUM" || confidence === "LOW"
-      ? confidence
-      : "HIGH";
   const confPart = confidenceMdWarning(confBand);
+  const freshnessPart = groundingMeta?.freshness
+    ? ` freshness=${groundingMeta.freshness}`
+    : "";
+  const checksPart = groundingMeta?.validateChecks?.length
+    ? ` checks=${groundingMeta.validateChecks.join("+")}`
+    : "";
   const block = [
     `path: ${pathRel}`,
     `code: ${code}`,
     ...formatRelatedMarkerLines(related),
-    `# auto-enriched from ${sourceNote} (score=${seed.score}${rulePart}${relatedPart}${methodPart}${confPart} writeBack=yes)`,
+    `# auto-enriched from ${sourceNote} (score=${seed.score}${rulePart}${relatedPart}${methodPart}${confPart}${freshnessPart}${checksPart} writeBack=yes)`,
   ].join("\n");
   const next = existing ? `${existing}\n${block}` : block;
   return {
@@ -577,8 +656,16 @@ function allPathsForRelated(
   return [...new Set([...fromDb, ...fromIndex].map((p) => p.replace(/\\/g, "/")))];
 }
 
+type MarkerSeed = {
+  pathRel: string;
+  score: number;
+  reason?: string;
+  hits?: string[];
+  ruleHits?: string[];
+};
+
 function promoteSeedForLayerHint(
-  seed: SeedCandidate,
+  seed: MarkerSeed,
   relatedPaths: string[],
   testData: string | null | undefined,
   index: ProjectFileIndex,
@@ -586,7 +673,7 @@ function promoteSeedForLayerHint(
   featureTokens: string[],
   symbolFromPath: (pathRel: string) => string | null
 ): {
-  seed: SeedCandidate;
+  seed: MarkerSeed;
   relatedPaths: string[];
   symbol: string | null;
   promoted: boolean;
@@ -833,6 +920,37 @@ export async function enrichTcTestDataFromIndexAsync(
 ): Promise<UnitMarkerEnrichResult> {
   const rawTd = (tc.testData || "").trim();
   if (hasManualUnitSourceMarkers(rawTd)) {
+    // Re-Approve still applies field aliases even when path/code were manually
+    // pinned; marker ownership must not prevent target.property normalization.
+    if (
+      /^\s*target\.field\s*:/im.test(rawTd) &&
+      !/^\s*target\.property\s*:\s*[A-Za-z_]\w*/im.test(rawTd)
+    ) {
+      const manualProfile =
+        opts?.enrichProfile ||
+        (opts?.projectRoot
+          ? await loadUnitEnrichProfileKnobs(opts.projectRoot)
+          : null);
+      const property = resolvePropertyFromFieldAliases(
+        rawTd,
+        manualProfile?.fieldAliases
+      );
+      if (property) {
+        const markers = extractTcSourceMarkers(rawTd);
+        const bound = bindTargetPropertyInTestData(rawTd, {
+          primaryPath: markers.paths[0],
+          codeIndex: opts?.codeIndex,
+          propertyOverride: property,
+        });
+        if (bound.bound) {
+          return {
+            testData: bound.testData,
+            enriched: false,
+            writeBack: false,
+          };
+        }
+      }
+    }
     return { testData: rawTd, enriched: false, writeBack: false };
   }
   const tcForResolve = prepareTcForEnrich(tc);
@@ -892,6 +1010,16 @@ export async function enrichTcTestDataFromIndexAsync(
     title: tc.title,
     matchedIntentIds: applied.matchedIds,
   });
+  if (applied.preferSutMapKey && !pinPath) {
+    const reason =
+      `FAIL_FEATURE_GAP — sutMap key «${applied.preferSutMapKey}» không resolve được production SUT`;
+    return {
+      testData: withSutResolveSkipNote(tcForResolve.testData, reason),
+      enriched: false,
+      skipReason: reason,
+      writeBack: false,
+    };
+  }
   if (pinPath && opts?.readExcerpt) {
     const guard = applyProfileDomainGuards({
       moduleText: [tc.module, tc.title].filter(Boolean).join("\n"),
@@ -952,20 +1080,93 @@ export async function enrichTcTestDataFromIndexAsync(
           title: tc.title,
           steps: tc.steps,
           pickFieldFromShortlist: opts?.pickFieldFromShortlist,
+          fieldAliases: profile?.fieldAliases,
         }
       );
+      const boundPreview = bindTargetPropertyInTestData(tcForResolve.testData, {
+        primaryPath: pinPath,
+        relatedPaths,
+        codeIndex: opts?.codeIndex,
+        propertyOverride,
+      }).testData;
+      // sutMap is authoritative for path selection, not for behavior existence.
+      // Read bounded related DTO/Validator bodies in parallel before marker write.
+      const relatedBodies = opts?.readExcerpt
+        ? await Promise.all(
+            relatedPaths.slice(0, 4).map(async (pathRel) => {
+              try {
+                return (await opts.readExcerpt!(pathRel)) || "";
+              } catch {
+                return "";
+              }
+            })
+          )
+        : [];
+      const fullExcerpt = [excerpt, ...relatedBodies].filter(Boolean).join("\n\n");
+      const evidence = behaviorEvidenceInExcerpt(boundPreview, fullExcerpt);
+      if (!evidence.ok) {
+        const reason =
+          evidence.skipReason ||
+          "FAIL_FEATURE_GAP — behavior không có trong source";
+        return {
+          testData: withSutResolveSkipNote(boundPreview, reason),
+          enriched: false,
+          skipReason: reason,
+          writeBack: false,
+        };
+      }
+      if (intent.requiresBodyRule && intent.rulePatterns.length) {
+        const hasRule = intent.rulePatterns.some((pattern) => {
+          const raw = String(pattern || "").replace(/^\(\?i\)/i, "");
+          try {
+            return new RegExp(raw, "i").test(fullExcerpt);
+          } catch {
+            return fullExcerpt.toLowerCase().includes(raw.toLowerCase());
+          }
+        });
+        if (!hasRule) {
+          const reason =
+            `FAIL_FEATURE_GAP — behavior [${intent.rulePatterns
+              .slice(0, 4)
+              .join(", ")}] không có trong source`;
+          return {
+            testData: withSutResolveSkipNote(boundPreview, reason),
+            enriched: false,
+            skipReason: reason,
+            writeBack: false,
+          };
+        }
+      }
       return enrichTestDataWithUnitMarkers(
-        tcForResolve.testData,
+        boundPreview,
         { ...seed, ruleHits: ["sutMap"] },
         "sutMap",
         opts?.projectRoot,
         code,
         relatedPaths,
-        null,
+        "MEDIUM",
         opts?.codeIndex,
         propertyOverride
       );
     }
+    const reason =
+      `FAIL_FEATURE_GAP — sutMap SUT «${pinPath}» không đọc được source`;
+    return {
+      testData: withSutResolveSkipNote(tcForResolve.testData, reason),
+      enriched: false,
+      skipReason: reason,
+      writeBack: false,
+    };
+  }
+  if (pinPath && !opts?.readExcerpt) {
+    const reason =
+      `FAIL_FEATURE_GAP — sutMap SUT «${pinPath}» cần source excerpt để validate`;
+    return {
+      testData: withSutResolveSkipNote(tcForResolve.testData, reason),
+      enriched: false,
+      skipReason: reason,
+      writeBack: false,
+    };
   }
 
   const moduleText = [tc.module, tc.title, opts?.requirementTitle]
@@ -1002,6 +1203,7 @@ export async function enrichTcTestDataFromIndexAsync(
         projectId: opts?.projectId || null,
         steps: tc.steps,
         expectedResult: tc.expectedResult,
+        testData: tcForResolve.testData,
       },
     });
 
@@ -1032,32 +1234,53 @@ export async function enrichTcTestDataFromIndexAsync(
         moduleText,
         profile?.domainGuards
       ).map((c) => c.pathRel);
-      const promoted = promoteSeedForLayerHint(
-        {
-          pathRel: seed.pathRel,
-          score: seed.score,
-          reason: seed.reason || "unitResolve",
-          hits: seed.hits,
-          ruleHits: seed.ruleHits,
-        },
-        relatedPaths,
-        tcForResolve.testData,
-        index,
-        opts?.codeIndex,
-        preferTokens,
-        (pathRel) =>
-          opts?.codeIndex
-            ? codeMarkerForEnrich(opts.codeIndex, pathRel, preferTokens, tc, intent)
-            : null
-      );
+      // An evidence-backed AI pick is atomic. Promoting only its path afterwards
+      // would detach code/property from the source packet that validated them.
+      const promoted =
+        resolved.source === "llm-shortlist"
+          ? {
+              seed: {
+                pathRel: seed.pathRel,
+                score: seed.score,
+                reason: seed.reason || "unitResolve",
+                hits: seed.hits,
+                ruleHits: seed.ruleHits,
+              },
+              relatedPaths,
+              symbol: resolved.symbol,
+            }
+          : promoteSeedForLayerHint(
+              {
+                pathRel: seed.pathRel,
+                score: seed.score,
+                reason: seed.reason || "unitResolve",
+                hits: seed.hits,
+                ruleHits: seed.ruleHits,
+              },
+              relatedPaths,
+              tcForResolve.testData,
+              index,
+              opts?.codeIndex,
+              preferTokens,
+              (pathRel) =>
+                opts?.codeIndex
+                  ? codeMarkerForEnrich(
+                      opts.codeIndex,
+                      pathRel,
+                      preferTokens,
+                      tc,
+                      intent
+                    )
+                  : null
+            );
       relatedPaths = filterCandidatesByDomainGuards(
         promoted.relatedPaths.map((pathRel) => ({ pathRel })),
         moduleText,
         profile?.domainGuards
       ).map((c) => c.pathRel);
-      const propertyOverride = await resolvePropertyOverrideForBind(
-        tcForResolve.testData,
-        {
+      const propertyOverride =
+        resolved.property ||
+        (await resolvePropertyOverrideForBind(tcForResolve.testData, {
           primaryPath: promoted.seed.pathRel,
           relatedPaths,
           codeIndex: opts?.codeIndex,
@@ -1065,8 +1288,88 @@ export async function enrichTcTestDataFromIndexAsync(
           title: tc.title,
           steps: tc.steps,
           pickFieldFromShortlist: opts?.pickFieldFromShortlist,
+          fieldAliases: profile?.fieldAliases,
+          readExcerpt: opts?.readExcerpt,
+        }));
+      const targetField = String(tcForResolve.testData || "").match(
+        /^\s*target\.field\s*:\s*(.+)$/im
+      )?.[1]?.trim();
+      if (targetField) {
+        const existingProperty = String(tcForResolve.testData || "").match(
+          /^\s*target\.property\s*:\s*(\S+)/im
+        )?.[1]?.trim();
+        const ownedProperties = buildFieldPropertyShortlist({
+          codeIndex: opts?.codeIndex,
+          primaryPath: promoted.seed.pathRel,
+          relatedPaths,
+        });
+        const propertyBound =
+          isIndexedPropertyName(propertyOverride, ownedProperties) ||
+          isIndexedPropertyName(existingProperty, ownedProperties);
+        if (!propertyBound) {
+          const reason =
+            `FAIL_FIELD_UNBOUND — «${targetField}» chưa map được vào property thuộc DTO/source`;
+          // Keep the independently validated primary grounding, but never retain
+          // the TC label as a guessed backend property. LOW makes the companion
+          // contract non-authoritative, so Unit Gen remains blocked until the
+          // field is bound.
+          const testDataWithoutProperty = String(tcForResolve.testData || "")
+            .split(/\r?\n/)
+            .filter(
+              (line) =>
+                !/^\s*target\.property\s*:/i.test(line) &&
+                !/^\s*#\s*field-resolve:\s*skipped\b/i.test(line)
+            )
+            .join("\n")
+            .trim();
+          const grounding = enrichTestDataWithUnitMarkers(
+            testDataWithoutProperty,
+            {
+              pathRel: promoted.seed.pathRel,
+              score: promoted.seed.score,
+              reason: promoted.seed.reason || "unitResolve",
+              ruleHits: promoted.seed.ruleHits,
+            },
+            "index.db",
+            opts?.projectRoot,
+            promoted.symbol || resolved.symbol,
+            relatedPaths,
+            resolved.confidence,
+            opts?.codeIndex,
+            null,
+            {
+              freshness: resolved.freshness,
+              validateChecks: resolved.validateChecks,
+            }
+          );
+          if (grounding.enriched) {
+            const nonAuthoritative = grounding.testData.replace(
+              /\bconfidence=(HIGH|MEDIUM)\b/i,
+              "confidence=LOW"
+            );
+            return {
+              ...grounding,
+              testData:
+                `${nonAuthoritative}\n` +
+                `# field-resolve: skipped — ${reason}`,
+              skipReason: reason,
+              writeBack: true,
+              candidatesTop3: resolved.candidatesTop3,
+              bodyRuleLog: resolved.bodyRuleLog,
+              confidence: "LOW",
+            };
+          }
+          return {
+            ...grounding,
+            testData: withSutResolveSkipNote(testDataWithoutProperty, reason),
+            skipReason: reason,
+            writeBack: false,
+            candidatesTop3: resolved.candidatesTop3,
+            bodyRuleLog: resolved.bodyRuleLog,
+            confidence: "LOW",
+          };
         }
-      );
+      }
       const hit = enrichTestDataWithUnitMarkers(
         tcForResolve.testData,
         {
@@ -1081,7 +1384,11 @@ export async function enrichTcTestDataFromIndexAsync(
         relatedPaths,
         resolved.confidence,
         opts?.codeIndex,
-        propertyOverride
+        propertyOverride,
+        {
+          freshness: resolved.freshness,
+          validateChecks: resolved.validateChecks,
+        }
       );
       return {
         ...hit,
@@ -1455,6 +1762,7 @@ export async function enrichTcTestDataFromIndexAsync(
         title: tc.title,
         steps: tc.steps,
         pickFieldFromShortlist: opts?.pickFieldFromShortlist,
+        fieldAliases: profile?.fieldAliases,
       }
     );
     const hit = enrichTestDataWithUnitMarkers(
@@ -1475,7 +1783,7 @@ export async function enrichTcTestDataFromIndexAsync(
     );
     return {
       ...hit,
-      ruleHits: "ruleHits" in promoted.seed ? promoted.seed.ruleHits : [],
+      ruleHits: promoted.seed.ruleHits || [],
       relatedPaths: hit.relatedPaths,
       candidatesTop3: decision.candidatesTop3,
       writeBack: true,
@@ -1499,12 +1807,22 @@ export async function enrichTcTestDataFromIndexAsync(
 }
 
 export async function loadProjectCodeAliases(
-  projectRoot: string
+  projectRoot: string,
+  codeAliasesFile = ".ai-test/code-aliases.json"
 ): Promise<CodeAliasMap | null> {
   try {
-    const raw = await readTextFile(projectRoot, ".ai-test/code-aliases.json");
-    const parsed = JSON.parse(raw) as CodeAliasMap;
-    if (parsed && typeof parsed === "object") return parsed;
+    const raw = await readTextFile(
+      projectRoot,
+      codeAliasesFile.replace(/\\/g, "/").replace(/^\.\//, "")
+    );
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const aliases: CodeAliasMap = {};
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (!Array.isArray(value)) continue;
+      const values = value.map((v) => String(v || "").trim()).filter(Boolean);
+      if (values.length) aliases[key] = values;
+    }
+    if (Object.keys(aliases).length) return aliases;
   } catch {
     /* optional */
   }
@@ -1670,9 +1988,15 @@ export async function enrichApprovedCasesWithUnitMarkers(
     };
   }
 
-  const aliases =
-    opts.codeAliases || (await loadProjectCodeAliases(opts.projectRoot));
   const enrichProfile = await loadUnitEnrichProfileKnobs(opts.projectRoot);
+  // Fresh disk profile/aliases win over potentially stale project meta.
+  const aliases =
+    enrichProfile.codeAliases ||
+    opts.codeAliases ||
+    (await loadProjectCodeAliases(
+      opts.projectRoot,
+      enrichProfile.codeAliasesFile
+    ));
   const pathIndex = buildProjectIndexCached(
     opts.projectId || "local",
     indexPaths
@@ -1706,7 +2030,8 @@ export async function enrichApprovedCasesWithUnitMarkers(
     pickFieldFromShortlist,
   };
 
-  const CONCURRENCY = 6;
+  // Match the grounding batch cap so 10 Approve TCs share one CLI invocation.
+  const CONCURRENCY = 10;
   const work = opts.cases.map((tc, idx) => ({ tc, idx }));
   const results: EnrichOneHit[] = [];
 
@@ -1718,35 +2043,9 @@ export async function enrichApprovedCasesWithUnitMarkers(
     results.push(...chunkHits);
   }
 
-  // Sequential retry — bulk Approve often misses path:/code: when LLM picks time out under load.
-  let retryEnrichedCount = 0;
-  const retryPick = opts.projectId
-    ? makePickFromShortlist(opts.projectId, LLM_PICK_RETRY_TIMEOUT_MS)
-    : null;
-  const retryFieldPick = opts.projectId
-    ? makePickFieldFromShortlist(opts.projectId, LLM_PICK_RETRY_TIMEOUT_MS)
-    : null;
-  const retryCtx = {
-    ...enrichCtx,
-    pickFromShortlist: retryPick,
-    pickFieldFromShortlist: retryFieldPick,
-  };
-
-  for (const r of results) {
-    const original = opts.cases[r.idx];
-    if (!shouldEnrichUnitTc(original)) continue;
-    if (r.enriched && hasUnitPathCodeMarkers(r.tc.testData)) continue;
-    const retry = await enrichOneApprovedUnitCase(r.tc, r.idx, retryCtx);
-    if (retry.enriched && hasUnitPathCodeMarkers(retry.tc.testData)) {
-      r.tc = retry.tc;
-      r.enriched = true;
-      r.bodyRuleLog = retry.bodyRuleLog;
-      retryEnrichedCount += 1;
-    } else if (!hasUnitPathCodeMarkers(r.tc.testData) && retry.tc.testData) {
-      r.tc = retry.tc;
-      r.bodyRuleLog = retry.bodyRuleLog || r.bodyRuleLog;
-    }
-  }
+  // Fail-closed results are final for this pass. The old sequential retry could
+  // launch one cold CLI process per TC and turn a 10-case Approve into 10 minutes.
+  const retryEnrichedCount = 0;
 
   results.sort((a, b) => a.idx - b.idx);
   let enrichedCount = 0;

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   AiCliNotReadyError,
   assertGenerationAllowed,
+  clearAiCliReadyCache,
   ensureAiCliReady,
   ensureCursorAgentReady,
   ensureTcGenCliReady,
@@ -78,6 +79,7 @@ describe("assertGenerationAllowed", () => {
 
 describe("ensureAiCliReady", () => {
   it("returns executablePath when detect is READY", async () => {
+    clearAiCliReadyCache();
     const mem: AiCliLocalState = { manualPaths: {}, lastResults: [] };
     const ready = result("READY");
     const out = await ensureAiCliReady("cursor-cli", {
@@ -93,7 +95,30 @@ describe("ensureAiCliReady", () => {
     assert.equal(mem.lastResults[0]?.status, "READY");
   });
 
+  it("reuses READY cache within TTL (skips detect)", async () => {
+    clearAiCliReadyCache();
+    const mem: AiCliLocalState = { manualPaths: {}, lastResults: [] };
+    let detects = 0;
+    const ready = result("READY");
+    const deps = {
+      detectOne: async () => {
+        detects += 1;
+        return ready;
+      },
+      loadState: () => mem,
+      saveState: (s: AiCliLocalState) => {
+        mem.manualPaths = s.manualPaths;
+        mem.lastResults = s.lastResults;
+      },
+      isDesktop: () => true,
+    };
+    await ensureAiCliReady("cursor-cli", deps);
+    await ensureAiCliReady("cursor-cli", deps);
+    assert.equal(detects, 1);
+  });
+
   it("uses stored manual path when detecting", async () => {
+    clearAiCliReadyCache();
     let seen: string | null | undefined;
     await ensureAiCliReady("gemini-cli", {
       detectOne: async (_id: AiCliId, manual) => {
@@ -115,6 +140,7 @@ describe("ensureAiCliReady", () => {
   });
 
   it("ensureCursorAgentReady is cursor-cli", async () => {
+    clearAiCliReadyCache();
     let id: AiCliId | undefined;
     const out = await ensureCursorAgentReady({
       detectOne: async (got) => {
@@ -163,6 +189,28 @@ describe("ensureTcGenCliReady", () => {
         }),
       /was not found on this machine/i
     );
+  });
+
+  it("defaults unknown Settings cliType to cursor-cli", async () => {
+    clearAiCliReadyCache();
+    let got: string | null = null;
+    await assert.rejects(
+      () =>
+        ensureTcGenCliReady("not-a-cli", {
+          detectOne: async (id) => {
+            got = id;
+            return result("NOT_FOUND", {
+              provider: "cursor-cli",
+              name: "Cursor Agent CLI",
+            });
+          },
+          loadState: () => ({ manualPaths: {}, lastResults: [] }),
+          saveState: () => {},
+          isDesktop: () => true,
+        }),
+      /was not found on this machine/i
+    );
+    assert.equal(got, "cursor-cli");
   });
 });
 

@@ -9,6 +9,22 @@ import { detectOneOnUserMachine } from "./runDetect";
 import type { AiCliDetectResult, AiCliId } from "./types";
 import { isAiCliReady } from "./types";
 
+/** Avoid re-running version + auth probes on every Gen/Repair within a short window. */
+export const AI_CLI_READY_CACHE_TTL_MS = 60_000;
+
+type ReadyCacheEntry = {
+  result: AiCliDetectResult;
+  manualPath: string | null;
+  checkedAtMs: number;
+};
+
+const readyCache = new Map<AiCliId, ReadyCacheEntry>();
+
+export function clearAiCliReadyCache(id?: AiCliId): void {
+  if (id) readyCache.delete(id);
+  else readyCache.clear();
+}
+
 export class AiCliNotReadyError extends Error {
   readonly result: AiCliDetectResult;
   constructor(result: AiCliDetectResult) {
@@ -66,6 +82,7 @@ function defaultDeps(): EnsureAiCliReadyDeps {
 
 /**
  * Re-detect (manual path → PATH → known locations) then block unless READY + path.
+ * READY results are cached briefly so Gen + Repair do not pay two subprocess probes each time.
  */
 export async function ensureAiCliReady(
   id: AiCliId,
@@ -73,11 +90,31 @@ export async function ensureAiCliReady(
 ): Promise<AiCliDetectResult> {
   const d = { ...defaultDeps(), ...deps };
   const local = d.loadState();
-  const result = await d.detectOne(id, local.manualPaths[id] ?? null);
+  const manualPath = local.manualPaths[id] ?? null;
+  const cached = readyCache.get(id);
+  const now = Date.now();
+  if (
+    cached &&
+    cached.manualPath === manualPath &&
+    now - cached.checkedAtMs < AI_CLI_READY_CACHE_TTL_MS &&
+    isAiCliReady(cached.result.status) &&
+    cached.result.executablePath?.trim()
+  ) {
+    assertGenerationAllowed(cached.result);
+    return cached.result;
+  }
+
+  const result = await d.detectOne(id, manualPath);
   const lastResults = local.lastResults.filter((r) => r.provider !== id);
   lastResults.push(result);
   d.saveState({ ...local, lastResults });
-  assertGenerationAllowed(result);
+  try {
+    assertGenerationAllowed(result);
+  } catch (e) {
+    readyCache.delete(id);
+    throw e;
+  }
+  readyCache.set(id, { result, manualPath, checkedAtMs: now });
   return result;
 }
 
@@ -98,6 +135,6 @@ export async function ensureTcGenCliReady(
 ): Promise<AiCliDetectResult | null> {
   const d = { ...defaultDeps(), ...deps };
   if (!d.isDesktop()) return null;
-  const id = parseAiCliId(cliType) ?? "gemini-cli";
+  const id = parseAiCliId(cliType) ?? "cursor-cli";
   return ensureAiCliReady(id, d);
 }

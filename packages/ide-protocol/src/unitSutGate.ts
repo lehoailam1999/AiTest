@@ -491,10 +491,13 @@ export function decideUnitSutGate(opts: {
 
   const beh = behaviorEvidenceInExcerpt(tcText, fullExcerpt);
   if (!beh.ok) {
+    const reason = String(
+      beh.skipReason || "VALIDATION behavior not evidenced in excerpts"
+    ).replace(/^FAIL_FEATURE_GAP\s*[—:-]\s*/i, "");
     return block({
       decision: "block",
       code: "FAIL_FEATURE_GAP",
-      reason: beh.skipReason || "VALIDATION behavior not evidenced in excerpts",
+      reason,
       alignmentScore: opts.alignmentScore ?? 0,
       markersHit,
       domainGuard: "pass",

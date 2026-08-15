@@ -45,4 +45,6 @@ export {
   buildFieldPropertyShortlist,
   propertiesFromIndex,
   normFieldLabel,
+  resolvePropertyFromFieldAliases,
+  isIndexedPropertyName,
 } from "./resolveFieldFromIndex";

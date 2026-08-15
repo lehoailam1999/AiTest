@@ -55,6 +55,10 @@
                 "\\bdenied\\b",
                 "\\bforbidden\\b",
                 "validate\\s+(fail|error|reject)|validation\\s+(fail|error|reject)",
+                "xac\\s*thuc",
+                "bat\\s*buoc",
+                "\\brequired\\b",
+                "de\\s*trong(?!\\s*ma)",
                 "kiem\\s*tra\\s*(hop\\s*le|du\\s*lieu)",
                 "kiem\\s*tra\\s*ma",
                 "trung\\s*(ma|code)",
@@ -69,7 +73,10 @@
                 "ArgumentException",
                 "CheckCode",
                 "AlreadyExists",
-                "Duplicate"
+                "Duplicate",
+                "Required",
+                "NotEmpty",
+                "NotNull"
             ],
             "rulePatterns": [
                 "throw",
@@ -77,9 +84,12 @@
                 "ArgumentException",
                 "CheckCode",
                 "AlreadyExists",
-                "Duplicate"
+                "Duplicate",
+                "Required",
+                "NotEmpty",
+                "NotNull"
             ],
-            "featureTokens": ["Reject", "Deny", "CheckCode", "Duplicate"],
+            "featureTokens": ["Reject", "Deny", "CheckCode", "Duplicate", "Required"],
             "requiresBodyRule": true
         },
         {
@@ -95,9 +105,9 @@
                 "empty\\s*(code|id).*(auto|generat|sinh|assign)",
                 "(auto|generat|sinh).*(empty|blank|missing|trong)\\s*(code|ma|id)"
             ],
-            "codePatterns": ["userProvidedCode", "IsNullOrWhiteSpace", "IsNullOrEmpty"],
-            "rulePatterns": ["userProvidedCode", "IsNullOrWhiteSpace", "IsNullOrEmpty"],
-            "featureTokens": ["userProvidedCode", "IsNullOrWhiteSpace"],
+            "codePatterns": ["IsNullOrWhiteSpace", "IsNullOrEmpty", "Generate"],
+            "rulePatterns": ["IsNullOrWhiteSpace", "IsNullOrEmpty", "Generate"],
+            "featureTokens": ["IsNullOrWhiteSpace", "Generate"],
             "requiresBodyRule": true
         },
         {
@@ -112,7 +122,6 @@
                 "loc\\s*ngan",
                 "ngan\\s*luu\\s*tru",
                 "\\bisoccupied\\b",
-                "\\biscompartmentdisabled\\b",
                 "compartment.*(empty|occupied|enable|disable)",
                 "empty\\s*(slot|bin|compartment)"
             ],
@@ -155,6 +164,8 @@
             "priority": 72,
             "cues": [
                 "tim\\s*kiem",
+                "tim\\s*theo",
+                "theo\\s*ma",
                 "\\bsearch\\b",
                 "gan\\s*dung",
                 "fuzzy",
@@ -168,6 +179,28 @@
             "rulePatterns": ["SearchTerm", "Contains", "ToLower", "Search"],
             "featureTokens": ["Search", "SearchTerm", "Contains", "ToLower"],
             "requiresBodyRule": true
+        },
+        {
+            "id": "persist_read",
+            "priority": 68,
+            "cues": [
+                "hien\\s*thi",
+                "tai\\s*du\\s*lieu",
+                "tai\\s*chi\\s*tiet",
+                "lay\\s*chi\\s*tiet",
+                "lay\\s*theo\\s*(id|dinh\\s*danh)",
+                "chi\\s*tiet\\s*(da\\s*luu|ban\\s*ghi)",
+                "tra\\s*ve\\s*(day\\s*du|dung)",
+                "quan\\s*sat[:\\s]*read",
+                "\\bget\\s*(by\\s*)?(id|detail)\\b",
+                "\\bgetquery\\b",
+                "\\bload\\s*(detail|entity|record|data)\\b",
+                "display\\s*(detail|full|info)",
+                "\\bread\\b.*(detail|entity|record)"
+            ],
+            "codePatterns": ["GetQuery", "GetHandler", "FindById", "GetById"],
+            "featureTokens": ["Get", "Query", "Detail"],
+            "requiresBodyRule": false
         },
         {
             "id": "persist_create",
@@ -187,14 +220,16 @@
             "id": "upload_resource",
             "priority": 50,
             "cues": [
-                "tep\\s*ky\\s*thuat\\s*so",
-                "file\\s*ky\\s*thuat\\s*so",
-                "digital\\s*(file|asset)",
-                "ky\\s*thuat\\s*so",
-                "digital\\s*file"
+                "tai\\s*len",
+                "\\bupload\\b",
+                "hinh\\s*anh",
+                "\\bimage\\b",
+                "\\bmedia\\b",
+                "\\bphoto\\b",
+                "digital\\s*(file|asset)"
             ],
             "codePatterns": ["Upload", "InitUpload"],
-            "featureTokens": ["Upload", "InitUpload", "Digital"]
+            "featureTokens": ["Upload", "InitUpload"]
         },
         {
             "id": "reject",

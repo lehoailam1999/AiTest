@@ -158,7 +158,7 @@ export function renderUnitGroundingBlock(
     `function: ${fn}`,
     `title: ${title}`,
     "",
-    "(`requirement` = Module; `function`/`module` = Function.) Primary SUT below is authoritative for Gen — do not re-resolve.",
+    "(`requirement` = Module; `function`/`module` = Function.) Use the resolved SUT as authoritative only when the companion grounding contract is authoritative, validated, and hash-fresh; otherwise re-resolve.",
     "",
     ...resolvedLines,
     "",

@@ -9,6 +9,9 @@ import {
   type UnitProjectIntentRule,
 } from "@aitest/ide-protocol";
 import { isTauri, readTextFile } from "../../tauri/bridge";
+import type { CodeAliasMap } from "../projectIntelligence/viCodeAliases";
+
+export type UnitFieldAliasMap = Record<string, string | string[]>;
 
 export type UnitEnrichProfileKnobs = {
   scope: "backend" | "frontend" | "any";
@@ -18,6 +21,8 @@ export type UnitEnrichProfileKnobs = {
   intentRules: UnitProjectIntentRule[];
   intentRulesFile: string;
   codeAliasesFile: string;
+  codeAliases?: CodeAliasMap | null;
+  fieldAliases?: UnitFieldAliasMap;
   allowDiskReresolve: boolean;
 };
 
@@ -64,6 +69,8 @@ const DEFAULTS: UnitEnrichProfileKnobs = {
   intentRules: [],
   intentRulesFile: ".ai-test/unit-intent-rules.json",
   codeAliasesFile: ".ai-test/code-aliases.json",
+  codeAliases: null,
+  fieldAliases: {},
   allowDiskReresolve: false,
 };
 
@@ -92,6 +99,8 @@ export async function loadUnitEnrichProfileKnobs(
         : "backend";
     const intentRulesFile =
       unit.intentRulesFile || DEFAULTS.intentRulesFile;
+    const codeAliasesFile =
+      unit.codeAliasesFile || DEFAULTS.codeAliasesFile;
     let intentRules: UnitProjectIntentRule[] = [];
     try {
       const irRaw = await readTextFile(
@@ -99,6 +108,41 @@ export async function loadUnitEnrichProfileKnobs(
         intentRulesFile.replace(/\\/g, "/").replace(/^\.\//, "")
       );
       intentRules = parseUnitProjectIntentRules(JSON.parse(irRaw));
+    } catch {
+      /* optional */
+    }
+    let codeAliases: CodeAliasMap | null = null;
+    let fieldAliases: UnitFieldAliasMap = {};
+    try {
+      const aliasesRaw = await readTextFile(
+        projectRoot,
+        codeAliasesFile.replace(/\\/g, "/").replace(/^\.\//, "")
+      );
+      const parsed = JSON.parse(aliasesRaw) as Record<string, unknown>;
+      const domainAliases: CodeAliasMap = {};
+      for (const [key, value] of Object.entries(parsed || {})) {
+        if (key === "fields" || !Array.isArray(value)) continue;
+        const values = value.map((v) => String(v || "").trim()).filter(Boolean);
+        if (values.length) domainAliases[key] = values;
+      }
+      codeAliases = Object.keys(domainAliases).length ? domainAliases : null;
+      const fields = parsed?.fields;
+      if (fields && typeof fields === "object" && !Array.isArray(fields)) {
+        fieldAliases = Object.fromEntries(
+          Object.entries(fields as Record<string, unknown>)
+            .map(([key, value]) => {
+              if (Array.isArray(value)) {
+                const values = value
+                  .map((v) => String(v || "").trim())
+                  .filter(Boolean);
+                return values.length ? [key, values] : null;
+              }
+              const text = String(value || "").trim();
+              return text ? [key, text] : null;
+            })
+            .filter((entry): entry is [string, string | string[]] => Boolean(entry))
+        );
+      }
     } catch {
       /* optional */
     }
@@ -112,7 +156,9 @@ export async function loadUnitEnrichProfileKnobs(
       sutMap: flattenSutMap(unit.sutMap),
       intentRules,
       intentRulesFile,
-      codeAliasesFile: unit.codeAliasesFile || DEFAULTS.codeAliasesFile,
+      codeAliasesFile,
+      codeAliases,
+      fieldAliases,
       allowDiskReresolve: unit.allowDiskReresolve === true,
     };
   } catch {

@@ -219,7 +219,8 @@ export function filterUnitLogicLayerCandidates(cands, opts) {
     let allowed = cands.filter((c) => !isDeniedUnitPrimaryPath(c.pathRel));
     if (!allowed.length)
         return [];
-    if (tcImpliesBehaviorPrimary(opts?.tcText || "")) {
+    if (tcImpliesBehaviorPrimary(opts?.tcText || "") &&
+        !opts?.allowValidationLayerPrimary) {
         const withoutEntity = allowed.filter((c) => !isAnemicEntityLikePath(c.pathRel));
         if (withoutEntity.length)
             allowed = withoutEntity;

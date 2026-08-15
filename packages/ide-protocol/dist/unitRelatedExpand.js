@@ -158,8 +158,24 @@ export function expandUnitRelatedPaths(opts) {
         if (shape >= 32)
             score += 6;
         const validationLayer = isValidationLayerRelatedPath(pathRel);
-        if (preferDto && validationLayer)
+        if (preferDto && validationLayer) {
             score += 28;
+            const stem = stemOf(pathRel);
+            // Prefer *Dto / *Validator over same-folder sibling *Command (Assign/Update…)
+            if (/(Dto|Dtos|Validator)$/i.test(stem))
+                score += 55;
+            else if (/Command$/i.test(stem) && !/Handler/i.test(stem)) {
+                const entryFam = featureStem(stemOf(entry)).toLowerCase();
+                const candFam = featureStem(stem).toLowerCase();
+                if (entryFam &&
+                    candFam &&
+                    entryFam !== candFam &&
+                    !entryFam.startsWith(candFam) &&
+                    !candFam.startsWith(entryFam)) {
+                    score -= 40;
+                }
+            }
+        }
         if (score < 28 && !(preferDto && validationLayer && feat >= 22))
             continue;
         scored.push({ path: pathRel, score, validationLayer });
@@ -174,8 +190,15 @@ export function expandUnitRelatedPaths(opts) {
         seen.add(k);
         out.push(p);
     };
-    // Validation/auth: reserve slots for DTO/Validator/Command first
+    // Validation/auth: reserve slots for DTO/Validator first, then bare Command
     if (preferDto) {
+        const dtoFirst = scored.filter((s) => s.validationLayer &&
+            /(Dto|Dtos|Validator)$/i.test(stemOf(s.path)));
+        for (const s of dtoFirst) {
+            push(s.path);
+            if (out.length >= Math.min(3, max))
+                break;
+        }
         for (const s of scored) {
             if (!s.validationLayer)
                 continue;

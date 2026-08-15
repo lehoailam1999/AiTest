@@ -97,7 +97,34 @@ export function decideUnitGenGate(input: {
       cta: "sync_md",
     };
   }
-  // Phase 5: missing markers, or Approve skip-note without markers
+  // Preserve precise IR / Approve refusal before collapsing to missing markers.
+  const block = isUnitTcBlockedForGen(input.markerBlob);
+  if (block.blocked) {
+    return {
+      ok: false,
+      code: "not_ready",
+      message: `${block.reason} — «${input.tcLabel}». Sửa TC IR / Re-gen / Re-Approve trước khi Gen.`,
+      cta: "sync_md",
+    };
+  }
+  const skipCode = String(input.markerBlob || "").match(
+    /(?:sut-resolve\s+skipped|FAIL)[^ \n:—]*[:\s—-]+.*?\b(FAIL_FIELD_UNBOUND|FAIL_OP_CONTRADICT|FAIL_FEATURE_GAP)\b/i
+  )?.[1] ||
+    String(input.markerBlob || "").match(
+      /\b(FAIL_FIELD_UNBOUND|FAIL_OP_CONTRADICT|FAIL_FEATURE_GAP)\b/i
+    )?.[1];
+  if (input.sutResolveSkipped && skipCode) {
+    return {
+      ok: false,
+      code: "not_ready",
+      message:
+        `${skipCode.toUpperCase()} — Approve đã từ chối writeBack cho «${input.tcLabel}». ` +
+        `Sửa aliases/intent hoặc BE behavior rồi Re-Approve.`,
+      cta: "sync_md",
+    };
+  }
+
+  // Phase 5: truly missing markers, or unclassified Approve skip-note
   if (
     input.hasSourceMarkers === false ||
     (input.sutResolveSkipped === true && input.hasSourceMarkers !== true)
@@ -108,15 +135,6 @@ export function decideUnitGenGate(input: {
       message:
         `FAIL_NEEDS_MARKER — «${input.tcLabel}» chưa có path: + code: đáng tin. ` +
         `Approve lại (Connect IDE + index) hoặc thêm path:/code: thủ công vào Test Data, rồi Gen.`,
-      cta: "sync_md",
-    };
-  }
-  const block = isUnitTcBlockedForGen(input.markerBlob);
-  if (block.blocked) {
-    return {
-      ok: false,
-      code: "not_ready",
-      message: `${block.reason} — «${input.tcLabel}». Sửa TC IR / Re-gen / Re-Approve trước khi Gen.`,
       cta: "sync_md",
     };
   }

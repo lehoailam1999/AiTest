@@ -11,6 +11,9 @@ export function canSoftBypassUnitSutGate(opts: {
   markersMatch?: boolean;
 }): boolean {
   if (!/FEATURE_GAP|SUT_MISMATCH/i.test(opts.code || "")) return false;
+  if (/primaryBucket:\s*VALIDATION_DATA|trace:\s*VALIDATION_DATA/i.test(opts.tcBlob || "")) {
+    return false;
+  }
   if (!opts.primaryPath?.trim() || !opts.sourceExcerpt?.trim()) return false;
   if (opts.markersMatch === false) return false;
 

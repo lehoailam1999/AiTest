@@ -34,13 +34,36 @@ export function behaviorEvidenceInExcerpt(
     extractMarker(tcBlob, "target.property") ||
     extractMarker(tcBlob, "target.field");
   const fieldLatin = /^[A-Za-z_][\w]*$/.test(field) ? field : "";
+  const fieldLabel = fieldLatin || field || "target field";
+  const fieldWindow = (() => {
+    if (!fieldLatin) return body;
+    const at = low.indexOf(fieldLatin.toLowerCase());
+    if (at < 0) return "";
+    return body.slice(Math.max(0, at - 350), Math.min(body.length, at + 350));
+  })();
+  const escapedField = fieldLatin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const fieldHasAttribute = (attributePattern: string): boolean => {
+    if (!fieldLatin) return false;
+    return new RegExp(
+      `(?:${attributePattern})[^{};]{0,240}\\b${escapedField}\\b`,
+      "i"
+    ).test(body);
+  };
+  // Latin-looking TC labels that never appear in SUT are unbound — not feature gaps.
+  if (fieldLatin && !body.toLowerCase().includes(fieldLatin.toLowerCase())) {
+    return {
+      ok: false,
+      skipReason: `FAIL_FIELD_UNBOUND — «${fieldLabel}» không có trong source/index`,
+    };
+  }
 
   if (isValidationDataBucket(tcBlob)) {
     if (/required|bắt buộc|not\s*empty|không.*trống|mandatory/.test(constraint)) {
       if (fieldLatin) {
         if (
-          body.includes(fieldLatin) &&
-          /\[required\]|requiredattribute|maxlength|stringlength/i.test(body)
+          fieldHasAttribute(
+            "\\[\\s*required\\b|requiredattribute|notempty|notnull|@notnull|@notblank"
+          )
         ) {
           return { ok: true };
         }
@@ -55,7 +78,7 @@ export function behaviorEvidenceInExcerpt(
         return {
           ok: false,
           skipReason:
-            "FAIL_VALIDATE — required constraint for field not evidenced in excerpt",
+            `FAIL_FEATURE_GAP — «${fieldLabel}» không có required trong source`,
         };
       }
       if (/\[required\]|requiredattribute|stringlength|maxlength/i.test(body)) {
@@ -67,7 +90,7 @@ export function behaviorEvidenceInExcerpt(
       return {
         ok: false,
         skipReason:
-          "FAIL_VALIDATE — required constraint not evidenced in excerpt",
+          `FAIL_FEATURE_GAP — «${fieldLabel}» không có required trong source`,
       };
     }
     if (/unique|duplicate|trùng/.test(constraint)) {
@@ -77,14 +100,28 @@ export function behaviorEvidenceInExcerpt(
       return {
         ok: false,
         skipReason:
-          "FAIL_VALIDATE — duplicate/unique constraint not in excerpt",
+          `FAIL_FEATURE_GAP — «${fieldLabel}» không có duplicate/unique behavior trong source`,
       };
     }
     if (/maxlength|max\s*length|\d+\s*ký/.test(constraint)) {
-      if (/maxlength|stringlength|\[\s*max/i.test(body)) return { ok: true };
+      const maxLengthSignal =
+        /\[\s*maxlength\s*\(|\[\s*stringlength\s*\(|lengthattribute|@size\s*\(|@length\s*\(|maxlength\s*[:=]|\.max\s*\(/i;
+      if (
+        (fieldLatin &&
+          (fieldHasAttribute(
+            "\\[\\s*maxlength\\s*\\(|\\[\\s*stringlength\\s*\\(|lengthattribute|@size\\s*\\(|@length\\s*\\("
+          ) ||
+            new RegExp(
+              `\\b${escapedField}\\b[^\\n]{0,180}(?:maximumlength|maxlength|\\.max\\s*\\()`,
+              "i"
+            ).test(body))) ||
+        (!fieldLatin && maxLengthSignal.test(body))
+      ) {
+        return { ok: true };
+      }
       return {
         ok: false,
-        skipReason: "FAIL_VALIDATE — maxLength not evidenced in excerpt",
+        skipReason: `FAIL_FEATURE_GAP — «${fieldLabel}» không có MaxLength trong source`,
       };
     }
     if (/throw|badrequest|validate|required|notfound/i.test(low)) {
@@ -92,20 +129,16 @@ export function behaviorEvidenceInExcerpt(
     }
     return {
       ok: false,
-      skipReason: "FAIL_VALIDATE — VALIDATION behavior not evidenced in excerpt",
+      skipReason: `FAIL_FEATURE_GAP — behavior của «${fieldLabel}» không có trong source`,
     };
   }
 
   const tcLow = tcBlob.toLowerCase();
   if (
-    /reject|từ chối|duplicate|notfound|accessdenied|compartmentnotfound/i.test(
-      tcLow
-    )
+    /reject|từ chối|duplicate|notfound|accessdenied/i.test(tcLow)
   ) {
     if (
-      /throw|badrequest|notfound|accessdenied|duplicate|exists|compartmentnotfound/i.test(
-        low
-      )
+      /throw|badrequest|notfound|accessdenied|duplicate|exists/i.test(low)
     ) {
       return { ok: true };
     }

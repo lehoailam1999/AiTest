@@ -356,8 +356,7 @@ export default function E2ETestPage() {
 
   const aiReady =
     conn?.status === "Ready" ||
-    conn?.status === "Connected" ||
-    Boolean(conn?.hasApiKey);
+    conn?.status === "Connected";
 
   const selected = useMemo(
     () => approved.find((t) => t.id === testCaseId) || null,

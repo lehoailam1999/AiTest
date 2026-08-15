@@ -57,7 +57,7 @@ describe("behaviorEvidenceInExcerpt", () => {
       "public async Task Handle() { await _repo.UpdateAsync(entity); }"
     );
     assert.equal(r.ok, false);
-    assert.match(r.skipReason || "", /required/);
+    assert.match(r.skipReason || "", /FAIL_FIELD_UNBOUND|required/);
   });
 
   it("fails when handler validates a different field only", () => {
@@ -66,5 +66,39 @@ describe("behaviorEvidenceInExcerpt", () => {
       "if (string.IsNullOrWhiteSpace(cmd.EvidenceCode)) throw new BadRequestException();"
     );
     assert.equal(r.ok, false);
+  });
+
+  it("reports field-specific FEATURE_GAP when MaxLength is absent", () => {
+    const r = behaviorEvidenceInExcerpt(
+      "primaryBucket: VALIDATION_DATA\n" +
+        "target.constraint: maxLength 200\n" +
+        "target.field: Mã mục\n" +
+        "target.property: ItemCode",
+      "public class ItemDto { public string ItemCode { get; set; } }"
+    );
+    assert.equal(r.ok, false);
+    assert.match(r.skipReason || "", /FAIL_FEATURE_GAP/);
+    assert.match(r.skipReason || "", /ItemCode.*MaxLength/);
+  });
+
+  it("accepts MaxLength only when it belongs to target property", () => {
+    const tc =
+      "primaryBucket: VALIDATION_DATA\n" +
+      "target.constraint: maxLength 200\n" +
+      "target.property: ItemCode";
+    assert.equal(
+      behaviorEvidenceInExcerpt(
+        tc,
+        "class Dto { [MaxLength(200)] public string Other {get;set;} public string ItemCode {get;set;} }"
+      ).ok,
+      false
+    );
+    assert.equal(
+      behaviorEvidenceInExcerpt(
+        tc,
+        "class Dto { [MaxLength(200)] public string ItemCode {get;set;} }"
+      ).ok,
+      true
+    );
   });
 });

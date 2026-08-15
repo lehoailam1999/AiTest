@@ -348,18 +348,24 @@ export function queryImpliesUploadIntent(
     "upload_resource",
     "upload_size_limit",
   ]);
-  if (
-    (intent.primaryClass && uploadClasses.has(intent.primaryClass)) ||
-    (intent.classes || []).some((c) => uploadClasses.has(c))
-  ) {
-    return true;
-  }
   const blob = String(shapeBlob || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
-  return /tai\s*len|\bupload\b|hinh\s*anh|\bimage\b|\bmedia\b|\bphoto\b|\bmagic\s*bytes\b|\bantivirus\b|\bscanner\b/.test(
-    blob
+  const explicitUpload =
+    /tai\s*len|\bupload\b|hinh\s*anh|\bimage\b|\bmedia\b|\bphoto\b|\bmagic\s*bytes\b|\bantivirus\b|\bscanner\b/.test(
+      blob
+    );
+  const hasUploadClass =
+    (intent.primaryClass && uploadClasses.has(intent.primaryClass)) ||
+    (intent.classes || []).some((c) => uploadClasses.has(c));
+  // `digital` may bootstrap upload_resource, but a classification/read TC must
+  // not be forced onto Upload* paths without an explicit upload cue.
+  return (
+    explicitUpload ||
+    (hasUploadClass &&
+      (!String(shapeBlob || "").trim() ||
+        intent.primaryClass === "upload_size_limit"))
   );
 }
 
@@ -370,8 +376,8 @@ export function pathIsDeleteLikeUnitPrimary(pathRel: string): boolean {
 }
 
 /**
- * Upload / image-file TCs — boost Upload|Image|Physical*|DigitalFile*Create paths;
- * demote Delete* (even DigitalDeviceDelete) and generic DocumentCreate.
+ * Upload / image-file TCs — boost portable Upload|Image|Media|InitUpload paths;
+ * demote Delete* and generic DocumentCreate. Product stems stay in SUT aliases.
  */
 export function uploadIntentPathShapeAdjust(
   pathRel: string,
@@ -391,25 +397,15 @@ export function uploadIntentPathShapeAdjust(
     return adj;
   }
   if (
-    /(Upload|PhysicalImage|DigitalFile|InitUpload|FileSignature|Antivirus|Scanner)/i.test(
-      p
-    ) ||
-    (/(Image|Media|Photo)/i.test(p) &&
+    /(Upload|InitUpload|FileSignature|Antivirus|Scanner)/i.test(p) ||
+    (/(Image|Media|Photo|Physical|Attachment)/i.test(p) &&
       /(Create|Upload|Handler|Service)/i.test(p))
   ) {
     adj += 38;
   }
-  // DigitalDevice* only when Create/Upload — never bare "Digital" latch on Delete
-  if (
-    /DigitalDevice/i.test(p) &&
-    /(Create|Upload|Init)/i.test(p) &&
-    !pathIsDeleteLikeUnitPrimary(p)
-  ) {
-    adj += 20;
-  }
   if (
     /Create(Command)?Handler/i.test(p) &&
-    !/(Upload|Image|Physical|Digital|Media|Photo|File|Attachment)/i.test(p)
+    !/(Upload|Image|Physical|Media|Photo|File|Attachment)/i.test(p)
   ) {
     adj -= 30;
   }
@@ -464,7 +460,7 @@ export function searchIntentPathShapeAdjust(
     adj += 52;
   }
   if (
-    /(Assign|Attach|Link)(Case|To|Evidence)?/i.test(p) &&
+    /(Assign|Attach|Link)/i.test(p) &&
     !isQueryLikePath(p) &&
     !/(GetAll|Search|List|Filter)/i.test(p)
   ) {
@@ -501,7 +497,7 @@ export function pathContradictsSearchVerb(
   if (isQueryLikePath(p) || /(GetAll|Search|ListAvailable|FindBy)/i.test(p)) {
     return false;
   }
-  return /(Assign|Attach|Link)(Case|To|Evidence)?/i.test(p);
+  return /(Assign|Attach|Link)/i.test(p);
 }
 
 /**
@@ -839,6 +835,16 @@ export function queryImpliesAuthzIntent(
   intent: UnitIntent,
   shapeBlob?: string | null
 ): boolean {
+  const forbidden = (intent.forbiddenOpTokens || []).map((t) =>
+    String(t || "").toLowerCase()
+  );
+  if (
+    forbidden.some((t) =>
+      /canwrite|permission|authorization|authorize|authz|deny|forbid/.test(t)
+    )
+  ) {
+    return false;
+  }
   const blob = shapeBlobNorm(shapeBlob);
   return (
     /phan\s*quyen|khong\s*quyen|quyen\s*ghi|\bpermission\b|\bauthorize\b|\bauthorization\b|\bcanwrite\b|\bforbidden\b|\bdenied\b|khong\s*(duoc\s*)?(ghi|sua|tao)/.test(
@@ -903,18 +909,35 @@ export function extractOpPreferTokens(
     out.push("Assign", "Attach", "Link", "Filter");
   }
   if (queryImpliesUploadIntent(intent, shapeBlob)) {
-    out.push("Upload", "Image", "Physical", "DigitalFile", "Media");
+    out.push("Upload", "Image", "Physical", "Media", "Attachment");
   }
   for (const t of intent.classFeatureTokens || []) {
+    if (/Upload|Image|Physical|Media|Attachment/i.test(t)) {
+      if (queryImpliesUploadIntent(intent, shapeBlob)) out.push(t);
+      continue;
+    }
+    if (/CanWrite|Permission|Authorization|Authorize/i.test(t)) {
+      if (queryImpliesAuthzIntent(intent, shapeBlob)) out.push(t);
+      continue;
+    }
     if (
-      /IsOccupied|Occupied|CanWrite|Permission|Assign|Upload|Filter|Compartment|Storage|SearchTerm|GetAll/i.test(
+      /IsOccupied|Occupied|Assign|Filter|Compartment|Storage|SearchTerm|GetAll/i.test(
         t
       )
     ) {
       out.push(t);
     }
   }
-  return uniq(out);
+  const forbidden = (intent.forbiddenOpTokens || [])
+    .map((t) => String(t || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!forbidden.length) return uniq(out);
+  return uniq(out).filter((token) => {
+    const low = token.toLowerCase();
+    return !forbidden.some(
+      (deny) => low === deny || low.includes(deny) || deny.includes(low)
+    );
+  });
 }
 
 /**
@@ -962,7 +985,7 @@ export function functionOpPathShapeAdjust(
 
   if (queryImpliesStorageStateIntent(intent, shapeBlob)) {
     if (
-      /(Storage|Compartment|Slot|Occupied|IsOccupied|Cabinet|Location)/i.test(p)
+      /(Storage|Compartment|Slot|Occupied|IsOccupied|Location)/i.test(p)
     ) {
       adj += 48;
     }
@@ -1508,7 +1531,11 @@ export function decideBodyRuleWriteBack(
       (intent.classes || []).includes("auto_generate_code")
     ) {
       const strong = usable.filter((c) =>
-        c.ruleHits.some((h) => /userProvidedCode/i.test(h))
+        c.ruleHits.some((h) =>
+          /IsNullOrWhiteSpace|IsNullOrEmpty|Generate|Empty|Blank|userProvidedCode/i.test(
+            h
+          )
+        )
       );
       if (strong.length) usable = strong;
     }

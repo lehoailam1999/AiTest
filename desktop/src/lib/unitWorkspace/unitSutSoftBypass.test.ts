@@ -27,5 +27,17 @@ describe("canSoftBypassUnitSutGate", () => {
       }),
       true
     );
+    assert.equal(
+      canSoftBypassUnitSutGate({
+        code: "FAIL_FEATURE_GAP",
+        primaryPath: "src/Foo.cs",
+        sourceExcerpt: "class Foo {}",
+        tcBlob: "primaryBucket: VALIDATION_DATA\nconfidence=HIGH",
+        alignmentScore: 100,
+        markersMatch: true,
+      }),
+      false,
+      "validation evidence gaps must not bypass even with authoritative markers"
+    );
   });
 });

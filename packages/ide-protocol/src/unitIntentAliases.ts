@@ -42,6 +42,11 @@ export type UnitIntent = {
   classFeatureTokens: string[];
   /** When true, Phase 3 must see ≥1 bodyRuleHits before write-back. */
   requiresBodyRule: boolean;
+  /**
+   * Project intent overlay may suppress misleading operation heuristics
+   * (for example duplicate validation must not be treated as permission).
+   */
+  forbiddenOpTokens?: string[];
 };
 
 /** Minimal TC shape — Desktop TestCase / Extension payloads. */

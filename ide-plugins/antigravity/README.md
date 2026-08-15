@@ -38,6 +38,6 @@ Trong Antigravity: **Extensions → Install from VSIX…** → Reload Window.
 
 ## Lưu ý
 
-- **Antigravity IDE plugin** ≠ provider LLM **Antigravity** trong Cấu hình AI.
-- LLM: chọn provider `Antigravity` → mặc định dùng **Google API Key + model** (giống Gemini).
-  Base URL chỉ cần khi dùng proxy OpenAI-compatible.
+- **Antigravity IDE plugin** và **Antigravity CLI** là hai thành phần khác nhau.
+- Trong Cấu hình AI, chọn `Antigravity CLI`; AITest gọi lệnh `agy` đã đăng nhập
+  trên máy và không lưu credential của vendor.

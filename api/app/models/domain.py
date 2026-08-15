@@ -98,17 +98,12 @@ class AiBackendConnection(TimestampMixin, Base):
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), unique=True, index=True
     )
-    backend_type: Mapped[str] = mapped_column(String(50), default="openai")
     model_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="NotConfigured")
-    api_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # AI_CLI only (legacy API_DIRECT coerced at runtime)
-    runner_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cli_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     cli_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     cli_args_json: Mapped[str | None] = mapped_column(Text, nullable=True)

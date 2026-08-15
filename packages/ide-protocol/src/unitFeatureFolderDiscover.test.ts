@@ -175,7 +175,7 @@ describe("unitFeatureFolderDiscover", () => {
       },
     };
     const hit = discoverFeatureFoldersFromIndex(index, null, {
-      titleTokens: ["Chọn", "hồ", "sơ", "vụ", "án", "vật", "chứng"],
+      titleTokens: ["Gán", "hồ", "sơ", "vụ", "án", "vật", "chứng"],
     });
     assert.ok(
       hit.bridgePaths.some((p) => /AssignCase/i.test(p)),
