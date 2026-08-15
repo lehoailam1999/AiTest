@@ -19,4 +19,19 @@ export {
   contextPacketFromIdeSemantic,
   ideFocusReadyForGenerate,
 } from "./fromIdeSemantic";
-export { rootsAligned, rootsMismatch, normalizeFsRoot } from "./rootsMatch";
+export {
+  rootsAligned,
+  rootsMismatch,
+  normalizeFsRoot,
+  ideWorkspaceMatchesProject,
+} from "./rootsMatch";
+export {
+  sortIdeDiscoveriesByNewest,
+  discoveryStartedAtMs,
+} from "./discoveryOrder";
+export {
+  probeDiscoveryAlive,
+  filterAliveDiscoveries,
+  markDiscoveryAlive,
+  clearDiscoveryLivenessCache,
+} from "./liveness";

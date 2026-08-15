@@ -30,3 +30,21 @@ export function rootsMismatch(
   if (!a || !b) return false;
   return !rootsAligned(a, b);
 }
+
+/**
+ * Strict path match for IDE discovery list / auto-connect.
+ * Unlike rootsAligned, empty sides do not match — never leaf-name alone.
+ */
+export function ideWorkspaceMatchesProject(
+  ideWorkspaceRoot: string | null | undefined,
+  projectPath: string | null | undefined
+): boolean {
+  const ideWs = normalizeFsRoot(ideWorkspaceRoot);
+  const targetWs = normalizeFsRoot(projectPath);
+  if (!ideWs || !targetWs) return false;
+  return (
+    ideWs === targetWs ||
+    ideWs.startsWith(`${targetWs}/`) ||
+    targetWs.startsWith(`${ideWs}/`)
+  );
+}

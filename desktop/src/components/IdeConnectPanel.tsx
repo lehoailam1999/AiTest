@@ -44,6 +44,7 @@ export function IdeConnectPanel({ compact, projectPath, onFocusApplied }: Props)
   const ide = useIdeBridgeSession((s) => s.ide);
   const focus = useIdeBridgeSession((s) => s.focus);
   const workspaceRoot = useIdeBridgeSession((s) => s.workspaceRoot);
+  const connectedPort = useIdeBridgeSession((s) => s.connectedPort);
   const confidence = useIdeBridgeSession((s) => s.confidence);
   const language = useIdeBridgeSession((s) => s.language);
   const detectedIde = useIdeBridgeSession((s) => s.detectedIde);
@@ -356,38 +357,45 @@ export function IdeConnectPanel({ compact, projectPath, onFocusApplied }: Props)
           }}
         >
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            💻 Các IDE đang mở trên máy ({availableIDEs.length}) — Bấm vào để kết nối trực tiếp:
+            💻 IDE đang chạy trùng Path dự án ({availableIDEs.length}) — ưu tiên cửa sổ mới nhất:
           </Typography.Text>
           <Space wrap size={6}>
-            {availableIDEs.map((item) => {
+            {availableIDEs.map((item, index) => {
               const itemWs = item.workspaceRoot
                 ? item.workspaceRoot.replace(/\\/g, "/").split("/").slice(-2).join("/")
                 : "No Folder";
+              const isNewest = index === 0;
               const isSelected =
-                workspaceRoot === item.workspaceRoot && status === "connected";
+                status === "connected" && connectedPort === item.port;
               return (
                 <Tag
                   key={`${item.port}-${item.workspaceRoot}`}
-                  color={isSelected ? "success" : "processing"}
+                  color={isSelected ? "success" : isNewest ? "blue" : "processing"}
                   style={{
                     cursor: "pointer",
                     padding: "4px 10px",
                     borderRadius: 6,
                     fontSize: 12,
-                    fontWeight: isSelected ? 600 : 400,
+                    fontWeight: isSelected || isNewest ? 600 : 400,
                   }}
                   onClick={() => {
                     void connectToDiscovery(item);
                   }}
-                  title={`Bấm để kết nối tới ${formatIdeName(item.ide)} (${item.workspaceRoot ?? "No path"}) qua Port ${item.port}`}
+                  title={`Bấm để kết nối tới ${formatIdeName(item.ide)} (${item.workspaceRoot ?? "No path"}) qua Port ${item.port}${item.startedAt ? ` · started ${item.startedAt}` : ""}`}
                 >
-                  {isSelected ? "🟢 " : "⚡ Connect "}
+                  {isSelected ? "🟢 " : isNewest ? "⭐ " : "⚡ Connect "}
                   <strong>{formatIdeName(item.ide)}</strong>: {itemWs} (Port {item.port})
+                  {isNewest ? " · mới nhất" : ""}
                 </Tag>
               );
             })}
           </Space>
         </div>
+      ) : projectPath?.trim() && tauri && status !== "connected" ? (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          Không có IDE đang mở trùng Path dự án — mở Cursor/VS Code đúng folder source rồi bấm
+          «Làm mới từ IDE».
+        </Typography.Text>
       ) : null}
 
       {!compact && status === "connected" && !ready ? (

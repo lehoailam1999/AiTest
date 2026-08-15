@@ -20,13 +20,14 @@ import {
   discoveryFromJson,
   type IdeBridgeConnection,
 } from "./connect";
+import {
+  ideWorkspaceMatchesProject,
+  normalizeFsRoot,
+} from "./rootsMatch";
+import { sortIdeDiscoveriesByNewest } from "./discoveryOrder";
+import { filterAliveDiscoveries, markDiscoveryAlive } from "./liveness";
 
 export type IdeFocusState = FocusChangedParams["focus"] | null;
-
-function normalizePathForCompare(p: string | null | undefined): string {
-  if (!p) return "";
-  return p.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
 
 type IdeBridgeSessionState = {
   status: "idle" | "connecting" | "connected" | "error";
@@ -35,6 +36,8 @@ type IdeBridgeSessionState = {
   focus: IdeFocusState;
   /** Workspace root reported by IDE bridge (not AITest project) */
   workspaceRoot: string | null;
+  /** Port of the currently connected discovery (distinguish multi Cursor same path) */
+  connectedPort: number | null;
   confidence: string | null;
   language: string | null;
   lastFocusAt: number | null;
@@ -78,6 +81,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
   ide: null,
   focus: null,
   workspaceRoot: null,
+  connectedPort: null,
   confidence: null,
   language: null,
   lastFocusAt: null,
@@ -108,6 +112,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
       error: null,
       focus: null,
       workspaceRoot: discovery.workspaceRoot ?? null,
+      connectedPort: discovery.port ?? null,
       capabilities: [],
       extensionVersion: null,
       unitGenSessionId: null,
@@ -134,6 +139,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
           status: "connected",
           ide: health.ide,
           workspaceRoot: health.workspaceRoot ?? discovery.workspaceRoot ?? null,
+          connectedPort: discovery.port ?? null,
           capabilities: health.capabilities ?? [],
           extensionVersion: health.extensionVersion ?? null,
           error: null,
@@ -143,6 +149,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
           status: "connected",
           ide: discovery.ide,
           workspaceRoot: discovery.workspaceRoot ?? null,
+          connectedPort: discovery.port ?? null,
           capabilities: [],
           extensionVersion: null,
           error: null,
@@ -155,6 +162,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
         error: e instanceof Error ? e.message : String(e),
         ide: null,
         workspaceRoot: null,
+        connectedPort: null,
       });
     }
   },
@@ -181,6 +189,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
       error: null,
       focus: null,
       workspaceRoot: null,
+      connectedPort: null,
       capabilities: [],
       extensionVersion: null,
       unitGenSessionId: null,
@@ -221,6 +230,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
           confidence: null,
           language: null,
           workspaceRoot: health.workspaceRoot ?? discovery.workspaceRoot ?? null,
+          connectedPort: discovery.port ?? null,
           capabilities: health.capabilities ?? [],
           extensionVersion: health.extensionVersion ?? null,
           error: null,
@@ -232,6 +242,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
           ide: discovery.ide,
           focus: null,
           workspaceRoot: discovery.workspaceRoot ?? null,
+          connectedPort: discovery.port ?? null,
           capabilities: [],
           extensionVersion: null,
           error: null,
@@ -245,6 +256,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
         ide: null,
         focus: null,
         workspaceRoot: null,
+        connectedPort: null,
         capabilities: [],
         extensionVersion: null,
         unitGenSessionId: null,
@@ -267,6 +279,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
       ide: null,
       focus: null,
       workspaceRoot: null,
+      connectedPort: null,
       confidence: null,
       language: null,
       lastFocusAt: null,
@@ -291,7 +304,7 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
 
   autoConnectIfMatching: async (targetPath?: string) => {
     if (!isTauri()) return false;
-    const targetWs = normalizePathForCompare(targetPath);
+    const targetWs = normalizeFsRoot(targetPath);
     if (!targetWs) {
       set({ detectedIde: null, detectedWorkspaceRoot: null, availableIDEs: [] });
       return false;
@@ -330,49 +343,55 @@ export const useIdeBridgeSession = create<IdeBridgeSessionState>((set, get) => (
         }
       }
 
-      set({ availableIDEs: discoveredList });
+      const matchedList = sortIdeDiscoveriesByNewest(
+        discoveredList.filter((d) =>
+          ideWorkspaceMatchesProject(d.workspaceRoot, targetPath)
+        )
+      );
 
-      if (discoveredList.length > 0) {
+      // Session already proven open — no need to spend a probe on it.
+      const openPort = get().connectedPort;
+      if (openPort && conn?.client.isConnected) {
+        const open = matchedList.find((d) => d.port === openPort);
+        if (open) markDiscoveryAlive(open, true);
+      }
+
+      const liveList = await filterAliveDiscoveries(matchedList);
+      set({ availableIDEs: liveList });
+
+      if (liveList.length > 0) {
         set({ extensionMissing: false, pendingIdeReload: false });
 
-        const targetLeaf = targetWs.split("/").pop() ?? "";
-        let bestMatch: IdeBridgeDiscovery | null = null;
-
-        for (const d of discoveredList) {
-          const ideWs = normalizePathForCompare(d.workspaceRoot);
-          const ideLeaf = ideWs.split("/").pop() ?? "";
-          if (
-            !ideWs ||
-            ideWs === targetWs ||
-            ideWs.includes(targetWs) ||
-            targetWs.includes(ideWs) ||
-            (targetLeaf.length > 2 && targetLeaf === ideLeaf)
-          ) {
-            bestMatch = d;
-            break;
-          }
-        }
+        const bestMatch = liveList[0] ?? null;
 
         if (bestMatch) {
           set({
             detectedIde: bestMatch.ide ?? "IDE",
             detectedWorkspaceRoot: bestMatch.workspaceRoot ?? null,
           });
-          if (get().status !== "connected" && get().status !== "connecting") {
+          const alreadyOnNewest =
+            get().status === "connected" &&
+            get().connectedPort === bestMatch.port;
+          if (
+            !alreadyOnNewest &&
+            get().status !== "connecting"
+          ) {
             await get().connectToDiscovery(bestMatch);
           }
           return true;
-        } else {
-          const first = discoveredList[0];
-          set({
-            detectedIde: first.ide ?? "IDE",
-            detectedWorkspaceRoot: first.workspaceRoot ?? null,
-          });
-          if (get().status === "connected") {
-            get().disconnect();
-          }
-          return false;
         }
+      } else if (discoveredList.length > 0) {
+        // Discovery files exist, but none is both on this project Path and alive
+        // (leftover file from an IDE window that was killed).
+        set({
+          detectedIde: null,
+          detectedWorkspaceRoot: null,
+          availableIDEs: [],
+        });
+        if (get().status === "connected") {
+          get().disconnect();
+        }
+        return false;
       } else {
         set({ detectedIde: null, detectedWorkspaceRoot: null, availableIDEs: [] });
         const status = await checkIdeExtensionStatus();
