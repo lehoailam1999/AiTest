@@ -80,7 +80,10 @@ export function useCoverageBoard(opts: Options = {}) {
     allCases,
     pendingCases,
     pendingCount,
-    loading: boardQuery.isFetching || (includeCases && casesQuery.isFetching),
+    loading:
+      (boardQuery.isPending && !boardQuery.data) ||
+      (includeCases && casesQuery.isPending && !casesQuery.data),
+    isFetching: boardQuery.isFetching || (includeCases && casesQuery.isFetching),
     error:
       (boardQuery.error instanceof Error ? boardQuery.error.message : null) ||
       (casesQuery.error instanceof Error ? casesQuery.error.message : null),
@@ -90,6 +93,30 @@ export function useCoverageBoard(opts: Options = {}) {
       await Promise.all(tasks);
     },
     invalidate,
+    updateCasesCache: (updatedList: TestCase[]) => {
+      if (!project) return;
+      queryClient.setQueryData<TestCase[]>(coverageBoardKeys.cases(project.id), (old) => {
+        if (!old) return updatedList;
+        const map = new Map(updatedList.map((item) => [item.id, item]));
+        return old.map((item) => map.get(item.id) ?? item);
+      });
+      void queryClient.invalidateQueries({
+        queryKey: coverageBoardKeys.all,
+        refetchType: "none",
+      });
+    },
+    removeCasesCache: (removedIds: string[]) => {
+      if (!project) return;
+      const removeSet = new Set(removedIds);
+      queryClient.setQueryData<TestCase[]>(coverageBoardKeys.cases(project.id), (old) => {
+        if (!old) return [];
+        return old.filter((item) => !removeSet.has(item.id));
+      });
+      void queryClient.invalidateQueries({
+        queryKey: coverageBoardKeys.all,
+        refetchType: "none",
+      });
+    },
     hasLocalPath,
     page: board?.pageNumber ?? page,
     pageSize: board?.pageSize ?? pageSize,

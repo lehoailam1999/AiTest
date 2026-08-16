@@ -257,7 +257,7 @@ export default function CoverageBoardPage() {
                 </Typography.Title>
               </div>
             </div>
-            {!journeySnapsReady || loading ? (
+            {!journeySnapsReady || (loading && journeyCases.length === 0) ? (
               <ReviewQueuePanel
                 key={`review-loading-${workspaceId}`}
                 projectId={project.id}
@@ -268,7 +268,6 @@ export default function CoverageBoardPage() {
                 loading
                 onChanged={() => {
                   invalidate();
-                  void refresh();
                 }}
               />
             ) : journeyCases.length === 0 ? (
@@ -293,7 +292,7 @@ export default function CoverageBoardPage() {
               />
             ) : (
               <ReviewQueuePanel
-                key={`review-${workspaceId}-${reviewEngine ?? "all"}-${reviewEpoch}`}
+                key={`review-${workspaceId}-${reviewEngine ?? "all"}`}
                 projectId={project.id}
                 cases={journeyCases}
                 moduleFilter={reviewModule}
@@ -302,7 +301,6 @@ export default function CoverageBoardPage() {
                 loading={loading}
                 onChanged={() => {
                   invalidate();
-                  void refresh();
                 }}
               />
             )}

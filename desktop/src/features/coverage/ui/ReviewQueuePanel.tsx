@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type Key } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   App,
   Button,
@@ -34,6 +35,7 @@ import {
   resolveTestEngine,
 } from "../../../lib/testEngine";
 import { workspace } from "../../../workspace";
+import { coverageBoardKeys } from "../model/useCoverageBoard";
 
 const UNASSIGNED_FUNCTION = "(Chưa gán Function)";
 
@@ -195,6 +197,7 @@ export function ReviewQueuePanel({
   onChanged,
 }: Props) {
   const { message, modal } = App.useApp();
+  const queryClient = useQueryClient();
   const [selected, setSelected] = useState<Key[]>([]);
   const [busy, setBusy] = useState(false);
   const [workspaceTitle, setWorkspaceTitle] = useState<string | null>(null);
@@ -336,9 +339,18 @@ export function ReviewQueuePanel({
           }
         }
       }
-      // Refresh status immediately — do not wait for MD/enrich sync (can take minutes)
+      // Update cache in-memory immediately so UI updates without full API reload
       setSelected([]);
-      onChanged();
+      if (approved.length > 0) {
+        queryClient.setQueryData<TestCase[]>(
+          coverageBoardKeys.cases(projectId),
+          (old) => {
+            if (!old) return approved;
+            const approvedMap = new Map(approved.map((c) => [c.id, c]));
+            return old.map((c) => approvedMap.get(c.id) ?? c);
+          }
+        );
+      }
       if (approved.length) {
         const sync = await syncApprovedTestCasesMdBestEffort({
           projectId,
@@ -360,8 +372,6 @@ export function ReviewQueuePanel({
         } else if (fail === 0) {
           message.success(`Đã duyệt ${ok} test case.`);
         }
-        // Sync may have written path:/code: back to DB — refresh once more
-        onChanged();
       } else if (fail === 0) {
         message.success(`Đã duyệt ${ok} test case.`);
       }
@@ -370,6 +380,10 @@ export function ReviewQueuePanel({
         const first = Array.from(new Set(failReasons)).slice(0, 3).join(" | ");
         message.error(`Lý do từ chối: ${first}`);
       }
+      void queryClient.invalidateQueries({
+        queryKey: coverageBoardKeys.all,
+        refetchType: "none",
+      });
     } finally {
       setBusy(false);
     }
@@ -402,13 +416,20 @@ export function ReviewQueuePanel({
     if (!editing) return;
     try {
       setEditBusy(true);
-      await testcases.update(editing.id, {
+      const updated = await testcases.update(editing.id, {
         projectId: editing.projectId,
         ...values,
       });
       message.success("Đã cập nhật test case.");
       setEditing(null);
-      onChanged();
+      queryClient.setQueryData<TestCase[]>(
+        coverageBoardKeys.cases(projectId),
+        (old) => (old ? old.map((item) => (item.id === editing.id ? { ...item, ...updated } : item)) : [])
+      );
+      void queryClient.invalidateQueries({
+        queryKey: coverageBoardKeys.all,
+        refetchType: "none",
+      });
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Không cập nhật được test case");
     } finally {
@@ -429,7 +450,14 @@ export function ReviewQueuePanel({
           message.success("Đã xoá test case.");
           setSelected((prev) => prev.filter((k) => String(k) !== row.id));
           if (editing?.id === row.id) setEditing(null);
-          onChanged();
+          queryClient.setQueryData<TestCase[]>(
+            coverageBoardKeys.cases(projectId),
+            (old) => (old ? old.filter((item) => item.id !== row.id) : [])
+          );
+          void queryClient.invalidateQueries({
+            queryKey: coverageBoardKeys.all,
+            refetchType: "none",
+          });
         } catch (e) {
           message.error(e instanceof Error ? e.message : "Không xoá được test case");
           throw e;

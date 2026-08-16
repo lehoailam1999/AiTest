@@ -194,9 +194,9 @@ export default function RequirementsPage() {
     opts?: { afterApprove?: boolean }
   ) {
     try {
-      await fn();
+      const res = await fn();
       if (okMsg) message.success(okMsg);
-      await refreshReqCases(sourceId);
+      void refreshReqCases(sourceId);
       void refreshJourney();
       if (opts?.afterApprove) {
         message.success({
@@ -205,6 +205,7 @@ export default function RequirementsPage() {
         });
         navigate("/requirement");
       }
+      return res;
     } catch (e) {
       message.error(e instanceof Error ? e.message : "Action failed");
     }
