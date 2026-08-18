@@ -47,7 +47,7 @@ Dev:
 npm run api         # uvicorn --reload :8000
 ```
 
-`api/.env`: `DATABASE_URL` … `port=5433`. Desktop: `http://127.0.0.1:8000/api`.
+`api/.env`: `POSTGRES_HOST=localhost`, `POSTGRES_PORT=5433`. Desktop: `http://127.0.0.1:8000/api`.
 
 Full Docker: image chỉ `uvicorn`, **không** chạy Alembic — nên vẫn làm bước 2 trên host (hoặc DB trống thì startup tự `create_all` nếu chưa có `alembic_version`). Desktop trỏ container: `VITE_API_URL=http://127.0.0.1:8000/api`.
 
@@ -95,5 +95,7 @@ npm run db:status
 
 | Biến | Dev native | API trong compose |
 |------|------------|-------------------|
-| `DATABASE_URL` | `host=localhost` … `port=5433` | `host=postgres` … `port=5432` |
+| `POSTGRES_HOST` | `localhost` | Compose tự set `DATABASE_URL=postgresql://…@postgres:5432/…` |
+| `POSTGRES_PORT` | `5433` (cổng host) | Trong container luôn `5432` |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Cùng Postgres Docker | Cùng |
 | `PORT` | `8000` | `8080` (map host **8000**) |

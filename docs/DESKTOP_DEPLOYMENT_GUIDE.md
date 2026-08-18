@@ -154,8 +154,8 @@ Ba file ở **thư mục gốc repo**:
 | File | Vai trò |
 |------|---------|
 | `docker-compose.production.yml` | Service `postgres`, `api` và volume DB |
-| `.env.production.example` | Mẫu biến — copy thành `.env.production` rồi điền secret |
-| `deploy.sh` | Kiểm tra Docker → `up --build` → Alembic → in URL |
+| `api/.env.example` | Mẫu biến — copy thành `api/.env` rồi điền secret |
+| `deploy.sh` | `git pull` → kiểm tra Docker → `up --build` → Alembic → in URL |
 
 ```text
 Host
@@ -170,23 +170,29 @@ Volume:
 #### A.2 Chuẩn bị máy chủ
 
 1. Docker Engine + Compose v2 (`docker compose version`).
-2. Có `api/` (`Dockerfile`, `requirements.txt`, `app/`), `docker-compose.production.yml`, `deploy.sh`, `.env.production.example`.
-3. `cp .env.production.example .env.production` — thay mọi `<SET_ME…>`.
+2. Có `api/` (`Dockerfile`, `requirements.txt`, `app/`), `docker-compose.production.yml`, `deploy.sh`, `api/.env.example`.
+3. `cp api/.env.example api/.env` — điền `POSTGRES_PASSWORD`, `JWT_KEY`, `ENCRYPTION_KEY`.
 4. Firewall: mở cổng API. Không public cổng Postgres trừ khi cần.
 
-#### A.3 `.env.production`
+#### A.3 `api/.env`
 
-Mẫu (`.env.production.example`). Tự sinh mật khẩu và khóa (≥ 32 ký tự cho JWT / encryption).
+Mẫu (`api/.env.example`). Tự sinh mật khẩu và khóa (≥ 32 ký tự cho JWT / encryption).
 
 ```env
+PORT=8000
+POSTGRES_HOST=localhost
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=<SET_ME>
 POSTGRES_DB=AITestDb
 POSTGRES_PORT=5433
 
-API_PORT=8000
 JWT_KEY=<SET_ME_MIN_32_CHARS>
 ENCRYPTION_KEY=<SET_ME_MIN_32_CHARS>
+JWT_ISSUER=AITest.API
+JWT_AUDIENCE=AITest.Client
+JWT_ACCESS_HOURS=24
+CORS_ORIGINS=*
+```
 JWT_ISSUER=AITest.API
 JWT_AUDIENCE=AITest.Client
 JWT_ACCESS_HOURS=24
@@ -205,7 +211,7 @@ AITEST_RULE_RETRIEVE_TCGEN=1
 | `POSTGRES_DB` | Không | `AITestDb` | Tên database |
 | `POSTGRES_PORT` | Không | `5433` | Cổng Postgres trên **host** (trong container: 5432) |
 | `API_PORT` | Không | `8000` | Cổng API trên **host** (trong container: 8080) |
-| `DATABASE_URL` | Không | `postgresql://USER:PASS@postgres:5432/DB` | Chỉ set khi Postgres nằm ngoài stack |
+| `DATABASE_URL` | Không (Compose tự tạo) | `postgresql://USER:PASS@postgres:5432/DB` | Chỉ inject trong container API |
 | `JWT_KEY` | Có | Fail | Ký JWT |
 | `ENCRYPTION_KEY` | Có | Fail | Mã hóa secret connection trong DB |
 | `JWT_ISSUER` / `JWT_AUDIENCE` | Không | `AITest.API` / `AITest.Client` | Claim JWT; Desktop cùng audience |
@@ -213,7 +219,7 @@ AITEST_RULE_RETRIEVE_TCGEN=1
 | `CORS_ORIGINS` | Không | `*` nếu biến trống | Origin Desktop/Vite. Production nên liệt kê cụ thể |
 | `AITEST_RULE_RETRIEVE_*` | Không | `selective` / `1` | Cách API lấy rule fragment khi gen |
 
-`deploy.sh` từ chối chạy nếu `.env.production` còn `<SET_ME`.
+`deploy.sh` từ chối chạy nếu `api/.env` còn `<SET_ME`.
 
 #### A.4 `docker-compose.production.yml`
 
@@ -224,7 +230,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD is required in .env.production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD is required in api/.env}
       POSTGRES_DB: ${POSTGRES_DB:-AITestDb}
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
@@ -243,9 +249,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-AITestDb}}
-      JWT_KEY: ${JWT_KEY:?Error: JWT_KEY is required in .env.production}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in .env.production}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-AITestDb}"
+      JWT_KEY: ${JWT_KEY:?Error: JWT_KEY is required in api/.env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in api/.env}
       JWT_ISSUER: ${JWT_ISSUER:-AITest.API}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-AITest.Client}
       JWT_ACCESS_HOURS: ${JWT_ACCESS_HOURS:-24}
@@ -281,12 +287,12 @@ volumes:
 |------|----------|
 | `build.context: ./api` | Image từ `api/Dockerfile` |
 | `PORT: "8080"` | Cổng trong container; không lấy từ `API_PORT` |
-| `DATABASE_URL` | Host `postgres`, port **5432**. Sai nếu ghi `localhost:5433` trong container |
+| `DATABASE_URL` | URL thật `postgresql://…@postgres:5432/…`. Sai nếu ghi `localhost:5433` trong container |
 | `JWT_KEY` / `ENCRYPTION_KEY` | Thiếu biến → `docker compose` dừng |
 | `ports: API_PORT:8080` | Máy QA gọi `http://<host>:<API_PORT>/...` |
 | `depends_on` + `service_healthy` | Không start API khi Postgres chưa sẵn |
 
-`api/Dockerfile`: `python:3.12-slim`, cài `requirements.txt`, copy `alembic.ini`, `alembic/` và `app/`, `uvicorn app.main:app --host 0.0.0.0 --port 8080`. Secret inject lúc runtime từ `.env.production`, không copy `.env` vào image.
+`api/Dockerfile`: `python:3.12-slim`, cài `requirements.txt`, copy `alembic.ini`, `alembic/` và `app/`, `uvicorn app.main:app --host 0.0.0.0 --port 8080`. Secret inject lúc runtime từ `api/.env`, không copy `.env` vào image.
 
 #### A.5 `deploy.sh`
 
@@ -363,8 +369,8 @@ Máy QA
 
 1. Tạo database (mặc định repo: `AITestDb`), user và mật khẩu.
 2. Python 3.12, pip.
-3. `api/.env.example` → `api/.env`. Sửa `DATABASE_URL`, `JWT_KEY`, `ENCRYPTION_KEY`, `PORT`, `CORS_ORIGINS`.
-4. `DATABASE_URL` dạng libpq (như example) hoặc `postgresql://user:pass@host:port/db`. Không commit `api/.env`.
+3. `api/.env.example` → `api/.env`. Sửa `POSTGRES_*`, `JWT_KEY`, `ENCRYPTION_KEY`, `PORT`, `CORS_ORIGINS`.
+4. Local không cần `DATABASE_URL` — app ghép `postgresql://USER:PASS@HOST:PORT/DB` từ `POSTGRES_*`. Compose tự inject URL `postgresql://…@postgres:5432/…`. Không commit `api/.env`.
 
 **Linux / macOS**
 

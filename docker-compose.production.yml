@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD is required in .env.production}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Error: POSTGRES_PASSWORD is required in api/.env}"
       POSTGRES_DB: ${POSTGRES_DB:-AITestDb}
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
@@ -23,11 +23,15 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      # Always use the Compose postgres service. Do not pass through DATABASE_URL
-      # from api/.env (that file is for local uvicorn: localhost:5433).
-      DATABASE_URL: "host=postgres user=${POSTGRES_USER:-postgres} password=${POSTGRES_PASSWORD} dbname=${POSTGRES_DB:-AITestDb} port=5432 sslmode=disable TimeZone=UTC"
-      JWT_KEY: "${JWT_KEY:?Error: JWT_KEY is required in .env.production}"
-      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in .env.production}"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: ${POSTGRES_DB:-AITestDb}
+      # Real URL for the in-network postgres service
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-AITestDb}"
+      JWT_KEY: "${JWT_KEY:?Error: JWT_KEY is required in api/.env}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in api/.env}"
       JWT_ISSUER: ${JWT_ISSUER:-AITest.API}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-AITest.Client}
       JWT_ACCESS_HOURS: ${JWT_ACCESS_HOURS:-24}

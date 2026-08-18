@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile
     environment:
       PORT: "8080"
-      DATABASE_URL: "host=postgres user=postgres password=postgres dbname=AITestDb port=5432 sslmode=disable TimeZone=UTC"
+      DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/AITestDb"
       JWT_KEY: "AITest-Super-Secret-Key-Min-32-Chars-Long!"
       ENCRYPTION_KEY: "AITest-Encryption-Key-Change-Me-32Chars!"
       JWT_ISSUER: "AITest.API"

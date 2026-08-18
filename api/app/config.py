@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from shlex import split as shlex_split
 from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,7 +18,13 @@ class Settings(BaseSettings):
     )
 
     port: int = 8000
-    database_url: str
+    postgres_user: str = "postgres"
+    postgres_password: str
+    postgres_db: str = "AITestDb"
+    postgres_host: str = "localhost"
+    postgres_port: int = 5433
+    # Optional override (Compose injects this for the API container).
+    database_url: str | None = None
     jwt_key: str
     encryption_key: str | None = None
     jwt_issuer: str = "AITest.API"
@@ -32,21 +37,17 @@ class Settings(BaseSettings):
 
     @property
     def sqlalchemy_url(self) -> str:
-        raw = self.database_url.strip()
-        if raw.startswith("postgresql"):
+        raw = (self.database_url or "").strip()
+        if raw.startswith("postgresql+psycopg://"):
+            return raw
+        if raw.startswith("postgresql://"):
             return raw.replace("postgresql://", "postgresql+psycopg://", 1)
-        # Go-style key=value DSN
-        parts: dict[str, str] = {}
-        for token in shlex_split(raw):
-            if "=" in token:
-                k, v = token.split("=", 1)
-                parts[k] = v
-        user = quote_plus(parts.get("user", "postgres"))
-        password = quote_plus(parts.get("password", "postgres"))
-        host = parts.get("host", "localhost")
-        port = parts.get("port", "5432")
-        dbname = parts.get("dbname", "AITestDb")
-        return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{dbname}"
+        user = quote_plus(self.postgres_user)
+        password = quote_plus(self.postgres_password)
+        return (
+            f"postgresql+psycopg://{user}:{password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
 
     @property
     def cors_origin_list(self) -> list[str]:
