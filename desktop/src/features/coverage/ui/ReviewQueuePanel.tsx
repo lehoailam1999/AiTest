@@ -310,6 +310,7 @@ export function ReviewQueuePanel({
         }),
     [selected, cases]
   );
+  const selectedIds = useMemo(() => selected.map(String), [selected]);
 
   /** Pending rows in the current table filter (engine / module / status) — for Duyệt tất cả. */
   const filteredPendingIds = useMemo(
@@ -557,6 +558,73 @@ export function ReviewQueuePanel({
     });
   }
 
+  function confirmDeleteSelected() {
+    if (selectedIds.length === 0) {
+      message.info("Chưa chọn test case để xoá.");
+      return;
+    }
+    const selectedRows = selectedIds
+      .map((id) => cases.find((item) => item.id === id))
+      .filter((item): item is TestCase => Boolean(item));
+    const preview = selectedRows
+      .slice(0, 3)
+      .map((item) => `${item.testCaseId} · ${item.title}`)
+      .join(" | ");
+    modal.confirm({
+      title: `Xoá ${selectedRows.length} test case đã chọn?`,
+      content:
+        selectedRows.length > 0
+          ? `${preview}${selectedRows.length > 3 ? " ..." : ""}`
+          : "Không thể hoàn tác.",
+      okText: `Xoá (${selectedRows.length})`,
+      okType: "danger",
+      cancelText: "Huỷ",
+      onOk: async () => {
+        try {
+          setBusy(true);
+          const settled = await Promise.all(
+            selectedRows.map(async (row) => {
+              try {
+                await testcases.remove(row.id);
+                return { ok: true as const, id: row.id };
+              } catch (error) {
+                return {
+                  ok: false as const,
+                  id: row.id,
+                  error: error instanceof Error ? error.message : String(error),
+                };
+              }
+            })
+          );
+          const deletedIds = settled.filter((item) => item.ok).map((item) => item.id);
+          const failed = settled.filter((item) => !item.ok);
+          if (deletedIds.length > 0) {
+            message.success(`Đã xoá ${deletedIds.length} test case.`);
+            setSelected((prev) => prev.filter((key) => !deletedIds.includes(String(key))));
+            if (editing && deletedIds.includes(editing.id)) setEditing(null);
+            queryClient.setQueryData<TestCase[]>(
+              coverageBoardKeys.cases(projectId),
+              (old) => (old ? old.filter((item) => !deletedIds.includes(item.id)) : [])
+            );
+            void queryClient.invalidateQueries({
+              queryKey: coverageBoardKeys.all,
+              refetchType: "none",
+            });
+          }
+          if (failed.length > 0) {
+            const reason = Array.from(new Set(failed.map((item) => item.error))).join(" | ");
+            message.error(
+              `Không xoá được ${failed.length} test case${reason ? `: ${reason}` : ""}`
+            );
+            throw new Error(reason || "Bulk delete test cases failed");
+          }
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  }
+
   function handleDownload() {
     if (filtered.length === 0) {
       message.info("Không có test case để tải về.");
@@ -730,6 +798,15 @@ export function ReviewQueuePanel({
               onClick={handleDownload}
             >
               Tải về
+            </Button>
+            <Button
+              danger
+              disabled={selectedIds.length === 0 || busy}
+              loading={busy}
+              icon={<DeleteOutlined />}
+              onClick={() => confirmDeleteSelected()}
+            >
+              Xoá đã chọn ({selectedIds.length})
             </Button>
             <Button
               type="primary"
