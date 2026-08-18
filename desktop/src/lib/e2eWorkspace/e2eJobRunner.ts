@@ -6,6 +6,8 @@ import { generateE2e, type E2EFileDto } from "../../api";
 import type { TestCase } from "../../api/types";
 import { createAsyncMutex, runPool } from "../runPool";
 import { isTauri, readTextFile, writeTextFile } from "../../tauri/bridge";
+import { writeTextFileIfChanged } from "../unitWorkspace/contentDedup";
+import { assertSafeAitestTargetRel } from "../testOutputLayout";
 import { buildE2EEnvConfig, buildE2EEnvWithProfile, playwrightEnvFromConfig } from "./env";
 import { prepareVerifySession } from "./verifyProfilePrep";
 import type { ProjectProfile } from "../projectProfile/types.js";
@@ -72,7 +74,7 @@ import {
   syncE2eWorkspaceRun,
 } from "./auditSync";
 import { newE2eRunId } from "./stagingApply";
-import { e2eModuleRoot } from "../testOutputLayout";
+import { compactTestCaseFileToken, e2eModuleRoot } from "../testOutputLayout";
 import { enforceExecutionGateFailure } from "./executionGate";
 
 function isLikelyPublicTestCase(tc: {
@@ -984,8 +986,8 @@ export async function generateE2eForTestCase(opts: {
       .replace(/[^\w]+/g, "-")
       .replace(/^-|-$/g, "")
       .slice(0, 40) || "journey";
-  const shortId = (tc.id || "").replace(/-/g, "").slice(0, 8);
-  const suggestedSpecPath = `${specRoot}/specs/${slug}.${shortId}.spec.ts`.replace(
+  const tcToken = compactTestCaseFileToken(tc.testCaseId || tc.id || "");
+  const suggestedSpecPath = `${specRoot}/specs/${slug}${tcToken ? `.${tcToken}` : ""}.spec.ts`.replace(
     /\/+/g,
     "/"
   );
@@ -1423,6 +1425,29 @@ type VerifyOpts = {
   priorRows?: E2eBatchItemResult[];
 };
 
+/** Put generated specs/POMs on `AItest/E2ETest/…` so Playwright cwd matches Unit Apply layout. */
+async function materializeE2eFilesOnAitest(
+  projectRoot: string,
+  files: E2EFileDto[],
+  log?: (line: string) => void
+): Promise<void> {
+  if (!isTauri() || !projectRoot || files.length === 0) return;
+  let wrote = 0;
+  for (const f of files) {
+    try {
+      const target = assertSafeAitestTargetRel((f.path || "").replace(/\\/g, "/"));
+      if (!target.toLowerCase().split("/").includes("e2etest")) continue;
+      const changed = await writeTextFileIfChanged(projectRoot, target, f.content || "");
+      if (changed) wrote += 1;
+    } catch {
+      /* skip jail / missing path */
+    }
+  }
+  if (wrote > 0) {
+    log?.(`  đã ghi ${wrote} file → AItest/E2ETest (chạy Playwright)\n`);
+  }
+}
+
 async function resolveVerifySession(opts: {
   projectRoot: string;
   files: E2EFileDto[];
@@ -1674,6 +1699,7 @@ export async function verifyE2eModuleBatch(opts: VerifyOpts): Promise<{
   let moduleStatus = "FAILED";
 
   try {
+    await materializeE2eFilesOnAitest(opts.projectRoot, allFiles, log);
     // Phase A: prefer IDE Extension runTests when bridge connected.
     let ideRunOk = false;
     if (isIdeCodegenReady()) {
@@ -2099,6 +2125,8 @@ export async function verifyE2eForTestCase(opts: {
         ? `→ Verify ${tc.title} (Chromium)…\n`
         : `→ Verify ${tc.title}…\n`
   );
+
+  await materializeE2eFilesOnAitest(opts.projectRoot, verifyFiles, log);
 
   const sandbox = await generateE2e.sandboxRepair({
     projectId: opts.projectId,

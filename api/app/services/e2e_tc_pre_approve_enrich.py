@@ -391,7 +391,11 @@ def normalize_e2e_steps(steps: str, expected: str = "") -> str:
     return "\n".join(out) if out else steps
 
 
-def enrich_e2e_tc_before_approve(tc: TestCase) -> bool:
+def enrich_e2e_tc_before_approve(
+    tc: TestCase,
+    *,
+    project_default_role: str | None = None,
+) -> bool:
     """Mutate E2E TC in place before Approve validation. Returns True if changed."""
     changed = False
 
@@ -411,6 +415,8 @@ def enrich_e2e_tc_before_approve(tc: TestCase) -> bool:
 
     if not login_or_public:
         role = infer_auth_role(tc)
+        if not role and project_default_role:
+            role = project_default_role.strip() or None
         if role:
             pairs.append(("authRole", role))
             pairs.append(("authRequired", "true"))

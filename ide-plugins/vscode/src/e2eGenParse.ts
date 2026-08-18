@@ -22,8 +22,18 @@ export function e2eSharedPagesDir(suggestedSpecPath: string): string {
 
 /** Map CLI-relative path onto AItest/E2ETest jail. */
 export function jailE2eOutputPath(raw: string, suggestedSpecPath: string): string {
-  let p = (raw || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/^`+|`+$/g, "").trim();
+  let p = (raw || "").replace(/\\/g, "/").replace(/^`+|`+$/g, "").trim();
   p = p.replace(/^FILE:\s*/i, "");
+  // Strip absolute drive prefix (e.g. D:/Xlab/.../AItest/E2ETest/...)
+  p = p.replace(/^[a-zA-Z]:\//, "/");
+  p = p.replace(/^\/+/, "");
+  // If the CLI returned a full absolute path, trim to AItest/ segment
+  const aitestIdx = p.toLowerCase().indexOf("aitest/");
+  if (aitestIdx > 0) {
+    p = p.slice(aitestIdx);
+  }
+  // Remove . and .. segments that LLM might produce
+  p = p.split("/").filter((s) => s && s !== "." && s !== "..").join("/");
   if (!p) throw new Error("Empty E2E output path");
   if (!/e2etest/i.test(`/${p}/`)) {
     const base = p.split("/").pop() || "file.ts";
@@ -113,6 +123,9 @@ export function buildE2eAgentPrompt(opts: {
     "You are generating Playwright TypeScript E2E tests for the open workspace (SUT).",
     "Write Spec + POM only. Do not invent AbsolutePath, roles, or locators not in the packet.",
     "Output ### FILE: <repo-relative-path> then a ts fence for each file.",
+    "Hard requirements: every test.step must be on its own await line; never chain steps on one line.",
+    "Hard requirements: if the UI shows VN datetime like HH:mm dd/MM/yyyy, do not use new Date(raw). Parse manually into Date(year, month - 1, day, hour, minute) and assert parsed.getTime() is not NaN before comparing.",
+    "Hard requirements: keep canonical layout: spec under {Requirement}/{TC}/specs, shared POM under {Requirement}/_shared/pages, config under {Requirement}/{TC}/playwright.config.ts. Do not duplicate equivalent files across multiple folders for one TC run.",
     "",
     "## Project rules / e2e-conventions",
     slice(opts.conventions, UNIT_GEN_LIMITS.maxConventionsChars),

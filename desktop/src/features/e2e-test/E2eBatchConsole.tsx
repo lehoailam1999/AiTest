@@ -280,7 +280,7 @@ export function E2eBatchConsole({
       <Typography.Text type="secondary">
         Gen OK {genOk}/{rows.length}
         {" · "}
-        Verify {verifyDone}/{genOk}
+        Execute {verifyDone}/{genOk}
         {" · "}
         Apply {applyDone}/{verifyDone || genOk}
       </Typography.Text>
@@ -327,7 +327,7 @@ export function E2eBatchConsole({
           ? `Kiểm thử tất cả phần đã gen (${genOk})`
           : `Kiểm thử tất cả (${genOk})`}
       </Button>
-      {canHeal ? (
+      {/* {canHeal ? (
         <Button
           icon={<ToolOutlined />}
           onClick={onHeal}
@@ -336,7 +336,7 @@ export function E2eBatchConsole({
         >
           Heal (AI sửa)
         </Button>
-      ) : null}
+      ) : null} */}
       <Button
         icon={<SaveOutlined />}
         onClick={onApply}
@@ -418,7 +418,7 @@ export function E2eBatchConsole({
               ),
           },
           {
-            title: "Verify",
+            title: "Execute",
             width: 90,
             render: (_, r) => {
               if (r.verifyStatus === "pass")

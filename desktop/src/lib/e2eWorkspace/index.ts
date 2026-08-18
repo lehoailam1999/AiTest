@@ -101,9 +101,12 @@ export {
   captureE2eBackups,
   rollbackE2eTargets,
   refreshE2eOverlayFromFiles,
+  stageE2eOverlayToTargets,
+  prepareE2eVerifyWorkspace,
   applyE2eStaging,
   stagingDirHint,
   updateE2eStagedFileContent,
   deleteE2eStagedFile,
+  removeLegacyProjectUnitRuns,
 } from "./stagingApply";
 export type { E2eStagingSession, E2eStagedFile, ApplyE2eResult } from "./stagingApply";

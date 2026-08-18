@@ -66,11 +66,12 @@ import { pickDiscoveredStorageStateRel } from "../../lib/e2eWorkspace/pickDiscov
 import {
   applyE2eStaging,
   buildE2eStagedFiles,
-  captureE2eBackups,
   deleteE2eStagedFile,
   newE2eRunId,
+  prepareE2eVerifyWorkspace,
   refreshE2eOverlayFromFiles,
   rollbackE2eTargets,
+  stageE2eOverlayToTargets,
   stagingDirHint,
   updateE2eStagedFileContent,
   writeE2eOverlayReplacingPrevious,
@@ -270,6 +271,23 @@ function mergeVerifyStatus(
   });
 }
 
+function isPlaywrightSpecPath(path: string): boolean {
+  const p = (path || "").replace(/\\/g, "/").toLowerCase();
+  return /(?:^|\/)specs\/.+\.(spec|test)\.(ts|tsx|js|jsx)$/.test(p);
+}
+
+function hasPlaywrightSpec(files: E2EFileDto[]): boolean {
+  return files.some((f) => f.kind === "spec" || isPlaywrightSpecPath(f.path || ""));
+}
+
+function flattenGenFiles(items: E2eGenItem[]): E2EFileDto[] {
+  const out: E2EFileDto[] = [];
+  for (const item of items) {
+    out.push(...(item.files || []));
+  }
+  return out;
+}
+
 export default function E2ETestPage() {
   const { message } = App.useApp();
   const { project } = useProject();
@@ -306,6 +324,11 @@ export default function E2ETestPage() {
   /** Default bật — hiện cửa sổ Chromium khi Headless (có thể tắt để nhanh hơn). */
   const [showBrowser, setShowBrowser] = useState(true);
   const [envHydrated, setEnvHydrated] = useState(false);
+  const discoveredStorageStateRel = useMemo(
+    () => pickDiscoveredStorageStateRel(authDiscovery),
+    [authDiscovery]
+  );
+  const effectiveUseStorageState = Boolean(discoveredStorageStateRel) || useStorageState;
 
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState<E2EFileDto[]>([]);
@@ -749,7 +772,7 @@ export default function E2ETestPage() {
       username: e2eUsername.trim() || undefined,
       password: e2ePassword.trim() || undefined,
       storageStateRel:
-        pickDiscoveredStorageStateRel(authDiscovery) ||
+        discoveredStorageStateRel ||
         (useStorageState ? "./fixtures/storageState.json" : undefined),
       module:
         inputMode === "requirement"
@@ -802,7 +825,7 @@ export default function E2ETestPage() {
     setResultTab("files");
     if (!isTauri()) return;
     // Reuse batch/single runId — creating a new e2e-* folder per TC was the
-    // root cause of stacked overlays (1 TC, then 2, then 4…) under .ai-test/staging.
+    // root cause of stacked overlays (1 TC, then 2, then 4…) in Tool drafts.
     const runId =
       fixedRunId ||
       e2eStagingRunIdRef.current ||
@@ -908,14 +931,14 @@ export default function E2ETestPage() {
         targetUrl,
         module: batchModule,
         requirementTitle: selectedBatchReq?.title,
-        provider: conn?.provider,
+        provider: conn?.cliType,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
-        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        storageStateRel: discoveredStorageStateRel,
         inspectPerTc: true,
         usePlaywrightInspect,
-        skipAuthSeed: Boolean(pickDiscoveredStorageStateRel(authDiscovery)),
+        skipAuthSeed: Boolean(discoveredStorageStateRel),
         defaultAuthRole: authDiscovery?.defaultRole || undefined,
         waitIfPaused: async () => {
           await control.waitIfPaused();
@@ -955,6 +978,43 @@ export default function E2ETestPage() {
           const tc = cases.find((c) => c.id === item.testCaseId);
           const snap = tc ? batchTcSnapshot(tc) : {};
           if (item.status === "generated") {
+            const hasSpec = item.genItem ? hasPlaywrightSpec(item.genItem.files || []) : false;
+            if (!hasSpec) {
+              const errMsg =
+                "Generate chưa tạo Playwright spec (.spec.ts) — chưa thể Verify";
+              const logBody = `${new Date().toISOString()} · E2E Generate FAIL · ${item.testCaseId}\n${item.title}\n\n${errMsg}`;
+              setBatchResults((prev) =>
+                prev.map((r) =>
+                  r.testCaseId !== item.testCaseId
+                    ? r
+                    : {
+                        ...r,
+                        ...snap,
+                        status: "fail",
+                        error: errMsg,
+                        errorDetail: logBody,
+                        runId: item.row.runId,
+                      }
+                )
+              );
+              if (localPath && isTauri()) {
+                void saveErrorLogFile(
+                  localPath,
+                  generateErrorLogRel(item.testCaseId),
+                  logBody
+                )
+                  .then((errorLogRel) => {
+                    setBatchResults((prev) =>
+                      prev.map((r) =>
+                        r.testCaseId === item.testCaseId ? { ...r, errorLogRel } : r
+                      )
+                    );
+                  })
+                  .catch(() => undefined);
+              }
+              message.warning(`Thiếu spec: ${item.title}`);
+              return;
+            }
             setBatchResults((prev) =>
               prev.map((r) =>
                 r.testCaseId !== item.testCaseId
@@ -1028,24 +1088,34 @@ export default function E2ETestPage() {
           ? (markBatchRowsPaused(mapped as BatchPipelineRow[]) as E2eBatchPipelineRow[])
           : mapped;
       });
-      setBatchGenItems(genItems);
-      setFiles(batchFiles);
+      const verifyReadyItems = genItems.filter(
+        (g) => Boolean(g.primarySpecPath) && hasPlaywrightSpec(g.files || [])
+      );
+      setBatchGenItems(verifyReadyItems);
+      setFiles(batchFiles.length ? batchFiles : flattenGenFiles(verifyReadyItems));
       await stageFilesFromGen(
-        batchFiles,
+        batchFiles.length ? batchFiles : flattenGenFiles(verifyReadyItems),
         batchModule,
         cases[0]?.id || "",
         batchStagingRunId
       );
       setRun((r) => ({
         ...finishPhase(r, "generate", {
-          status: genItems.length > 0 ? "finish" : "error",
+          status: verifyReadyItems.length > 0 ? "finish" : "error",
           durationMs: Math.round(performance.now() - t0),
         }),
         jobPassed: null,
       }));
-      message.success(
-        `Generate xong: ${genItems.length}/${cases.length} TC — tiếp theo: Kiểm thử`
-      );
+      if (verifyReadyItems.length > 0) {
+        message.success(
+          `Generate xong: ${verifyReadyItems.length}/${cases.length} TC có spec — tiếp theo: Kiểm thử`
+        );
+      } else {
+        message.error(
+          "Generate không tạo được Playwright spec cho TC nào. Mở log Generate để xem lỗi chi tiết."
+        );
+        setResultTab("log");
+      }
       void persistE2eEnv();
       void refreshAuthDiscovery();
     } catch (e) {
@@ -1078,8 +1148,20 @@ export default function E2ETestPage() {
       message.warning("Cần project + root");
       return;
     }
-    if (files.length === 0 || batchGenItems.length === 0) {
-      message.warning("Chưa Generate — bấm Chạy E2E Job trước (hoặc chờ TC gen xong)");
+    const verifyReadyItems = batchGenItems.filter(
+      (g) => Boolean(g.primarySpecPath) && hasPlaywrightSpec(g.files || [])
+    );
+    if (verifyReadyItems.length === 0) {
+      message.warning(
+        "Chưa có TC nào có Playwright spec để Verify. Hãy Generate lại và kiểm tra log."
+      );
+      setResultTab("log");
+      return;
+    }
+    const verifyFiles = files.length ? files : flattenGenFiles(verifyReadyItems);
+    if (!hasPlaywrightSpec(verifyFiles)) {
+      message.error("Không tìm thấy file spec để chạy Playwright. Hãy Generate lại.");
+      setResultTab("files");
       return;
     }
     // Module folder from requirement title; verify set = all generated items this batch.
@@ -1100,12 +1182,12 @@ export default function E2ETestPage() {
     setResultTab("log");
     setBatchProgress({
       current: 0,
-      total: batchGenItems.length,
+      total: verifyReadyItems.length,
       label: preserveGeneratePause
-        ? `Kiểm thử tất cả phần đã gen (${batchGenItems.length} TC)`
+        ? `Kiểm thử tất cả phần đã gen (${verifyReadyItems.length} TC)`
         : showBrowser
-          ? `Kiểm thử tất cả — Chromium (${batchGenItems.length} TC)…`
-          : `Kiểm thử tất cả (${batchGenItems.length} TC)…`,
+          ? `Kiểm thử tất cả — Chromium (${verifyReadyItems.length} TC)…`
+          : `Kiểm thử tất cả (${verifyReadyItems.length} TC)…`,
     });
 
     try {
@@ -1121,12 +1203,13 @@ export default function E2ETestPage() {
       let session = staging;
       if (isTauri() && session) {
         try {
-          session = {
-            ...session,
-            backups: await captureE2eBackups(localPath, session.files),
-          };
+          session = await prepareE2eVerifyWorkspace(localPath, session);
+          e2eStagingSessionRef.current = session;
           setStaging(session);
-          pushPhaseLog("headless", "  đã snapshot AItest (rollback sau Verify)\n");
+          pushPhaseLog(
+            "headless",
+            "  đã copy staging → AItest/E2ETest (rollback sau Verify)\n"
+          );
         } catch {
           /* optional */
         }
@@ -1138,17 +1221,17 @@ export default function E2ETestPage() {
         projectRoot: localPath,
         module: batchModule,
         targetUrl,
-        files,
-        genItems: batchGenItems,
+        files: verifyFiles,
+        genItems: verifyReadyItems,
         domSnapshot,
         showBrowser,
-        provider: conn?.provider,
+        provider: conn?.cliType,
         healFailures: false,
         maxRetries: 1,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
-        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        storageStateRel: discoveredStorageStateRel,
         defaultAuthRole: authDiscovery?.defaultRole || undefined,
         // Suite path only when genItems share one — else each Spec uses baked path
         featurePath: inspectCacheRef.current?.featurePath,
@@ -1203,7 +1286,7 @@ export default function E2ETestPage() {
           pushPhaseLog("headless", `  staging warn: ${String(e)}\n`);
         }
       }
-      const allPassed = okCount === batchGenItems.length;
+      const allPassed = okCount === verifyReadyItems.length;
       const firstVerifyError =
         rows.find((r) => r.status !== "ok")?.error || "";
       setRun((r) => ({
@@ -1216,7 +1299,7 @@ export default function E2ETestPage() {
       setRun((r) => finishPhase(r, "heal", { status: "skip", durationMs: 0 }));
       if (allPassed) {
         message.success(
-          `Kiểm thử: ${okCount}/${batchGenItems.length} PASS (${metrics.passRatePct}%)`
+          `Kiểm thử: ${okCount}/${verifyReadyItems.length} PASS (${metrics.passRatePct}%)`
         );
       } else {
         setResultTab("log");
@@ -1252,8 +1335,18 @@ export default function E2ETestPage() {
       message.warning("Cần project + root");
       return;
     }
-    if (files.length === 0 || batchGenItems.length === 0) {
-      message.warning("Chưa có file Generate");
+    const verifyReadyItems = batchGenItems.filter(
+      (g) => Boolean(g.primarySpecPath) && hasPlaywrightSpec(g.files || [])
+    );
+    if (verifyReadyItems.length === 0) {
+      message.warning("Không có Playwright spec để Heal.");
+      setResultTab("log");
+      return;
+    }
+    const verifyFiles = files.length ? files : flattenGenFiles(verifyReadyItems);
+    if (!hasPlaywrightSpec(verifyFiles)) {
+      message.warning("Không tìm thấy file spec để Heal.");
+      setResultTab("files");
       return;
     }
     if (run.jobPassed === true) {
@@ -1281,23 +1374,32 @@ export default function E2ETestPage() {
     setResultTab("log");
 
     try {
+      let session = e2eStagingSessionRef.current || staging;
+      if (isTauri() && session) {
+        try {
+          await stageE2eOverlayToTargets(localPath, session);
+          pushPhaseLog("heal", "  đã copy staging → AItest/E2ETest để Heal\n");
+        } catch {
+          /* optional */
+        }
+      }
       const t0 = performance.now();
       const { rows, okCount, files: outFiles, metrics } = await verifyE2eModuleBatch({
         projectId: project.id,
         projectRoot: localPath,
         module: batchModule,
         targetUrl,
-        files,
-        genItems: batchGenItems,
+        files: verifyFiles,
+        genItems: verifyReadyItems,
         domSnapshot: inspectCacheRef.current?.promptJson || "",
         showBrowser,
-        provider: conn?.provider,
+        provider: conn?.cliType,
         healFailures: true,
         maxRetries: 2,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
-        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        storageStateRel: discoveredStorageStateRel,
         defaultAuthRole: authDiscovery?.defaultRole || undefined,
         featurePath: inspectCacheRef.current?.featurePath,
         priorRows: batchResults.map((r) => ({
@@ -1346,7 +1448,7 @@ export default function E2ETestPage() {
           /* optional */
         }
       }
-      const allPassed = okCount === batchGenItems.length;
+      const allPassed = okCount === verifyReadyItems.length;
       setRun((r) => ({
         ...finishPhase(r, "heal", {
           status: allPassed ? "finish" : "error",
@@ -1356,7 +1458,7 @@ export default function E2ETestPage() {
         healCount: allPassed ? 1 : 0,
       }));
       message.success(
-        `Heal: ${okCount}/${batchGenItems.length} PASS (${metrics.passRatePct}%) — ${metrics.summaryLine}`
+        `Heal: ${okCount}/${verifyReadyItems.length} PASS (${metrics.passRatePct}%) — ${metrics.summaryLine}`
       );
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
@@ -1406,19 +1508,41 @@ export default function E2ETestPage() {
         testCase: selected,
         targetUrl,
         module: selected.module || undefined,
-        provider: conn?.provider,
+        provider: conn?.cliType,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
-        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        storageStateRel: discoveredStorageStateRel,
         inspectPerTc: true,
         usePlaywrightInspect,
-        skipAuthSeed: Boolean(pickDiscoveredStorageStateRel(authDiscovery)),
+        skipAuthSeed: Boolean(discoveredStorageStateRel),
         defaultAuthRole: authDiscovery?.defaultRole || undefined,
         onLog: (line) => pushPhaseLog("generate", line),
       });
       setSingleRunId(gen.runId);
       setSinglePrimarySpec(gen.primarySpecPath);
+      const singleHasSpec = hasPlaywrightSpec(gen.files || []);
+      if (!singleHasSpec) {
+        const errMsg =
+          "Generate chưa tạo Playwright spec (.spec.ts) cho TC này — chưa thể Verify";
+        if (localPath && isTauri()) {
+          const logBody = `${new Date().toISOString()} · E2E Generate FAIL · ${selected.id}\n${selected.title}\n\n${errMsg}`;
+          void saveErrorLogFile(localPath, generateErrorLogRel(selected.id), logBody).catch(
+            () => undefined
+          );
+        }
+        setBatchGenItems([]);
+        setRun((r) => ({
+          ...finishPhase(r, "generate", {
+            status: "error",
+            durationMs: Math.round(performance.now() - t0),
+          }),
+          jobPassed: null,
+        }));
+        message.error(errMsg);
+        setResultTab("log");
+        return;
+      }
       setBatchGenItems([
         {
           testCaseId: selected.id,
@@ -1469,6 +1593,13 @@ export default function E2ETestPage() {
       message.warning("Chưa Generate");
       return;
     }
+    if (!singlePrimarySpec || !hasPlaywrightSpec(files)) {
+      message.warning(
+        "Generate chưa có Playwright spec cho TC này. Hãy Generate lại và kiểm tra log."
+      );
+      setResultTab("log");
+      return;
+    }
     const phase: E2ePhaseId = healFailures ? "heal" : "headless";
     setBusy(true);
     setActivePhase(phase);
@@ -1485,11 +1616,17 @@ export default function E2ETestPage() {
       let session = staging;
       if (!healFailures && isTauri() && session) {
         try {
-          session = {
-            ...session,
-            backups: await captureE2eBackups(localPath, session.files),
-          };
+          session = await prepareE2eVerifyWorkspace(localPath, session);
+          e2eStagingSessionRef.current = session;
           setStaging(session);
+          pushPhaseLog(phase, "  đã copy staging → AItest/E2ETest (rollback sau Verify)\n");
+        } catch {
+          /* optional */
+        }
+      } else if (healFailures && isTauri() && session) {
+        try {
+          await stageE2eOverlayToTargets(localPath, session);
+          pushPhaseLog(phase, "  đã copy staging → AItest/E2ETest để Heal\n");
         } catch {
           /* optional */
         }
@@ -1506,13 +1643,13 @@ export default function E2ETestPage() {
         domSnapshot: inspectCacheRef.current?.promptJson || "",
         module: selected.module || undefined,
         showBrowser,
-        provider: conn?.provider,
+        provider: conn?.cliType,
         healFailures,
         maxRetries: healFailures ? 2 : 1,
         useStorageState,
         username: e2eUsername,
         password: e2ePassword,
-        storageStateRel: pickDiscoveredStorageStateRel(authDiscovery),
+        storageStateRel: discoveredStorageStateRel,
         defaultAuthRole: authDiscovery?.defaultRole || undefined,
         featurePath: inspectCacheRef.current?.featurePath,
         onLog: (line) => pushPhaseLog(phase, line),
@@ -1789,14 +1926,14 @@ export default function E2ETestPage() {
           targetUrl={targetUrl}
           testCaseId={testCaseId || batchSelected[0] || ""}
           authReady={
-            Boolean(pickDiscoveredStorageStateRel(authDiscovery)) ||
+            Boolean(discoveredStorageStateRel) ||
             Boolean(e2eUsername.trim() && e2ePassword.trim()) ||
             useStorageState ||
             // Discover found role users — still recommend seed for storageState
             Boolean(authDiscovery?.ready)
           }
           authLabel={
-            pickDiscoveredStorageStateRel(authDiscovery)
+            discoveredStorageStateRel
               ? authDiscovery?.defaultRole || "storage"
               : e2eUsername.trim()
                 ? "credentials"
@@ -1807,7 +1944,7 @@ export default function E2ETestPage() {
                     : undefined
           }
           authHint={
-            pickDiscoveredStorageStateRel(authDiscovery) ||
+            discoveredStorageStateRel ||
             (e2eUsername.trim() && e2ePassword.trim()) ||
             useStorageState
               ? undefined
@@ -1943,11 +2080,13 @@ export default function E2ETestPage() {
                       Quét DOM bằng Playwright Chromium (SPA)
                     </Checkbox>
                     <Checkbox
-                      checked={useStorageState}
+                      checked={effectiveUseStorageState}
                       onChange={(e) => setUseStorageState(e.target.checked)}
-                      disabled={busy}
+                      disabled={busy || Boolean(discoveredStorageStateRel)}
                     >
-                      Dùng storageState — chỉ bật khi đã có fixtures/storageState.json (tránh ENOENT)
+                      {discoveredStorageStateRel
+                        ? `Đã auto dùng storageState: ${discoveredStorageStateRel}`
+                        : "Dùng storageState fallback — chỉ bật khi đã có fixtures/storageState.json (tránh ENOENT)"}
                     </Checkbox>
                     <Alert
                       type={
@@ -2390,7 +2529,7 @@ export default function E2ETestPage() {
 
         {staging ? (
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0, fontSize: 12 }}>
-            Staging: <code>{stagingDirHint(staging.runId)}</code>
+            Staging Apply: <code>{stagingDirHint(staging.runId, staging.packagePrefix)}</code>
           </Typography.Paragraph>
         ) : null}
 

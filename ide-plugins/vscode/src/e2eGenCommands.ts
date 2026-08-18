@@ -82,9 +82,51 @@ async function genOneItem(
       message: s.slice(0, 200),
     })
   );
-  const files = parseE2eFilesFromRaw(raw, suggested);
+  let files = parseE2eFilesFromRaw(raw, suggested);
   if (!files.length) {
     throw new Error("Empty E2E files from Agent CLI");
+  }
+  const hasSpec = files.some(
+    (f) => f.kind === "spec" || /\/specs\/.*\.spec\.ts$/i.test(f.path)
+  );
+  if (!hasSpec) {
+    notifyProgress(notify, {
+      commandId,
+      phase: "generating",
+      current,
+      total,
+      message: `Thiếu spec — retry với prompt bổ sung…`,
+    });
+    const retryPrompt =
+      prompt +
+      "\n\n## CRITICAL RETRY\n" +
+      "Your previous output did NOT contain a Playwright spec file (*.spec.ts under specs/).\n" +
+      "You MUST output at least one ### FILE: .../specs/<name>.spec.ts with full Playwright test code.\n" +
+      "Re-generate now. Include both the spec AND page files.";
+    const raw2 = await runPrompt(retryPrompt, adaptiveTimeoutMs(retryPrompt), (s) =>
+      notifyProgress(notify, {
+        commandId,
+        phase: "generating",
+        current,
+        total,
+        message: `retry: ${s.slice(0, 200)}`,
+      })
+    );
+    const files2 = parseE2eFilesFromRaw(raw2, suggested);
+    if (files2.some((f) => f.kind === "spec" || /\/specs\/.*\.spec\.ts$/i.test(f.path))) {
+      files = files2;
+    } else if (files2.length) {
+      files = [...files, ...files2];
+    }
+    const stillNoSpec = !files.some(
+      (f) => f.kind === "spec" || /\/specs\/.*\.spec\.ts$/i.test(f.path)
+    );
+    if (stillNoSpec) {
+      throw new Error(
+        "Agent CLI trả về page/fixture nhưng KHÔNG có Playwright spec (.spec.ts). " +
+        "Kiểm tra AI model, e2e-conventions, hoặc context (FE source quá lớn / thiếu)."
+      );
+    }
   }
   const metas: CodegenGeneratedFileMeta[] = files.map((f) => ({
     path: f.path,

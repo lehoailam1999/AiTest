@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app import constants as C
 from app.database import get_db
 from app.deps import get_current_user
-from app.models.domain import GenerationTask, Job, Source, TestCase, WorkspaceRun
+from app.models.domain import GenerationTask, Job, Project, Source, TestCase, WorkspaceRun
 from app.models.user import User
 from app.responses import errors, ok, page, page_params
 from app.serializers import testcase_dto
@@ -257,6 +257,7 @@ def _split_e2e_readiness_issues(issues: list[str]) -> tuple[list[str], list[str]
         "steps bị trống",
         "step mơ hồ",
         "locator kỹ thuật",
+        "test data bị trống",
     )
     critical: list[str] = []
     soft: list[str] = []
@@ -530,7 +531,19 @@ def _transition(
     if to == C.REVIEW_APPROVED:
         normalized_type = normalize_engine_type(tc.type)
         if normalized_type == "E2E":
-            enrich_e2e_tc_before_approve(tc)
+            proj_default_role: str | None = None
+            proj = db.get(Project, tc.project_id) if tc.project_id else None
+            if proj and proj.meta:
+                try:
+                    _pmeta = json.loads(proj.meta)
+                    proj_default_role = (
+                        _pmeta.get("defaultAuthRole")
+                        or _pmeta.get("authRole")
+                        or _pmeta.get("default_role")
+                    )
+                except Exception:
+                    pass
+            enrich_e2e_tc_before_approve(tc, project_default_role=proj_default_role)
             issues = _validate_e2e_approve_readiness(tc)
             critical, soft = _split_e2e_readiness_issues(issues)
             if critical:

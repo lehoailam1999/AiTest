@@ -166,8 +166,8 @@ export function E2eVerifyApplyConsole({
         type="info"
         showIcon
         style={{ marginBottom: 10 }}
-        title="Verify trên staging — Apply chỉ ghi AItest/E2ETest/"
-        description="Staging tạm rồi rollback cho đến Apply. Apply ghi AItest/E2ETest/ trên disk — không đụng src production. Sau Apply có thể dọn staging."
+        title="Verify trên AItest/E2ETest — Apply ghi bền"
+        description="Giống Unit: copy staging vào AItest/E2ETest, chạy Playwright, rồi rollback đến khi Apply. Apply ghi AItest/E2ETest/ trên disk — không đụng src production."
       />
 
       {metrics && metrics.total > 0 ? (

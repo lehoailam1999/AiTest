@@ -1397,8 +1397,9 @@ pub fn delete_text_file(project_root: String, relative_path: String) -> Result<(
     Ok(())
 }
 
-/// Remove a directory tree under project root. Restricted to `*/.ai-test/**` staging paths.
-/// When `empty_only` is true, only remove if the directory is empty (or missing).
+/// Remove a directory tree under project root.
+/// Allowed: `.ai-test/**` staging, empty `AItest/**` prune, and leftover `unit-runs/**`
+/// (legacy E2E overlay leak — drafts now live in OS temp, like Unit).
 #[tauri::command]
 pub fn delete_dir(
     project_root: String,
@@ -1421,9 +1422,13 @@ pub fn delete_dir(
     let allowed_staging = parts.iter().any(|s| s.eq_ignore_ascii_case(".ai-test"));
     let allowed_aitest_empty = empty_only_flag
         && parts.iter().any(|s| s.eq_ignore_ascii_case("aitest"));
-    if !allowed_staging && !allowed_aitest_empty {
+    let allowed_legacy_unit_runs = parts
+        .first()
+        .map(|s| s.eq_ignore_ascii_case("unit-runs"))
+        .unwrap_or(false);
+    if !allowed_staging && !allowed_aitest_empty && !allowed_legacy_unit_runs {
         return Err(
-            "Chỉ được xóa thư mục dưới .ai-test/ (staging) hoặc thư mục trống dưới AItest/"
+            "Chỉ được xóa thư mục dưới .ai-test/ (staging), unit-runs/ (legacy), hoặc thư mục trống dưới AItest/"
                 .into(),
         );
     }

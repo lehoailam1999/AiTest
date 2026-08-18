@@ -23,7 +23,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-AITestDb}}"
+      # Always use the Compose postgres service. Do not pass through DATABASE_URL
+      # from api/.env (that file is for local uvicorn: localhost:5433).
+      DATABASE_URL: "host=postgres user=${POSTGRES_USER:-postgres} password=${POSTGRES_PASSWORD} dbname=${POSTGRES_DB:-AITestDb} port=5432 sslmode=disable TimeZone=UTC"
       JWT_KEY: "${JWT_KEY:?Error: JWT_KEY is required in .env.production}"
       ENCRYPTION_KEY: "${ENCRYPTION_KEY:?Error: ENCRYPTION_KEY is required in .env.production}"
       JWT_ISSUER: ${JWT_ISSUER:-AITest.API}

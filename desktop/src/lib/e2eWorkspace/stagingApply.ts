@@ -1,6 +1,7 @@
 /**
- * EX3 — E2E staging under `.ai-test/workspace/{runId}/` → Apply `AItest/E2ETest/…` → cleanup.
- * Choice: staging-first + Apply confirm (sandbox may write AItest for heal; FE rolls back then Apply).
+ * EX3 — E2E overlay lives in the Tool draft (OS temp), same as Unit.
+ * Verify copies overlay → `AItest/E2ETest/…`, runs Playwright, then rolls back.
+ * Apply writes `AItest/E2ETest/…` permanently and deletes the draft.
  */
 import { readTextFile, writeTextFile, deleteTextFile, deleteDir, isTauri } from "../../tauri/bridge";
 import {
@@ -9,12 +10,15 @@ import {
   aiTestDir,
 } from "../unitWorkspace/paths";
 import { cleanupWorkspaceRunAfterApply } from "../unitWorkspace/cleanup";
+import { deleteDraftPath, readDraftText, writeDraftText } from "../unitWorkspace/draftStore";
+import { writeTextFileIfChanged } from "../unitWorkspace/contentDedup";
 import type { StagingBackup } from "../unitWorkspace/types";
 import {
   assertSafeAitestTargetRel,
   coerceAitestApplyPath,
   compiledAitestArtifactRels,
   emptyAitestParentRels,
+  e2eSuiteRoot,
 } from "../testOutputLayout";
 import { audit } from "../../api";
 import type { E2EFileDto } from "../../api";
@@ -51,6 +55,29 @@ function assertE2eTarget(targetRel: string): string {
   return p;
 }
 
+/** Overlay is a Tool draft; fall back to a leaked repo `unit-runs/` file from older builds. */
+async function readE2eOverlayText(
+  projectRoot: string,
+  workspaceRel: string
+): Promise<string> {
+  try {
+    return await readDraftText(projectRoot, workspaceRel);
+  } catch {
+    return await readTextFile(projectRoot, workspaceRel);
+  }
+}
+
+/** Wipe leftover `{project}/unit-runs` that old E2E Generate wrote into the SUT. */
+export async function removeLegacyProjectUnitRuns(
+  projectRoot: string
+): Promise<void> {
+  try {
+    await deleteDir(projectRoot, "unit-runs");
+  } catch {
+    /* missing, locked, or not Tauri */
+  }
+}
+
 export function newE2eRunId(testCaseId: string): string {
   const short = testCaseId.replace(/-/g, "").slice(0, 8);
   return `e2e-${short}-${Date.now()}`;
@@ -58,8 +85,8 @@ export function newE2eRunId(testCaseId: string): string {
 
 /**
  * Write overlay under a fixed runId. If `previous` has a different runId, delete that
- * staging folder first — prevents orphan `.ai-test/staging/e2e-*` trees that accumulate
- * every TC during batch generate (Unit uses one runId per job; E2E must match).
+ * Tool draft first — prevents orphan overlay trees that accumulate every TC during
+ * batch generate (Unit uses one runId per job; E2E must match).
  */
 export async function writeE2eOverlayReplacingPrevious(
   projectRoot: string,
@@ -119,10 +146,10 @@ export async function writeE2eOverlay(
     throw new Error("Staging E2E cần Desktop (Tauri).");
   }
   for (const f of session.files) {
-    await writeTextFile(projectRoot, f.workspaceRel, f.content);
+    await writeDraftText(projectRoot, f.workspaceRel, f.content);
   }
   const manifestRel = `${workspaceRunDir(session.runId, session.packagePrefix)}/manifest.e2e.json`;
-  await writeTextFile(
+  await writeDraftText(
     projectRoot,
     manifestRel,
     JSON.stringify(
@@ -145,6 +172,33 @@ export async function writeE2eOverlay(
       2
     )
   );
+  await removeLegacyProjectUnitRuns(projectRoot);
+}
+
+/** Copy Tool draft overlay onto `AItest/E2ETest/…` so Playwright/Verify run like Unit. */
+export async function stageE2eOverlayToTargets(
+  projectRoot: string,
+  session: E2eStagingSession
+): Promise<void> {
+  for (const f of session.files) {
+    const targetRel = assertE2eTarget(f.targetRel);
+    const content = await readE2eOverlayText(projectRoot, f.workspaceRel);
+    await writeTextFileIfChanged(projectRoot, targetRel, content);
+  }
+}
+
+/**
+ * Snapshot current AItest files, then copy overlay onto disk for Verify/Run.
+ * Caller rolls back after Verify; Apply is the only persistent write.
+ */
+export async function prepareE2eVerifyWorkspace(
+  projectRoot: string,
+  session: E2eStagingSession
+): Promise<E2eStagingSession> {
+  const backups = await captureE2eBackups(projectRoot, session.files);
+  const next: E2eStagingSession = { ...session, backups };
+  await stageE2eOverlayToTargets(projectRoot, next);
+  return next;
 }
 
 async function fileExists(projectRoot: string, rel: string): Promise<boolean> {
@@ -239,7 +293,7 @@ export async function applyE2eStaging(
       const files: { path: string; content: string; kind: string }[] = [];
       for (const f of session.files) {
         const targetRel = assertE2eTarget(f.targetRel);
-        const content = await readTextFile(projectRoot, f.workspaceRel);
+        const content = await readE2eOverlayText(projectRoot, f.workspaceRel);
         files.push({ path: targetRel, content, kind: f.kind || "spec" });
       }
       const ideResult = await ideApplyFiles({
@@ -259,7 +313,7 @@ export async function applyE2eStaging(
     } else {
       for (const f of session.files) {
         const targetRel = assertE2eTarget(f.targetRel);
-        const content = await readTextFile(projectRoot, f.workspaceRel);
+        const content = await readE2eOverlayText(projectRoot, f.workspaceRel);
         await writeTextFile(projectRoot, targetRel, content);
         applied.push(targetRel);
       }
@@ -296,6 +350,7 @@ export async function applyE2eStaging(
         session.runId,
         session.packagePrefix
       );
+      await removeLegacyProjectUnitRuns(projectRoot);
       stagingCleaned = true;
     } catch {
       /* Apply OK — staging cleanup best-effort */
@@ -321,7 +376,8 @@ export async function applyE2eStaging(
 }
 
 export function stagingDirHint(runId: string, packagePrefix?: string | null): string {
-  return workspaceRunDir(runId, packagePrefix);
+  void runId;
+  return e2eSuiteRoot({ packagePrefix });
 }
 
 export function e2eAiTestDir(packagePrefix?: string | null): string {
@@ -338,7 +394,7 @@ function matchStagedPath(filePath: string, staged: E2eStagedFile): boolean {
 }
 
 /**
- * Edit one generated E2E file: memory DTO path + staging overlay + AItest source.
+ * Edit one generated E2E file in the Tool draft. Apply later writes AItest/.
  */
 export async function updateE2eStagedFileContent(
   projectRoot: string,
@@ -355,8 +411,7 @@ export async function updateE2eStagedFileContent(
   if (!hit) throw new Error(`File không có trong staging: ${filePath}`);
 
   assertE2eTarget(hit.targetRel);
-  await writeTextFile(projectRoot, hit.workspaceRel, content);
-  await writeTextFile(projectRoot, hit.targetRel, content);
+  await writeDraftText(projectRoot, hit.workspaceRel, content);
 
   const next: E2eStagingSession = { ...session, files: nextFiles };
   await writeE2eOverlay(projectRoot, next);
@@ -378,9 +433,14 @@ export async function deleteE2eStagedFile(
   assertE2eTarget(hit.targetRel);
 
   try {
-    await deleteTextFile(projectRoot, hit.workspaceRel);
+    await deleteDraftPath(projectRoot, hit.workspaceRel);
   } catch {
     /* overlay may already be gone */
+  }
+  try {
+    await deleteTextFile(projectRoot, hit.workspaceRel);
+  } catch {
+    /* legacy project unit-runs overlay */
   }
 
   try {

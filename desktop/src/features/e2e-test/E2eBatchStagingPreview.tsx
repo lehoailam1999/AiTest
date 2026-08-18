@@ -42,7 +42,7 @@ type Props = {
   runId?: string | null;
   selectedPath: string | null;
   onSelectPath: (path: string | null) => void;
-  /** Persist edit/delete to staging + AItest/ disk */
+  /** Persist edit/delete to Tool draft; Apply writes AItest/ */
   onSaveFile?: (path: string, content: string) => Promise<void>;
   onDeleteFile?: (path: string) => Promise<void>;
 };
@@ -248,7 +248,7 @@ export function E2eBatchStagingPreview({
     setSaving(true);
     try {
       await onSaveFile(selected.path, draft);
-      message.success("Đã lưu staging + source");
+      message.success("Đã lưu overlay (Apply mới ghi AItest)");
       setEditing(false);
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
@@ -267,8 +267,7 @@ export function E2eBatchStagingPreview({
           <Typography.Text code style={{ fontSize: 12 }}>
             {selected.path}
           </Typography.Text>{" "}
-          khỏi kết quả Generate / staging và file trên source dưới{" "}
-          <code>AItest/E2ETest/</code>.
+          khỏi overlay Generate. File đã Apply dưới <code>AItest/E2ETest/</code> cũng sẽ bị xóa.
         </Typography.Paragraph>
       ),
       okText: "Xóa",
@@ -277,7 +276,7 @@ export function E2eBatchStagingPreview({
       onOk: async () => {
         try {
           await onDeleteFile(selected.path);
-          message.success("Đã xóa staging + source");
+          message.success("Đã xóa overlay");
           setEditing(false);
           onSelectPath(null);
         } catch (e) {
@@ -314,12 +313,11 @@ export function E2eBatchStagingPreview({
         title="File staging — chưa Apply vào source"
         description={
           <>
-            Tạm trong{" "}
+            Overlay nằm trong Tool draft (giống Unit). Verify/chạy copy vào{" "}
             <Typography.Text code style={{ fontSize: 12 }}>
               {stagingDirHint(String(hintRun))}
             </Typography.Text>
-            . Nhóm «Dùng chung» + theo TC — <strong>Sửa/Xóa</strong> đồng bộ overlay và source{" "}
-            <code>AItest/E2ETest/</code>.
+            . Apply mới ghi bền vào <code>AItest/E2ETest/</code>.
           </>
         }
       />

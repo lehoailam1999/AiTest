@@ -2,34 +2,31 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from shlex import split as shlex_split
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _API_DIR = Path(__file__).resolve().parents[1]
+_REPO_DIR = _API_DIR.parent
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(_API_DIR / ".env"),
+        # Runtime values can still be overridden by real process environment variables.
+        env_file=str(_REPO_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
     port: int = 8000
-    database_url: str = (
-        "host=localhost user=postgres password=postgres "
-        "dbname=AITestDb port=5433 sslmode=disable TimeZone=UTC"
-    )
-    jwt_key: str = "AITest-Super-Secret-Key-Min-32-Chars-Long!"
+    database_url: str
+    jwt_key: str
     encryption_key: str | None = None
     jwt_issuer: str = "AITest.API"
     jwt_audience: str = "AITest.Client"
     jwt_access_hours: int = 8
-    cors_origins: str = (
-        "http://localhost:5173,http://127.0.0.1:5173,"
-        "http://localhost:4200,http://localhost:4300,"
-        "tauri://localhost,http://tauri.localhost,https://tauri.localhost"
-    )
+    cors_origins: str
     # Workspace metadata SQLite (paths only — never source content)
     workspace_meta_db: str | None = None
     workspace_enable_watcher: bool = False
@@ -41,12 +38,12 @@ class Settings(BaseSettings):
             return raw.replace("postgresql://", "postgresql+psycopg://", 1)
         # Go-style key=value DSN
         parts: dict[str, str] = {}
-        for token in raw.split():
+        for token in shlex_split(raw):
             if "=" in token:
                 k, v = token.split("=", 1)
                 parts[k] = v
-        user = parts.get("user", "postgres")
-        password = parts.get("password", "postgres")
+        user = quote_plus(parts.get("user", "postgres"))
+        password = quote_plus(parts.get("password", "postgres"))
         host = parts.get("host", "localhost")
         port = parts.get("port", "5432")
         dbname = parts.get("dbname", "AITestDb")
