@@ -8,13 +8,12 @@ from urllib.parse import quote_plus
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _API_DIR = Path(__file__).resolve().parents[1]
-_REPO_DIR = _API_DIR.parent
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        # Runtime values can still be overridden by real process environment variables.
-        env_file=str(_REPO_DIR / ".env"),
+        # Local: api/.env. Docker Compose injects process env and overrides this.
+        env_file=str(_API_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
