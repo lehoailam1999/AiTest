@@ -67,6 +67,7 @@ export function assertSafeAitestTargetRel(targetRel: string): string {
 export function isAllowedUnitLayoutPath(safeRel: string): boolean {
   const p = (safeRel || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (!p) return false;
+  if (/(?:^|\/)aitest\/test-cases(?:\/|$)/i.test(p)) return false;
   if (/\/unittest\//i.test(`/${p}/`)) return true;
   const low = p.toLowerCase();
   const marker = "aitest/";

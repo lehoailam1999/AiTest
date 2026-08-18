@@ -9,6 +9,9 @@ export const IdeCapabilities = {
     planner: "planner",
     sessionReuse: "sessionReuse",
     tcSync: "tcSync",
+    /** Unit Approve via IDE Repository Intelligence (symbols/defs/refs). */
+    repositoryIntelligence: "repositoryIntelligence",
+    unitApproveV2: "unitApproveV2",
 };
 /** Caps this Extension build advertises. */
 export const EXTENSION_CAPABILITIES = [
@@ -17,10 +20,17 @@ export const EXTENSION_CAPABILITIES = [
     IdeCapabilities.stream,
     IdeCapabilities.sessionReuse,
     IdeCapabilities.tcSync,
+    IdeCapabilities.repositoryIntelligence,
+    IdeCapabilities.unitApproveV2,
 ];
 /** Desktop requires these before IDE Unit Gen. */
 export const DESKTOP_REQUIRED_UNIT_CAPS = [
     IdeCapabilities.unit,
+];
+/** Desktop requires these before Unit Approve v2. */
+export const DESKTOP_REQUIRED_UNIT_APPROVE_CAPS = [
+    IdeCapabilities.repositoryIntelligence,
+    IdeCapabilities.unitApproveV2,
 ];
 /** Desktop requires these before IDE E2E Gen (Agent CLI). */
 export const DESKTOP_REQUIRED_E2E_CAPS = [

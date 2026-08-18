@@ -1,6 +1,7 @@
 import { runTestCommand, runDotnetTest, deleteTextFile } from "../../tauri/bridge";
 import {
-  preserveStagedOverlays,
+  captureStagingBackups,
+  restoreSourceAfterVerify,
   stageOverlayToTargets,
 } from "./staging";
 import { saveManifest } from "./manager";
@@ -123,8 +124,18 @@ export async function runCombinedBatchVerify(input: {
   }
 
   const stages: VerifyStageResult[] = [];
+  const backupsByRun: Array<{
+    manifest: UnitWorkspaceManifest;
+    backups: Awaited<ReturnType<typeof captureStagingBackups>>;
+  }> = [];
 
   try {
+    for (const m of manifests) {
+      backupsByRun.push({
+        manifest: m,
+        backups: await captureStagingBackups(projectRoot, m),
+      });
+    }
     for (const m of manifests) {
       await stageOverlayToTargets(projectRoot, m);
     }
@@ -214,7 +225,7 @@ export async function runCombinedBatchVerify(input: {
     );
     return { success: overallPass, stages, updatedManifests: updated };
   } finally {
-    // Keep all staged AItest files on disk until Apply / Discard (never wipe UnitTest/).
-    await preserveStagedOverlays(projectRoot, manifests);
+    // The source remains unchanged until the user chooses Update/Apply.
+    await restoreSourceAfterVerify(projectRoot, backupsByRun);
   }
 }

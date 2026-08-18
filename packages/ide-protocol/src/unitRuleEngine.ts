@@ -88,7 +88,7 @@ export const UNIT_PROMPT_RULES_CORE: readonly string[] = [
   "Policy SoT is the «Project rules / unit-conventions» block below — follow it; do not invent conflicting rules.",
   "Primary SUT in the packet is authoritative — map TC intent to closest behavior in primary + related excerpts.",
   "VALIDATION_DATA: assert only constraints evidenced in excerpts ([Required], MaxLength, throw/BadRequest, duplicate) — never invent.",
-  "Refuse only if excerpts cannot support any faithful assert without inventing APIs/BRs: empty fence + one line FAIL_NEEDS_MARKER | FAIL_DOMAIN_GUARD | FAIL_FEATURE_GAP | FAIL_SUT_MISMATCH.",
+  "If the locked packet cannot be exercised faithfully, return an empty code fence; never search for or substitute another SUT.",
 ];
 
 /** Rough token estimate when no tokenizer is available (chars/4). */

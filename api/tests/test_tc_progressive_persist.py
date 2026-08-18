@@ -49,7 +49,7 @@ def test_persist_generated_drafts_dedupes_and_counts():
     )
     d3 = SimpleNamespace(
         title="Logout",
-        steps="1. click",
+        steps="1. Thực hiện nghiệp vụ đăng xuất và thu hồi phiên",
         module="Auth",
         type="Unit",
         priority="TB",

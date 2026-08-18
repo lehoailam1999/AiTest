@@ -45,10 +45,19 @@ export {
 export {
   buildE2eRouteCatalog,
   matchFeaturePathFromCatalog,
+  matchFeaturePathByLabels,
+  isPathPlausibleForCatalog,
+  scoreRoutesByLabelIndex,
+  featureSourcesForPath,
   MIN_MATCH_SCORE,
   STRONG_CATALOG_SCORE,
+  LABEL_STRONG_SCORE,
 } from "./e2eRouteCatalog";
-export type { E2eRouteCatalog, RouteMatchResult } from "./e2eRouteCatalog";
+export type {
+  E2eRouteCatalog,
+  RouteLabelIndex,
+  RouteMatchResult,
+} from "./e2eRouteCatalog";
 export {
   loadOrBuildE2eRouteCatalog,
   fingerprintRoutingPaths,

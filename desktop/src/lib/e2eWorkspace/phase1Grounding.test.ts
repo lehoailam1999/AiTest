@@ -33,6 +33,14 @@ describe("deriveFeaturePathFromTc", () => {
     assert.equal(p, "/evidence");
   });
 
+  it("rejects a trace-id path marker (/BR-4)", () => {
+    const p = deriveFeaturePathFromTc({
+      testData: "trace: BR/BR-4\npath: /BR-4\nruleRef: BR-4",
+      title: "Tạo mới vật chứng",
+    });
+    assert.equal(p, undefined);
+  });
+
   it("picks route matching TC tokens", () => {
     const p = deriveFeaturePathFromTc({
       title: "Upload vật chứng evidence",

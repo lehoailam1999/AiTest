@@ -1,11 +1,12 @@
 /**
- * Phase C — write Approved TC markdown under `.ai-test/test-cases/`.
+ * Phase C — write Approved TC markdown under `AItest/test-cases/`.
  */
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import {
   AI_TEST_CASES_DIR,
   assertSafeAiTestCasesRel,
+  assertSafeAiTestCasesReadRel,
   type TcSyncApprovedMdParams,
   type TcSyncApprovedMdResult,
   type TcSyncFileMeta,
@@ -63,6 +64,23 @@ export async function handleTcSyncApprovedMd(
     }
   }
 
+  for (const raw of params.deletePaths || []) {
+    const rel = (raw || "").replace(/\\/g, "/");
+    try {
+      const safe = assertSafeAiTestCasesReadRel(rel);
+      const abs = path.join(root, ...safe.split("/"));
+      await fs.rm(abs, { force: true });
+      out.push({ path: safe, status: "DELETED" });
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      out.push({
+        path: rel,
+        status: /TC path jail/i.test(error) ? "REJECTED_JAIL" : "ERROR",
+        error,
+      });
+    }
+  }
+
   const rejected = out.some((g) => g.status === "REJECTED_JAIL" || g.status === "ERROR");
   const anyOk = out.some((g) => g.status === "CREATED" || g.status === "UPDATED");
   return {
@@ -81,7 +99,7 @@ export async function readApprovedTcMarkdownRel(
   const root = (projectRoot || "").trim() || workspaceRoot();
   if (!root) return null;
   try {
-    const safe = assertSafeAiTestCasesRel(pathRel);
+    const safe = assertSafeAiTestCasesReadRel(pathRel);
     const abs = path.join(root, ...safe.split("/"));
     const content = await fs.readFile(abs, "utf8");
     return { path: safe, content };

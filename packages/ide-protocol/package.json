@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "tsx --test src/protocol.test.ts src/codegen.test.ts src/unitGenGuards.test.ts src/capabilities.test.ts src/unitRuleEngine.test.ts src/unitSutGate.test.ts src/unitIntentAliases.test.ts src/unitLogicLayerFilter.test.ts src/unitBodyRuleScore.test.ts src/unitApproveConfidence.test.ts src/unitRelatedExpand.test.ts src/unitLayerHint.test.ts src/unitPrimaryPrefer.test.ts src/unitProjectIntentRules.test.ts src/unitFeatureFolderDiscover.test.ts src/expandTokensFromIndex.test.ts",
+    "test": "tsx --test src/protocol.test.ts src/codegen.test.ts src/unitGenGuards.test.ts src/capabilities.test.ts src/unitRuleEngine.test.ts src/unitSutGate.test.ts src/unitIntentAliases.test.ts src/unitLogicLayerFilter.test.ts src/unitBodyRuleScore.test.ts src/unitApproveConfidence.test.ts src/unitRelatedExpand.test.ts src/unitLayerHint.test.ts src/unitPrimaryPrefer.test.ts src/unitProjectIntentRules.test.ts src/unitFeatureFolderDiscover.test.ts src/expandTokensFromIndex.test.ts src/approvedGroundingDecision.test.ts src/unitApproveRpc.test.ts src/groundingCompanion.test.ts",
     "mock-ide": "tsx src/mock/runMockIde.ts"
   },
   "devDependencies": {

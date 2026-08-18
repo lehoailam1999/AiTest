@@ -1,12 +1,10 @@
-import { deleteTextFile, readTextFile } from "../../tauri/bridge";
 import { loadManifest, saveManifest } from "./manager";
 import { cleanupWorkspaceRunAfterApply } from "./cleanup";
-import { assertSafeAitestTargetRel } from "../testOutputLayout";
 import type { UnitWorkspaceManifest } from "./types";
 
 /**
- * Discard a workspace run: remove generated targets under AItest/ (if present)
- * and delete staging `.ai-test/staging/{runId}`. Does not Apply.
+ * Discard a Tool draft. Source files are untouched because only Update/Apply
+ * is allowed to persist changes under AItest/.
  */
 export async function discardWorkspaceRun(
   projectRoot: string,
@@ -17,21 +15,6 @@ export async function discardWorkspaceRun(
   const removedTargets: string[] = [];
 
   if (manifest) {
-    for (const f of manifest.files) {
-      if (f.op === "delete") continue;
-      try {
-        assertSafeAitestTargetRel(f.targetRel);
-      } catch {
-        continue;
-      }
-      try {
-        await readTextFile(projectRoot, f.targetRel);
-        await deleteTextFile(projectRoot, f.targetRel);
-        removedTargets.push(f.targetRel);
-      } catch {
-        /* not on disk */
-      }
-    }
     try {
       const discarded: UnitWorkspaceManifest = {
         ...manifest,

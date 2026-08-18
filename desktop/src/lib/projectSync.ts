@@ -18,15 +18,12 @@ function seedAiRules(
 
 export function buildProjectAutoFromProfileConventions(input: {
   e2eConventions?: string | null;
+  /** Unit conventions remain file SoT under `.ai-test/unit-conventions.md` — not projectAuto. */
   unitConventions?: string | null;
 }): string {
   const e2e = (input.e2eConventions || "").trim();
-  const unit = (input.unitConventions || "").trim();
-  const blocks: string[] = [];
-  if (e2e) blocks.push(`## E2E profile conventions\n${e2e}`);
-  if (unit) blocks.push(`## Unit profile conventions\n${unit}`);
-  if (!blocks.length) return "";
-  return `QUY TẮC DỰ ÁN (auto — project profile)\n\n${blocks.join("\n\n")}`;
+  if (!e2e) return "";
+  return `QUY TẮC DỰ ÁN (auto — project profile)\n\n## E2E profile conventions\n${e2e}`;
 }
 
 export function buildProjectMetaFromScan(

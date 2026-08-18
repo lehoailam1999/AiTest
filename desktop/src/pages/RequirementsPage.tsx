@@ -26,7 +26,11 @@ import { activityUrl, e2eTestUrl, unitTestUrl } from "../lib/productRoutes";
 import TestCaseEditModal, {
   type TestCaseEditModalFormValues,
 } from "../components/TestCaseEditModal";
-import { ENGINE_TOOLTIP } from "../lib/testEngine";
+import {
+  ENGINE_TOOLTIP,
+  isE2eTestCaseType,
+  isUnitTestCaseType,
+} from "../lib/testEngine";
 import type { Requirement, RequirementSource, TestCase } from "../api/types";
 import RequirementDocField, {
   buildRequirementPayload,
@@ -43,6 +47,7 @@ import {
 import type { RequirementTopic } from "../api/types";
 import { labelOf, priorityLabel, displayReviewStatus, isTcPendingReview, typeLabel } from "../i18n/labels";
 import { syncApprovedTestCasesMdBestEffort } from "../lib/approvedTcSync";
+import { approveUnitCases } from "../lib/unitApprove";
 import { normalizeFunctionLabel } from "../lib/normalizeFunctionLabel";
 import { useProject } from "../state/ProjectContext";
 import { workspace } from "../workspace";
@@ -713,10 +718,30 @@ export default function RequirementsPage() {
               onApprove={(id) =>
                 tcAction(
                   async () => {
+                    const pendingTc = (casesByReq[r.id] || []).find(
+                      (tc) => tc.id === id
+                    );
+                    if (!pendingTc) {
+                      throw new Error("Không tìm thấy test case để duyệt");
+                    }
+                    if (isUnitTestCaseType(pendingTc.type)) {
+                      const [result] = await approveUnitCases({
+                        projectId: project.id,
+                        projectRoot: workspace.getLocalPath(project.id) || "",
+                        cases: [pendingTc],
+                        requirementTitle: r.title,
+                      });
+                      if (!result?.ok) {
+                        throw new Error(
+                          result?.error || "Unit Approve không thành công"
+                        );
+                      }
+                      return result.tc;
+                    }
+
                     const tc = await testcases.approve(id);
-                    // Refresh status first; MD sync runs after (can be slow)
-                    void (async () => {
-                      if (!project) return;
+                    // E2E remains on the existing approve + best-effort sync path.
+                    if (isE2eTestCaseType(tc.type)) {
                       const sync = await syncApprovedTestCasesMdBestEffort({
                         projectId: project.id,
                         projectRoot: workspace.getLocalPath(project.id),
@@ -725,17 +750,16 @@ export default function RequirementsPage() {
                       });
                       if (sync.ok && sync.written.length) {
                         message.success(
-                          sync.message || `Đã sync TC → .ai-test/test-cases/`
+                          sync.message || `Đã sync TC → AItest/test-cases/`
                         );
                       } else if (!sync.ok || sync.via === "skipped") {
                         message.warning(
                           sync.errors[0] ||
                             sync.message ||
-                            "Duyệt OK nhưng chưa ghi .ai-test/test-cases — gắn project root hoặc Connect IDE"
+                            "Duyệt OK nhưng chưa ghi AItest/test-cases — gắn project root hoặc Connect IDE"
                         );
                       }
-                      void refreshReqCases(r.id);
-                    })();
+                    }
                     return tc;
                   },
                   r.id,

@@ -147,6 +147,10 @@ class TestCase(TimestampMixin, Base):
     execution_status: Mapped[str] = mapped_column(String(50), default="Pending")
     generated_from_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     generated_from_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_decision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unit_tc_ir_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unit_decision_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    unit_content_revision: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class Execution(TimestampMixin, Base):

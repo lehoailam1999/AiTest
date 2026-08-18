@@ -3,6 +3,7 @@
  *
  * Project-agnostic — never invent /admin/... without evidence in TC, Spec, or FE source.
  */
+import { isUsableFeaturePath } from "./assertTcReadyForE2eGen";
 
 const PATH_MARKER_RE =
   /(?:^|\n)\s*(?:path|route|url|featurePath|feature_path)\s*[:=]\s*([^\n;,|]+)/i;
@@ -256,9 +257,5 @@ function isAuthRoute(path: string): boolean {
 }
 
 function isUsableRoutePath(path: string): boolean {
-  const p = (path || "").trim();
-  if (!p || p === "/") return false;
-  if (/thi[eế]u\s*context|missing\s*context|[\[\]]/i.test(p)) return false;
-  if (!/^\/[A-Za-z][\w\-./]*$/.test(p)) return false;
-  return !isAuthRoute(p);
+  return isUsableFeaturePath(path);
 }

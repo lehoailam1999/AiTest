@@ -7,13 +7,8 @@
 import {
   UNIT_GEN_LIMITS,
   assertSafeAitestTargetRel,
-  decideUnitSutGate,
   extractTcSourceMarkers,
-  isInterfaceLikePrimaryPath,
-  isValidationDataBucket,
-  primaryMatchesMarkers,
   stemOfPath,
-  type UnitDomainGuardRule,
 } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import { ensureCursorAgentReady } from "../aiCli/gate";
@@ -24,13 +19,10 @@ import {
 } from "../ideProtocol";
 import { getIdeRpcClientOrNull } from "../ideBridge/session";
 import {
-  buildGenerateContext,
-  ideListSourceFiles,
   ideReadFile,
   loadUnitProjectRules,
 } from "../ideLocalCommands";
 import { forcePacketPrimary } from "../contextPacket/forcePacketPrimary";
-import { primaryFile } from "../contextPacket/serialize";
 import type { AITestContextPacket } from "../contextPacket/types";
 import {
   buildPacketFromUnitGrounding,
@@ -41,16 +33,16 @@ import { unitGroundingContractRelPath } from "../approvedTcSync/unitSourceGround
 import { resolvePackagePrefix } from "../resolvePackagePrefix";
 import {
   buildRequirementTcModule,
+  uniquifyKeyForTestCase,
   uniquifyTestTargetRel,
 } from "../testOutputLayout";
-import { sourceExtensionsForLanguage, suggestUnitTestPath } from "../stackHints";
+import { suggestUnitTestPath } from "../stackHints";
 import type { CodeAliasMap } from "../projectIntelligence/viCodeAliases";
 import { loadUnitEnrichProfileKnobs } from "../approvedTcSync/loadUnitEnrichProfile";
 import { recordUnitJobMetric } from "../unitJobMetrics";
 import { syncWorkspaceRun } from "./auditSync";
 import { assertTcReadyForUnitGen } from "./assertTcReadyForUnitGen";
 import { decideUnitLanguageGate } from "./unitGenGates";
-import { canSoftBypassUnitSutGate } from "./unitSutSoftBypass";
 import {
   addArtifactToWorkspace,
   createUnitWorkspaceRun,
@@ -62,195 +54,6 @@ import {
   canTransitionUnitJob,
   UNIT_JOB_TRANSITIONS,
 } from "./unitJobState";
-
-/** Optional unit gate knobs from `.ai-test/project.profile.json` (loose; schema may lag). */
-async function loadUnitProfileGateKnobs(projectRoot: string): Promise<{
-  domainGuards: UnitDomainGuardRule[];
-  requireMarkers: boolean | null;
-  unitScope: "backend" | "frontend" | "any";
-  minAlignment: number;
-  genMode: "strict_spec" | "always_generate";
-}> {
-  try {
-    const { readTextFile } = await import("../../tauri/bridge");
-    const raw = await readTextFile(projectRoot, ".ai-test/project.profile.json");
-    const j = JSON.parse(raw) as {
-      unit?: {
-        domainGuards?: UnitDomainGuardRule[];
-        requireMarkers?: boolean | string[];
-        scope?: "backend" | "frontend" | "any";
-        minAlignment?: number;
-        genMode?: "strict_spec" | "always_generate";
-      };
-    };
-    const unit = j?.unit;
-    const domainGuards = Array.isArray(unit?.domainGuards) ? unit!.domainGuards! : [];
-    // Phase 5: default require path:+code: unless profile sets requireMarkers: false
-    let requireMarkers: boolean | null = true;
-    if (unit?.requireMarkers === false) requireMarkers = false;
-    else if (unit?.requireMarkers === true) requireMarkers = true;
-    else if (Array.isArray(unit?.requireMarkers) && unit!.requireMarkers!.length)
-      requireMarkers = true;
-    const scopeRaw = (unit?.scope || "backend").toLowerCase();
-    const unitScope: "backend" | "frontend" | "any" =
-      scopeRaw === "frontend" || scopeRaw === "any" || scopeRaw === "backend"
-        ? scopeRaw
-        : "backend";
-    const minAlignment =
-      typeof unit?.minAlignment === "number" && Number.isFinite(unit.minAlignment)
-        ? unit.minAlignment
-        : 50;
-    const genMode = unit?.genMode === "always_generate" ? "always_generate" : "strict_spec";
-    return { domainGuards, requireMarkers, unitScope, minAlignment, genMode };
-  } catch {
-    return {
-      domainGuards: [],
-      requireMarkers: true,
-      unitScope: "backend",
-      minAlignment: 50,
-      genMode: "strict_spec",
-    };
-  }
-}
-
-function refuseCodeToDesktop(code: string | undefined): string {
-  const map: Record<string, string> = {
-    FAIL_NEEDS_MARKER: "needs_marker",
-    FAIL_DOMAIN_GUARD: "domain_guard",
-    FAIL_FEATURE_GAP: "feature_gap",
-    FAIL_SUT_MISMATCH: "sut_mismatch",
-    FAIL_FIELD_UNBOUND: "field_unbound",
-    FAIL_OP_CONTRADICT: "op_contradict",
-  };
-  return map[(code || "").toUpperCase()] || "sut_mismatch";
-}
-
-function canBypassFeatureGapWithAuthoritativeSut(opts: {
-  code?: string;
-  primaryPath: string;
-  sourceExcerpt: string;
-  tcBlob: string;
-}): boolean {
-  if (!/FEATURE_GAP/i.test(opts.code || "")) return false;
-  // Authoritative path/code proves identity, not that a requested validation
-  // behavior exists. Never bypass Required/MaxLength/duplicate evidence gaps.
-  if (isValidationDataBucket(opts.tcBlob)) return false;
-  if (!opts.primaryPath || !opts.sourceExcerpt.trim()) return false;
-  const markers = extractTcSourceMarkers(opts.tcBlob || "");
-  if (!(markers.paths.length > 0 || markers.codes.length > 0)) return false;
-  return primaryMatchesMarkers(opts.primaryPath, markers);
-}
-
-function hasGroundedSourceForGen(primaryPath: string, sourceExcerpt: string): boolean {
-  return Boolean((primaryPath || "").trim() && (sourceExcerpt || "").trim());
-}
-
-type DesktopSutGateOutcome =
-  | { ok: true; softBypassCode?: string; alwaysGenerateFeatureGap?: boolean }
-  | { ok: false; code: string; message: string };
-
-async function evaluateDesktopUnitSutGate(opts: {
-  projectRoot: string;
-  tc: TestCase;
-  approvedTcMd: string;
-  codeAliases: CodeAliasMap | null;
-  contextPacket: AITestContextPacket | undefined;
-  primaryRel: string;
-}): Promise<DesktopSutGateOutcome> {
-  const packet = opts.contextPacket;
-  const primary = packet
-    ? packet.files.find((f) => f.role === "primary") || primaryFile(packet)
-    : undefined;
-  const primaryPath = (opts.primaryRel || primary?.pathRel || "").replace(/\\/g, "/");
-  const excerpt = (primary?.content || "").trim();
-  const relatedExcerpt = (packet?.files || [])
-    .filter((f) => f.role === "dependency")
-    .map((f) => f.content || "")
-    .filter(Boolean)
-    .join("\n\n");
-  const knobs = await loadUnitProfileGateKnobs(opts.projectRoot);
-  const tcBlob = [
-    opts.approvedTcMd,
-    opts.tc.title,
-    opts.tc.module,
-    opts.tc.testData,
-    opts.tc.steps,
-    opts.tc.expectedResult,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  const sutGate = decideUnitSutGate({
-    tcText: tcBlob,
-    primaryPath: primaryPath || null,
-    sourceExcerpt: excerpt || null,
-    relatedExcerpt: relatedExcerpt || null,
-    codeAliases: opts.codeAliases,
-    moduleText: [opts.tc.module, opts.tc.title, (opts.approvedTcMd || "").slice(0, 1500)]
-      .filter(Boolean)
-      .join("\n"),
-    domainGuards: knobs.domainGuards,
-    requireMarkers: knobs.requireMarkers !== false,
-    unitScope: knobs.unitScope,
-    minAlignment: knobs.minAlignment,
-  });
-  const groundedForGen = hasGroundedSourceForGen(primaryPath, excerpt);
-  const markerSet = extractTcSourceMarkers(tcBlob);
-  const markersMatch = primaryMatchesMarkers(primaryPath, markerSet);
-  const softBypassOk =
-    sutGate.decision === "block" &&
-    groundedForGen &&
-    canSoftBypassUnitSutGate({
-      code: sutGate.code,
-      primaryPath,
-      sourceExcerpt: excerpt,
-      tcBlob,
-      alignmentScore: sutGate.alignmentScore,
-      minAlignment: sutGate.minAlignment,
-      markersMatch,
-    });
-  if (
-    sutGate.decision === "block" &&
-    !softBypassOk &&
-    !canBypassFeatureGapWithAuthoritativeSut({
-      code: sutGate.code,
-      primaryPath,
-      sourceExcerpt: excerpt,
-      tcBlob,
-    }) &&
-    !(
-      knobs.genMode === "always_generate" &&
-      /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
-      !isValidationDataBucket(tcBlob)
-    )
-  ) {
-    const code = sutGate.code || "FAIL_NEEDS_MARKER";
-    const refuseCode = String(code);
-    const cta =
-      refuseCode === "FAIL_NEEDS_MARKER"
-        ? "Thêm path:/code: đúng domain, Approve lại, rồi Gen."
-        : refuseCode === "FAIL_FEATURE_GAP"
-          ? "Behavior không có trong source — đổi TC hoặc sửa BE rồi Re-Approve."
-          : refuseCode === "FAIL_FIELD_UNBOUND"
-            ? "Map field trong code-aliases.fields hoặc thêm target.property rồi Re-Approve."
-            : refuseCode === "FAIL_OP_CONTRADICT"
-              ? "Kiểm tra intent permission; với duplicate hãy dùng forbidOpTokens/preferSutMapKey."
-              : "Re-Approve TC với SUT đúng intent rồi Gen.";
-    return {
-      ok: false,
-      code,
-      message: `${code} — ${sutGate.reason}. ${cta}`,
-    };
-  }
-  return {
-    ok: true,
-    softBypassCode: softBypassOk ? String(sutGate.code || "FAIL_SUT_GATE") : undefined,
-    alwaysGenerateFeatureGap:
-      sutGate.decision === "block" &&
-      knobs.genMode === "always_generate" &&
-      /FEATURE_GAP/i.test(String(sutGate.code || "")) &&
-      !isValidationDataBucket(tcBlob),
-  };
-}
 
 export { canTransitionUnitJob, UNIT_JOB_TRANSITIONS };
 export type UnitJobRunnerDeps = {
@@ -339,13 +142,7 @@ export async function startUnitIdeGenJob(opts: {
 
   const gate = await assertTcReadyForUnitGen({ projectRoot, tc });
   if (!gate.ok) {
-    // Extension is the final gate authority for marker/approved-md checks.
-    // Desktop keeps UX preflight for hard runtime requirements only.
-    if (gate.code === "needs_marker" || gate.code === "no_sync_md") {
-      deps.onProgress?.(
-        `preflight soft-bypass ${gate.code} — delegate final decision to Extension gate`
-      );
-    } else {
+    // Consume-only: Desktop never soft-bypasses a missing/stale Approve decision.
     recordUnitJobMetric({
       projectId,
       contextSource: "unknown",
@@ -363,7 +160,6 @@ export async function startUnitIdeGenJob(opts: {
       code: gate.code,
       cta: gate.cta,
     };
-    }
   }
 
   const langGate = decideUnitLanguageGate({
@@ -450,7 +246,7 @@ export async function startUnitIdeGenJob(opts: {
     testCaseTitle: tc.title,
     packagePrefix,
   });
-  let targetPath = uniquifyTestTargetRel(feHint.relativePath, tc.id);
+  let targetPath = uniquifyTestTargetRel(feHint.relativePath, uniquifyKeyForTestCase(tc));
   let contextPacket: unknown = undefined;
   let sutSourceFile = "";
   let contextSource = "unknown";
@@ -475,7 +271,31 @@ export async function startUnitIdeGenJob(opts: {
 
     let primaryRel = "";
 
-    if (isUnitGroundingFastPathEligible(groundingContract, mdMarkersEarly)) {
+    const groundingEligible = isUnitGroundingFastPathEligible(
+      groundingContract,
+      mdMarkersEarly
+    );
+    if (groundingContract?.authoritative === true && !groundingEligible) {
+      const message =
+        "STALE_APPROVE_DECISION — grounding contract/markers invalid; Re-Approve required";
+      manifest = {
+        ...manifest,
+        status: "gen_failed",
+        failReason: message,
+        timeline: pushTimeline(
+          manifest.timeline || [],
+          "job.gen.failed",
+          message
+        ),
+      };
+      await persist(projectRoot, manifest);
+      return {
+        ok: false,
+        error: message,
+        code: "stale_approve_decision",
+      };
+    }
+    if (groundingEligible && groundingContract) {
       const built = await buildPacketFromUnitGrounding({
         projectRoot,
         projectId,
@@ -511,100 +331,52 @@ export async function startUnitIdeGenJob(opts: {
           testCaseTitle: tc.title,
           packagePrefix,
         });
-        targetPath = uniquifyTestTargetRel(grounded.relativePath, tc.id);
+        targetPath = uniquifyTestTargetRel(grounded.relativePath, uniquifyKeyForTestCase(tc));
+      } else if (groundingContract?.authoritative === true) {
+        const message =
+          "STALE_APPROVE_DECISION — source missing or content hash changed; Re-Approve required";
+        manifest = {
+          ...manifest,
+          status: "gen_failed",
+          failReason: message,
+          timeline: pushTimeline(
+            manifest.timeline || [],
+            "job.gen.failed",
+            message
+          ),
+        };
+        await persist(projectRoot, manifest);
+        return {
+          ok: false,
+          error: message,
+          code: "stale_approve_decision",
+        };
       }
     }
 
     if (!contextPacket) {
-      const paths =
-        deps.sourceFiles.length > 0
-          ? deps.sourceFiles
-          : await ideListSourceFiles(
-              projectRoot,
-              sourceExtensionsForLanguage(deps.language || "")
-            );
-      const ctx = await buildGenerateContext({
-        projectRoot,
-        projectId,
-        language: deps.language || "",
-        framework: deps.framework === "auto" ? "" : deps.framework || "",
-        testCase: tc,
-        allSourcePaths: paths,
-        manualPrimaryPath: null,
-        forcedRelatedPaths: null,
-        broadLocalContext: deps.broadLocalContext,
-        codeAliases,
-        approvedTcMd: approvedTcMd || null,
-        requirementTitle: reqTitle,
-        preferIndexContext: true,
-        syncIndexIfMissing: true,
-      });
-      contextSource = ctx.contextSource || "implementation-plan";
-      const impl = ctx.implementationPlan;
-      // Planner may mark non-ready for strict spec, but Gen should still continue when
-      // we have grounded TC + source; verify stage will judge spec compliance.
-      if (impl && impl.status !== "ready") {
-        const note =
-          `Implementation Planner non-ready: ${impl.status} — continue generate from TC + source; ` +
-          `spec compliance will be evaluated in Verify.`;
-        manifest = {
-          ...manifest,
-          timeline: pushTimeline(manifest.timeline || [], "job.gen.progress", note),
-        };
-        await persist(projectRoot, manifest);
-      }
-      contextPacket = ctx.packetForApi;
-      primaryRel = (ctx.primaryPath || "").replace(/\\/g, "/");
-      // MD markers are Approve SoT — prefer over planner entry when MD has path:
-      const mdMarkers = extractTcSourceMarkers(approvedTcMd || "");
-      const markerPaths = (
-        mdMarkers.paths.length
-          ? mdMarkers
-          : extractTcSourceMarkers(
-              [approvedTcMd, tc.testData].filter(Boolean).join("\n")
-            )
-      ).paths;
-      if (mdMarkers.paths[0]) {
-        primaryRel = mdMarkers.paths[0].replace(/\\/g, "/");
-      } else if (impl?.entry?.pathRel) {
-        primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
-      } else if (markerPaths[0]) {
-        primaryRel = markerPaths[0].replace(/\\/g, "/");
-      }
-      if (primaryRel && isInterfaceLikePrimaryPath(primaryRel) && impl?.entry?.pathRel) {
-        primaryRel = impl.entry.pathRel.replace(/\\/g, "/");
-      }
-      if (primaryRel) {
-        sutSourceFile = primaryRel;
-        let className =
-          impl?.entry?.symbol ||
-          ctx.packet.sourceUnderTest?.symbol ||
-          stemOfPath(primaryRel) ||
-          "";
-        if (
-          /^I[A-Z]/.test(className) &&
-          impl?.entry?.symbol &&
-          !/^I[A-Z]/.test(impl.entry.symbol)
-        ) {
-          className = impl.entry.symbol;
-        } else if (/^I[A-Z]/.test(className)) {
-          className = stemOfPath(primaryRel);
-        }
-        const grounded = suggestUnitTestPath({
-          language: deps.language || "",
-          framework: deps.framework === "auto" ? "" : deps.framework || "",
-          sourceFileName: primaryRel,
-          className,
-          module: tc.module || undefined,
-          requirementTitle: reqTitle,
-          testCaseTitle: tc.title,
-          packagePrefix,
-        });
-        targetPath = uniquifyTestTargetRel(grounded.relativePath, tc.id);
-      }
+      const message =
+        "MISSING_APPROVE_DECISION — Unit Gen requires an authoritative IDE Approve decision; Re-Approve required";
+      manifest = {
+        ...manifest,
+        status: "gen_failed",
+        failReason: message,
+        timeline: pushTimeline(
+          manifest.timeline || [],
+          "job.gen.failed",
+          message
+        ),
+      };
+      await persist(projectRoot, manifest);
+      return {
+        ok: false,
+        error: message,
+        code: "missing_approve_decision",
+        manifest,
+      };
     }
 
-    // Force packet primary = planner/marker/grounding impl BEFORE gate.
+    // Force packet primary from Approve Decision before Gen.
     if (contextPacket && primaryRel) {
       contextPacket = await forcePacketPrimary({
         packet: contextPacket as AITestContextPacket,
@@ -621,56 +393,34 @@ export async function startUnitIdeGenJob(opts: {
       }
     }
 
-    const gateOut = await evaluateDesktopUnitSutGate({
-      projectRoot,
-      tc,
-      approvedTcMd,
-      codeAliases,
-      contextPacket: contextPacket as AITestContextPacket | undefined,
-      primaryRel,
-    });
-    if (!gateOut.ok) {
-      contextPacket = undefined;
-      sutSourceFile = "";
+    // Consume-only: never re-resolve/reclassify when Decision is authoritative.
+    if (contextSource === "grounding-contract") {
+      deps.onProgress?.(
+        "grounding Decision authoritative — skip Gen replan/reclassify gate"
+      );
+    } else {
+      const message =
+        "MISSING_APPROVE_DECISION — Gen no longer re-resolves SUT; Re-Approve required";
       manifest = {
         ...manifest,
         status: "gen_failed",
-        failReason: gateOut.message,
+        failReason: message,
         timeline: pushTimeline(
           manifest.timeline || [],
           "job.gen.failed",
-          gateOut.message
+          message
         ),
       };
       await persist(projectRoot, manifest);
-      recordUnitJobMetric({
-        projectId,
-        contextSource: contextSource || "desktop-sut-gate",
-        runnerUsed: "IDE_EXTENSION",
-        ideConnected: true,
-        jobId,
-        via: "ide-extension",
-        durationMs: Date.now() - started,
-        failReason: refuseCodeToDesktop(gateOut.code),
-        ok: false,
-      });
       return {
         ok: false,
-        error: gateOut.message,
-        code: refuseCodeToDesktop(gateOut.code),
+        error: message,
+        code: "missing_approve_decision",
         manifest,
       };
     }
-    if (gateOut.softBypassCode) {
-      deps.onProgress?.(
-        `gate soft-bypass ${gateOut.softBypassCode} — confidence/alignment ok; generate from TC + source`
-      );
-    }
-    if (gateOut.alwaysGenerateFeatureGap) {
-      deps.onProgress?.("fallback mode: FEATURE_GAP → always_generate");
-    }
   } catch {
-    /* Extension resolves SUT from disk + TC MD — still blocked by Extension Phase 5 gate */
+    /* Grounding load/build errors fall through; missing packet fails closed below. */
   }
 
   // Probe CLI only after deterministic grounding/gates pass. Invalid TC/SUT
@@ -825,14 +575,17 @@ export async function startUnitIdeGenJob(opts: {
       ide.error ||
       (ide.perTc || []).map((p) => p.error).filter(Boolean).join("; ") ||
       "IDE Unit Gen failed";
-    const refuse = (msg.match(/FAIL_(NEEDS_MARKER|DOMAIN_GUARD|FEATURE_GAP|SUT_MISMATCH)/i) ||
-      [])[0];
+    const refuse =
+      (msg.match(
+        /\b(MISSING_APPROVE_DECISION|STALE_APPROVE_DECISION|INVALID_APPROVE_DECISION|FAIL_(DOMAIN_GUARD|FEATURE_GAP|SUT_MISMATCH))\b/i
+      ) || [])[0];
     const failCode = refuse
       ? refuse.toUpperCase().replace(/^FAIL_/, "").toLowerCase()
       : "gen_failed";
-    // Map to stable Desktop codes: needs_marker | domain_guard | feature_gap | sut_mismatch | gen_failed
     const codeMap: Record<string, string> = {
-      needs_marker: "needs_marker",
+      missing_approve_decision: "missing_decision",
+      stale_approve_decision: "stale_decision",
+      invalid_approve_decision: "invalid_decision",
       domain_guard: "domain_guard",
       feature_gap: "feature_gap",
       sut_mismatch: "sut_mismatch",
@@ -879,7 +632,7 @@ export async function startUnitIdeGenJob(opts: {
     try {
       return uniquifyTestTargetRel(
         assertSafeAitestTargetRel(draft.path || targetPath),
-        tc.id
+        uniquifyKeyForTestCase(tc)
       );
     } catch {
       return targetPath;

@@ -14,7 +14,7 @@ alwaysApply: false
 | Pha | Runtime SoT | Cursor pointer |
 |-----|-------------|----------------|
 | **Sinh TC** | `unit_tc_analysis_*.md` → `unit_tc_analysis_rules.py` + `tc_*unit*.md` + `base.py` | [`unit-tc-from-analysis.mdc`](unit-tc-from-analysis.mdc) |
-| **Approve path/code** | `resolveUnitPrimaryFromIndex` + `unitBodyRuleScore` (CRUD) + `unit-intent-defs.json` | [`code-aliases-unit-gen.mdc`](code-aliases-unit-gen.mdc) (**alwaysApply**) |
+| **Approve path/code** | IDE Repository Intelligence (`unitApproveResolve`) + `unitApproveRpc` decision v2 | [`code-aliases-unit-gen.mdc`](code-aliases-unit-gen.mdc) |
 
 Gen **không** chọn SUT path. Approve **không** inject analysis fragments.
 
@@ -39,7 +39,7 @@ Gen **không** chọn SUT path. Approve **không** inject analysis fragments.
 | Sinh TC E2E | `PROFILE-TC-E2E` | flows, path, auth, coverage |
 | Sinh Unit code | `PROFILE-UNIT-CODEGEN` | uutgs |
 | Sinh E2E code | `PROFILE-E2E-CODEGEN` | playwright, grounding |
-| Approve Unit | `code-aliases-unit-gen.mdc` | `index.db` + CRUD — docs: `docs/UNIT_APPROVE_SOURCE_GROUNDING.md` |
+| Approve Unit | `code-aliases-unit-gen.mdc` | IDE Repository Intelligence + immutable decision — docs: `docs/UNIT_APPROVE_SOURCE_GROUNDING.md` |
 
 Selective: `AITEST_RULE_RETRIEVE_MODE=selective` (+ gate `…_TCGEN` / `…_E2E` / `…_ANALYSIS`).
 

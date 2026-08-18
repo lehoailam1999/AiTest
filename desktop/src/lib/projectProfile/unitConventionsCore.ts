@@ -20,9 +20,8 @@ export function renderUnitConventionsMd(profile: ProjectProfile): string {
   lines.push(`Unit scope: ${unit?.scope || "backend"}`);
   lines.push(`Gen mode: ${unit?.genMode || "strict_spec"}`);
   lines.push(`Min alignment: ${unit?.minAlignment ?? 50}`);
-  lines.push(
-    `Disk re-resolve (Extension): ${unit?.allowDiskReresolve === true ? "on" : "off (default)"}`
-  );
+  lines.push("Grounding SoT: authoritative .grounding.json");
+  lines.push("Gen source resolution: disabled (consume-only)");
   lines.push(
     `Require markers: ${
       Array.isArray(unit?.requireMarkers)

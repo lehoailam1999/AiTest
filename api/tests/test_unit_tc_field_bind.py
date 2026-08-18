@@ -104,6 +104,25 @@ def test_ir_ready_accepts_complete_br():
     ready, reasons = decide_unit_tc_ir_ready(ir)
     assert ready is True
     assert not reasons
+    apply_unit_tc_ir_readiness(ir)
+    assert ir["status"] == "READY_FOR_GROUNDING"
+    assert ir["automationReady"] is False
+
+
+def test_generation_ready_does_not_require_source_property_binding():
+    ir = {
+        "primaryBucket": "VALIDATION_DATA",
+        "trace": {"behaviorId": "VAL-2-B01"},
+        "testData": {
+            "input": {"diaDiemThuGiu": ""},
+            "target": {"field": "Địa điểm thu giữ", "constraint": "required"},
+        },
+        "expectedResult": {"observable": "validate", "description": "Reject empty"},
+        "steps": {"execute": ["Thực hiện nghiệp vụ"]},
+    }
+    apply_unit_tc_ir_readiness(ir)
+    assert ir["status"] == "READY_FOR_GROUNDING"
+    assert ir["automationReady"] is False
 
 
 def test_markers_ready_blocks_placeholder_field():

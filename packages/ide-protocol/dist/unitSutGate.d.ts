@@ -58,8 +58,14 @@ export declare function filterStrongRankTokens(tokens: string[]): string[];
 /**
  * Strip policy / conventions dumps so feature-gap does not latch onto wording
  * inside `.ai-test/unit-conventions.md` examples (e.g. «BR / malware / validation»).
+ * Also strip Approve auto-enrich / field-resolve comments (ruleHits=…Duplicate…).
  */
 export declare function scenarioTextForFeatureGap(tcText: string): string;
+/**
+ * When VALIDATION_DATA has target.constraint, classify only that constraint family.
+ * Prevents "Duplicate" ruleHits / unrelated TC words from forcing uniqueness gaps.
+ */
+export declare function constraintFamily(constraint: string): "required" | "unique" | "maxlength" | "other" | null;
 export declare function detectFeatureGap(tcText: string, sourceExcerpt: string): {
     gap: boolean;
     label?: string;

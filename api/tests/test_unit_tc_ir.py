@@ -48,10 +48,12 @@ def test_looks_like_ir_and_flattens_portable_markers():
     assert "behaviorId: VAL-25-B04" in td
     assert "target.constraint: maxLength" in td
     assert "trace: VALIDATION_DATA/VAL-25" in td
-    assert "target.property:" in td or "target.field: T" in td
-    # Auto layerHint/sourceSignal when VALIDATION field binds
-    if "maxLength" in td:
-        assert "sourceSignal:" in td
+    assert "target.field: Tên" in td
+    assert "target.property:" not in td
+    assert "status: READY_FOR_GROUNDING" in td
+    assert "READY_FOR_CODEGEN" not in td
+    assert flat["automationReady"] is False
+    assert "sourceSignal:" not in td
 
 
 def test_parse_test_cases_json_accepts_ir_wrapper():
@@ -97,6 +99,8 @@ def test_parse_test_cases_json_accepts_ir_wrapper():
     assert "primaryBucket: BUSINESS_RULES" in (d.test_data or "")
     assert "Mã CODE-1 đã tồn tại" in (d.precondition or "")
     assert d.type == "Unit" or "Unit" in str(d.type)
+    assert "status: READY_FOR_GROUNDING" in (d.test_data or "")
+    assert d.automation_ready is False
 
 
 def test_legacy_flat_tc_still_parses():

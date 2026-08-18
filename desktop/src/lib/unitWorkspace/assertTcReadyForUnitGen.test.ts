@@ -60,79 +60,51 @@ describe("decideUnitGenGate", () => {
     }
   });
 
-  it("passes when IDE + MD present", () => {
+  it("passes only with authoritative decision and matching projections", () => {
     const r = decideUnitGenGate({
       isTauri: true,
       projectRoot: "D:/forensic",
       ideReady: true,
-      mdPath: ".ai-test/test-cases/m/TC-1.md",
+      mdPath: "AItest/test-cases/m/TC-1.md",
       tcLabel: "TC-1",
-    });
-    assert.equal(r.ok, true);
-    if (r.ok) assert.equal(r.mdPath, ".ai-test/test-cases/m/TC-1.md");
-  });
-
-  it("Phase 5: fails without path:/code: markers", () => {
-    const r = decideUnitGenGate({
-      isTauri: true,
-      projectRoot: "D:/forensic",
-      ideReady: true,
-      mdPath: ".ai-test/test-cases/m/TC-092.md",
-      tcLabel: "TC-092",
-      hasSourceMarkers: false,
-    });
-    assert.equal(r.ok, false);
-    if (!r.ok) {
-      assert.equal(r.code, "needs_marker");
-      assert.match(r.message, /FAIL_NEEDS_MARKER|path:/i);
-    }
-  });
-
-  it("Phase 5: fails when Approve sut-resolve skipped (no markers)", () => {
-    const r = decideUnitGenGate({
-      isTauri: true,
-      projectRoot: "D:/forensic",
-      ideReady: true,
-      mdPath: ".ai-test/test-cases/m/TC-092.md",
-      tcLabel: "TC-092",
-      hasSourceMarkers: false,
-      sutResolveSkipped: true,
-    });
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.equal(r.code, "needs_marker");
-  });
-
-  it("preserves FEATURE_GAP instead of collapsing to missing markers", () => {
-    const r = decideUnitGenGate({
-      isTauri: true,
-      projectRoot: "D:/forensic",
-      ideReady: true,
-      mdPath: ".ai-test/test-cases/m/TC-005.md",
-      tcLabel: "TC-005",
-      hasSourceMarkers: false,
-      sutResolveSkipped: true,
-      markerBlob:
-        "# sut-resolve skipped: FAIL_FEATURE_GAP — «EvidenceCode» không có MaxLength trong source",
-    });
-    assert.equal(r.ok, false);
-    if (!r.ok) {
-      assert.equal(r.code, "not_ready");
-      assert.match(r.message, /FAIL_FEATURE_GAP/);
-      assert.doesNotMatch(r.message, /Thêm path/);
-    }
-  });
-
-  it("Phase 5: passes with markers", () => {
-    const r = decideUnitGenGate({
-      isTauri: true,
-      projectRoot: "D:/forensic",
-      ideReady: true,
-      mdPath: ".ai-test/test-cases/m/TC-092.md",
-      tcLabel: "TC-092",
+      hasAuthoritativeDecision: true,
       hasSourceMarkers: true,
-      sutResolveSkipped: false,
+      projectionsMatch: true,
     });
     assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.mdPath, "AItest/test-cases/m/TC-1.md");
+  });
+
+  it("fails without an authoritative IDE Approve decision", () => {
+    const r = decideUnitGenGate({
+      isTauri: true,
+      projectRoot: "D:/forensic",
+      ideReady: true,
+      mdPath: "AItest/test-cases/m/TC-092.md",
+      tcLabel: "TC-092",
+      hasAuthoritativeDecision: false,
+      decisionReason: "IDE Approve outcome FEATURE_GAP",
+    });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.code, "missing_decision");
+      assert.match(r.message, /FEATURE_GAP/);
+    }
+  });
+
+  it("fails when MD projections do not match the decision", () => {
+    const r = decideUnitGenGate({
+      isTauri: true,
+      projectRoot: "D:/forensic",
+      ideReady: true,
+      mdPath: "AItest/test-cases/m/TC-092.md",
+      tcLabel: "TC-092",
+      hasAuthoritativeDecision: true,
+      hasSourceMarkers: true,
+      projectionsMatch: false,
+    });
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.code, "projection_mismatch");
   });
 });
 
@@ -156,7 +128,7 @@ describe("decideUnitLanguageGate", () => {
     assert.equal(r.ok, false);
     if (!r.ok) {
       assert.equal(r.code, "needs_language");
-      assert.match(r.message, /FAIL_NEEDS_LANGUAGE/);
+      assert.match(r.message, /C#.*TS\/JS/);
     }
   });
 

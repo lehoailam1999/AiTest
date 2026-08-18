@@ -10,6 +10,9 @@ export const IdeCapabilities = {
   planner: "planner",
   sessionReuse: "sessionReuse",
   tcSync: "tcSync",
+  /** Unit Approve via IDE Repository Intelligence (symbols/defs/refs). */
+  repositoryIntelligence: "repositoryIntelligence",
+  unitApproveV2: "unitApproveV2",
 } as const;
 
 export type IdeCapability =
@@ -22,11 +25,19 @@ export const EXTENSION_CAPABILITIES: IdeCapability[] = [
   IdeCapabilities.stream,
   IdeCapabilities.sessionReuse,
   IdeCapabilities.tcSync,
+  IdeCapabilities.repositoryIntelligence,
+  IdeCapabilities.unitApproveV2,
 ];
 
 /** Desktop requires these before IDE Unit Gen. */
 export const DESKTOP_REQUIRED_UNIT_CAPS: IdeCapability[] = [
   IdeCapabilities.unit,
+];
+
+/** Desktop requires these before Unit Approve v2. */
+export const DESKTOP_REQUIRED_UNIT_APPROVE_CAPS: IdeCapability[] = [
+  IdeCapabilities.repositoryIntelligence,
+  IdeCapabilities.unitApproveV2,
 ];
 
 /** Desktop requires these before IDE E2E Gen (Agent CLI). */

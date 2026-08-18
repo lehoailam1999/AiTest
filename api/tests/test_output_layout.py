@@ -53,31 +53,31 @@ class TestOutputLayout(unittest.TestCase):
                 "pkg-api/src/orders/orders.service.ts",
                 "Orders",
                 "orders.service.test.ts",
-                "pkg-api/AItest/UnitTest/Orders/orders.service.test.ts",
+                "pkg-api/AItest/UnitTest/orders/orders.service.test.ts",
             ),
             (
                 "pkg-web/src/pages/home.tsx",
                 "Home",
                 "home.test.tsx",
-                "pkg-web/AItest/UnitTest/Home/home.test.tsx",
+                "pkg-web/AItest/UnitTest/home/home.test.tsx",
             ),
             (
                 "org/services/billing/src/invoice.ts",
                 "Billing",
                 "invoice.test.ts",
-                "org/services/billing/AItest/UnitTest/Billing/invoice.test.ts",
+                "org/services/billing/AItest/UnitTest/billing/invoice.test.ts",
             ),
             (
                 "backend/src/Users/UserService.cs",
                 "Users",
                 "UserServiceTests.cs",
-                "backend/AItest/UnitTest/Users/UserServiceTests.cs",
+                "backend/AItest/UnitTest/users/UserServiceTests.cs",
             ),
             (
                 "frontend/src/features/checkout/cart.ts",
                 "Checkout",
                 "cart.test.ts",
-                "frontend/AItest/UnitTest/Checkout/cart.test.ts",
+                "frontend/AItest/UnitTest/checkout/cart.test.ts",
             ),
         ]
         for src, module, name, expected in cases:
@@ -100,7 +100,7 @@ class TestOutputLayout(unittest.TestCase):
         )
         self.assertEqual(
             path,
-            "product-a/WebSpa/AItest/UnitTest/FeatureX/widget.component.test.ts",
+            "product-a/WebSpa/AItest/UnitTest/featurex/widget.component.test.ts",
         )
         after = path.lower().split("/aitest/", 1)[-1]
         self.assertNotIn("webspa/", after)
@@ -124,7 +124,7 @@ class TestOutputLayout(unittest.TestCase):
             module="Domain",
             package_prefix="my-custom-pkg",
         )
-        self.assertEqual(path, "my-custom-pkg/AItest/UnitTest/Domain/x.test.ts")
+        self.assertEqual(path, "my-custom-pkg/AItest/UnitTest/domain/x.test.ts")
         # Explicit empty only for true single-root packages
         path_root = under_generated_test_folder(
             "unit",
@@ -133,7 +133,7 @@ class TestOutputLayout(unittest.TestCase):
             module="Domain",
             package_prefix="",
         )
-        self.assertEqual(path_root, "AItest/UnitTest/Domain/x.test.ts")
+        self.assertEqual(path_root, "AItest/UnitTest/domain/x.test.ts")
 
     def test_business_folder_named_backend_is_kept(self):
         """Do not treat 'backend' as always-tech when it is a business module under src."""
@@ -183,7 +183,7 @@ class TestOutputLayout(unittest.TestCase):
             "OrderFlowTests.cs",
             module="Order",
         )
-        self.assertEqual(path, "AItest/IntegrationTest/Order/OrderFlowTests.cs")
+        self.assertEqual(path, "AItest/IntegrationTest/order/OrderFlowTests.cs")
 
     def test_tc_module_wins_over_source(self):
         path = under_generated_test_folder(
@@ -192,7 +192,7 @@ class TestOutputLayout(unittest.TestCase):
             source_file_name="src/Order/Services/OrderService.cs",
             module="Đăng nhập",
         )
-        self.assertEqual(path, "AItest/UnitTest/Đăng-nhập/OrderServiceTests.cs")
+        self.assertEqual(path, "AItest/UnitTest/dang-nhap/OrderServiceTests.cs")
 
     def test_fallback_tc_module(self):
         path = under_generated_test_folder(
@@ -200,7 +200,7 @@ class TestOutputLayout(unittest.TestCase):
             "FooTests.cs",
             module="Order",
         )
-        self.assertEqual(path, "AItest/UnitTest/Order/FooTests.cs")
+        self.assertEqual(path, "AItest/UnitTest/order/FooTests.cs")
 
     def test_go_internal_kept_as_business_path(self):
         path = under_generated_test_folder(
@@ -310,9 +310,17 @@ class TestOutputLayout(unittest.TestCase):
             "chứa-ký-tự-không-phải-chữ-và-số-Hệ-thống-không-chấp-nhận-dữ-liệu-không-hợp-lệ"
         )
         short = sanitize_path_segment(long_tc)
-        self.assertLessEqual(len(short), 48)
+        self.assertLessEqual(len(short), 40)
         self.assertEqual(short, sanitize_path_segment(long_tc))  # stable
         self.assertIn("-", short)
+
+    def test_sanitize_path_segment_ascii_slug(self):
+        self.assertEqual(sanitize_path_segment("Đăng nhập"), "dang-nhap")
+        self.assertEqual(
+            sanitize_path_segment("Ghi nhận thông tin thu giữ vật chứng"),
+            "ghi-nhan-thong-tin-thu-giu-vat-chung",
+        )
+        self.assertEqual(sanitize_path_segment("Todo App SRS"), "todo-app-srs")
 
     def test_shorten_e2e_rel_path_preserves_structure(self):
         long_seg = "E2E-Validation-" + ("x" * 80)
@@ -323,7 +331,7 @@ class TestOutputLayout(unittest.TestCase):
         self.assertEqual(parts[1], "E2ETest")
         self.assertEqual(parts[-2], "specs")
         self.assertEqual(parts[-1], "foo.spec.ts")
-        self.assertLessEqual(len(parts[3]), 48)
+        self.assertLessEqual(len(parts[3]), 40)
 
     def test_shorten_e2e_rel_path_keeps_spec_and_page_suffix(self):
         long_spec = (

@@ -3,14 +3,21 @@
  * Phase 5: IDE + Approved MD + path:/code: markers before CLI.
  */
 import {
+  AI_TEST_CASES_DIR,
+  extractTcSourceMarkers,
   hasUnitSourceMarkers,
-  isUnitSutResolveSkipped,
+  LEGACY_AI_TEST_CASES_DIR,
   UNIT_GEN_LIMITS,
 } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import { isIdeCodegenReady } from "../ideProtocol";
 import { isTauri, listSourceFiles, readTextFile } from "../../tauri/bridge";
 import { approvedTcMarkdownRelPath } from "../approvedTcSync/approvedTcMarkdown";
+import { unitGroundingContractRelPath } from "../approvedTcSync/unitSourceGroundingContract";
+import {
+  isUnitGroundingFastPathEligible,
+  parseUnitSourceGroundingContract,
+} from "./groundingFastPath";
 import {
   decideUnitGenGate,
   type UnitGenGateResult,
@@ -22,7 +29,7 @@ function norm(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
 }
 
-/** Probe Approved TC MD under .ai-test/test-cases/{UnitTest|E2ETest}/{module}/{code}.md (or walk). */
+/** Probe canonical `AItest/test-cases`, then legacy `.ai-test/test-cases`. */
 export async function probeApprovedTcMd(
   projectRoot: string,
   tc: Pick<TestCase, "id" | "testCaseId" | "module" | "type">
@@ -41,7 +48,25 @@ export async function probeApprovedTcMd(
       return { path: expected.replace(/\\/g, "/"), content: body };
     }
   } catch {
-    /* try walk */
+    /* try legacy exact path, then walk */
+  }
+
+  const legacyExpected = expected.replace(
+    new RegExp(`^${AI_TEST_CASES_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    LEGACY_AI_TEST_CASES_DIR
+  );
+  if (legacyExpected !== expected) {
+    try {
+      const body = await readTextFile(projectRoot, legacyExpected);
+      if (body.trim()) {
+        return {
+          path: legacyExpected.replace(/\\/g, "/"),
+          content: body,
+        };
+      }
+    } catch {
+      /* try walk */
+    }
   }
 
   let listed: string[] = [];
@@ -53,7 +78,12 @@ export async function probeApprovedTcMd(
   const want = codes.map((c) => `${c}.md`.toLowerCase());
   for (const rel of listed) {
     const n = norm(rel);
-    if (!n.includes(".ai-test/test-cases/")) continue;
+    if (
+      !n.includes(`${AI_TEST_CASES_DIR.toLowerCase()}/`) &&
+      !n.includes(`${LEGACY_AI_TEST_CASES_DIR.toLowerCase()}/`)
+    ) {
+      continue;
+    }
     const base = n.split("/").pop() || "";
     if (want.includes(base)) {
       try {
@@ -108,14 +138,30 @@ export async function assertTcReadyForUnitGen(opts: {
     });
   }
   const md = await probeApprovedTcMd(root, opts.tc);
-  // MD markers win when present; else fall back to DB Test Data
-  const mdHas = hasUnitSourceMarkers(md?.content || "");
-  const dbHas = hasUnitSourceMarkers(opts.tc.testData || "");
-  const hasMarkers = mdHas || dbHas;
-  const markerBlob = mdHas
-    ? md?.content || ""
-    : [md?.content || "", opts.tc.testData || ""].join("\n");
-  const skipped = isUnitSutResolveSkipped(markerBlob) && !hasMarkers;
+  const mdContent = md?.content || "";
+  const hasMarkers = hasUnitSourceMarkers(mdContent);
+  const markers = extractTcSourceMarkers(mdContent);
+  let contract: ReturnType<typeof parseUnitSourceGroundingContract> = null;
+  if (md?.path) {
+    try {
+      const raw = await readTextFile(root, unitGroundingContractRelPath(md.path));
+      contract = parseUnitSourceGroundingContract(raw);
+    } catch {
+      contract = null;
+    }
+  }
+  const authoritative = Boolean(contract?.authoritative);
+  const projectionsMatch = isUnitGroundingFastPathEligible(contract, markers);
+  // The Approve refusal is the only text that tells the user what to fix.
+  const refusal = contract?.refusalReasons?.[0];
+  const decisionReason = !contract
+    ? "Thiếu hoặc sai schema companion .grounding.json"
+    : !contract.authoritative
+      ? `IDE Approve ${contract.outcome || "NOT_READY"}` +
+        (refusal ? `: ${refusal.code} — ${refusal.message}` : "")
+      : !projectionsMatch
+        ? "Quyết định IDE Approve không khớp projection path/code trong TC Markdown"
+        : undefined;
   return decideUnitGenGate({
     isTauri: true,
     projectRoot: root,
@@ -123,8 +169,9 @@ export async function assertTcReadyForUnitGen(opts: {
     mdPath: md?.path ?? null,
     tcLabel: label,
     hasSourceMarkers: hasMarkers,
-    sutResolveSkipped: skipped,
-    markerBlob,
+    hasAuthoritativeDecision: authoritative,
+    projectionsMatch,
+    decisionReason,
   });
 }
 

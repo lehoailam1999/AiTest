@@ -24,7 +24,7 @@ alwaysApply: false
 ## Pipeline (không trộn pha)
 
 ```text
-Knowledge PRIMARY (BR|VAL|ERROR|AC-BE) → Unit TC IR → Approve (index.db) → Codegen
+Knowledge PRIMARY (BR|VAL|ERROR|AC-BE) → Unit TC IR → IDE Repository Intelligence Approve → locked Decision → Codegen
 ```
 
 - FEATURES = tên `module` only · FLOWS/UI → E2E  

@@ -2,8 +2,8 @@
  * Shared Unit Gen conventions SoT — Desktop seeds `.ai-test/unit-conventions.md`;
  * Extension reads file or falls back to UNIT_CONVENTIONS_CORE.
  *
- * Gen-time only: do NOT paste Approve pipeline / shortlist / FAIL_UNGATED here —
- * Desktop already gated + resolved primary SUT before CLI runs.
+ * Gen-time only: IDE Repository Intelligence already locked an authoritative
+ * decision before CLI runs. Do not describe Desktop `index.db` resolve here.
  */
 /** Quantified limits (architecture invariants). */
 export declare const UNIT_GEN_LIMITS: {

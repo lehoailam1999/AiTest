@@ -6,6 +6,12 @@
 const PATH_MARKER_RE =
   /(?:^|\n)\s*(?:path|route|url|featurePath|feature_path)\s*[:=]\s*([^\n;,|]+)/i;
 
+/**
+ * Traceability ids (BR-4, FR-12, AC-3…) leak from Analysis `trace:`/`ruleRef:` into
+ * path markers. They are ASCII and would pass every other check, so reject the shape.
+ */
+const RULE_REF_PATH_RE = /^\/?(?:BR|FR|AC|REQ)-\d[\w-]*$/i;
+
 /** Reject LLM placeholders / soft-DoR notes mistaken as routes (e.g. path: [Thiếu Context]). */
 export function isUsableFeaturePath(raw: string | null | undefined): boolean {
   const normalized = coerceToPathname(raw);
@@ -18,6 +24,7 @@ export function isUsableFeaturePath(raw: string | null | undefined): boolean {
     return false;
   }
   if (/[\[\]{}]|featurepath\s*$/i.test(low)) return false;
+  if (RULE_REF_PATH_RE.test(p)) return false;
   if (/^(login|signin|sign-in|auth|register)$/i.test(low.replace(/^\//, ""))) return false;
   // Must look like a real UI path segment (ASCII letters only — rejects VN slug invent)
   if (!/^\/?[A-Za-z][\w\-./]*$/.test(p.replace(/\s/g, ""))) return false;
@@ -54,7 +61,7 @@ const EXPECTED_OUTCOME_RE =
   /(?:expectedOutcome|expected\s*result|expected|kết\s*quả\s*mong\s*đợi)\s*[:=]/i;
 
 const PATH_ONLY_KEYS =
-  /^(path|route|url|featurePath|feature_path|authRole|auth_role|role|roles|authRequired|auth_required|landmark|multiRole|trace)$/i;
+  /^(path|route|url|featurePath|feature_path|featureSources|feature_sources|authRole|auth_role|role|roles|authRequired|auth_required|landmark|multiRole|trace)$/i;
 
 /** Vague-only steps — no concrete control / data. */
 const VAGUE_STEP_RE =

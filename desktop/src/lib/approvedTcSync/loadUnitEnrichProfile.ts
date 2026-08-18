@@ -8,7 +8,7 @@ import {
   type UnitDomainGuardRule,
   type UnitProjectIntentRule,
 } from "@aitest/ide-protocol";
-import { isTauri, readTextFile } from "../../tauri/bridge";
+import { isTauri, readTextFile, writeTextFile } from "../../tauri/bridge";
 import type { CodeAliasMap } from "../projectIntelligence/viCodeAliases";
 
 export type UnitFieldAliasMap = Record<string, string | string[]>;
@@ -23,7 +23,6 @@ export type UnitEnrichProfileKnobs = {
   codeAliasesFile: string;
   codeAliases?: CodeAliasMap | null;
   fieldAliases?: UnitFieldAliasMap;
-  allowDiskReresolve: boolean;
 };
 
 /**
@@ -71,7 +70,6 @@ const DEFAULTS: UnitEnrichProfileKnobs = {
   codeAliasesFile: ".ai-test/code-aliases.json",
   codeAliases: null,
   fieldAliases: {},
-  allowDiskReresolve: false,
 };
 
 export async function loadUnitEnrichProfileKnobs(
@@ -88,7 +86,6 @@ export async function loadUnitEnrichProfileKnobs(
         sutMap?: Record<string, string>;
         intentRulesFile?: string;
         codeAliasesFile?: string;
-        allowDiskReresolve?: boolean;
       };
     };
     const unit = j?.unit || {};
@@ -159,11 +156,60 @@ export async function loadUnitEnrichProfileKnobs(
       codeAliasesFile,
       codeAliases,
       fieldAliases,
-      allowDiskReresolve: unit.allowDiskReresolve === true,
     };
   } catch {
     return { ...DEFAULTS };
   }
+}
+
+/**
+ * Merge IDE-verified label→property bindings into a code-aliases payload.
+ * Existing entries win so a later wrong pick cannot overwrite a known mapping.
+ */
+export function applyLearnedFieldAliases(
+  parsed: Record<string, unknown> | null | undefined,
+  bindings: readonly { label: string; property: string }[]
+): { next: Record<string, unknown>; added: number } {
+  const source = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const fields =
+    source.fields && typeof source.fields === "object" && !Array.isArray(source.fields)
+      ? { ...(source.fields as Record<string, unknown>) }
+      : {};
+  let added = 0;
+  for (const binding of bindings) {
+    const label = binding.label.trim();
+    const property = binding.property.trim();
+    if (!label || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(property)) continue;
+    const existing = fields[label];
+    if (typeof existing === "string" && existing.trim()) continue;
+    if (Array.isArray(existing) && existing.length) continue;
+    fields[label] = property;
+    added += 1;
+  }
+  return { next: { ...source, fields }, added };
+}
+
+/**
+ * Persist IDE-verified field bindings into the project alias file so later
+ * Approve runs can bind without waiting for CLI, and without hand-editing.
+ */
+export async function mergeLearnedFieldAliases(
+  projectRoot: string,
+  bindings: readonly { label: string; property: string }[]
+): Promise<number> {
+  if (!projectRoot?.trim() || !bindings.length || !isTauri()) return 0;
+  const knobs = await loadUnitEnrichProfileKnobs(projectRoot);
+  const rel = knobs.codeAliasesFile.replace(/\\/g, "/").replace(/^\.\//, "");
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = JSON.parse(await readTextFile(projectRoot, rel)) as Record<string, unknown>;
+  } catch {
+    parsed = {};
+  }
+  const { next, added } = applyLearnedFieldAliases(parsed, bindings);
+  if (!added) return 0;
+  await writeTextFile(projectRoot, rel, `${JSON.stringify(next, null, 2)}\n`);
+  return added;
 }
 
 /** Filter seed candidates through profile domainGuards (module cue). */

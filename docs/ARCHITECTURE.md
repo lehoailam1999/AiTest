@@ -81,10 +81,10 @@ flowchart TB
 
   Approved --> Ground{Phân loại Test Case}
 
-  Ground -->|Unit Test| UG[Gắn mã Unit: index.db]
-  UG --> UMD["Tệp MD: path / code / property"]
-  UMD --> Gen["Sinh Code: Desktop → Extension → Agent CLI"]
-  Gen --> UVA[Staging → Verify → Apply]
+  Ground -->|Unit Test| UG[Gắn mã Unit: IDE Repository Intelligence]
+  UG -->|authoritative decision| UMD["AItest/test-cases/UnitTest: MD + .grounding.json"]
+  UMD --> Gen["Consume-only Gen: Extension → Agent CLI"]
+  Gen --> UVA["Tool draft (OS temp) → Verify tạm → khôi phục source → Update"]
   UVA --> UOut[Lưu vào AItest/UnitTest]
 
   Ground -->|E2E Test| EG[Gắn mã E2E: FE Catalog + Auth]
@@ -99,8 +99,8 @@ flowchart TB
 | Pha | Đơn vị Đảm nhận | Đầu vào ──► Đầu ra |
 |---|---|---|
 | **1. Thiết Kế (Design)** | Backend + PostgreSQL | SRS → Phân tích → Sinh TC Approved (**chưa** gắn path SUT) |
-| **2. Gắn Mã (Ground)** | Desktop App (+ Backend Shortlist) | Approved TC + Code Index/Catalog ──► Tệp Markdown chứa Markers (`path:`, `code:`) |
-| **3. Sinh Code (Automate)** | **IDE Extension + Agent CLI** (Unit & E2E) | Tệp Markdown Markers ──► Staging ──► Verify (Runner) ──► Apply ghi tệp vào `AItest/` |
+| **2. Gắn Mã (Ground)** | **IDE Repository Intelligence** (+ Desktop persist) | Approved TC ──► immutable decision ──► MD markers + companion `.grounding.json` |
+| **3. Sinh Code (Automate)** | **IDE Extension + Agent CLI** | Unit: Approved MD ──► draft nội bộ Tool ──► Verify tạm ──► Update ghi `AItest/UnitTest`; E2E giữ pipeline riêng. |
 
 ### So Sánh Chi Tiết Giữa Unit Test Và E2E Test:
 
@@ -119,25 +119,25 @@ flowchart TB
 
 Khi tạo Jobs sinh Test Case ở pha Design, hệ thống **tuyệt đối không ghi cứng đường dẫn mã nguồn (SUT Path)** vào CSDL PostgreSQL. Chỉ khi người dùng bấm **Duyệt (Approve)** trên Desktop App, quá trình gắn mã (Grounding) mới được kích hoạt:
 
-- **Dành cho Unit Test**: Hệ thống đối chiếu `Module → Function → Title` với tệp chỉ mục code local `index.db` ──► Xếp hạng và đề xuất shortlist ──► Gắn thẻ `code:` và thuộc tính `target.property` ──► Đồng bộ ra tệp Markdown `.ai-test/test-cases/` kèm file grounding. AI chỉ được chọn trong danh sách shortlist, nếu chỉ số tin cậy thấp hoặc index cũ (`STALE_INDEX`) sẽ không cho phép gắn nhầm.
+- **Dành cho Unit Test**: Desktop gọi IDE `unitApproveResolve` (Repository Intelligence: symbols/source/evidence) ──► khóa `UnitApprovalDecision` ──► project `path:`/`code:`/`target.property` + companion `.grounding.json`. Gen **consume-only**; không fallback `index.db` / disk re-resolve. Chi tiết: [`docs/UNIT_APPROVE_SOURCE_GROUNDING.md`](UNIT_APPROVE_SOURCE_GROUNDING.md).
 - **Dành cho E2E Test**: Hệ thống đối chiếu Frontend Catalog + `project.profile.json` + `.ai-test/auth/` ──► Gắn thẻ `path:`, `featurePath:` và `authRole:` chuẩn xác (không tự bịa ra route hoặc vai trò đăng nhập không tồn tại).
 
 ---
 
 ## 5. PHA SINH MÃ TỰ ĐỘNG (AUTOMATE PHASE)
 
-**Luồng thực thi:** `Tệp Approved MD ──► Cổng Kiểm Tra (Gates) ──► Sinh Code (Extension + Agent CLI) ──► Staging ──► Verify (Runner) ──► Apply vào thư mục AItest/`.
+**Luồng Unit:** `AItest/test-cases/UnitTest/*.md ──► Gates ──► Extension + Agent CLI ──► draft nội bộ Tool (OS temp) ──► Verify tạm ──► khôi phục source ──► người dùng Update/Apply vào AItest/UnitTest`.
 
 ```mermaid
 flowchart TB
   MD[Tệp Approved MD] --> Gates{Cổng Kiểm Tra Gates}
   Gates -->|Hợp lệ (OK)| Ext["Extension → Agent CLI"]
   Gates -->|Không hợp lệ| X[Từ chối Sinh Code]
-  Ext --> Stg[Thư mục Tạm Staging]
-  Stg --> Ver{Tự Chạy Verify}
+  Ext --> Stg[Draft nội bộ Desktop Tool / OS temp]
+  Stg --> Ver{Stage tạm → chạy Verify → restore source}
   Ver -->|Unit Test| RU[Động cơ: dotnet / vitest / jest / pytest]
   Ver -->|E2E Test| RE[Động cơ: Playwright]
-  RU --> App[Ghi Chính Thức Vào AItest/]
+  RU --> App[Người dùng Update/Apply → AItest/UnitTest]
   RE --> App
 ```
 
@@ -145,8 +145,8 @@ flowchart TB
 |---|---|---|
 | **Cổng Kiểm Tra (Gates)** | Kiểm tra kết nối IDE; field bind; Planner `ready`. | Kiểm tra kết nối IDE; route / `authRole` đã được ground. |
 | **Sinh Code (Gen)** | Agent CLI chạy trên thư mục SUT local. | **Cùng** Agent CLI chạy trên thư mục SUT local. |
-| **Lưu Tạm (Staging)** | `.ai-test/staging/{runId}/` | `.ai-test/staging/{runId}/` |
-| **Xác minh & Ghi chính thức** | Chạy runner stack ──► Ghi vào `AItest/UnitTest/` | Chạy Playwright ──► Ghi vào `AItest/E2ETest/` |
+| **Lưu nháp** | OS temp của Desktop Tool; không tạo `.ai-test/staging` trong source | Pipeline E2E riêng |
+| **Xác minh & Ghi chính thức** | Verify chỉ stage tạm rồi restore; nút Update/Apply mới ghi `AItest/UnitTest/` | Chạy Playwright ──► Ghi vào `AItest/E2ETest/` |
 
 ---
 
@@ -170,21 +170,45 @@ erDiagram
 > [!NOTE]
 > PostgreSQL chỉ đóng vai trò lưu trữ duy nhất (SoT) cho dữ liệu nghiệp vụ (Yêu cầu, Test Case, Trạng thái Jobs). CSDL **không lưu trữ mã nguồn dự án SUT hay các tệp binary video/trace nặng**.
 
-### 6.2 Cấu Trúc Thư Mục Artifacts Trên Máy Local (`AItest/` & `.ai-test/`)
+### 6.2 Cấu Trúc Unit Test Trên Source
 
 ```text
 {Thư_Mục_Mã_Nguồn_SUT_Local}/
-├── AItest/                             ← Thư mục lưu mã test chính thức
-│   ├── UnitTest/{Tên_Module}/…         ← Mã nguồn Unit Test sinh ra (*.cs, *.test.ts, test_*.py)
+├── AItest/                             ← Một cây thao tác Unit trên source
+│   ├── test-cases/
+│   │   └── UnitTest/{module}/
+│   │       ├── TC-001.md               ← Kịch bản Approved
+│   │       └── TC-001.grounding.json   ← Quyết định IDE authoritative
+│   ├── UnitTest/{module}/…             ← Mã Unit Test đã Update/Apply
 │   ├── E2ETest/_shared/… + {Req}/{TC}/ ← Mã nguồn E2E Test Playwright (*.spec.ts)
 │   ├── APITest/ · IntegrationTest/     ← Cấu trúc dành cho API / Integration Test
 │   └── Reports/ · Coverage/ · Metadata/← Báo cáo kết quả kiểm thử & bao phủ
-└── .ai-test/                           ← Thư mục tạm & chứa tri thức local
-    ├── test-cases/{module}/{TC}.md     ← Kịch bản Test Case đã Approved kèm Markers
-    ├── index.db                        ← Chỉ mục mã nguồn local (JSON format)
-    ├── project.profile.json            ← Cấu hình profile dự án local
-    └── staging/{runId}/                ← Thư mục tạm cô lập trước khi Verify
+└── .ai-test/                           ← Chỉ metadata/profile local; không chứa Unit draft
+    ├── project.profile.json
+    ├── unit-conventions.md
+    ├── code-aliases.json
+    └── logs/                           ← debug best-effort, gitignored
 ```
+
+Thao tác **Sửa/Xóa** trên Tool chỉ đổi draft. Sau Verify, source được trả về đúng trạng
+thái trước đó. Nút **Update/Apply** là ranh giới duy nhất ghi đè hoặc xóa file dưới
+`AItest/UnitTest/`. Trang **Run Test** luôn chạy bản đã Update trong source.
+
+### 6.3 Cách Chạy Unit Test
+
+1. **Approve TC**: tạo/cập nhật `AItest/test-cases/UnitTest/{module}/{TC}.md`
+   và file `.grounding.json` bên cạnh.
+2. **Gen Unit**: Tool đọc Approved TC, Extension sinh code vào Tool draft.
+3. **Sửa/Xóa trên Tool**: chỉ thay đổi draft; cần Verify lại sau mỗi lần sửa.
+4. **Verify**: Tool stage tạm, chạy runner, rồi restore source dù PASS hay FAIL.
+5. **Update source**: khi PASS, bấm **Update** để ghi/xóa dưới `AItest/UnitTest`.
+6. **Run Test**: chạy từ trang Run Test, hoặc chạy trực tiếp trong source:
+   - C#: `dotnet test "AItest/AItest.UnitTests.csproj" --nologo`
+   - TypeScript/Jest: `npx jest --config "AItest/jest.config.cjs" --runInBand`
+
+Muốn chỉnh lại sau khi đã Update: sửa TC hoặc Gen lại trên Tool → sửa draft → Verify
+→ Update lần nữa. Tool nhận biết file đã tồn tại và thực hiện update thay vì tạo bản
+trùng.
 
 | Stack Mã Nguồn SUT | Định dạng Code Đầu ra (Unit) | Bộ Chạy Test Runner |
 |---|---|---|
@@ -200,7 +224,7 @@ erDiagram
 |---|---|
 | **Người dùng ↔ Backend API** | Xác thực qua **JWT Token**; Cấu hình CORS chặt chẽ. |
 | **Kết nối AI CLI Engine** | Thực thi trực tiếp trên máy cá nhân qua Cursor CLI / Claude CLI; **không hardcode vendor API Key**. |
-| **Ghi đĩa Local SUT** | Cơ chế cô lập đường dẫn (**Path Jail**): Chỉ được phép ghi vào `AItest/` và `.ai-test/`. |
+| **Ghi đĩa Local SUT** | TC + code Unit chỉ ghi dưới `AItest/`; draft Gen nằm trong OS temp của Tool. |
 | **Thông tin Đăng nhập E2E** | Sử dụng file seed/profile local trên máy cá nhân — không invent; không lưu trữ mật khẩu nhạy cảm lên CSDL Backend. |
 
 ```text

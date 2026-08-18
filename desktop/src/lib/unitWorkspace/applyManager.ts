@@ -8,6 +8,7 @@ import type { StagingBackup, UnitWorkspaceManifest } from "./types";
 import {
   assertSafeAitestTargetRel,
   coerceAitestApplyPath,
+  compiledAitestArtifactRels,
 } from "../testOutputLayout";
 import { resolvePackagePrefix } from "../resolvePackagePrefix";
 import {
@@ -17,35 +18,17 @@ import {
 import { ideApplyFiles, isIdeCodegenReady, rememberCodegenResult } from "../ideProtocol";
 import { pushTimeline } from "./unitJobEvents";
 import { recordUnitJobMetric } from "../unitJobMetrics";
-
-const BUILD_OUTPUT_DIRS = ["dist", "build", "out"] as const;
-
-function compiledArtifactCandidates(targetRel: string): string[] {
-  const norm = (targetRel || "").replace(/\\/g, "/").replace(/^\/+/, "");
-  const idx = norm.toLowerCase().indexOf("/aitest/");
-  if (idx < 0) return [];
-  const prefix = idx > 0 ? norm.slice(0, idx) : "";
-  const tail = norm.slice(idx + 1); // keep "AItest/..."
-  const sourceExt = (tail.match(/(\.[^.]+)$/)?.[1] || "").toLowerCase();
-  if (![".ts", ".tsx"].includes(sourceExt)) return [];
-
-  const stem = tail.slice(0, -sourceExt.length);
-  const out: string[] = [];
-  for (const outDir of BUILD_OUTPUT_DIRS) {
-    const root = prefix ? `${prefix}/${outDir}` : outDir;
-    out.push(`${root}/${stem}.js`);
-    out.push(`${root}/${stem}.js.map`);
-    out.push(`${root}/${stem}.d.ts`);
-    out.push(`${root}/${stem}.d.ts.map`);
-  }
-  return out.map((p) => p.replace(/\/+/g, "/"));
-}
+import { readDraftText } from "./draftStore";
+import {
+  reconcileUnitArtifactOwnership,
+  type FailedUnitOwner,
+} from "./unitArtifactOwnership";
 
 async function removeCompiledAitestArtifacts(
   projectRoot: string,
   targetRel: string
 ): Promise<void> {
-  for (const rel of compiledArtifactCandidates(targetRel)) {
+  for (const rel of compiledAitestArtifactRels(targetRel)) {
     try {
       await deleteTextFile(projectRoot, rel);
     } catch {
@@ -136,7 +119,7 @@ async function writeManifestOverlay(
     const files: { path: string; content: string; kind: string }[] = [];
     for (const f of safeManifest.files) {
       if (f.op === "delete") continue;
-      const content = await readTextFile(projectRoot, f.workspaceRel);
+      const content = await readDraftText(projectRoot, f.workspaceRel);
       files.push({ path: f.targetRel, content, kind: "unit" });
     }
     if (files.length) {
@@ -188,7 +171,7 @@ async function writeManifestOverlay(
       }
       continue;
     }
-    const content = await readTextFile(projectRoot, f.workspaceRel);
+    const content = await readDraftText(projectRoot, f.workspaceRel);
     await writeTextFileIfChanged(projectRoot, f.targetRel, content);
     await removeCompiledAitestArtifacts(projectRoot, f.targetRel);
     applied.push(f.targetRel);
@@ -288,8 +271,17 @@ function backupsToMap(backups: StagingBackup[]): Map<string, string | null> {
 export async function applyManyWorkspacesToRepo(
   projectRoot: string,
   manifests: UnitWorkspaceManifest[],
-  opts?: { module?: string | null }
-): Promise<{ results: ApplyManyItemResult[]; appliedPaths: string[] }> {
+  opts?: {
+    module?: string | null;
+    /** Gen-failed TC keys whose previously owned source tests must be removed. */
+    failedUnits?: FailedUnitOwner[];
+  }
+): Promise<{
+  results: ApplyManyItemResult[];
+  appliedPaths: string[];
+  deletedFailedPaths: string[];
+  failedCleanupErrors: string[];
+}> {
   type Prepared = {
     runId: string;
     safe: UnitWorkspaceManifest;
@@ -364,7 +356,42 @@ export async function applyManyWorkspacesToRepo(
     });
   await removeAiTestDirAfterApplyBatch(projectRoot, pkgsToSweep);
 
-  return { results, appliedPaths: allWritten };
+  let deletedFailedPaths: string[] = [];
+  let failedCleanupErrors: string[] = [];
+  try {
+    const successful = prepared
+      .filter((item) => results.some((result) => result.runId === item.runId && result.ok))
+      .map((item) => ({
+        testCaseId: item.safe.testCaseId,
+        packagePrefix: item.safe.packagePrefix,
+        targetPaths: item.safe.files
+          .filter((file) => file.op !== "delete")
+          .map((file) => file.targetRel),
+      }));
+    const successfulIds = new Set(
+      successful.map((item) => item.testCaseId.trim().toLowerCase())
+    );
+    const ownership = await reconcileUnitArtifactOwnership({
+      projectRoot,
+      successful,
+      failed: (opts?.failedUnits || []).filter(
+        (item) => !successfulIds.has(item.testCaseId.trim().toLowerCase())
+      ),
+    });
+    deletedFailedPaths = ownership.deletedPaths;
+    failedCleanupErrors = ownership.deleteErrors;
+  } catch (error) {
+    failedCleanupErrors = [
+      error instanceof Error ? error.message : "Không cập nhật được ownership file test",
+    ];
+  }
+
+  return {
+    results,
+    appliedPaths: allWritten,
+    deletedFailedPaths,
+    failedCleanupErrors,
+  };
 }
 
 /** Single-job Apply — same pipeline as batch (one manifest). */

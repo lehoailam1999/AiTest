@@ -1469,6 +1469,25 @@ label textarea:disabled,
   padding: 0 4px;
 }
 
+.coverage-review-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-card, #ffffff);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 10px;
+  padding: 8px 14px 4px;
+}
+
+.coverage-review-progress .ant-progress {
+  margin-bottom: 0;
+}
+
+/* Row of the TC the resolver is working on right now. */
+.coverage-review-table tr.coverage-review-row--approving>td {
+  background: var(--bg-accent-soft, #eff6ff);
+}
+
 .coverage-review-table {
   flex: 1;
   min-height: 220px;
@@ -3370,6 +3389,108 @@ label textarea:disabled,
   .settings-engine-card {
     transition: none;
   }
+}
+
+/* —— Unit batch console (Generate/Verify table) —— */
+.batch-run-table {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Horizontal scrolling stays inside the table, never on the page. */
+.batch-run-table .ant-table-content {
+  overscroll-behavior-x: contain;
+}
+
+.batch-run-table .ant-table-cell {
+  overflow: hidden;
+}
+
+.batch-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Caps stay just inside the declared column widths (260 / 320). */
+.batch-clamp-1 {
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  max-width: 240px;
+}
+
+.batch-clamp-2 {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  max-width: 300px;
+}
+
+/* —— Run test page (log/command must not widen the shell) —— */
+.run-test-page {
+  overflow-x: hidden;
+}
+
+.run-test-page,
+.run-test-page .ant-card,
+.run-test-page .ant-card-body,
+.run-test-page .ant-space,
+.run-test-page .ant-space-item,
+.run-test-page .ant-tabs,
+.run-test-page .ant-tabs-content-holder,
+.run-test-page .ant-alert,
+.run-test-page .ant-table-wrapper {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.run-test-page .ant-alert-message,
+.run-test-page .ant-alert-description,
+.run-test-page .ant-typography,
+.run-test-cmd {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.run-test-page .ant-typography code,
+.run-test-cmd.ant-typography-code,
+.run-test-cmd code {
+  display: inline;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.run-test-log {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  background: var(--ant-color-fill-quaternary, #f5f5f5);
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
+  line-height: 1.45;
+}
+
+.run-test-history-table .batch-clamp-1 {
+  max-width: 100%;
+}
+
+.run-test-result .ant-statistic-content {
+  overflow-wrap: anywhere;
 }
 
 /* —— E2E Job Console (EX1) —— */

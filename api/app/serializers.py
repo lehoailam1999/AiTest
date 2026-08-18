@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.models.domain import (
     AiBackendConnection,
     ApplyAudit,
@@ -24,6 +26,7 @@ from app.services.requirement_content import (
     sources_for_detail,
 )
 from app.services.requirement_topics import topics_from_description
+from app.services.unit_tc_revision import unit_testcase_content_revision
 from app.services.vietnamese_labels import priority_vi, severity_vi, type_vi
 
 
@@ -125,6 +128,15 @@ def testcase_dto(t: TestCase, source_content_hash: str | None = None) -> dict:
         and t.is_ai_generated
         and (not gen_hash or gen_hash != source_content_hash)
     )
+
+    def _json_object(value: str | None):
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return None
+
     return {
         "id": str(t.id),
         "projectId": str(t.project_id),
@@ -153,6 +165,11 @@ def testcase_dto(t: TestCase, source_content_hash: str | None = None) -> dict:
         "executionStatus": t.execution_status,
         "generatedFromHash": gen_hash,
         "generatedFromVersion": t.generated_from_version,
+        "unitDecision": _json_object(getattr(t, "unit_decision_json", None)),
+        "unitTcIr": _json_object(getattr(t, "unit_tc_ir_json", None)),
+        "unitDecisionId": getattr(t, "unit_decision_id", None),
+        "unitContentRevision": getattr(t, "unit_content_revision", None),
+        "unitContentRevisionCurrent": unit_testcase_content_revision(t),
         "isStale": is_stale,
         "needsReview": is_stale,
         "createdAt": _iso(t.created_at),

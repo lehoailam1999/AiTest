@@ -1,60 +1,18 @@
 ---
-description: Portable Unit Approve grounding — Module → Function → Title from index.db (no product nouns)
-alwaysApply: true
+description: Portable Unit Approve grounding — IDE Repository Intelligence (no product nouns)
+globs: desktop/src/lib/unitApprove/**,desktop/src/lib/approvedTcSync/**,ide-plugins/vscode/src/repositoryIntelligence/**,packages/ide-protocol/src/unitApproveRpc.ts,packages/ide-protocol/src/approvedGroundingDecision.ts,packages/ide-protocol/src/defaults/*.json
+alwaysApply: false
 ---
 
-# Unit Approve grounding (every project)
+# Unit Approve grounding
 
-SoT = **`index.db` + TC text** (Module → Function → Title). Portable mọi stack. Không hardcode domain sản phẩm.
+Pha Approve only. SoT runtime:
 
-> **Pha Approve only.** Sinh Unit TC → [`unit-tc-from-analysis.mdc`](unit-tc-from-analysis.mdc).  
-> Chi tiết as-built + roadmap: [`docs/UNIT_APPROVE_SOURCE_GROUNDING.md`](../../docs/UNIT_APPROVE_SOURCE_GROUNDING.md).
+- IDE resolve: `ide-plugins/vscode/src/repositoryIntelligence/`
+- Protocol decision: `packages/ide-protocol/src/unitApproveRpc.ts`
+- Desktop coordinator: `desktop/src/lib/unitApprove/`
+- Decision/contract projection: `packages/ide-protocol/src/approvedGroundingDecision.ts`
+- As-built map: `docs/UNIT_APPROVE_SOURCE_GROUNDING.md`
 
-## Progressive match
-
-```
-Module → Function → Title → index.db → CRUD verb → *Handler/*Service → path:/code: → sync MD
-```
-
-| Step | Input | Effect |
-| --- | --- | --- |
-| 1 | **Module** (Requirement Studio) | Lock source-module family (fail-closed / feature-folder discover) |
-| 2 | **Function** (`tc.module`) | Rank files trong family |
-| 3 | **Title** + steps/expected | Refine symbol; khớp **CRUD verb** |
-| 4 | Body-rule (optional) | Confirm excerpt; same-family tie ≠ ambiguous |
-
-Sync MD: `requirement:` = Module; `function:` / `module:` = Function.  
-Markers: `path:` + `code:` (Type hoặc Type.Method) + optional `related:` + companion `.grounding.json` (Layer 5). Comment có `confidence=`; fail `FAIL_VALIDATE` / `STALE_INDEX`.
-
-## CRUD verb (VI/IT → path stems)
-
-Từ Function + Title + steps + `quan sát:` — **không** từ «từ chối» / trùng mã alone.
-
-| Verb | Cues | Path stems |
-| --- | --- | --- |
-| create | tạo mới, create, add new | Create / Insert / Add |
-| read | tải/lấy chi tiết, get by id, quan sát: read | Get / Query / FindById |
-| update | cập nhật, update, edit, quan sát: update | Update / Edit / Patch |
-| delete | xóa, delete, remove, quan sát: delete | Delete / Remove |
-
-Wrong CRUD sibling → refuse soft writeBack. `validate_reject` ≠ create shape.
-
-## Resolver (as-built)
-
-1. `index.db` deterministic  
-2. Optional FS excerpt (body-rule)  
-3. LLM shortlist fallback — chỉ khi fail-closed / ungated  
-
-Không invent product nouns để vá path sai.
-
-## Forbidden
-
-- Product nouns trong protocol / shared aliases  
-- Absolute `D:/...` paths  
-- Agent tự điền SUT knobs để vá ranking  
-- Sửa sync-MD rules theo dự án thay vì Approve ranking  
-- Ghi docs/roadmap như đã ship khi chưa có code
-
-## After changes
-
-Restart Desktop → Re-Approve → MD có `path:` / `code:` (+ optional `.grounding.json`).
+Không copy cue/stem table vào rule này. Không hardcode product nouns, absolute path hoặc SUT knobs để vá ranking.
+Không fallback sang Desktop `index.db` / AI picker cũ.

@@ -25,6 +25,38 @@ describe("e2eRouteCatalogCache", () => {
     assert.match(a, /app-routing/);
   });
 
+  it("catalogFromCache misses on version bump", () => {
+    const fp = fingerprintRoutingPaths(["src/app/app-routing.module.ts"]);
+    const v3 = JSON.stringify({
+      version: 3,
+      fingerprint: fp,
+      routes: ["/admin/evidence"],
+      sources: ["src/app/app-routing.module.ts"],
+      updatedAt: "2026-01-01T00:00:00Z",
+    });
+    assert.equal(catalogFromCache(v3, fp), null);
+  });
+
+  it("round-trips harvested labels and featureSources", () => {
+    const fp = fingerprintRoutingPaths(["src/app/admin/evidence/evidence.routes.ts"]);
+    const raw = serializeCatalogCache(
+      {
+        routes: ["/admin/evidence"],
+        sources: ["src/app/admin/evidence/evidence.routes.ts"],
+        labels: { "/admin/evidence": { vat: 8, chung: 10 } },
+        featureSources: {
+          "/admin/evidence": ["src/app/admin/evidence/list/evidence.component.html"],
+        },
+      },
+      fp
+    );
+    const hit = catalogFromCache(raw, fp);
+    assert.equal(hit?.labels?.["/admin/evidence"]?.chung, 10);
+    assert.deepEqual(hit?.featureSources?.["/admin/evidence"], [
+      "src/app/admin/evidence/list/evidence.component.html",
+    ]);
+  });
+
   it("catalogFromCache hits only when fingerprint matches", () => {
     const fp = fingerprintRoutingPaths(["src/app/app-routing.module.ts"]);
     const raw = serializeCatalogCache(

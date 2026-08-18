@@ -367,3 +367,29 @@ describe("decideUnitSutGate VALIDATION + related excerpt", () => {
     assert.equal(g.decision, "gen", g.reason);
   });
 });
+
+describe("detectFeatureGap constraint-first", () => {
+  it("does not invent uniqueness gap when constraint is required", () => {
+    const tc = [
+      "Cập nhật tên vật chứng để trống - Từ chối",
+      "primaryBucket: VALIDATION_DATA",
+      "target.constraint: Không được để trống (bắt buộc)",
+      "target.field: tenVatChung",
+      "# auto-enriched from index.db (ruleHits=throw+BadRequest+Duplicate confidence=LOW)",
+    ].join("\n");
+    const ex = "public class EvidenceDto { [Required] public string Name { get; set; } }";
+    const g = detectFeatureGap(tc, ex);
+    assert.equal(g.gap, false, g.label);
+  });
+
+  it("reports uniqueness only when constraint says duplicate", () => {
+    const tc = [
+      "primaryBucket: VALIDATION_DATA",
+      "target.constraint: Không được trùng mã vật chứng đã tồn tại",
+      "target.field: EvidenceCode",
+    ].join("\n");
+    const g = detectFeatureGap(tc, "public class EvidenceDto { public string EvidenceCode { get; set; } }");
+    assert.equal(g.gap, true);
+    assert.equal(g.label, "uniqueness/duplicate");
+  });
+});

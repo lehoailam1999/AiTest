@@ -113,6 +113,35 @@ describe("enrichE2eMarkersFromIndex", () => {
     assert.equal(path, "/admin/evidence");
   });
 
+  it("bridges a Vietnamese business label to a source route through learned aliases", () => {
+    const path = inferE2eRoutePath(
+      sampleE2e({
+        module: "Sinh mã vật chứng tự động",
+        title:
+          "Sinh mã vật chứng tự động - Nhập mã vật chứng trùng với mã đã tồn tại",
+        steps: "1. Nhập mã vật chứng\n2. Hoàn tất tạo mới",
+        testData: "trace: BR-22\nauthRequired: true",
+        precondition: "Popup Tạo mới vật chứng đang mở",
+      }),
+      {
+        requirementTitle: "Tạo mới vật chứng",
+        routeCatalog: {
+          routes: [
+            "/admin/evidence",
+            "/admin/digital-device",
+            "/admin/storage-room",
+            "/upload-activity",
+          ],
+          sources: ["src/app/admin/evidence/evidence.routes.ts"],
+        },
+        semanticAliases: {
+          maVatChung: "EvidenceCode",
+        },
+      }
+    );
+    assert.equal(path, "/admin/evidence");
+  });
+
   it("enriches post-login E2E test case with path, auth, scenario and normalized steps", () => {
     const res = enrichTcTestDataWithE2eMarkers(sampleE2e());
     assert.equal(res.enriched, true);
@@ -163,6 +192,51 @@ describe("enrichE2eMarkersFromIndex", () => {
     assert.match(md, /authRequired: true/);
     assert.doesNotMatch(md, /authRequired: false/);
     assert.match(md, /path: \/admin\/evidence\/new/);
+  });
+
+  it("drops a trace-id path (/BR-4) and re-infers from harvested labels", () => {
+    const res = enrichTcTestDataWithE2eMarkers(
+      sampleE2e({
+        module: "Tạo mới vật chứng theo quy trình 2 bước",
+        title:
+          "[E2E-Boundary] Tạo mới vật chứng theo quy trình 2 bước - bỏ qua trường",
+        steps: "1. Hoàn tất quy trình tạo vật chứng",
+        testData:
+          "baseURL: http://localhost:4200; trace: BR/BR-4\npath: /BR-4\nruleRef: BR-4",
+        precondition: "Người dùng đã đăng nhập; popup Tạo mới vật chứng đang mở",
+      }),
+      {
+        routeCatalog: {
+          routes: ["/admin/evidence", "/admin/storage-room", "/admin/person"],
+          sources: ["src/app/admin/evidence/evidence.routes.ts"],
+          labels: {
+            "/admin/evidence": { vat: 8, chung: 10, buoc: 4, quy: 2, trinh: 2 },
+            "/admin/storage-room": { kho: 6, phong: 5 },
+            "/admin/person": { nhan: 4, su: 4 },
+          },
+          featureSources: {
+            "/admin/evidence": [
+              "src/app/admin/evidence/list/evidence.component.html",
+              "src/app/admin/evidence/create/evidence-create-modal.component.html",
+            ],
+          },
+        },
+      }
+    );
+    assert.equal(res.path, "/admin/evidence");
+    assert.match(res.testData, /path: \/admin\/evidence/);
+    assert.doesNotMatch(res.testData, /path: \/BR-4/);
+    assert.match(res.testData, /ruleRef: BR-4/);
+    assert.match(
+      res.testData,
+      /featureSources: src\/app\/admin\/evidence\/list\/evidence\.component\.html/
+    );
+    const md = renderE2eGroundingBlock(
+      { ...sampleE2e(), testData: res.testData },
+      "Tạo mới vật chứng"
+    );
+    assert.match(md, /path: \/admin\/evidence/);
+    assert.match(md, /featureSources:/);
   });
 
   it("Gen seed drops unusable TC marker then uses moduleMap", () => {

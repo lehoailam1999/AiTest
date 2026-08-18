@@ -1,24 +1,43 @@
 /**
- * Path jail for Approved TC markdown under `.ai-test/test-cases/`
+ * Path jail for Approved TC artifacts under `AItest/test-cases/`
  * (including `UnitTest/` and `E2ETest/` subfolders).
- * Separate from AItest codegen jail.
+ * Allows `.md` and companion `.grounding.json` only.
  */
-const PREFIX = ".ai-test/test-cases";
-export function assertSafeAiTestCasesRel(targetRel) {
-    const p = (targetRel || "").replace(/\\/g, "/").trim().replace(/^\/+/, "");
-    if (!p) {
+const PREFIX = "AItest/test-cases";
+const LEGACY_PREFIX = ".ai-test/test-cases";
+function normalizeAndValidate(targetRel) {
+    const path = (targetRel || "").replace(/\\/g, "/").trim().replace(/^\/+/, "");
+    if (!path) {
         throw new Error("TC path jail: đường dẫn trống");
     }
-    if (p.split("/").some((s) => s === ".." || s === ".") || /^[a-zA-Z]:/.test(p)) {
+    if (path.split("/").some((segment) => segment === ".." || segment === ".") ||
+        /^[a-zA-Z]:/.test(path)) {
         throw new Error("TC path jail: không được chứa .. hoặc absolute drive");
     }
-    const low = p.toLowerCase();
-    if (!low.startsWith(`${PREFIX}/`) && low !== PREFIX) {
-        throw new Error(`TC path jail: chỉ ghi dưới ${PREFIX}/ (got ${p})`);
+    const low = path.toLowerCase();
+    const isMd = low.endsWith(".md");
+    const isGrounding = low.endsWith(".grounding.json");
+    if (!isMd && !isGrounding) {
+        throw new Error(`TC path jail: chỉ cho phép .md hoặc .grounding.json (got ${path})`);
     }
-    if (!low.endsWith(".md") && low !== PREFIX) {
-        throw new Error(`TC path jail: chỉ cho phép file .md (got ${p})`);
+    return { path, low };
+}
+export function assertSafeAiTestCasesRel(targetRel) {
+    const { path, low } = normalizeAndValidate(targetRel);
+    if (!low.startsWith(`${PREFIX.toLowerCase()}/`)) {
+        throw new Error(`TC path jail: chỉ ghi dưới ${PREFIX}/ (got ${path})`);
     }
-    return p;
+    return path;
+}
+/** Read-only compatibility for repositories not yet re-synced to `AItest/test-cases`. */
+export function assertSafeAiTestCasesReadRel(targetRel) {
+    const { path, low } = normalizeAndValidate(targetRel);
+    const canonical = PREFIX.toLowerCase();
+    const legacy = LEGACY_PREFIX.toLowerCase();
+    if (!low.startsWith(`${canonical}/`) && !low.startsWith(`${legacy}/`)) {
+        throw new Error(`TC path jail: chỉ đọc dưới ${PREFIX}/ hoặc ${LEGACY_PREFIX}/ (got ${path})`);
+    }
+    return path;
 }
 export const AI_TEST_CASES_DIR = PREFIX;
+export const LEGACY_AI_TEST_CASES_DIR = LEGACY_PREFIX;

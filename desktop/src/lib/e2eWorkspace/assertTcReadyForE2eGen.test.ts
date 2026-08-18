@@ -131,6 +131,8 @@ describe("assertTcReadyForE2eGen", () => {
     assert.equal(isUsableFeaturePath("/[Thiếu Context]"), false);
     assert.equal(isUsableFeaturePath("[Thiếu Context]"), false);
     assert.equal(isUsableFeaturePath("/admin/storage-room"), true);
+    assert.equal(isUsableFeaturePath("/BR-4"), false);
+    assert.equal(isUsableFeaturePath("/FR-12"), false);
     assert.equal(
       hasPathMarker({ testData: "path: [Thiếu Context]\nauthRole: admin" }),
       false

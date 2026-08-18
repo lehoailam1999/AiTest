@@ -246,12 +246,12 @@ export function VerifyApplyConsole({
       busy
     );
     const titles: Record<PipeKey, string> = {
-      staging: "Staging",
+      staging: "Tool draft",
       compile: "Compile",
       test: "Test",
       coverage: "Coverage",
       repair: "Repair",
-      apply: "Apply",
+      apply: "Update",
     };
     return {
       title: titles[key],
@@ -368,11 +368,11 @@ export function VerifyApplyConsole({
       setApplyOpen(false);
       message.success(
         result.stagingCleaned
-          ? `Đã Apply ${result.appliedPaths.length} file vào AItest/ · đã dọn .ai-test/staging`
-          : `Đã Apply ${result.appliedPaths.length} file vào AItest/`
+          ? `Đã Update ${result.appliedPaths.length} file vào AItest/UnitTest · đã dọn Tool draft`
+          : `Đã Update ${result.appliedPaths.length} file vào AItest/UnitTest`
       );
     } catch (e) {
-      message.error(e instanceof Error ? e.message : "Apply thất bại");
+      message.error(e instanceof Error ? e.message : "Update source thất bại");
     } finally {
       onBusy(false);
     }
@@ -380,15 +380,15 @@ export function VerifyApplyConsole({
 
   async function onDiscard() {
     modal.confirm({
-      title: "Không Apply · Hủy bỏ Unit Job này?",
+      title: "Không Update · Hủy bỏ Unit Job này?",
       content:
-        "Xóa file đã gen dưới AItest/ (nếu còn trên đĩa) và dọn staging. Không ghi Apply. Production src không bị đụng.",
-      okText: "Hủy bỏ & xóa file gen",
+        "Chỉ xóa Tool draft. Source AItest/ và production src không thay đổi.",
+      okText: "Hủy bỏ draft",
       okType: "danger",
       onOk: async () => {
         onBusy(true);
         try {
-          const res = await discardWorkspaceRun(
+          await discardWorkspaceRun(
             projectRoot,
             manifest.runId,
             manifest.packagePrefix
@@ -398,9 +398,7 @@ export function VerifyApplyConsole({
             status: "discarded",
             files: [],
           });
-          message.success(
-            `Đã hủy job · xóa ${res.removedTargets.length} file trên AItest/ (nếu có)`
-          );
+          message.success("Đã hủy Tool draft; source chưa đổi");
         } catch (e) {
           message.error(e instanceof Error ? e.message : "Hủy bỏ thất bại");
           throw e;
@@ -422,7 +420,7 @@ export function VerifyApplyConsole({
   return (
     <Card
       id={VERIFY_APPLY_CONSOLE_ID}
-      title="3. Execute & Apply"
+      title="3. Verify & Update Source"
       style={{ marginTop: 8 }}
       extra={
         suggestVerify && !applied && manifest.status !== "pass" ? (
@@ -435,7 +433,7 @@ export function VerifyApplyConsole({
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          title="Verify / Apply cần ứng dụng Desktop (Tauri)"
+          title="Verify / Update cần ứng dụng Desktop (Tauri)"
         />
       ) : null}
 
@@ -450,11 +448,11 @@ export function VerifyApplyConsole({
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        title="Verify trên staging · Apply ghi đủ file vào AItest/"
+        title="Verify Tool draft · Update mới ghi vào source"
         description={
           stackInspect?.is_monorepo_package
-            ? `Monorepo · ${stackInspect.workspace_kind || "package"} · ${stackInspect.package_name || manifest.packageName || manifest.packagePrefix} — Apply giữ nguyên folder staging dưới package/AItest/. Sau Apply dọn .ai-test/staging.`
-            : `Staging tạm rồi rollback đến khi Apply. Apply ghi toàn bộ overlay vào ${aitestHint} (test + scaffold) — không đụng src production. Sau Apply dọn .ai-test/staging.`
+            ? `Monorepo · ${stackInspect.workspace_kind || "package"} · ${stackInspect.package_name || manifest.packageName || manifest.packagePrefix} — Verify stage tạm rồi restore; Update giữ đúng package AItest/UnitTest.`
+            : `Draft nằm trong OS temp của Tool. Verify stage tạm rồi restore source; Update ghi toàn bộ test + scaffold vào ${aitestHint}.`
         }
       />
 
@@ -558,7 +556,7 @@ export function VerifyApplyConsole({
           disabled={!canApply || busy || applied}
           onClick={() => setApplyOpen(true)}
         >
-          Apply vào source
+          Update vào source
         </Button>
         <Button
           danger
@@ -566,7 +564,7 @@ export function VerifyApplyConsole({
           disabled={!isTauri() || busy || applied || manifest.status === "discarded"}
           onClick={() => void onDiscard()}
         >
-          Không Apply · Hủy bỏ
+          Không Update · Hủy bỏ
         </Button>
         <Button
           icon={<ToolOutlined />}
@@ -591,7 +589,7 @@ export function VerifyApplyConsole({
                 : ""}
           </Tag>
         ) : null}
-        {applied ? <Tag color="blue">Đã Apply</Tag> : null}
+        {applied ? <Tag color="blue">Đã Update</Tag> : null}
       </Space>
 
       {manifest.status === "fail" ? (
@@ -623,7 +621,7 @@ export function VerifyApplyConsole({
           showIcon
           style={{ marginBottom: 12 }}
           title={`Auto-Repair · ${manifest.autoRepairAttempts || "…"}/${AUTO_REPAIR_MAX_ATTEMPTS}`}
-          description="Đang verify → repair → verify lại trên staging."
+          description="Đang verify → repair → verify lại trên Tool draft."
         />
       ) : null}
 
@@ -632,13 +630,13 @@ export function VerifyApplyConsole({
           type="success"
           showIcon
           style={{ marginBottom: 12 }}
-          title="Sẵn sàng Apply"
+          title="Sẵn sàng Update source"
           description={
             <>
               Sẽ ghi <strong>{targetPaths.length}</strong> file dưới{" "}
               <Typography.Text code>{aitestHint}</Typography.Text>
               {" · "}
-              không đụng production src · sau Apply dọn staging.
+              Verify restore source · sau Update dọn Tool draft.
               <div style={{ marginTop: 8 }}>
                 {targetPaths.slice(0, 5).map((p) => (
                   <div key={p}>
@@ -674,7 +672,7 @@ export function VerifyApplyConsole({
               <br />
               Chạy full suite trên{" "}
               <Link to={`/run?lane=unit&cmd=${encodeURIComponent(testCmd.trim())}`}>Chạy test</Link>
-              {" · "}staging job đã được dọn (nếu cleanup thành công).
+              {" · "}Tool draft đã được dọn.
             </>
           }
         />
@@ -786,7 +784,7 @@ export function VerifyApplyConsole({
           showIcon
           style={{ marginTop: 4 }}
           title="Chưa chạy Verify"
-          description="Bấm Verify để compile/test trên staging. PASS xong mới Apply vào AItest/."
+          description="Bấm Verify để compile/test bản draft. PASS xong mới Update vào AItest/UnitTest."
         />
       )}
 
@@ -813,17 +811,17 @@ export function VerifyApplyConsole({
       ) : null}
 
       <Modal
-        title="Apply vào AItest/?"
+        title="Update vào AItest/UnitTest?"
         open={applyOpen}
         onCancel={() => setApplyOpen(false)}
         onOk={() => void onApplyConfirm()}
-        okText="Apply"
+        okText="Update"
         confirmLoading={busy}
       >
         <Typography.Paragraph>
           Ghi <strong>{targetPaths.length}</strong> file dưới{" "}
           <Typography.Text code>{aitestHint}</Typography.Text>. Không đụng production src. Sau
-          Apply, staging <Typography.Text code>.ai-test/staging</Typography.Text> sẽ được dọn.
+          Update xong, Tool draft trong OS temp sẽ được dọn.
         </Typography.Paragraph>
         <ul style={{ margin: 0, paddingLeft: 20 }}>
           {manifest.files

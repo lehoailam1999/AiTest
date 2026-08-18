@@ -1,6 +1,5 @@
 /**
- * Unit workspace cleanup — must never wipe sibling staging runs.
- * Unit Verify must not wipe staged AItest/UnitTest (only Apply/Discard).
+ * Unit drafts stay outside the source; Verify restores source after each run.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -11,21 +10,13 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 
 describe("cleanupWorkspaceRunAfterApply safety", () => {
-  it("source deletes only runDir then emptyOnly parents (not wipe all staging)", () => {
+  it("deletes the Tool draft, not a source-local run directory", () => {
     const src = readFileSync(join(here, "cleanup.ts"), "utf8");
-    assert.match(src, /emptyOnly:\s*true/);
-    const wipeAll = src.match(
-      /deleteDir\(\s*projectRoot\s*,\s*`\$\{aiTestDir\([^)]*\)\}\/\$\{AI_TEST_STAGING_DIR\}`\s*\)/
-    );
-    assert.equal(
-      wipeAll,
-      null,
-      "Must not remove_dir_all the entire staging/ folder (kills sibling Apply overlays)"
-    );
-    assert.match(
-      src,
-      /deleteDir\(\s*projectRoot\s*,\s*`\$\{aiTestDir\([^)]*\)\}\/\$\{AI_TEST_STAGING_DIR\}`\s*,\s*\{\s*emptyOnly:\s*true/
-    );
+    const fnStart = src.indexOf("export async function cleanupWorkspaceRunAfterApply");
+    const nextExport = src.indexOf("\nexport async function removeAiTestDirAfterApplyBatch");
+    const fnBody = src.slice(fnStart, nextExport > 0 ? nextExport : fnStart + 2000);
+    assert.match(fnBody, /deleteDraftPath\(projectRoot,\s*runDir\)/);
+    assert.doesNotMatch(fnBody, /deleteDir\(projectRoot,\s*runDir\)/);
   });
 });
 
@@ -65,27 +56,23 @@ describe("applyManyWorkspacesToRepo batch safety", () => {
   });
 });
 
-describe("Unit Verify preserves staged AItest files", () => {
-  it("combinedBatchVerify re-stages overlays instead of rollback wipe", () => {
+describe("Unit Verify restores source until Update/Apply", () => {
+  it("combinedBatchVerify captures backups and restores source", () => {
     const src = readFileSync(join(here, "combinedBatchVerify.ts"), "utf8");
-    assert.match(src, /preserveStagedOverlays/);
-    assert.doesNotMatch(
-      src,
-      /rollbackStaging\(/,
-      "batch Verify must not rollback (that wiped UnitTest after PASS)"
-    );
+    assert.match(src, /captureStagingBackups/);
+    assert.match(src, /restoreSourceAfterVerify/);
   });
 
-  it("verifyEngine re-stages overlays instead of rollback wipe", () => {
+  it("verifyEngine rolls temporary targets back", () => {
     const src = readFileSync(join(here, "verifyEngine.ts"), "utf8");
-    assert.match(src, /preserveStagedOverlays/);
-    assert.doesNotMatch(src, /rollbackStaging\(/);
+    assert.match(src, /captureStagingBackups/);
+    assert.match(src, /rollbackStaging/);
   });
 
-  it("preserveStagedOverlays is the Verify keep-disk API", () => {
+  it("staging helper exposes source restoration", () => {
     const src = readFileSync(join(here, "staging.ts"), "utf8");
-    assert.match(src, /export async function preserveStagedOverlays/);
-    assert.match(src, /stageOverlayToTargets/);
+    assert.match(src, /export async function restoreSourceAfterVerify/);
+    assert.match(src, /rollbackStaging/);
   });
 });
 
@@ -104,13 +91,27 @@ describe("Apply removes .ai-test folder", () => {
     );
   });
 
-  it("removeAiTestDirAfterApplyBatch full-deletes aiTestDir", () => {
+  it("removeAiTestDirAfterApplyBatch wipes staging and logs, keeps test-cases", () => {
     const src = readFileSync(join(here, "cleanup.ts"), "utf8");
-    assert.match(src, /export async function removeAiTestDirAfterApplyBatch/);
+    const fnStart = src.indexOf("export async function removeAiTestDirAfterApplyBatch");
+    const fnBody = src.slice(fnStart);
+    assert.match(fnBody, /AI_TEST_STAGING_DIR/);
+    assert.match(fnBody, /AI_TEST_LOGS_DIR/);
     assert.match(
-      src,
-      /deleteDir\(\s*projectRoot\s*,\s*root\s*\)/,
-      "must remove_dir_all .ai-test (not emptyOnly only)"
+      fnBody,
+      /deleteDir\(\s*projectRoot\s*,\s*`\$\{root\}\/\$\{AI_TEST_STAGING_DIR\}`\s*\)/,
+      "batch finish must full-delete leftover staging/"
     );
+    assert.match(
+      fnBody,
+      /deleteDir\(\s*projectRoot\s*,\s*`\$\{root\}\/\$\{AI_TEST_LOGS_DIR\}`\s*\)/,
+      "batch finish must full-delete leftover logs/"
+    );
+    assert.doesNotMatch(
+      fnBody,
+      /deleteDir\(\s*projectRoot\s*,\s*root\s*\)/,
+      "must not wipe entire .ai-test (test-cases / aliases stay)"
+    );
+    assert.match(fnBody, /deleteDir\(\s*projectRoot\s*,\s*root\s*,\s*\{\s*emptyOnly:\s*true/);
   });
 });

@@ -114,7 +114,7 @@ export type BuildGenerateContextInput = {
   /** Sync code index if missing (default true when preferIndexContext) */
   syncIndexIfMissing?: boolean;
   /**
-   * Approved TC markdown from `.ai-test/test-cases/` (SoT on disk).
+   * Approved TC markdown from `AItest/test-cases/` (SoT on disk).
    * Merged into resolve/alignment so path:/code: markers work even when DB Test Data lags.
    */
   approvedTcMd?: string | null;

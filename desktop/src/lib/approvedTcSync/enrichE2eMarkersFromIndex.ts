@@ -10,6 +10,8 @@ import {
 } from "../e2eWorkspace/assertTcReadyForE2eGen";
 import { lookupModuleMapPath } from "../e2eWorkspace/generateGrounding";
 import {
+  featureSourcesForPath,
+  isPathPlausibleForCatalog,
   matchFeaturePathFromCatalog,
   type E2eRouteCatalog,
 } from "../e2eWorkspace/e2eRouteCatalog";
@@ -54,6 +56,8 @@ export type E2eEnrichOpts = {
   requirementTitle?: string | null;
   /** Batch-shared FE route catalog (from source, cached) */
   routeCatalog?: E2eRouteCatalog | null;
+  /** Repository-learned label → code identifier aliases (portable VI↔code bridge). */
+  semanticAliases?: Record<string, string | string[]> | null;
 };
 
 export function hasManualE2eSourceMarkers(testData: string | null | undefined): boolean {
@@ -71,7 +75,7 @@ export function stripAutoEnrichedE2eMarkers(testData: string): string {
     .filter((line) => {
       if (/^\s*#\s*auto-enriched\s*\(E2E(?: approve)?\)/i.test(line)) return false;
       if (
-        /^\s*(?:path|featurePath|route|scenarioType|ruleRef|postcondition|requirement|authRole|authRequired|landmark)\s*[:=]/i.test(
+        /^\s*(?:path|featurePath|route|featureSources|scenarioType|ruleRef|postcondition|requirement|authRole|authRequired|landmark)\s*[:=]/i.test(
           line
         ) &&
         AUTO_ENRICHED_E2E_RE.test(testData)
@@ -115,6 +119,26 @@ export function stripUnusablePathMarkers(text: string): string {
     .trim();
 }
 
+/**
+ * Drop path markers that no source route can back (`path: /BR-4` from a trace id).
+ * Keeping them would hand Codegen a route that 404s and block re-inference.
+ */
+export function stripImplausiblePathMarkers(
+  text: string,
+  catalog?: E2eRouteCatalog | null
+): string {
+  if (!catalog?.routes?.length) return (text || "").trim();
+  return (text || "")
+    .split(/\r?\n/)
+    .filter((ln) => {
+      const m = /^\s*(path|featurePath|feature_path|route)\s*[:=]\s*(.+)$/i.exec(ln.trim());
+      if (!m) return true;
+      return isPathPlausibleForCatalog(m[2], catalog);
+    })
+    .join("\n")
+    .trim();
+}
+
 function hasKv(testData: string, key: string): boolean {
   const k = key.toLowerCase();
   return (testData || "")
@@ -146,25 +170,33 @@ export function inferE2eRoutePath(
     moduleMap?: Record<string, string> | null;
     requirementTitle?: string | null;
     routeCatalog?: E2eRouteCatalog | null;
+    semanticAliases?: Record<string, string | string[]> | null;
   }
 ): string | null {
   const blob = [tc.precondition, tc.testData, tc.steps, tc.title].filter(Boolean).join("\n");
+  const catalog = opts?.routeCatalog || null;
+  /** A route from TC text counts only if source routes can back it. */
+  const accept = (raw: string | null | undefined): string | null => {
+    const n = normalizeFeaturePath(raw || "");
+    if (!n) return null;
+    return isPathPlausibleForCatalog(n, catalog) ? n : null;
+  };
 
   const pathM = PATH_KV_RE.exec(blob);
   if (pathM?.[1]) {
-    const n = normalizeFeaturePath(pathM[1]);
+    const n = accept(pathM[1]);
     if (n) return n;
   }
 
   const urlM = URL_KV_RE.exec(blob);
   if (urlM?.[1]) {
-    const n = normalizeFeaturePath(urlM[1]);
+    const n = accept(urlM[1]);
     if (n) return n;
   }
 
   const routeMatch = INLINE_ROUTE_RE.exec(blob);
   if (routeMatch?.[1]) {
-    const n = normalizeFeaturePath(routeMatch[1]);
+    const n = accept(routeMatch[1]);
     if (n) return n;
   }
 
@@ -178,6 +210,7 @@ export function inferE2eRoutePath(
   if (opts?.routeCatalog?.routes?.length) {
     const matched = matchFeaturePathFromCatalog(tc, opts.routeCatalog, {
       requirementTitle: opts?.requirementTitle,
+      semanticAliases: opts?.semanticAliases,
     });
     if (matched.path && !matched.ambiguous && isUsableFeaturePath(matched.path)) {
       return normalizeFeaturePath(matched.path);
@@ -273,8 +306,9 @@ export function enrichTcTestDataWithE2eMarkers(
     return { testData: tc.testData || "", enriched: false, writeBack: false };
   }
 
-  let existing = stripUnusablePathMarkers(
-    stripMissingContextMarkers((tc.testData || "").trim())
+  let existing = stripImplausiblePathMarkers(
+    stripUnusablePathMarkers(stripMissingContextMarkers((tc.testData || "").trim())),
+    opts?.routeCatalog
   );
   const manualPath = hasManualE2eSourceMarkers(existing);
 
@@ -297,6 +331,14 @@ export function enrichTcTestDataWithE2eMarkers(
   const linesToAppend: string[] = [];
   if (inferredPath && !pureLogin && !manualPath) {
     linesToAppend.push(`path: ${inferredPath}`);
+  }
+  // Feature code behind the route — Codegen reads real templates instead of guessing.
+  const featureSources = featureSourcesForPath(
+    inferredPath || normalizeFeaturePath(PATH_KV_RE.exec(existing)?.[1] || ""),
+    opts?.routeCatalog
+  );
+  if (featureSources.length && !pureLogin && !hasKv(existing, "featureSources")) {
+    linesToAppend.push(`featureSources: ${featureSources.join(", ")}`);
   }
   if (auth.role && !hasKv(existing, "authRole")) {
     linesToAppend.push(`authRole: ${auth.role}`);
@@ -374,6 +416,7 @@ export async function enrichApprovedCasesWithE2eMarkers(opts: {
   requirementTitle?: string | null;
   requirementTitleByCaseKey?: Record<string, string> | null;
   routeCatalog?: E2eRouteCatalog | null;
+  semanticAliases?: Record<string, string | string[]> | null;
 }): Promise<{
   cases: TestCase[];
   enrichedCount: number;
@@ -395,6 +438,7 @@ export async function enrichApprovedCasesWithE2eMarkers(opts: {
       moduleMap: opts.moduleMap,
       requirementTitle: reqTitle,
       routeCatalog: opts.routeCatalog,
+      semanticAliases: opts.semanticAliases,
     });
     if (res.enriched && res.writeBack) {
       enrichedCount += 1;

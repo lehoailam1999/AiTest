@@ -406,6 +406,16 @@ export function buildUnitPrompt(opts: {
     gatePassed && opts.primaryPath
       ? `Import / exercise the SUT at «${opts.primaryPath}» — this is the only allowed primary SUT for this job.`
       : "",
+    gatePassed && opts.primaryPath
+      ? [
+          "",
+          "## Locked Approve Decision (do not re-rank SUT)",
+          `- Implement the unit test for THIS Approved TC against locked files only.`,
+          `- Primary: ${opts.primaryPath}`,
+          `- Do not search the repo for an alternate Handler/DTO; do not reclassify intent.`,
+          `- Prefer observable behavior already present in the Source / Related excerpts below.`,
+        ].join("\n")
+      : "",
     "",
   ];
   const rules = (opts.projectRules || opts.conventions || EMBEDDED_UNIT_CONVENTIONS).trim();

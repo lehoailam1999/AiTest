@@ -32,14 +32,21 @@ function sample(overrides: Partial<TestCase> = {}): TestCase {
 }
 
 describe("approvedTcMarkdown", () => {
-  it("builds E2E path under .ai-test/test-cases/E2ETest", () => {
+  it("builds E2E path under AItest/test-cases/E2ETest", () => {
     const p = approvedTcMarkdownRelPath(sample());
-    assert.equal(p, ".ai-test/test-cases/E2ETest/account/TC-LOGIN-01.md");
+    assert.equal(p, "AItest/test-cases/E2ETest/account/TC-LOGIN-01.md");
   });
 
-  it("builds Unit path under .ai-test/test-cases/UnitTest", () => {
+  it("builds Unit path under AItest/test-cases/UnitTest", () => {
     const p = approvedTcMarkdownRelPath(sample({ type: "Unit", testCaseId: "TC-U-01" }));
-    assert.equal(p, ".ai-test/test-cases/UnitTest/account/TC-U-01.md");
+    assert.equal(p, "AItest/test-cases/UnitTest/account/TC-U-01.md");
+  });
+
+  it("uses ASCII folder slug for Vietnamese Function", () => {
+    const p = approvedTcMarkdownRelPath(
+      sample({ type: "Unit", testCaseId: "TC-032", module: "Ghi nhận thông tin thu giữ vật chứng" })
+    );
+    assert.equal(p, "AItest/test-cases/UnitTest/ghi-nhan-thong-tin-thu-giu-vat-chung/TC-032.md");
   });
 
   it("skips non-Approved", () => {
@@ -65,14 +72,11 @@ describe("approvedTcMarkdown", () => {
     });
     assert.match(md, /requirement: Vật chứng/);
     assert.match(md, /## Grounding \(Unit Gen\)/);
-    assert.match(md, /requirement: Vật chứng/);
     assert.match(md, /function: Phân loại VTKT/);
     assert.match(md, /module: Phân loại VTKT/);
-    assert.match(md, /\| Module \| Vật chứng \|/);
-    assert.match(md, /\| Function \| Phân loại VTKT \|/);
-    assert.match(md, /only when the companion grounding contract is authoritative/);
+    assert.doesNotMatch(md, /## Meta/);
+    assert.match(md, /SoT: companion `\.grounding\.json`/);
     assert.match(md, /### Resolved SUT/);
-    assert.match(md, /Module → Function → Title/);
     const g = parseApprovedTcGrounding(md);
     assert.equal(g.requirement, "Vật chứng");
     assert.equal(g.module, "Phân loại VTKT");
@@ -103,7 +107,6 @@ describe("approvedTcMarkdown", () => {
     const md = renderApprovedTestCaseMarkdown(
       sample({ type: "Unit", module: "Chọn vị trí lưu trữ vật chứng" })
     );
-    assert.match(md, /\| Module \| — \|/);
     assert.match(md, /requirement: —/);
     assert.match(md, /function: Chọn vị trí lưu trữ vật chứng/);
     assert.match(md, /module: Chọn vị trí lưu trữ vật chứng/);

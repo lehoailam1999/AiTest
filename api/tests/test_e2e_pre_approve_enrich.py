@@ -48,8 +48,13 @@ def test_infer_rejects_module_slug_and_vn_path():
     tc = _tc(steps="1. Mở trang", test_data="", module="Tạo mới vật chứng")
     assert infer_e2e_route_path(tc) is None
     assert not is_usable_feature_path("/tạo-mới-vật-chứng")
+    assert not is_usable_feature_path("/BR-4")
+    assert not is_usable_feature_path("/FR-12")
     assert normalize_feature_path("http://localhost:4200") is None
     assert normalize_feature_path("http://localhost:4200/admin/evidence/new") == "/admin/evidence/new"
+    assert infer_e2e_route_path(
+        _tc(steps="1. Hoàn tất", test_data="trace: BR/BR-4\npath: /BR-4", module="Tạo mới vật chứng")
+    ) is None
 
 
 def test_infer_scenario_negative_from_title():

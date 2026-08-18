@@ -1,9 +1,15 @@
 import { deleteDir } from "../../tauri/bridge";
-import { workspaceRunDir, aiTestDir, AI_TEST_STAGING_DIR } from "./paths";
+import {
+  workspaceRunDir,
+  aiTestDir,
+  AI_TEST_STAGING_DIR,
+  AI_TEST_LOGS_DIR,
+} from "./paths";
+import { deleteDraftPath } from "./draftStore";
 
 /**
- * After Apply PASS — remove this run's staging only (siblings mid-batch).
- * Batch finish: `removeAiTestDirAfterApplyBatch` (UUAS).
+ * After Apply/Discard — remove this Tool-internal draft from OS temp.
+ * Legacy `.ai-test/staging` cleanup remains below for old repositories.
  */
 export async function cleanupWorkspaceRunAfterApply(
   projectRoot: string,
@@ -11,7 +17,7 @@ export async function cleanupWorkspaceRunAfterApply(
   packagePrefix?: string | null
 ): Promise<void> {
   const runDir = workspaceRunDir(runId, packagePrefix);
-  await deleteDir(projectRoot, runDir);
+  await deleteDraftPath(projectRoot, runDir);
 
   // Parent staging/ — emptyOnly so sibling runs survive mid-batch.
   try {
@@ -44,7 +50,7 @@ export async function cleanupWorkspaceRunAfterApply(
 }
 
 /**
- * After Apply batch finishes — remove entire `{pkg}/.ai-test` (staging disposable).
+ * Migration cleanup: wipe old source-local staging/logs if they still exist.
  * Call once per packagePrefix when that package's jobs in the batch are done.
  */
 export async function removeAiTestDirAfterApplyBatch(
@@ -58,10 +64,24 @@ export async function removeAiTestDirAfterApplyBatch(
     seen.add(key);
     const root = aiTestDir(raw);
     try {
-      // Full remove_dir_all — folder must go after Apply (not leave empty staging/).
-      await deleteDir(projectRoot, root);
+      await deleteDir(projectRoot, `${root}/${AI_TEST_STAGING_DIR}`);
     } catch {
       /* missing / locked — best-effort */
+    }
+    try {
+      await deleteDir(projectRoot, `${root}/${AI_TEST_LOGS_DIR}`);
+    } catch {
+      /* missing / locked — best-effort */
+    }
+    try {
+      await deleteDir(projectRoot, `${root}/workspace`, { emptyOnly: true });
+    } catch {
+      /* ignore */
+    }
+    try {
+      await deleteDir(projectRoot, root, { emptyOnly: true });
+    } catch {
+      /* still has test-cases / conventions */
     }
   }
 }

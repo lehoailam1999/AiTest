@@ -92,6 +92,8 @@ export default defineConfig({
     assert.ok(files[".ai-test/project.profile.json"]);
     assert.ok(files[".ai-test/e2e-conventions.md"]);
     assert.ok(files[".ai-test/unit-conventions.md"]);
+    assert.match(files[".ai-test/.gitignore"] || "", /staging\//);
+    assert.match(files[".ai-test/.gitignore"] || "", /logs\//);
     assert.equal(files[".ai-test/e2e-playwright-run.md"], undefined);
     const loaded = parseProjectProfileJson(files[".ai-test/project.profile.json"]);
     assert.equal(loaded?.schema, "aitest-project-profile-v1");

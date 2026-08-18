@@ -1,5 +1,5 @@
 """
-Unit TC IR readiness — downgrade READY_FOR_CODEGEN when IR incomplete or unbound.
+Unit TC IR readiness — decide whether content is ready for source grounding.
 
 Portable gates (no product nouns). Used at flatten + post-gen filter.
 """
@@ -53,7 +53,9 @@ _MAXLENGTH_IN_CONSTRAINT_RE = re.compile(
     r"(?i)max\s*length|maxlength|stringlength|\d+\s*ký\s*tự",
 )
 
-_STATUS_READY_RE = re.compile(r"(?i)^status\s*:\s*READY_FOR_CODEGEN\s*$")
+_STATUS_READY_RE = re.compile(
+    r"(?i)^status\s*:\s*(READY_FOR_GROUNDING|READY_FOR_CODEGEN)\s*$"
+)
 _STATUS_NOT_READY_RE = re.compile(r"(?i)^status\s*:\s*NOT_READY\s*$")
 _PRIMARY_BUCKET_RE = re.compile(r"(?i)^primaryBucket\s*:\s*(\S+)")
 _BEHAVIOR_ID_RE = re.compile(r"(?i)^behaviorId\s*:\s*(\S+)")
@@ -97,8 +99,9 @@ def _vi_key(key: str) -> bool:
 
 def decide_unit_tc_ir_ready(obj: dict[str, Any]) -> tuple[bool, list[str]]:
     """
-    Return (ready_for_codegen, refuse_reasons).
-    ready=True only when IR satisfies portable gen-ready contract.
+    Return (ready_for_grounding, refuse_reasons).
+    This phase is source-independent: BE property binding and implementation
+    evidence belong to Approve, never to TC content generation.
     """
     reasons: list[str] = []
 
@@ -142,8 +145,6 @@ def decide_unit_tc_ir_ready(obj: dict[str, Any]) -> tuple[bool, list[str]]:
     target = td.get("target") if isinstance(td.get("target"), dict) else {}
     field_label = str(target.get("field") or "").strip()
     constraint = str(target.get("constraint") or "").strip()
-    prop = str(target.get("property") or "").strip()
-
     if primary == "VALIDATION_DATA":
         if not field_label:
             reasons.append("FAIL_VAL_NO_FIELD")
@@ -151,15 +152,6 @@ def decide_unit_tc_ir_ready(obj: dict[str, Any]) -> tuple[bool, list[str]]:
             reasons.append("FAIL_FIELD_PLACEHOLDER")
         if not constraint:
             reasons.append("FAIL_VAL_NO_CONSTRAINT")
-
-    hints = obj.get("testDataHints") or obj.get("test_data_hints") or {}
-    has_signal = isinstance(hints, dict) and bool(
-        str(hints.get("sourceSignal") or "").strip()
-        or str(hints.get("layerHint") or "").strip()
-    )
-
-    if constraint and _MAXLENGTH_IN_CONSTRAINT_RE.search(constraint) and not has_signal:
-        reasons.append("FAIL_NO_SOURCE_SIGNAL")
 
     steps_blob = ""
     steps = obj.get("steps")
@@ -182,35 +174,16 @@ def decide_unit_tc_ir_ready(obj: dict[str, Any]) -> tuple[bool, list[str]]:
         if obs not in text.lower() and token not in text.lower():
             reasons.append("FAIL_GENERIC_ASSERT")
 
-    input_val = td.get("input")
-    if isinstance(input_val, dict):
-        prop = str(target.get("property") or "").strip()
-        field_needs = bool(
-            field_label
-            and not re.match(r"^[A-Za-z_][\w]*$", field_label)
-            and (" " in field_label or re.search(r"[^\x00-\x7F]", field_label))
-        )
-        for k in input_val.keys():
-            ks = str(k)
-            if _vi_key(ks) and not prop:
-                reasons.append("FAIL_INPUT_VI_KEYS")
-                break
-            if field_needs and prop and ks != prop and len(input_val) == 1:
-                reasons.append("FAIL_INPUT_PROPERTY_MISMATCH")
-                break
-            if field_needs and not prop:
-                reasons.append("FAIL_FIELD_UNBOUND")
-                break
-
     return (len(reasons) == 0, reasons)
 
 
 def apply_unit_tc_ir_readiness(obj: dict[str, Any]) -> dict[str, Any]:
-    """Mutate status/automationReady on IR object based on readiness gate."""
+    """Mutate generation status; automation is never ready before Approve."""
     ready, reasons = decide_unit_tc_ir_ready(obj)
     if ready:
-        obj["status"] = "READY_FOR_CODEGEN"
-        obj["automationReady"] = True
+        obj["status"] = "READY_FOR_GROUNDING"
+        obj["automationReady"] = False
+        obj.pop("_irReadyRefuse", None)
     else:
         obj["status"] = "NOT_READY"
         obj["automationReady"] = False
@@ -255,17 +228,6 @@ def decide_unit_tc_markers_ready(
             reasons.append("FAIL_FIELD_PLACEHOLDER")
         if not markers.get("target.constraint"):
             reasons.append("FAIL_VAL_NO_CONSTRAINT")
-        prop = markers.get("target.property") or ""
-        for m in _INPUT_LINE_RE.finditer(td):
-            for k in _parse_input_keys_from_line(m.group(1)):
-                if _vi_key(k) and not prop and not re.match(r"^[A-Za-z_][\w]*$", field):
-                    reasons.append("FAIL_INPUT_VI_KEYS")
-
-    constraint = markers.get("target.constraint") or ""
-    if constraint and _MAXLENGTH_IN_CONSTRAINT_RE.search(constraint):
-        if not _SOURCE_SIGNAL_RE.search(td):
-            reasons.append("FAIL_NO_SOURCE_SIGNAL")
-
     if _STATUS_READY_RE.search(td) and reasons:
         return False, reasons
 

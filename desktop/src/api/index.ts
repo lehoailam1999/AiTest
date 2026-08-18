@@ -1,4 +1,5 @@
 import { authFetch, authUpload, type Paged } from "./client";
+import type { UnitApprovalDecision } from "@aitest/ide-protocol";
 import type {
   Connection,
   Execution,
@@ -144,6 +145,7 @@ export type TestCaseInput = {
   steps: string;
   expectedResult: string;
   testData?: string;
+  automationReady?: boolean;
 };
 
 export const testcases = {
@@ -193,6 +195,20 @@ export const testcases = {
     authFetch<TestCase>(`/testcases/${id}/submit`, { method: "POST" }),
   approve: (id: string) =>
     authFetch<TestCase>(`/testcases/${id}/approve`, { method: "POST" }),
+  approveUnit: (body: {
+    id: string;
+    expectedRevision: string;
+    decision: UnitApprovalDecision;
+    testData?: string;
+  }) =>
+    authFetch<TestCase>(`/testcases/${body.id}/approve-unit`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedRevision: body.expectedRevision,
+        decision: body.decision,
+        ...(typeof body.testData === "string" ? { testData: body.testData } : {}),
+      }),
+    }),
   reject: (id: string, comment?: string) =>
     authFetch<TestCase>(`/testcases/${id}/reject`, {
       method: "POST",
@@ -266,41 +282,6 @@ export const agentApi = {
     preferHeuristic?: boolean;
   }) =>
     authFetch<BusinessIntentDto>("/agent/analyze-intent", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  pickUnitPrimary: (body: {
-    projectId: string;
-    requirementTitle?: string;
-    module?: string;
-    title?: string;
-    steps?: string;
-    expectedResult?: string;
-    candidates: Array<{ path: string; code?: string; score?: number }>;
-  }) =>
-    authFetch<{
-      path?: string | null;
-      code?: string | null;
-      confidence?: number | null;
-      source?: string;
-    }>("/agent/pick-unit-primary", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  pickUnitField: (body: {
-    projectId: string;
-    fieldLabel: string;
-    inputKeys?: string[];
-    title?: string;
-    steps?: string;
-    primaryPath?: string;
-    candidates: Array<{ property: string } | string>;
-  }) =>
-    authFetch<{
-      property?: string | null;
-      confidence?: number | null;
-      source?: string;
-    }>("/agent/pick-unit-field", {
       method: "POST",
       body: JSON.stringify(body),
     }),

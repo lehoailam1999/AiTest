@@ -207,6 +207,7 @@ const FEATURE_GAP_CHECKS: Array<{
 /**
  * Strip policy / conventions dumps so feature-gap does not latch onto wording
  * inside `.ai-test/unit-conventions.md` examples (e.g. «BR / malware / validation»).
+ * Also strip Approve auto-enrich / field-resolve comments (ruleHits=…Duplicate…).
  */
 export function scenarioTextForFeatureGap(tcText: string): string {
   let t = tcText || "";
@@ -222,12 +223,35 @@ export function scenarioTextForFeatureGap(tcText: string): string {
     .split("\n")
     .filter(
       (line) =>
+        !/^\s*#\s*auto-enriched\b/i.test(line) &&
+        !/^\s*#\s*field-resolve\s*:/i.test(line) &&
+        !/^\s*#\s*sut-resolve\b/i.test(line) &&
         !/BR\s*\/\s*malware|malware\s*\/\s*validation|e\.g\.\s*antivirus|FAIL_FEATURE_GAP|authoritative policy SoT/i.test(
           line
         )
     )
     .join("\n");
   return t;
+}
+
+function extractConstraint(tcText: string): string {
+  const m = String(tcText || "").match(/^\s*target\.constraint\s*:\s*(.+)$/im);
+  return (m?.[1] || "").trim().toLowerCase();
+}
+
+/**
+ * When VALIDATION_DATA has target.constraint, classify only that constraint family.
+ * Prevents "Duplicate" ruleHits / unrelated TC words from forcing uniqueness gaps.
+ */
+export function constraintFamily(
+  constraint: string
+): "required" | "unique" | "maxlength" | "other" | null {
+  const c = (constraint || "").trim().toLowerCase();
+  if (!c) return null;
+  if (/unique|duplicate|trùng|đã\s*tồn\s*tại|already\s*exist/.test(c)) return "unique";
+  if (/maxlength|max\s*length|\d+\s*ký|giới\s*hạn\s*tối\s*đa/.test(c)) return "maxlength";
+  if (/required|bắt buộc|not\s*empty|không.*trống|mandatory/.test(c)) return "required";
+  return "other";
 }
 
 export function detectFeatureGap(
@@ -237,8 +261,38 @@ export function detectFeatureGap(
   const tc = scenarioTextForFeatureGap(tcText);
   const ex = sourceExcerpt || "";
   if (!tc.trim() || !ex.trim()) return { gap: false };
+
+  const constraint = extractConstraint(tc);
+  const family = constraintFamily(constraint);
+  if (family === "required") {
+    // Defer to behaviorEvidenceInExcerpt — do not invent uniqueness gap.
+    return { gap: false };
+  }
+  if (family === "maxlength") {
+    const hasMax =
+      /\[\s*maxlength\s*\(|\[\s*stringlength\s*\(|lengthattribute|@size\s*\(|@length\s*\(|maxlength\s*[:=]|\.max\s*\(/i.test(
+        ex
+      );
+    return hasMax ? { gap: false } : { gap: true, label: "maxlength" };
+  }
+  if (family === "unique") {
+    const hasDup =
+      /unique|duplicate|exists|already|trùng|Duplicate|IsUnique|AnyAsync|FirstOrDefault|conflict|Conflict/i.test(
+        ex
+      );
+    return hasDup ? { gap: false } : { gap: true, label: "uniqueness/duplicate" };
+  }
+
   for (const c of FEATURE_GAP_CHECKS) {
     if (c.tcRe.test(tc) && !c.excerptRe.test(ex)) {
+      // Prefer constraint-scoped uniqueness only; generic "exists" in title alone
+      // is too noisy when constraint says required/empty.
+      if (c.label === "uniqueness/duplicate" && family === "other") {
+        continue;
+      }
+      if (c.label === "uniqueness/duplicate" && !constraint && /required|bắt buộc|trống|empty|null/i.test(tc)) {
+        continue;
+      }
       return { gap: true, label: c.label };
     }
   }

@@ -2,6 +2,7 @@ import { readTextFile, writeTextFile, deleteTextFile } from "../../tauri/bridge"
 import { workspaceRunDir } from "./paths";
 import { writeTextFileIfChanged } from "./contentDedup";
 import type { StagingBackup, UnitWorkspaceManifest } from "./types";
+import { readDraftText, writeDraftText } from "./draftStore";
 
 function backupsRel(runId: string, packagePrefix?: string | null): string {
   return `${workspaceRunDir(runId, packagePrefix)}/backups.json`;
@@ -13,7 +14,10 @@ export async function loadStagingBackups(
   packagePrefix?: string | null
 ): Promise<StagingBackup[]> {
   try {
-    const raw = await readTextFile(projectRoot, backupsRel(runId, packagePrefix));
+    const raw = await readDraftText(
+      projectRoot,
+      backupsRel(runId, packagePrefix)
+    );
     const parsed = JSON.parse(raw) as StagingBackup[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -27,7 +31,7 @@ async function saveStagingBackups(
   backups: StagingBackup[],
   packagePrefix?: string | null
 ): Promise<void> {
-  await writeTextFile(
+  await writeDraftText(
     projectRoot,
     backupsRel(runId, packagePrefix),
     JSON.stringify(backups, null, 2)
@@ -50,7 +54,6 @@ export async function captureStagingBackups(
 ): Promise<StagingBackup[]> {
   const backups: StagingBackup[] = [];
   for (const f of manifest.files) {
-    if (f.op === "delete") continue;
     const exists = await fileExists(projectRoot, f.targetRel);
     let previousContent: string | null = null;
     if (exists) {
@@ -72,13 +75,16 @@ export async function stageOverlayToTargets(
   manifest: UnitWorkspaceManifest
 ): Promise<void> {
   for (const f of manifest.files) {
-    if (f.op === "delete") continue;
-    const content = await readTextFile(projectRoot, f.workspaceRel);
+    if (f.op === "delete") {
+      await deleteTextFile(projectRoot, f.targetRel);
+      continue;
+    }
+    const content = await readDraftText(projectRoot, f.workspaceRel);
     await writeTextFileIfChanged(projectRoot, f.targetRel, content);
   }
 }
 
-/** Restore repo from backups (e.g. failed experimental stage). Unit Verify uses preserveStagedOverlays instead. */
+/** Restore source after temporary Verify staging or a failed Apply. */
 export async function rollbackStaging(
   projectRoot: string,
   runId: string,
@@ -99,14 +105,19 @@ export async function rollbackStaging(
   }
 }
 
-/** After Unit Verify — disk = overlay until Apply/Discard (UUAS rule 8). */
-export async function preserveStagedOverlays(
+/** Restore the source after temporary Verify staging; Apply is the only persistent update. */
+export async function restoreSourceAfterVerify(
   projectRoot: string,
-  manifests: UnitWorkspaceManifest[]
+  backupsByRun: Array<{ manifest: UnitWorkspaceManifest; backups: StagingBackup[] }>
 ): Promise<void> {
-  for (const m of manifests) {
+  for (const item of backupsByRun) {
     try {
-      await stageOverlayToTargets(projectRoot, m);
+      await rollbackStaging(
+        projectRoot,
+        item.manifest.runId,
+        item.backups,
+        item.manifest.packagePrefix
+      );
     } catch {
       /* best-effort */
     }

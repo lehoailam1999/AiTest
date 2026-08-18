@@ -7,8 +7,10 @@ import {
   assertSafeAitestTargetRel,
   buildRequirementTcModule,
   coerceAitestApplyPath,
+  compactTestCaseFileToken,
   isFlatAitestTarget,
   rewriteSutImports,
+  sanitizePathSegment,
   sutModuleSpecifier,
   underGeneratedTestFolder,
   uniquifyTestTargetRel,
@@ -30,6 +32,9 @@ describe("P5 AItest path jail", () => {
     assert.throws(() => assertSafeAitestTargetRel("AItest/../secrets.txt"));
     assert.throws(() => assertSafeAitestTargetRel("src/Order/OrderTests.cs"));
     assert.throws(() =>
+      assertSafeAitestTargetRel("AItest/test-cases/UnitTest/order/TC-001.md")
+    );
+    assert.throws(() =>
       assertSafeAitestTargetRel("AItest/UnitTest/WebSpa/src/app/x.test.ts")
     );
   });
@@ -50,7 +55,7 @@ describe("P5 AItest path jail", () => {
       module: "Order",
       sourceFileName: "src/Order/Services/OrderService.cs",
     });
-    assert.equal(out, "AItest/UnitTest/Order/OrderServiceTests.cs");
+    assert.equal(out, "AItest/UnitTest/order/OrderServiceTests.cs");
   });
 
   it("coerce collapses duplicated nested AItest/E2ETest path", () => {
@@ -106,7 +111,7 @@ describe("P5 AItest path jail", () => {
       module: "Home",
       sourceFileName: "web-app/src/pages/home.tsx",
     });
-    assert.equal(path, "web-app/AItest/UnitTest/Home/home.test.tsx");
+    assert.equal(path, "web-app/AItest/UnitTest/home/home.test.tsx");
   });
 
   it("rewriteSutImports prefers src/ baseUrl path", () => {
@@ -179,18 +184,54 @@ describe("P5 AItest path jail", () => {
     );
   });
 
+  it("uniquifyTestTargetRel prefers TC-id over UUID", () => {
+    assert.equal(compactTestCaseFileToken("TC-032"), "TC032");
+    assert.equal(compactTestCaseFileToken("TC-LOGIN-01"), "TCLOGIN01");
+    assert.equal(
+      uniquifyTestTargetRel("AItest/UnitTest/seizure/foo.test.ts", "TC-032"),
+      "AItest/UnitTest/seizure/foo.TC032.test.ts"
+    );
+    assert.equal(
+      uniquifyTestTargetRel(
+        "AItest/UnitTest/seizure/EvidenceCreateCommandHandlerTests.cs",
+        "TC-032"
+      ),
+      "AItest/UnitTest/seizure/EvidenceCreateCommandHandlerTests_TC032.cs"
+    );
+    assert.equal(
+      uniquifyTestTargetRel(
+        "AItest/UnitTest/seizure/EvidenceCreateCommandHandlerTests_TC032.cs",
+        "TC-032"
+      ),
+      "AItest/UnitTest/seizure/EvidenceCreateCommandHandlerTests_TC032.cs"
+    );
+  });
+
   it("Unit output keeps Requirement parent only", () => {
     assert.equal(
       buildRequirementTcModule("Todo App SRS", "Lọc tất cả - Happy path", "FeatureX"),
-      "Todo-App-SRS/Lọc-tất-cả-Happy-path"
+      "todo-app-srs/loc-tat-ca-happy-path"
     );
-    assert.equal(buildRequirementTcModule("To do", "AC-00 PATCH", null), "To-do/AC-00-PATCH");
+    assert.equal(buildRequirementTcModule("To do", "AC-00 PATCH", null), "to-do/ac-00-patch");
     const path = underGeneratedTestFolder("unit", "todos.service.test.ts", null, {
       requirementTitle: "Todo App SRS",
       testCaseTitle: "Lọc tất cả - Happy path",
       packagePrefix: "",
     });
-    assert.equal(path, "AItest/UnitTest/Todo-App-SRS/todos.service.test.ts");
+    assert.equal(path, "AItest/UnitTest/todo-app-srs/todos.service.test.ts");
+  });
+
+  it("sanitizePathSegment is ASCII lowercase and length-capped", () => {
+    assert.equal(sanitizePathSegment("Đăng nhập"), "dang-nhap");
+    assert.equal(
+      sanitizePathSegment("Ghi nhận thông tin thu giữ vật chứng"),
+      "ghi-nhan-thong-tin-thu-giu-vat-chung"
+    );
+    const long = sanitizePathSegment(
+      "Ghi nhận thông tin thu giữ vật chứng và các trường bắt buộc khi tạo mới"
+    );
+    assert.ok(long.length <= 40);
+    assert.match(long, /^[a-z0-9._-]+$/);
   });
 
   it("E2E shared root + module-as-req with TC", async () => {
@@ -204,11 +245,11 @@ describe("P5 AItest path jail", () => {
     assert.equal(e2eSharedRoot({ packagePrefix: "backend" }), "backend/AItest/E2ETest/_shared");
     assert.equal(
       buildMod(null, "Login OK", "Auth"),
-      "Auth/Login-OK"
+      "auth/login-ok"
     );
     assert.equal(
       e2eModuleRoot("Auth", { requirementTitle: "Req", testCaseTitle: "TC1" }),
-      "AItest/E2ETest/Req/TC1"
+      "AItest/E2ETest/req/tc1"
     );
     assert.equal(
       e2eStorageStateRel("Auth"),

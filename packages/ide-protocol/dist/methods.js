@@ -33,8 +33,10 @@ export const IdeMethods = {
     /** Phase 2 — AI CLI / workspace session reuse */
     codegenOpenSession: "aitest/codegen.openSession",
     codegenCloseSession: "aitest/codegen.closeSession",
-    /** Phase C — sync Approved TC markdown into `.ai-test/test-cases/` */
+    /** Phase C — sync Approved TC markdown into `AItest/test-cases/` */
     tcSyncApprovedMd: "aitest/tc.syncApprovedMd",
+    /** Unit Approve v2 — IDE Repository Intelligence resolve */
+    unitApproveResolve: "aitest/unitApprove.resolve",
 };
 /** Plugin → Desktop notifications (no id / no response) */
 export const IdeNotifications = {

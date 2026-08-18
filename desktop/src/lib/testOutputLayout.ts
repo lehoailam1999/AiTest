@@ -165,8 +165,16 @@ function normRel(path?: string | null): string {
   return p.replace(/^\/+|\/+$/g, "");
 }
 
-/** Safe folder segment: no traversal; length-capped for Windows MAX_PATH. */
-const MAX_PATH_SEGMENT_LEN = 48;
+/** Safe folder segment: ASCII slug, length-capped for Windows MAX_PATH. */
+const MAX_PATH_SEGMENT_LEN = 40;
+
+function stripDiacritics(s: string): string {
+  return s
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "");
+}
 
 /** Keep Playwright/test + POM compound suffixes when truncating long filenames. */
 const COMPOUND_FILE_EXTS = [
@@ -200,9 +208,11 @@ function truncatePathSegment(seg: string, maxLen = MAX_PATH_SEGMENT_LEN): string
 export function sanitizePathSegment(raw?: string | null, maxLen = MAX_PATH_SEGMENT_LEN): string {
   let s = (raw || "").trim();
   if (!s) return "";
+  s = stripDiacritics(s);
   s = s.replace(/[<>:"|?*\[\]]/g, "");
   s = s.replace(/\//g, "-");
-  s = s.replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  s = s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  s = s.toLowerCase();
   if (s === "." || s === "..") return "";
   return truncatePathSegment(s, maxLen);
 }
@@ -364,19 +374,51 @@ export function testFileNameFromSource(opts: {
 }
 
 /**
+ * Compact on-disk token from a TC code (`TC-032` → `TC032`).
+ * UUID fallback keeps legacy uniquify (`1b899cf6-…` → `1b899cf6`).
+ */
+export function compactTestCaseFileToken(testCaseId: string): string {
+  const raw = (testCaseId || "").trim();
+  if (!raw) return "";
+  const uuidHex = raw.replace(/-/g, "");
+  if (/^[a-f0-9]{32}$/i.test(uuidHex)) {
+    return uuidHex.slice(0, 8).toLowerCase();
+  }
+  const tc = raw.match(/^TC[-_]?(.*)$/i);
+  if (tc) {
+    const rest = (tc[1] || "").replace(/[^A-Za-z0-9]/g, "");
+    if (rest) return `TC${rest.toUpperCase()}`.slice(0, 24);
+  }
+  if (/^[a-f0-9]{8,}$/i.test(uuidHex)) {
+    return uuidHex.slice(0, 8).toLowerCase();
+  }
+  return raw.replace(/[^A-Za-z0-9]/g, "").slice(0, 16);
+}
+
+/** Prefer human TC-id (`TC-032`) over row UUID when uniquifying generated files. */
+export function uniquifyKeyForTestCase(tc: {
+  testCaseId?: string | null;
+  id?: string | null;
+}): string {
+  return (tc.testCaseId || "").trim() || (tc.id || "").trim();
+}
+
+/**
  * Ensure each Unit TC gets a distinct file under the same module/source.
  * Without this, batch verify stages N overlays onto one path → Jest chỉ chạy 1 file
  * trong khi UI vẫn gắn PASS cho mọi TC.
  *
  * Examples:
- *   foo.test.ts + id 1b899cf6-… → foo.1b899cf6.test.ts
- *   FooTests.cs + id → FooTests_1b899cf6.cs
+ *   foo.test.ts + TC-032 → foo.TC032.test.ts
+ *   FooTests.cs + TC-032 → FooTests_TC032.cs
+ *   UUID fallback: foo.test.ts + 1b899cf6-… → foo.1b899cf6.test.ts
  */
 export function uniquifyTestTargetRel(targetRel: string, testCaseId: string): string {
-  const short = (testCaseId || "").replace(/-/g, "").slice(0, 8).toLowerCase();
+  const short = compactTestCaseFileToken(testCaseId);
   if (!short) return targetRel.replace(/\\/g, "/");
   const norm = targetRel.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (norm.toLowerCase().includes(`.${short}.`) || norm.toLowerCase().includes(`_${short}.`)) {
+  const needle = short.toLowerCase();
+  if (norm.toLowerCase().includes(`.${needle}.`) || norm.toLowerCase().includes(`_${needle}.`)) {
     return norm;
   }
   const testSpec = norm.match(/^(.*?)(\.(?:test|spec))(\.[^.]+)$/i);
@@ -560,6 +602,7 @@ export function assertSafeAitestTargetRel(targetRel: string): string {
     throw new Error(`Path jail: đường dẫn dưới ${AITEST_ROOT}/ chưa đủ`);
   }
   const forbiddenUnderAitest = new Set([
+    "test-cases",
     "src",
     "app",
     "lib",
@@ -684,6 +727,55 @@ export function aitestRootFromTarget(targetRel?: string | null): string {
   const m = p.match(/^(.*?\/)?AItest(?=\/|$)/i);
   if (!m) return AITEST_ROOT;
   return (m[0] || AITEST_ROOT).replace(/\/+$/, "") || AITEST_ROOT;
+}
+
+const BUILD_OUTPUT_DIRS = ["dist", "build", "out"] as const;
+
+function splitAitestPath(targetRel: string): { prefix: string; tail: string } | null {
+  const norm = (targetRel || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const padded = `/${norm.toLowerCase()}`;
+  const idx = padded.indexOf("/aitest/");
+  if (idx < 0) return null;
+  const prefix = idx <= 0 ? "" : norm.slice(0, idx - 1);
+  const tail = idx <= 0 ? norm : norm.slice(idx);
+  return { prefix, tail };
+}
+
+/**
+ * Compiled JS next to an AItest TS/TSX test — must be removed with the source.
+ * Handles both `AItest/…` (repo root) and `{pkg}/AItest/…`.
+ */
+export function compiledAitestArtifactRels(targetRel: string): string[] {
+  const split = splitAitestPath(targetRel);
+  if (!split) return [];
+  const sourceExt = (split.tail.match(/(\.[^.]+)$/)?.[1] || "").toLowerCase();
+  if (![".ts", ".tsx"].includes(sourceExt)) return [];
+  const stem = split.tail.slice(0, -sourceExt.length);
+  const out: string[] = [];
+  for (const outDir of BUILD_OUTPUT_DIRS) {
+    const root = split.prefix ? `${split.prefix}/${outDir}` : outDir;
+    out.push(`${root}/${stem}.js`);
+    out.push(`${root}/${stem}.js.map`);
+    out.push(`${root}/${stem}.d.ts`);
+    out.push(`${root}/${stem}.d.ts.map`);
+  }
+  return out.map((p) => p.replace(/\/+/g, "/"));
+}
+
+/**
+ * Parent dirs under AItest/ to prune after deleting a generated file.
+ * Nearest folder first; includes `{pkg}/AItest` / `AItest` last (empty-only).
+ */
+export function emptyAitestParentRels(targetRel: string): string[] {
+  const p = (targetRel || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const parts = p.split("/").filter(Boolean);
+  const aitIdx = parts.findIndex((s) => s.toLowerCase() === AITEST_ROOT.toLowerCase());
+  if (aitIdx < 0 || parts.length < aitIdx + 2) return [];
+  const dirs: string[] = [];
+  for (let i = parts.length - 1; i > aitIdx; i -= 1) {
+    dirs.push(parts.slice(0, i).join("/"));
+  }
+  return dirs;
 }
 
 /** Rewrite SUT + local imports to stable `src/…` (or relative) that resolve from AItest. */

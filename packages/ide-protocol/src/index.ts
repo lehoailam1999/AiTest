@@ -13,6 +13,7 @@ export {
   EXTENSION_CAPABILITIES,
   DESKTOP_REQUIRED_UNIT_CAPS,
   DESKTOP_REQUIRED_E2E_CAPS,
+  DESKTOP_REQUIRED_UNIT_APPROVE_CAPS,
   negotiateCapabilities,
   hasCapability,
   type IdeCapability,
@@ -121,7 +122,9 @@ export {
 
 export {
   assertSafeAiTestCasesRel,
+  assertSafeAiTestCasesReadRel,
   AI_TEST_CASES_DIR,
+  LEGACY_AI_TEST_CASES_DIR,
 } from "./tcPathJail.js";
 
 export {
@@ -129,6 +132,63 @@ export {
   UNIT_GEN_LIMITS,
   UNIT_LAYOUT_RULE,
 } from "./unitConventions.js";
+
+export {
+  normalizeGroundingCompanion,
+  parseGroundingCompanion,
+} from "./groundingCompanion.js";
+
+export {
+  APPROVED_GROUNDING_SCHEMA,
+  REQUIRED_GROUNDING_CHECKS,
+  normalizeContentHash,
+  sameContentHash,
+  validateApprovedGroundingDecision,
+  type ApprovedGroundingDecision,
+  type GroundingBinding,
+  type GroundingConfidence,
+  type GroundingMarkerInput,
+  type GroundingOutcome,
+  type GroundingTargetScope,
+  type GroundingValidationResult,
+} from "./approvedGroundingDecision.js";
+
+export {
+  UNIT_APPROVE_REQUEST_SCHEMA,
+  UNIT_APPROVE_RESPONSE_SCHEMA,
+  UNIT_APPROVE_DECISION_SCHEMA,
+  UNIT_TC_IR_SCHEMA,
+  DEFAULT_UNIT_APPROVE_LIMITS,
+  validateUnitApprovalDecision,
+  projectDecisionToV1Grounding,
+  hashDecisionBody,
+  type Sha256Hex,
+  type Sha256Fn,
+  type SourcePosition,
+  type SourceRange,
+  type UnitApproveTargetScope,
+  type UnitApproveScenario,
+  type UnitApprovePrimaryBucket,
+  type UnitApproveTcIr,
+  type RepositoryRevision,
+  type RepositoryRevisionExpectation,
+  type UnitApproveResolveLimits,
+  type UnitApproveResolveParams,
+  type GroundedSymbolKind,
+  type GroundedSymbol,
+  type GroundedFileRole,
+  type GroundedFile,
+  type ExistingTestEvidence,
+  type FieldBindingDecision,
+  type BehaviorEvidence,
+  type FileSnapshot,
+  type UnitApproveCheck,
+  type UnitApproveReasonCode,
+  type UnitApproveReason,
+  type UnitApprovalDecision,
+  type UnitApproveResolveResult,
+  type UnitApproveDecisionValidation,
+} from "./unitApproveRpc.js";
 
 export {
   UNIT_RANK_POLICY,
@@ -170,6 +230,7 @@ export {
   isUnitGenRefuseOutput,
   detectFeatureGap,
   scenarioTextForFeatureGap,
+  constraintFamily,
   weakCommonPathTokenPenalty,
   UNIT_SUT_ALIGN_MIN_UNMARKED_STRICT,
   UNIT_SUT_ALIGN_HARD_FLOOR,

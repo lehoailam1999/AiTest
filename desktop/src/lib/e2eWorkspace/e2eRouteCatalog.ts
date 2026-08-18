@@ -7,6 +7,11 @@
  * routing files. Title/steps are weak tie-breakers only — never pick a route from
  * verbs like "Upload" alone.
  *
+ * Locale bridge: when the module is non-ASCII (no overlap with `/admin/evidence`),
+ * fall back to labels harvested from that route's own feature templates
+ * (`Thêm vật chứng` in evidence HTML → `/admin/evidence`). Fail closed unless the
+ * label hit is strong, distinctive, and backed by ≥2 module tokens.
+ *
  * Angular/JHipster: compose nested routes from file location
  * (.../admin/evidence/evidence.routes.ts → /admin/evidence).
  * path: 'new' loading a Modal is NOT a navigable AbsolutePath — UX opens
@@ -92,9 +97,20 @@ const AMBIGUOUS_GAP = 0.75;
  */
 export const STRONG_CATALOG_SCORE = 4;
 
+/**
+ * Route → UI label tokens (term frequency) harvested from the route's own feature
+ * folder. This is the portable bridge for non-ASCII TC modules: a Vietnamese
+ * module ("Tạo mới vật chứng") cannot match ASCII segments (`/admin/evidence`),
+ * but it does match the labels rendered by that feature's own templates.
+ */
+export type RouteLabelIndex = Record<string, Record<string, number>>;
+
 export type E2eRouteCatalog = {
   routes: string[];
   sources: string[];
+  labels?: RouteLabelIndex;
+  /** route → feature template/component files (the code behind that screen). */
+  featureSources?: Record<string, string[]>;
 };
 
 export type RouteMatchResult = {
@@ -102,7 +118,25 @@ export type RouteMatchResult = {
   score: number;
   candidates: Array<{ path: string; score: number }>;
   ambiguous: boolean;
+  /** Which signal picked the route — path segments or harvested UI labels. */
+  matchedBy?: "path" | "label";
+  labelScore?: number;
 };
+
+/**
+ * Pivoted length normalization — plain cosine over-rewards routes with few
+ * labels, plain TF-IDF over-rewards label-rich routes. Calibrated on a real
+ * Angular repo: true feature ≥ 0.89, wrong/absent feature ≤ 0.60.
+ */
+const LABEL_NORM_ALPHA = 0.75;
+/** Title/steps/precondition tokens corroborate; module/requirement lead. */
+const LABEL_SECONDARY_WEIGHT = 0.45;
+/** Label-only pick must clear this absolute bar (see calibration above). */
+export const LABEL_STRONG_SCORE = 0.8;
+/** …and beat the runner-up by this ratio, else stay unresolved (fail closed). */
+const LABEL_AMBIGUOUS_RATIO = 1.1;
+/** …and be backed by ≥2 distinct module/requirement tokens, not one lucky word. */
+const LABEL_MIN_MATCHED_TOKENS = 2;
 
 function normSlash(pathRel: string): string {
   return (pathRel || "").replace(/\\/g, "/");
@@ -289,10 +323,214 @@ function extractRoutesFromText(text: string, filePath: string): string[] {
   return out;
 }
 
+/* ── UI label harvest ─────────────────────────────────────────────────────── */
+
+/** Function words / generic UI verbs — carry no feature identity in any locale. */
+const LABEL_STOP_TOKENS = new Set([
+  "cac",
+  "cua",
+  "cho",
+  "voi",
+  "tren",
+  "duoi",
+  "vao",
+  "khi",
+  "khong",
+  "hoac",
+  "duoc",
+  "theo",
+  "trong",
+  "này",
+  "nay",
+  "tat",
+  "chua",
+  "dang",
+  "san",
+  "hay",
+  "vui",
+  "long",
+  "thanh",
+  "cong",
+  "that",
+  "bai",
+  "loi",
+  "canh",
+  "bao",
+  "xac",
+  "nhan",
+  "dong",
+  "huy",
+  "luu",
+  "them",
+  "sua",
+  "xoa",
+  "tim",
+  "kiem",
+  "chon",
+  "nhap",
+  "xem",
+  "chi",
+  "tiet",
+  "danh",
+  "sach",
+  "trang",
+  "bang",
+  "cot",
+  "ngay",
+  "gio",
+  "ten",
+  "tong",
+  "quay",
+  "lai",
+  "tiep",
+  "truoc",
+  "sau",
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "all",
+  "none",
+  "yes",
+  "not",
+  "save",
+  "cancel",
+  "close",
+  "search",
+  "filter",
+  "submit",
+  "confirm",
+  "success",
+  "warning",
+  "required",
+  "loading",
+  "name",
+  "date",
+  "time",
+  "total",
+  "action",
+  "actions",
+  "status",
+]);
+
+const HTML_TEXT_NODE_RE = />([^<>{}]{2,80})</g;
+const HTML_LABEL_ATTR_RE =
+  /\b(?:placeholder|title|label|aria-label|alt|header|heading|tooltip)\s*=\s*"([^"{}]{2,80})"/gi;
+const TS_LABEL_KV_RE =
+  /\b(?:title|label|header|heading|placeholder|message|name|text)\s*:\s*['"]([^'"{}]{2,80})['"]/gi;
+const TS_TEMPLATE_RE = /template\s*:\s*`([\s\S]{0,20000}?)`/g;
+
+/** Keep human sentences; drop code, i18n keys, interpolation, numbers-only. */
+function isLikelyUiLabel(raw: string): boolean {
+  const s = (raw || "").trim();
+  if (s.length < 2 || s.length > 80) return false;
+  if (/[{}<>$=|]/.test(s)) return false;
+  if (!/[A-Za-zÀ-ỹ]/.test(s)) return false;
+  // i18n key ("forensicApp.evidence.home.title") — the rendered text is captured separately
+  if (/^[A-Za-z][\w.]*\.[\w.]+$/.test(s) && !/\s/.test(s)) return false;
+  if (/^(?:https?:|\.\/|\/)/.test(s)) return false;
+  return true;
+}
+
+export function extractUiLabelPhrases(text: string, filePathRel: string): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const s = (raw || "").replace(/\s+/g, " ").trim();
+    if (isLikelyUiLabel(s)) out.push(s);
+  };
+
+  const isHtml = /\.html?$/i.test(normSlash(filePathRel));
+  const htmlChunks: string[] = [];
+  if (isHtml) {
+    htmlChunks.push(text || "");
+  } else {
+    let m: RegExpExecArray | null;
+    const tplRe = new RegExp(TS_TEMPLATE_RE.source, "g");
+    while ((m = tplRe.exec(text || "")) !== null) htmlChunks.push(m[1]);
+    const kvRe = new RegExp(TS_LABEL_KV_RE.source, "gi");
+    while ((m = kvRe.exec(text || "")) !== null) push(m[1]);
+  }
+
+  for (const chunk of htmlChunks) {
+    let m: RegExpExecArray | null;
+    const textRe = new RegExp(HTML_TEXT_NODE_RE.source, "g");
+    while ((m = textRe.exec(chunk)) !== null) push(m[1]);
+    const attrRe = new RegExp(HTML_LABEL_ATTR_RE.source, "gi");
+    while ((m = attrRe.exec(chunk)) !== null) push(m[1]);
+  }
+
+  return out;
+}
+
+/** Phrases → token term-frequency, dropping locale-agnostic filler. */
+export function labelTokenFrequency(phrases: string[]): Record<string, number> {
+  const tf: Record<string, number> = {};
+  for (const phrase of phrases) {
+    for (const token of tokenize(phrase)) {
+      if (WEAK_MATCH_TOKENS.has(token) || LABEL_STOP_TOKENS.has(token)) continue;
+      tf[token] = (tf[token] || 0) + 1;
+    }
+  }
+  return tf;
+}
+
+function dirOf(pathRel: string): string {
+  const p = normSlash(pathRel);
+  const idx = p.lastIndexOf("/");
+  return idx <= 0 ? "" : p.slice(0, idx);
+}
+
+function tailSlug(dir: string): string {
+  const segs = normSlash(dir).split("/").filter(Boolean);
+  return (segs[segs.length - 1] || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+const LABEL_FILE_RE = /\.(?:html?|ts|tsx|jsx?|vue)$/i;
+const LABEL_FILE_SKIP_RE =
+  /\.(?:spec|test|d)\.[tj]sx?$|\.(?:routes?|module|service|model|guard|resolver|pipe)\.[tj]s$|mock-data|environment/i;
+
+/**
+ * Feature folder files that render user-visible labels for a route.
+ * Own folder + one nested level (list/create/update/detail) — never the whole area.
+ */
+export function pickLabelFilesForDir(
+  dir: string,
+  paths: string[],
+  limit: number
+): string[] {
+  if (!dir) return [];
+  const base = normSlash(dir);
+  const baseDepth = base.split("/").filter(Boolean).length;
+  const candidates = paths
+    .map(normSlash)
+    .filter((p) => p.startsWith(`${base}/`))
+    .filter((p) => LABEL_FILE_RE.test(p) && !LABEL_FILE_SKIP_RE.test(p))
+    .filter((p) => {
+      const depth = p.split("/").filter(Boolean).length;
+      return depth <= baseDepth + 2;
+    });
+  const rank = (p: string): number => {
+    let s = 0;
+    if (/\.html?$/i.test(p)) s += 50;
+    if (/list|home|index/i.test(p)) s += 12;
+    if (/create|new|add|update|edit|modal|dialog|detail/i.test(p)) s += 8;
+    s -= p.split("/").length;
+    return s;
+  };
+  return candidates
+    .sort((a, b) => rank(b) - rank(a) || a.localeCompare(b))
+    .slice(0, limit);
+}
+
 export async function buildE2eRouteCatalog(opts: {
   paths: string[];
   readFile: (pathRel: string) => Promise<string>;
   maxFiles?: number;
+  /** Label files read per route (feature folder templates). 0 disables harvest. */
+  maxLabelFilesPerRoute?: number;
+  /** Global cap on label file reads across all routes. */
+  maxLabelFilesTotal?: number;
 }): Promise<E2eRouteCatalog> {
   const maxFiles = opts.maxFiles ?? 40;
   const routingPaths = opts.paths
@@ -306,14 +544,23 @@ export async function buildE2eRouteCatalog(opts: {
   const routes: string[] = [];
   const sources: string[] = [];
   const seen = new Set<string>();
+  /** route → most specific feature folder (dir tail must equal the route leaf). */
+  const routeDir = new Map<string, string>();
   for (const pathRel of routingPaths) {
     try {
       const text = await opts.readFile(pathRel);
       sources.push(pathRel);
+      const dir = dirOf(pathRel);
       for (const r of extractRoutesFromText(text, pathRel)) {
         if (!seen.has(r)) {
           seen.add(r);
           routes.push(r);
+        }
+        if (dir && tailSlug(dir) === featureSlug(r)) {
+          const prev = routeDir.get(r);
+          if (!prev || prev.split("/").length < dir.split("/").length) {
+            routeDir.set(r, dir);
+          }
         }
       }
     } catch {
@@ -321,7 +568,149 @@ export async function buildE2eRouteCatalog(opts: {
     }
   }
   routes.sort((a, b) => a.localeCompare(b));
-  return { routes, sources };
+
+  const perRoute = opts.maxLabelFilesPerRoute ?? 8;
+  const totalCap = opts.maxLabelFilesTotal ?? 160;
+  const labels: RouteLabelIndex = {};
+  const featureSources: Record<string, string[]> = {};
+  if (perRoute > 0) {
+    let reads = 0;
+    for (const route of routes) {
+      const dir = routeDir.get(route);
+      if (!dir || reads >= totalCap) continue;
+      const files = pickLabelFilesForDir(
+        dir,
+        opts.paths,
+        Math.min(perRoute, totalCap - reads)
+      );
+      const phrases: string[] = [];
+      const readOk: string[] = [];
+      for (const file of files) {
+        try {
+          const text = await opts.readFile(file);
+          reads += 1;
+          readOk.push(file);
+          phrases.push(...extractUiLabelPhrases(text, file));
+        } catch {
+          /* skip unreadable */
+        }
+      }
+      if (readOk.length) featureSources[route] = readOk;
+      const tf = labelTokenFrequency(phrases);
+      const top = Object.entries(tf)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 60);
+      if (top.length) labels[route] = Object.fromEntries(top);
+    }
+  }
+
+  return {
+    routes,
+    sources,
+    ...(Object.keys(labels).length ? { labels } : {}),
+    ...(Object.keys(featureSources).length ? { featureSources } : {}),
+  };
+}
+
+/** Feature code behind a route — Codegen reads these instead of guessing selectors. */
+export function featureSourcesForPath(
+  rawPath: string | null | undefined,
+  catalog?: E2eRouteCatalog | null,
+  limit = 3
+): string[] {
+  const p = normalizePath(rawPath || "");
+  if (!p || !catalog?.featureSources) return [];
+  const map = catalog.featureSources;
+  const exact = map[p];
+  if (exact?.length) return exact.slice(0, limit);
+  const low = p.toLowerCase();
+  const parent = Object.keys(map)
+    .filter((route) => low === route.toLowerCase() || low.startsWith(`${route.toLowerCase()}/`))
+    .sort((a, b) => b.length - a.length)[0];
+  return parent ? (map[parent] || []).slice(0, limit) : [];
+}
+
+/**
+ * Reality check for a path marker that came from TC text / LLM IR.
+ * Accepts exact catalog routes and unlisted children of a known area
+ * (`/admin/evidence/123/edit`), rejects paths whose first segment exists nowhere
+ * in the source routes (e.g. `/BR-4` from a `trace:` line).
+ * No catalog → cannot judge, so accept (caller stays fail-closed elsewhere).
+ */
+export function isPathPlausibleForCatalog(
+  rawPath: string | null | undefined,
+  catalog?: E2eRouteCatalog | null
+): boolean {
+  const p = normalizePath(rawPath || "");
+  if (!p || p === "/") return false;
+  if (!catalog?.routes?.length) return true;
+  const low = p.toLowerCase();
+  if (catalog.routes.some((r) => r.toLowerCase() === low)) return true;
+  if (catalog.routes.some((r) => low.startsWith(`${r.toLowerCase()}/`))) return true;
+  const head = low.split("/").filter(Boolean)[0] || "";
+  if (!head) return false;
+  return catalog.routes.some(
+    (r) => (r.toLowerCase().split("/").filter(Boolean)[0] || "") === head
+  );
+}
+
+export type LabelMatch = { score: number; matched: number };
+
+/**
+ * TF-IDF over harvested labels: tokens shared by every feature (Save/Search…)
+ * lose weight automatically, so no per-product stopword table is needed.
+ * `matched` counts distinct module/requirement tokens that actually hit.
+ */
+export function scoreRoutesByLabelIndex(
+  primaryTokens: string[],
+  secondaryTokens: string[],
+  labels?: RouteLabelIndex | null
+): Record<string, LabelMatch> {
+  const out: Record<string, LabelMatch> = {};
+  if (!labels) return out;
+  const routes = Object.keys(labels);
+  if (!routes.length) return out;
+
+  const usable = (t: string) => t.length >= 3 && !LABEL_STOP_TOKENS.has(t);
+  const weights = new Map<string, number>();
+  for (const t of primaryTokens) if (usable(t)) weights.set(t, 1);
+  for (const t of secondaryTokens) {
+    if (usable(t) && !weights.has(t)) weights.set(t, LABEL_SECONDARY_WEIGHT);
+  }
+  if (!weights.size) return out;
+
+  // Document frequency over every harvested token — the route norm needs it too.
+  const df: Record<string, number> = {};
+  for (const route of routes) {
+    for (const token of Object.keys(labels[route] || {})) {
+      df[token] = (df[token] || 0) + 1;
+    }
+  }
+  const idfOf = (token: string) =>
+    Math.log((routes.length + 1) / (1 + (df[token] || 0)));
+
+  for (const route of routes) {
+    const tf = labels[route] || {};
+    let norm = 0;
+    for (const [token, freq] of Object.entries(tf)) {
+      const w = Math.log(1 + freq) * Math.max(0, idfOf(token));
+      norm += w * w;
+    }
+    norm = Math.sqrt(norm) || 1;
+
+    let dot = 0;
+    let matched = 0;
+    for (const [token, weight] of weights) {
+      const freq = tf[token] || 0;
+      const idf = idfOf(token);
+      if (freq <= 0 || idf <= 0) continue;
+      dot += Math.log(1 + freq) * idf * weight;
+      if (weight === 1) matched += 1;
+    }
+    const score = dot / Math.pow(norm, LABEL_NORM_ALPHA);
+    if (score > 0) out[route] = { score, matched };
+  }
+  return out;
 }
 
 function tokenize(blob: string): string[] {
@@ -331,6 +720,48 @@ function tokenize(blob: string): string[] {
     .replace(/\p{M}/gu, "")
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length >= 3);
+}
+
+function compactToken(value: string): string {
+  return (value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function identifierTokens(value: string): string[] {
+  return tokenize(
+    (value || "")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[_./\\-]+/g, " ")
+  );
+}
+
+/**
+ * Expand business labels through repository-learned aliases only when the label
+ * actually appears in this TC. Example: `maVatChung → EvidenceCode` contributes
+ * `evidence`, allowing a Vietnamese TC to match `/admin/evidence` without a
+ * product-specific translation table.
+ */
+function semanticAliasTokens(
+  blob: string,
+  aliases?: Record<string, string | string[]> | null
+): string[] {
+  if (!aliases) return [];
+  const compactBlob = compactToken(blob);
+  const out = new Set<string>();
+  for (const [label, rawValues] of Object.entries(aliases)) {
+    const compactLabel = compactToken(label);
+    if (!compactLabel || !compactBlob.includes(compactLabel)) continue;
+    const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+    for (const value of values) {
+      for (const token of identifierTokens(String(value || ""))) {
+        if (!WEAK_MATCH_TOKENS.has(token)) out.add(token);
+      }
+    }
+  }
+  return [...out];
 }
 
 /** Domain tokens only — verbs/severity from titles must not pick the route. */
@@ -406,6 +837,8 @@ export function matchFeaturePathFromCatalog(
     hasFePrimary?: boolean;
     /** Journey / Requirement Studio title (often Latin when module is VI) */
     requirementTitle?: string | null;
+    /** Source-backed business label → code identifier aliases. */
+    semanticAliases?: Record<string, string | string[]> | null;
   }
 ): RouteMatchResult {
   if (!catalog.routes.length) {
@@ -420,7 +853,21 @@ export function matchFeaturePathFromCatalog(
     .map((s) => (s || "").trim())
     .filter(Boolean)
     .join("\n");
-  const primaryTokens = strongTokens(primaryBlob);
+  const tcBlob = [
+    primaryBlob,
+    tc.title,
+    tc.steps,
+    tc.precondition,
+    tc.testData,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const primaryTokens = [
+    ...new Set([
+      ...strongTokens(primaryBlob),
+      ...semanticAliasTokens(tcBlob, opts?.semanticAliases),
+    ]),
+  ];
   const secondaryTokens = strongTokens(
     [tc.title, tc.steps, tc.precondition].filter(Boolean).join("\n")
   );
@@ -445,38 +892,99 @@ export function matchFeaturePathFromCatalog(
     .filter((x) => x.primaryScore > 0)
     .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
 
-  if (!scored.length) {
-    return { score: 0, candidates: [], ambiguous: false };
-  }
-
-  const top = scored[0];
-  const second = scored[1];
   const minScore =
     opts?.minScore ??
     (opts?.hasFePrimary ? STRONG_CATALOG_SCORE : MIN_MATCH_SCORE);
-  const ambiguous =
-    second &&
-    top.score >= minScore &&
-    second.score >= minScore &&
-    top.score - second.score < AMBIGUOUS_GAP;
-  if (ambiguous) {
+  const top = scored[0];
+  const second = scored[1];
+  const pathAmbiguous = Boolean(
+    top &&
+      second &&
+      top.score >= minScore &&
+      second.score >= minScore &&
+      top.score - second.score < AMBIGUOUS_GAP
+  );
+
+  if (top && !pathAmbiguous && top.score >= minScore && top.primaryScore >= 2) {
     return {
+      path: top.path,
       score: top.score,
-      candidates: scored.slice(0, 5).map(({ path, score }) => ({ path, score })),
-      ambiguous: true,
-    };
-  }
-  if (top.score < minScore || top.primaryScore < 2) {
-    return {
-      score: top.score,
+      matchedBy: "path",
       candidates: scored.slice(0, 3).map(({ path, score }) => ({ path, score })),
       ambiguous: false,
+    };
+  }
+
+  // Locale bridge: ASCII segments cannot match a Vietnamese module, but the labels
+  // rendered by that feature's own templates can. Fallback only — never overrides
+  // a clean path match above.
+  const labelFallback = matchFeaturePathByLabels(
+    { primaryBlob, secondaryBlob: tcBlob },
+    catalog
+  );
+  if (labelFallback.path && !pathAmbiguous) return labelFallback;
+
+  if (!top) {
+    return labelFallback.candidates.length
+      ? labelFallback
+      : { score: 0, candidates: [], ambiguous: false };
+  }
+  return {
+    score: top.score,
+    labelScore: labelFallback.labelScore,
+    candidates: scored
+      .slice(0, pathAmbiguous ? 5 : 3)
+      .map(({ path, score }) => ({ path, score })),
+    ambiguous: pathAmbiguous,
+  };
+}
+
+/**
+ * Label-only route resolution (fail-closed): needs an absolute score, a margin
+ * over the runner-up, and ≥2 distinct module/requirement tokens.
+ */
+export function matchFeaturePathByLabels(
+  blobs: { primaryBlob: string; secondaryBlob?: string },
+  catalog: E2eRouteCatalog
+): RouteMatchResult {
+  const labels = catalog.labels;
+  if (!labels || !Object.keys(labels).length) {
+    return { score: 0, candidates: [], ambiguous: false };
+  }
+  const scores = scoreRoutesByLabelIndex(
+    tokenize(blobs.primaryBlob),
+    tokenize(blobs.secondaryBlob || ""),
+    labels
+  );
+  const ranked = Object.entries(scores)
+    .map(([path, m]) => ({ path, ...m }))
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+  if (!ranked.length) return { score: 0, candidates: [], ambiguous: false };
+
+  const top = ranked[0];
+  const runnerUp = ranked[1]?.score || 0;
+  const candidates = ranked
+    .slice(0, 5)
+    .map(({ path, score }) => ({ path, score }));
+  const strong = top.score >= LABEL_STRONG_SCORE;
+  const distinctive =
+    strong &&
+    top.matched >= LABEL_MIN_MATCHED_TOKENS &&
+    top.score >= runnerUp * LABEL_AMBIGUOUS_RATIO;
+  if (!distinctive) {
+    return {
+      score: top.score,
+      labelScore: top.score,
+      candidates,
+      ambiguous: strong,
     };
   }
   return {
     path: top.path,
     score: top.score,
-    candidates: scored.slice(0, 3).map(({ path, score }) => ({ path, score })),
+    labelScore: top.score,
+    matchedBy: "label",
+    candidates,
     ambiguous: false,
   };
 }

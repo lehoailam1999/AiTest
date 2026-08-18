@@ -1,8 +1,9 @@
 /**
  * Persist Generate / Verify error logs under `.ai-test/…/logs/`.
  */
-import { writeTextFile } from "../../tauri/bridge";
+import { readTextFile, writeTextFile } from "../../tauri/bridge";
 import { aiTestDir, workspaceRunDir } from "./paths";
+import { readDraftText, writeDraftText } from "./draftStore";
 
 function safeTcFileId(testCaseId: string): string {
   return (testCaseId || "unknown").replace(/[^\w.-]+/g, "_").slice(0, 96) || "unknown";
@@ -32,8 +33,22 @@ export async function saveErrorLogFile(
   body: string
 ): Promise<string> {
   const text = (body || "").trimEnd() + "\n";
-  await writeTextFile(projectRoot, rel, text);
+  if (rel.replace(/\\/g, "/").startsWith("unit-runs/")) {
+    await writeDraftText(projectRoot, rel, text);
+  } else {
+    await writeTextFile(projectRoot, rel, text);
+  }
   return rel;
+}
+
+export async function readErrorLogFile(
+  projectRoot: string,
+  rel: string
+): Promise<string> {
+  if (rel.replace(/\\/g, "/").startsWith("unit-runs/")) {
+    return readDraftText(projectRoot, rel);
+  }
+  return readTextFile(projectRoot, rel);
 }
 
 export function formatVerifyStagesLog(

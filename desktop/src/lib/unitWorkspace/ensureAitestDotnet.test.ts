@@ -33,6 +33,10 @@ describe("ensureAitestDotnet", () => {
       csharpShortIdFromPath("src/Lib/AItest/FooServiceTests_a1b2c3d4.cs"),
       "a1b2c3d4"
     );
+    assert.equal(
+      csharpShortIdFromPath("AItest/UnitTest/seizure/FooServiceTests_TC032.cs"),
+      "TC032"
+    );
     assert.equal(csharpShortIdFromPath("AItest/NoHash.cs"), "");
   });
 
@@ -43,6 +47,14 @@ describe("ensureAitestDotnet", () => {
     assert.match(out, /public FooServiceTests_a1b2c3d4\s*\(/);
     assert.doesNotMatch(out, /public FooServiceTests\s*\(/);
     assert.equal(ensureCsharpUniqueTestClass(out, "a1b2c3d4"), out);
+  });
+
+  it("uniquifies public *Tests class names with TC-id", () => {
+    const src = `namespace X;\npublic class EvidenceCreateCommandHandlerTests\n{\n  public EvidenceCreateCommandHandlerTests() {}\n}\n`;
+    const out = ensureCsharpUniqueTestClass(src, "TC032");
+    assert.match(out, /public class EvidenceCreateCommandHandlerTests_TC032/);
+    assert.match(out, /public EvidenceCreateCommandHandlerTests_TC032\s*\(/);
+    assert.equal(ensureCsharpUniqueTestClass(out, "TC032"), out);
   });
 
   it("drops invented third-party Core.Repository usings (CS0234)", () => {
@@ -191,6 +203,8 @@ describe("ensureAitestDotnet", () => {
     assert.match(body, /IsTestProject>true/);
     assert.match(body, /ProjectReference Include="\.\.\\MyLib\.csproj"/);
     assert.match(body, /PackageReference Include="xunit" Version=/);
+    assert.match(body, /Compile Remove="test-cases\\\*\*\\\*"/);
+    assert.match(body, /None Remove="test-cases\\\*\*\\\*"/);
     assert.doesNotMatch(body, /Forensic/i);
   });
 

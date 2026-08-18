@@ -13,6 +13,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import { Link, useSearchParams } from "react-router-dom";
@@ -207,7 +208,7 @@ export default function RunTestPage() {
 
   if (!project) {
     return (
-      <div className="page">
+      <div className="page run-test-page">
         <Typography.Title level={3}>Chạy test</Typography.Title>
         <Alert
           type="warning"
@@ -229,7 +230,7 @@ export default function RunTestPage() {
       .join(" · ") || "chưa nhận diện stack";
 
   return (
-    <div className="page">
+    <div className="page run-test-page">
       <header className="page-head">
         <div>
           <Typography.Title level={3} style={{ margin: 0 }}>
@@ -417,9 +418,13 @@ export default function RunTestPage() {
                     {localPath ? (
                       <Typography.Text
                         type="secondary"
+                        className="run-test-cmd"
                         style={{ display: "block", marginTop: 6, fontSize: 12 }}
                       >
-                        Root: <Typography.Text code>{localPath}</Typography.Text>
+                        Root:{" "}
+                        <Typography.Text code className="run-test-cmd">
+                          {localPath}
+                        </Typography.Text>
                       </Typography.Text>
                     ) : null}
                   </div>
@@ -467,7 +472,7 @@ export default function RunTestPage() {
       </Card>
 
       {run ? (
-        <Card title="Kết quả lần chạy" style={{ marginBottom: 16 }}>
+        <Card title="Kết quả lần chạy" className="run-test-result" style={{ marginBottom: 16 }}>
           <Space direction="vertical" size="large" style={{ width: "100%" }}>
             <Row gutter={[16, 16]}>
               <Col xs={12} sm={6}>
@@ -493,23 +498,14 @@ export default function RunTestPage() {
                 <Progress percent={passRate} status={run.failed > 0 ? "exception" : "success"} />
               </div>
             ) : null}
-            <Typography.Paragraph>
+            <Typography.Paragraph className="run-test-cmd" style={{ marginBottom: 0 }}>
               <Typography.Text type="secondary">Command: </Typography.Text>
-              <Typography.Text code>{run.command}</Typography.Text>
+              <Typography.Text code className="run-test-cmd">
+                {run.command}
+              </Typography.Text>
             </Typography.Paragraph>
             {run.log ? (
-              <pre
-                style={{
-                  maxHeight: 240,
-                  overflow: "auto",
-                  background: "var(--ant-color-fill-quaternary, #f5f5f5)",
-                  padding: 12,
-                  borderRadius: 8,
-                  fontSize: 12,
-                }}
-              >
-                {run.log.slice(0, 8000)}
-              </pre>
+              <pre className="run-test-log">{run.log.slice(0, 8000)}</pre>
             ) : null}
           </Space>
         </Card>
@@ -534,6 +530,7 @@ export default function RunTestPage() {
         <Table
           rowKey="id"
           size="small"
+          className="batch-run-table run-test-history-table"
           dataSource={filteredHistory}
           pagination={{ pageSize: 8 }}
           columns={[
@@ -565,7 +562,12 @@ export default function RunTestPage() {
             {
               title: "Command",
               dataIndex: "command",
-              ellipsis: true,
+              width: 280,
+              render: (v: string) => (
+                <Tooltip title={v} placement="topLeft">
+                  <div className="batch-clamp batch-clamp-1">{v || "—"}</div>
+                </Tooltip>
+              ),
             },
             {
               title: "When",

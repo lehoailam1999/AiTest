@@ -1,10 +1,10 @@
 /**
- * Phase C — serialize Approved TestCase → Markdown under `.ai-test/test-cases/`.
- * Artifact for Agent local / Extension Gen — includes grounding hierarchy for SUT resolve.
+ * Phase C — serialize Approved TestCase → Markdown under `AItest/test-cases/`.
+ * Artifact for Agent local / Extension Gen — projections of the IDE Approve decision.
  *
- * Layout (separate Unit vs E2E):
- *   `.ai-test/test-cases/UnitTest/{function}/{testCaseId}.md`
- *   `.ai-test/test-cases/E2ETest/{function}/{testCaseId}.md`
+ * Layout (separate Unit vs E2E; Function folder is ASCII slug):
+ *   `AItest/test-cases/UnitTest/{functionAscii}/{testCaseId}.md`
+ *   `AItest/test-cases/E2ETest/{functionAscii}/{testCaseId}.md`
  *
  * Display labels (sync MD / UI):
  *   Module   = Requirement Studio title (`requirement:`) — scopes source-module family
@@ -12,14 +12,20 @@
  *   Title    = TC title — refine symbol/path inside family
  */
 import { AI_TEST_CASES_DIR, assertSafeAiTestCasesRel, extractTcSourceMarkers } from "@aitest/ide-protocol";
+import type { UnitApprovalDecision } from "@aitest/ide-protocol";
 import type { TestCase } from "../../api/types";
 import { TEST_CASES_DIR } from "../projectProfile/constants";
 import { deriveAuthContextFromTestCase } from "../e2eWorkspace/deriveAuthContextFromTc";
 import { normalizeFeaturePath } from "../e2eWorkspace/assertTcReadyForE2eGen";
 import { isE2eTestCaseType } from "../testEngine";
-import { GENERATED_TEST_FOLDERS } from "../testOutputLayout";
+import { GENERATED_TEST_FOLDERS, sanitizePathSegment } from "../testOutputLayout";
+import { renderDecisionGroundingLines } from "../unitApprove/decisionProjection";
 
-function slugSeg(raw: string, fallback: string): string {
+function folderSeg(raw: string, fallback: string): string {
+  return sanitizePathSegment(raw) || fallback;
+}
+
+function fileSeg(raw: string, fallback: string): string {
   const s = (raw || "")
     .trim()
     .replace(/[\\/:*?"<>|]+/g, "-")
@@ -30,7 +36,7 @@ function slugSeg(raw: string, fallback: string): string {
   return s || fallback;
 }
 
-/** UnitTest | E2ETest under `.ai-test/test-cases/` (mirrors AItest output folders). */
+/** UnitTest | E2ETest under `AItest/test-cases/` (mirrors executable folders). */
 export function approvedTcKindFolder(
   type?: string | null
 ): typeof GENERATED_TEST_FOLDERS.unit | typeof GENERATED_TEST_FOLDERS.e2e {
@@ -41,14 +47,14 @@ export function approvedTcKindFolder(
 
 /**
  * Relative path:
- * `.ai-test/test-cases/{UnitTest|E2ETest}/{function}/{testCaseId}.md`
+ * `AItest/test-cases/{UnitTest|E2ETest}/{function}/{testCaseId}.md`
  */
 export function approvedTcMarkdownRelPath(
   tc: Pick<TestCase, "testCaseId" | "module" | "id" | "type">
 ): string {
   const kindSeg = approvedTcKindFolder(tc.type);
-  const moduleSeg = slugSeg(tc.module || "general", "general");
-  const codeSeg = slugSeg(tc.testCaseId || tc.id, tc.id.slice(0, 8));
+  const moduleSeg = folderSeg(tc.module || "general", "general");
+  const codeSeg = fileSeg(tc.testCaseId || tc.id, tc.id.slice(0, 8));
   const rel = `${TEST_CASES_DIR}/${kindSeg}/${moduleSeg}/${codeSeg}.md`;
   return assertSafeAiTestCasesRel(rel);
 }
@@ -65,6 +71,7 @@ export type ApprovedTcMdRenderOpts = {
   requirementTitle?: string | null;
   fallbackRole?: string | null;
   analysisActors?: string[] | null;
+  unitDecision?: UnitApprovalDecision | null;
 };
 
 /**
@@ -115,7 +122,8 @@ export function parseApprovedTcGrounding(md: string | null | undefined): {
 
 export function renderUnitGroundingBlock(
   tc: Pick<TestCase, "title" | "module" | "testData" | "testCaseId" | "id" | "type">,
-  requirementTitle?: string | null
+  requirementTitle?: string | null,
+  decision?: UnitApprovalDecision | null
 ): string {
   const modDoc = (requirementTitle || "").trim() || "—";
   const fn = (tc.module || "").trim() || "—";
@@ -127,7 +135,16 @@ export function renderUnitGroundingBlock(
 
   // Display-only: path/code/related come from Approve auto-enrich — not hardcoded here.
   const resolvedLines: string[] = ["### Resolved SUT", ""];
-  if (markers.paths[0] || markers.codes[0]) {
+  if (decision) {
+    resolvedLines.push(...renderDecisionGroundingLines(decision));
+    try {
+      const mdRel = approvedTcMarkdownRelPath(tc);
+      const contractBase = mdRel.replace(/\.md$/i, ".grounding.json").split("/").pop() || "";
+      if (contractBase) resolvedLines.push(`contract: ${contractBase}`);
+    } catch {
+      /* path jail — skip contract pointer */
+    }
+  } else if (markers.paths[0] || markers.codes[0]) {
     if (markers.paths[0]) resolvedLines.push(`path: ${markers.paths[0]}`);
     if (markers.codes[0]) resolvedLines.push(`code: ${markers.codes[0]}`);
     if (markers.related.length) {
@@ -146,7 +163,7 @@ export function renderUnitGroundingBlock(
     resolvedLines.push(`_(unresolved)_ ${skip}`);
   } else {
     resolvedLines.push(
-      "_(unresolved)_ — Approve chưa khớp được SUT từ index (Module → Function → Title)."
+      "_(unresolved)_ — missing SUT; Re-Approve.",
     );
   }
 
@@ -158,7 +175,7 @@ export function renderUnitGroundingBlock(
     `function: ${fn}`,
     `title: ${title}`,
     "",
-    "(`requirement` = Module; `function`/`module` = Function.) Use the resolved SUT as authoritative only when the companion grounding contract is authoritative, validated, and hash-fresh; otherwise re-resolve.",
+    "SoT: companion `.grounding.json` (authoritative + hash-fresh).",
     "",
     ...resolvedLines,
     "",
@@ -178,6 +195,9 @@ export function renderE2eGroundingBlock(
   const pathMatch = td.match(/(?:^|\n)\s*(?:path|featurePath|feature_path|route)\s*[:=]\s*([^\n;,|]+)/i);
   const urlMatch = td.match(/(?:^|\n)\s*(?:url|baseURL|base_url)\s*[:=]\s*([^\n;,|]+)/i);
   const landmarkMatch = td.match(/(?:^|\n)\s*landmark\s*[:=]\s*([^\n;,|]+)/i);
+  const featureSources = (
+    td.match(/(?:^|\n)\s*featureSources\s*[:=]\s*([^\n|]+)/i)?.[1] || ""
+  ).trim();
   const path =
     normalizeFeaturePath(pathMatch?.[1]) ||
     normalizeFeaturePath(urlMatch?.[1]) ||
@@ -202,6 +222,9 @@ export function renderE2eGroundingBlock(
   }
   if (landmark) {
     resolvedLines.push(`landmark: ${landmark}`);
+  }
+  if (featureSources) {
+    resolvedLines.push(`featureSources: ${featureSources}`);
   }
   if (auth.role) {
     resolvedLines.push(`authRole: ${auth.role}`);
@@ -237,7 +260,7 @@ export function renderE2eGroundingBlock(
     `function: ${fn}`,
     `title: ${title}`,
     "",
-    "(`requirement` = Module; `function`/`module` = Function.) E2E route path & auth context below are authoritative for Codegen.",
+    "SoT: path + auth below (authoritative for Codegen).",
     "",
     ...resolvedLines,
     "",
@@ -257,7 +280,7 @@ export function renderApprovedTestCaseMarkdown(
         fallbackRole: opts?.fallbackRole,
         analysisActors: opts?.analysisActors,
       })
-    : renderUnitGroundingBlock(tc, requirementTitle);
+    : renderUnitGroundingBlock(tc, requirementTitle, opts?.unitDecision);
 
   const lines: string[] = [
     "---",
@@ -274,18 +297,6 @@ export function renderApprovedTestCaseMarkdown(
     "---",
     "",
     `# ${tc.title}`,
-    "",
-    "## Meta",
-    "",
-    `| Field | Value |`,
-    `| --- | --- |`,
-    `| Code | \`${tc.testCaseId}\` |`,
-    `| Module | ${requirementTitle || "—"} |`,
-    `| Function | ${tc.module || "—"} |`,
-    `| Type | ${tc.type} |`,
-    `| Priority | ${tc.priority} |`,
-    `| Severity | ${tc.severity} |`,
-    `| Review | ${tc.reviewStatus} |`,
     "",
     groundingBlock.trimEnd(),
     "",
@@ -307,10 +318,10 @@ export function renderApprovedTestCaseMarkdown(
   }
   const groundingTag = isE2e
     ? "<!-- aitest:e2e-grounding — Route path + auth context for E2E Codegen -->"
-    : "<!-- aitest:unit-grounding — Module (requirement) → Function (module) → title for SUT resolve -->";
+    : "<!-- aitest:unit-grounding — Module/Function/title are scenario intent; SUT authority is companion .grounding.json -->";
   const contractTag = isE2e
     ? ""
-    : "<!-- aitest:grounding-contract — companion .grounding.json (Layer 5 Source Grounding Contract) -->";
+    : "<!-- aitest:grounding-contract — companion .grounding.json (immutable IDE Approve decision) -->";
   lines.push(
     "<!-- aitest:approved-tc-artifact — SoT Gen vẫn là DB Approved; file này đồng bộ cho Agent/IDE -->",
     groundingTag,

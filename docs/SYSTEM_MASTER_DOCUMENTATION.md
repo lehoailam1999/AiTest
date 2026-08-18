@@ -15,7 +15,7 @@
 
 > [!IMPORTANT]
 > **Triết lý Thiết kế Cốt lõi (Hybrid Architecture):**
-> 1. **Desktop App (React + Tauri)** là nơi người dùng làm việc hàng ngày: Studio, Coverage, Gen/Verify/Apply, đọc/ghi local FS, staging `.ai-test/`. Desktop **không** gọi LLM vendor trực tiếp và **không** lưu SoT dài hạn.
+> 1. **Desktop App (React + Tauri)** là nơi người dùng làm việc hàng ngày: Studio, Coverage, Gen/Verify/Update và đọc/ghi local FS. Draft Unit nằm trong OS temp của Tool, không nằm trong source. Desktop **không** gọi LLM vendor trực tiếp và **không** lưu SoT dài hạn.
 > 2. **IDE Extension** (Cursor/VS Code trên **repo SUT**) là **Gen Owner** cho Unit (IDE path): chạy Cursor Agent CLI trong workspace đích, apply/jail path, sync Approved TC markdown. Desktop chỉ **orchestrate** (`UnitJobRunner` + JSON-RPC).
 > 3. **Python Backend (FastAPI)** là trung tâm Auth, Requirement Studio, Test Case SoT, Jobs, Reports; legacy `POST /generate-unit` vẫn có (UI «Gen legacy (API)»). E2E Generate/Verify/Heal vẫn điều phối qua API + Desktop co-located FS.
 > 4. **PostgreSQL** là **Source of Truth (SoT)** nghiệp vụ: Dự án, Requirement, Knowledge, TC, Jobs, Execution metadata. **Không** lưu full mã nguồn SUT hay binary video/trace.
@@ -110,11 +110,11 @@ Chi tiết protocol Unit: `packages/ide-protocol/` + `ide-plugins/vscode/` (brid
 ┌─────────────────────────────┐        ┌─────────────────────────────────────────┐
 │ Requirement Workspace       │        │ Approved TC (Postgres SoT)              │
 │   ├── Upload Tài liệu       │        │        +                                │
-│   ├── Phân tích (Knowledge) │ ─────► │ Approve → sync `.ai-test/test-cases/` MD│
+│   ├── Phân tích (Knowledge) │ ─────► │ Approve → sync `AItest/test-cases/` MD│
 │   └── Sinh & Duyệt Test Case│        │        +                                │
 │       (Draft ──► APPROVED)  │        │ Bind SUT + Connect IDE                  │
 │                             │        │        ▼                                │
-│                             │        │ Unit: Planner → Ext Gen → staging       │
+│                             │        │ Unit: Planner → Ext Gen → Tool draft    │
 │                             │        │        → Verify → Apply → AItest/       │
 │                             │        │ E2E: Generate → Verify → Heal → Apply   │
 └─────────────────────────────┘        └─────────────────────────────────────────┘
@@ -127,8 +127,8 @@ Chi tiết protocol Unit: `packages/ide-protocol/` + `ide-plugins/vscode/` (brid
 
 ### 2.2 Phase 2: Automate (Unit & E2E Engines)
 1. **Đầu vào:** TC **`Approved`** + `projectRoot` local (SUT).
-2. **Approve artifact:** ghi `.ai-test/test-cases/{module}/{testCaseId}.md` (bắt buộc trước Unit IDE Gen).
-3. **Unit (IDE path — mặc định):** Implementation Planner → Context Package → Extension Gen → staging → Verify → Apply `AItest/UnitTest/…`.
+2. **Approve artifact:** ghi `AItest/test-cases/{type}/{module}/{testCaseId}.md` (bắt buộc trước Unit IDE Gen).
+3. **Unit (IDE path — mặc định):** Implementation Planner → Context Package → Extension Gen → Tool draft → Verify tạm + restore → Update `AItest/UnitTest/…`.
 4. **Unit (legacy):** `POST /api/generate-unit` qua UI «Gen legacy (API)» (không silent fallback từ IDE path).
 5. **E2E:** Generate (API) → Verify Playwright tuần tự → Heal tùy chọn → Apply `AItest/E2ETest/…`.
 
@@ -161,17 +161,17 @@ Khi LLM lỗi/quota: Heuristic/Regex nội bộ vẫn bóc khung TC cơ bản.
 
 ### 3.4 Grounding markers trên TC (Unit)
 
-Approve Desktop resolve từ `index.db` (Module → Function → Title + CRUD verb) rồi sync MD:
+Approve qua **IDE Repository Intelligence** (`unitApproveResolve`), rồi Desktop persist decision + sync MD / `.grounding.json`:
 
 ```text
-path: src/.../EvidenceImageUploadService.cs
-code: EvidenceImageUploadService
-related: …   # optional
+path: src/.../EvidenceCreateCommandHandler.cs
+code: EvidenceCreateCommandHandler.Handle
+related: …
 ```
 
-Thiếu marker + không resolve được entry → fail-closed `needs_marker` (Implementation Planner), không bịa SUT.
+Thiếu quyết định authoritative / hash stale → fail-closed (Re-Approve), không bịa SUT và không re-resolve lúc Gen.
 
-**As-built vs roadmap** (symbol range, confidence HIGH/MED/LOW, STALE_INDEX, Source Grounding Contract, field LLM shortlist):  
+**As-built** (immutable decision, field shortlist, FEATURE_GAP giữ primary):  
 → [`docs/UNIT_APPROVE_SOURCE_GROUNDING.md`](UNIT_APPROVE_SOURCE_GROUNDING.md) · Architect overview → [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
@@ -199,7 +199,7 @@ Thiếu marker + không resolve được entry → fail-closed `needs_marker` (I
 
 ```text
 Approved TC
-    → Approve sync MD (.ai-test/test-cases/…)
+    → Approve sync MD (AItest/test-cases/…)
     → Desktop gates (Tauri · projectRoot · IDE · MD)
     → Implementation Planner (Desktop)
          entry + multi-layer deps (handler→service→ports)
@@ -208,7 +208,7 @@ Approved TC
     → Extension generateUnitBatch
          (+ optional CLI sessionId / sessionReuse)
     → Quality guards (stack, alignment, no-invent)
-    → Staging .ai-test/staging/{runId}/
+    → Tool draft trong OS temp (không tạo staging trong source)
     → Verify → Apply → AItest/UnitTest/{RequirementOrModule}/…
 ```
 
@@ -232,7 +232,7 @@ sequenceDiagram
     Ext->>CLI: oneshot (session-cached bin)
     CLI-->>Ext: test source
     Ext-->>UI: files + sourceFileName
-    UI->>Tauri: staging overlay
+    UI->>Tauri: Tool draft overlay (OS temp)
     Dev->>UI: Verify / Apply
     UI->>Tauri: runner / copy AItest/UnitTest
   end
@@ -263,7 +263,7 @@ sequenceDiagram
 | Gate | Hành vi |
 |---|---|
 | Connect IDE | Bắt buộc trước IDE Gen |
-| Approved TC MD | Bắt buộc dưới `.ai-test/test-cases/` |
+| Approved TC MD | Bắt buộc dưới `AItest/test-cases/` |
 | Planner `ready` | Bắt buộc trước gọi Extension (khi đi index/TS path) |
 | SUT alignment | Extension từ chối packet lệch domain |
 | Path jail | Chỉ `AItest/UnitTest/…` (+ scaffold AItest root cho csproj) |
@@ -271,9 +271,11 @@ sequenceDiagram
 
 Conventions SoT: `packages/ide-protocol/src/unitConventions.ts` → seed `.ai-test/unit-conventions.md`.
 
-### 4.7 Staging / Verify / Apply
+### 4.7 Tool Draft / Verify / Update
 
-- Staging: `{ProjectRoot}/.ai-test/staging/{runId}/…` + manifest/timeline.
+- Unit draft: vùng OS temp riêng của Desktop Tool + manifest/timeline; source không có `.ai-test/staging`.
+- Verify: stage tạm vào `AItest/UnitTest`, chạy runner, rồi restore source.
+- Update: ranh giới duy nhất ghi/xóa Unit code trên source.
 - Verify/Apply UI: `VerifyApplyConsole.tsx`, `BatchRunConsole.tsx`.
 - Apply: `applyManager.ts` → `AItest/UnitTest/{RequirementOrModule}/…` (layout rule `UNIT_LAYOUT_RULE`).
 
@@ -365,7 +367,7 @@ Post-login TC cần `path:` / `featurePath:` (không invent `/admin/...`).
 │   ├── unit-conventions.md                   ← seed từ protocol SoT
 │   ├── project.profile.json                  ← project profile (bind source)
 │   ├── index.db                              ← code index (TS/JS)
-│   ├── staging/{runId}/…                     ← Unit/E2E staging
+│   ├── workspace/{runId}/…                   ← E2E legacy workspace (Unit không dùng)
 │   └── auth/                                 ← E2E storageState (nếu có)
 └── src/ | app/ | …                           ← mã nguồn SUT (giữ nguyên)
 ```
@@ -374,7 +376,7 @@ Post-login TC cần `path:` / `featurePath:` (không invent `/admin/...`).
 
 1. **Unit:** `[{packagePrefix}/]AItest/UnitTest/{RequirementOrModule}/{TestFile}` — không nhái `ClientApp/src/app/...` vào dưới UnitTest.
 2. **E2E POM/auth** nằm `_shared/`, không nhân bản theo từng TC (trừ legacy).
-3. Path jail: Extension + Desktop từ chối ghi ngoài `AItest/` (và TC MD ngoài `.ai-test/test-cases/`).
+3. Path jail: Extension + Desktop từ chối code ngoài `AItest/UnitTest` và TC artifact ngoài `AItest/test-cases/`.
 
 ---
 
@@ -421,7 +423,7 @@ npm run desktop # Tauri + Vite
 | Connect IDE fail | Mở SUT trong Cursor + extension AITest; `npm run extension:install`; Reload Window |
 | `needs_marker` / Implementation Planner | Thêm `path:` + `code:` vào Test Data → Approve lại → Gen |
 | `FAIL_SUT_MISMATCH` / SUT = audit-log | Packet/index lệch domain — cập nhật extension; thêm marker; không Gen không grounding |
-| Thiếu Approved TC MD | Approve TC (ghi `.ai-test/test-cases/…`) trước Gen Unit |
+| Thiếu Approved TC MD | Approve TC (ghi `AItest/test-cases/…`) trước Gen Unit |
 | AI Not Ready (Backend) | Settings → cấu hình AI → Verify (chủ yếu Studio / legacy / E2E) |
 | E2E thiếu `playwright.config` / `_shared/pages` | Restart API; Generate lại nếu Spec lỗi |
 

@@ -101,8 +101,8 @@ type SharedFile = FlatFile & {
 };
 
 /**
- * Staging preview batch — nhóm file theo TC (+ package nếu khác nhau).
- * Sửa/Xóa đồng bộ overlay staging + file AItest/ trên đĩa (nếu đã có).
+ * Tool draft preview — nhóm file theo TC (+ package nếu khác nhau).
+ * Sửa/Xóa chỉ đổi draft; Update/Apply mới thay đổi source.
  */
 export function BatchStagingPreview({
   jobs,
@@ -253,7 +253,15 @@ export function BatchStagingPreview({
     setDraft("");
   }, [selected?.targetRel]);
 
-  const okCount = jobs.filter((j) => j.row.status === "ok").length;
+  // Một TC chỉ còn được tính khi draft của nó vẫn còn file; Xóa file cuối cùng
+  // phải kéo con số này xuống, không thì Verify/Update đếm việc không tồn tại.
+  const tcKeysWithFiles = useMemo(
+    () => new Set(allFiles.map((f) => f.jobKey)),
+    [allFiles]
+  );
+  const okJobs = jobs.filter((j) => j.row.status === "ok");
+  const okCount = okJobs.filter((j) => tcKeysWithFiles.has(j.row.key)).length;
+  const emptiedCount = okJobs.length - okCount;
   const failCount = failJobs.length;
   const waitingCount = jobs.filter(
     (j) =>
@@ -285,25 +293,19 @@ export function BatchStagingPreview({
       const targets = selectedIsShared
         ? siblingsForTarget(selected.targetRel)
         : [selected];
-      let synced = 0;
       const seenRuns = new Set<string>();
       for (const t of targets) {
         if (!t.runId || seenRuns.has(t.runId)) continue;
         seenRuns.add(t.runId);
-        const res = await updateWorkspaceFileContent(
+        await updateWorkspaceFileContent(
           projectRoot,
           t.runId,
           t.targetRel,
           draft,
           t.packagePrefix
         );
-        synced += res.syncedTargets.length;
       }
-      message.success(
-        synced > 0
-          ? `Đã lưu staging + source (${seenRuns.size} overlay)`
-          : `Đã lưu ${seenRuns.size} staging overlay`
-      );
+      message.success(`Đã lưu ${seenRuns.size} Tool draft; source chưa đổi`);
       setEditing(false);
       onFilesChanged?.();
     } catch (e) {
@@ -327,8 +329,9 @@ export function BatchStagingPreview({
             {selected.targetRel}
           </Typography.Text>
           {selectedIsShared
-            ? ` khỏi ${siblings.length} staging TC và file dưới AItest/ (nếu có).`
-            : " khỏi staging và file tương ứng dưới AItest/ (nếu đã có trên đĩa)."}{" "}
+            ? ` khỏi ${siblings.length} Tool draft.`
+            : " khỏi Tool draft."}{" "}
+          Xóa trên source chỉ xảy ra khi Update/Apply.{" "}
           Không đụng production SUT.
         </Typography.Paragraph>
       ),
@@ -338,21 +341,17 @@ export function BatchStagingPreview({
       onOk: async () => {
         try {
           const seenRuns = new Set<string>();
-          let synced = 0;
           for (const t of siblings) {
             if (!t.runId || seenRuns.has(t.runId)) continue;
             seenRuns.add(t.runId);
-            const res = await deleteWorkspaceFile(
+            await deleteWorkspaceFile(
               projectRoot,
               t.runId,
               t.targetRel,
               t.packagePrefix
             );
-            synced += res.syncedTargets.length;
           }
-          message.success(
-            synced > 0 ? "Đã xóa staging + source" : "Đã xóa khỏi staging"
-          );
+          message.success("Đã cập nhật Tool draft; source chưa đổi");
           setEditing(false);
           onFilesChanged?.();
         } catch (e) {
@@ -399,7 +398,7 @@ export function BatchStagingPreview({
   return (
     <Card
       id="aitest-batch-staging-preview"
-      title="2. Staging preview · Batch"
+      title="2. Tool draft preview · Batch"
       style={{ marginTop: 8 }}
       extra={
         <Space wrap>
@@ -408,6 +407,9 @@ export function BatchStagingPreview({
             <Tag color="purple">{sharedFiles.length} dùng chung</Tag>
           ) : null}
           <Tag color="success">{okCount} TC OK</Tag>
+          {emptiedCount > 0 ? (
+            <Tag color="warning">{emptiedCount} TC draft trống</Tag>
+          ) : null}
           {failCount > 0 ? <Tag color="error">{failCount} lỗi</Tag> : null}
           {pausedCount > 0 ? <Tag color="orange">{pausedCount} tạm dừng</Tag> : null}
           {waitingCount > 0 && pausedCount === 0 ? <Tag>{waitingCount} chờ</Tag> : null}
@@ -421,8 +423,10 @@ export function BatchStagingPreview({
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        title={`Đã sinh ${uniqueFileCount} file duy nhất từ ${okCount} TC`}
-        description="File scaffold / trùng path giữa nhiều TC nằm ở «Dùng chung». Mỗi TC chỉ còn file riêng."
+        title={`Đã sinh ${uniqueFileCount} file duy nhất từ ${okCount} TC${
+          emptiedCount > 0 ? ` · ${emptiedCount} TC không còn file` : ""
+        }`}
+        description="File scaffold / trùng path giữa nhiều TC nằm ở «Dùng chung». Mỗi TC chỉ còn file riêng. Sửa/Xóa chỉ đổi Tool draft; Update/Apply mới ghi vào AItest/. Xóa file cuối của một TC sẽ bỏ TC đó khỏi số lượng Verify/Update."
       />
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -431,7 +435,7 @@ export function BatchStagingPreview({
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {waitingCount > 0
                 ? "Đang Generate — file sẽ hiện dần khi từng TC xong."
-                : "Chưa có file staging."}
+                : "Chưa có file draft."}
             </Typography.Text>
           ) : (
             <>

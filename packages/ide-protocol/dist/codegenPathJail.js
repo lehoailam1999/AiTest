@@ -62,6 +62,8 @@ export function isAllowedUnitLayoutPath(safeRel) {
     const p = (safeRel || "").replace(/\\/g, "/").replace(/^\/+/, "");
     if (!p)
         return false;
+    if (/(?:^|\/)aitest\/test-cases(?:\/|$)/i.test(p))
+        return false;
     if (/\/unittest\//i.test(`/${p}/`))
         return true;
     const low = p.toLowerCase();

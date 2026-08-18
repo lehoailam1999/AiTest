@@ -1,10 +1,10 @@
 /**
- * Staging dirs for unit workspace runs.
- * Nested under the owning package when known (e.g. backend/.ai-test/…),
- * never at monorepo root for BE/FE sources.
+ * Opaque keys for Tool-internal Unit drafts.
+ * The Tauri draft store maps these keys to OS temp; they are never SUT paths.
  */
 export const AI_TEST_DIR = ".ai-test";
 export const AI_TEST_STAGING_DIR = "staging";
+export const AI_TEST_LOGS_DIR = "logs";
 
 function normPkg(packagePrefix?: string | null): string {
   return (packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
@@ -17,14 +17,15 @@ export function aiTestDir(packagePrefix?: string | null): string {
 }
 
 export function workspaceRunDir(runId: string, packagePrefix?: string | null): string {
-  return `${aiTestDir(packagePrefix)}/${AI_TEST_STAGING_DIR}/${runId}`;
+  void packagePrefix;
+  return `unit-runs/${runId}`;
 }
 
 export function manifestRelPath(runId: string, packagePrefix?: string | null): string {
   return `${workspaceRunDir(runId, packagePrefix)}/manifest.json`;
 }
 
-/** Overlay file path relative to project root. */
+/** Overlay key relative to the Tool's private draft root. */
 export function overlayRelPath(
   runId: string,
   targetRel: string,

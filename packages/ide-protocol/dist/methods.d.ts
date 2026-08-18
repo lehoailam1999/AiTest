@@ -34,8 +34,10 @@ export declare const IdeMethods: {
     /** Phase 2 — AI CLI / workspace session reuse */
     readonly codegenOpenSession: "aitest/codegen.openSession";
     readonly codegenCloseSession: "aitest/codegen.closeSession";
-    /** Phase C — sync Approved TC markdown into `.ai-test/test-cases/` */
+    /** Phase C — sync Approved TC markdown into `AItest/test-cases/` */
     readonly tcSyncApprovedMd: "aitest/tc.syncApprovedMd";
+    /** Unit Approve v2 — IDE Repository Intelligence resolve */
+    readonly unitApproveResolve: "aitest/unitApprove.resolve";
 };
 export type IdeMethodName = (typeof IdeMethods)[keyof typeof IdeMethods];
 /** Plugin → Desktop notifications (no id / no response) */

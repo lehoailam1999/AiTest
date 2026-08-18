@@ -84,7 +84,9 @@ export declare class IdeRpcClient {
     /** Phase 2 — open reusable AI CLI / workspace session */
     codegenOpenSession(params: import("./codegenTypes.js").CodegenOpenSessionParams): Promise<import("./codegenTypes.js").CodegenOpenSessionResult>;
     codegenCloseSession(params: import("./codegenTypes.js").CodegenCloseSessionParams): Promise<import("./codegenTypes.js").CodegenCloseSessionResult>;
-    /** Phase C — write Approved TC markdown under `.ai-test/test-cases/` */
+    /** Phase C — write Approved TC markdown under `AItest/test-cases/` */
     tcSyncApprovedMd(params: import("./tcTypes.js").TcSyncApprovedMdParams): Promise<import("./tcTypes.js").TcSyncApprovedMdResult>;
+    /** Unit Approve v2 — IDE Repository Intelligence */
+    unitApproveResolve(params: import("./unitApproveRpc.js").UnitApproveResolveParams): Promise<import("./unitApproveRpc.js").UnitApproveResolveResult>;
 }
 export declare function rpcIdKey(id: JsonRpcId): string;

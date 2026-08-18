@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactElement } from "react";
 import {
   App,
   Button,
@@ -10,6 +10,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import {
@@ -26,12 +27,18 @@ import { applyManyWorkspacesToRepo } from "../../lib/unitWorkspace/applyManager"
 import { runCombinedBatchVerify } from "../../lib/unitWorkspace/combinedBatchVerify";
 import { discardWorkspaceRuns } from "../../lib/unitWorkspace/discardManager";
 import {
+  emptiedDraftRowCount,
+  rowsWithPendingDraft,
+  type DraftEntryCounts,
+} from "../../lib/unitWorkspace/draftInventory";
+import {
   batchVerifyPass,
   extractFailedPathTokens,
   extractUnitFailureExcerpt,
 } from "../../lib/unitWorkspace/batchVerifyFailureMap";
 import {
   formatVerifyStagesLog,
+  readErrorLogFile,
   saveErrorLogFile,
   unitErrorLogRel,
   unitVerifyLogRel,
@@ -46,7 +53,7 @@ import type {
 } from "../../lib/unitWorkspace/types";
 import { suggestWorkspaceVerifyCommands } from "../../lib/stackHints";
 import type { ProjectMeta, StackInspect, TestCase } from "../../api/types";
-import { isTauri, readTextFile } from "../../tauri/bridge";
+import { isTauri } from "../../tauri/bridge";
 import { labelOf, priorityLabel, typeLabel } from "../../i18n/labels";
 import { unitJobMetricByJobId } from "../../lib/unitJobMetrics";
 
@@ -54,6 +61,24 @@ import { unitJobMetricByJobId } from "../../lib/unitJobMetrics";
 export const BATCH_NOTE_WAITING = "Đang chờ…";
 export const BATCH_NOTE_PAUSED = "Tạm dừng — chờ Tiếp tục";
 export const BATCH_NOTE_RUNNING = "Đang chạy…";
+
+/**
+ * Long generate/verify errors used to widen the whole page: a `max-content`
+ * table cannot wrap them, so the cell must cap its own width instead.
+ */
+function ClampedCell({
+  text,
+  lines,
+}: {
+  text: string;
+  lines: 1 | 2;
+}): ReactElement {
+  return (
+    <Tooltip title={text} placement="topLeft">
+      <div className={`batch-clamp batch-clamp-${lines}`}>{text}</div>
+    </Tooltip>
+  );
+}
 
 export function isBatchQueueNote(error?: string | null): boolean {
   return (
@@ -179,8 +204,13 @@ type Props = {
   generateFailCount?: number;
   onDiscarded?: () => void;
   /**
+   * rowKey → draft entries còn lại (Sửa/Xóa trong Tool draft làm số này đổi).
+   * Thiếu key = chưa load manifest → coi như còn việc, không chặn Verify/Update.
+   */
+  draftEntryCounts?: DraftEntryCounts;
+  /**
    * table — chỉ bảng trạng thái (trong card Generate)
-   * verifyApply — mục 3: nút Verify/Apply/Hủy (dưới Staging preview)
+   * verifyApply — mục 3: nút Verify/Update/Hủy (dưới Tool draft preview)
    */
   variant?: "table" | "verifyApply";
 };
@@ -204,6 +234,7 @@ export function BatchRunConsole({
   onRetryGenerateFails,
   generateFailCount = 0,
   onDiscarded,
+  draftEntryCounts,
   variant = "table",
 }: Props) {
   const { message, modal } = App.useApp();
@@ -254,7 +285,15 @@ export function BatchRunConsole({
 
   const verifyDone = rows.filter((r) => r.verifyStatus === "pass").length;
   const applyDone = rows.filter((r) => r.applyStatus === "done").length;
-  const genOk = rows.filter((r) => r.status === "ok" && r.workspaceRunId).length;
+  const genOkRows = useMemo(
+    () => rowsWithPendingDraft(rows, draftEntryCounts),
+    [rows, draftEntryCounts]
+  );
+  const genOk = genOkRows.length;
+  const emptiedDrafts = useMemo(
+    () => emptiedDraftRowCount(rows, draftEntryCounts),
+    [rows, draftEntryCounts]
+  );
 
   const logSummary = useMemo(
     () =>
@@ -306,9 +345,13 @@ export function BatchRunConsole({
 
   async function runVerifyAll() {
     if (!isTauri()) return;
-    const work = rows.filter((r) => r.status === "ok" && r.workspaceRunId);
+    const work = genOkRows;
     if (work.length === 0) {
-      message.info("Không có job Generate OK để Verify.");
+      message.info(
+        emptiedDrafts > 0
+          ? "Mọi Tool draft đã bị xóa hết file — Gen lại trước khi Verify."
+          : "Không có job Generate OK để Verify."
+      );
       return;
     }
     const { preserveGeneratePause } = beginSidePhase();
@@ -317,7 +360,7 @@ export function BatchRunConsole({
       total: work.length,
       label: preserveGeneratePause
         ? `Verify ${work.length} unit đã gen (Generate đang tạm dừng)`
-        : `Staging ${work.length} job → chạy 1 lệnh test`,
+        : `Nạp ${work.length} Tool draft → chạy 1 lệnh test`,
       phase: "verify",
     });
     try {
@@ -327,7 +370,7 @@ export function BatchRunConsole({
         if (m) manifests.push(m);
       }
       if (manifests.length === 0) {
-        message.error("Không load được staging nào.");
+        message.error("Không load được Tool draft nào.");
         return;
       }
       // Resolve commands from real overlay paths (batch UI often has targetRelPaths=[]).
@@ -370,9 +413,18 @@ export function BatchRunConsole({
       const promotions: Promise<void>[] = [];
       const fullVerifyLog = formatVerifyStagesLog(result.stages);
       const nextRows: BatchPipelineRow[] = [];
+      const workKeys = new Set(work.map((r) => r.key));
       for (const r of rows) {
         if (!r.workspaceRunId || r.status !== "ok") {
           nextRows.push({ ...r, verifyStatus: "skipped" as const });
+          continue;
+        }
+        if (!workKeys.has(r.key)) {
+          nextRows.push({
+            ...r,
+            verifyStatus: "skipped" as const,
+            error: "Tool draft trống — đã xóa hết file gen",
+          });
           continue;
         }
         const m = byRun.get(r.workspaceRunId);
@@ -380,8 +432,8 @@ export function BatchRunConsole({
           nextRows.push({
             ...r,
             verifyStatus: "fail" as const,
-            error: "Thiếu staging sau verify",
-            errorDetail: "Thiếu staging sau verify",
+            error: "Thiếu Tool draft sau verify",
+            errorDetail: "Thiếu Tool draft sau verify",
           });
           continue;
         }
@@ -498,13 +550,13 @@ export function BatchRunConsole({
     if (!isTauri()) return;
     const work = rows.filter((r) => r.workspaceRunId);
     if (work.length === 0) {
-      message.info("Không có staging để hủy.");
+      message.info("Không có Tool draft để hủy.");
       return;
     }
     modal.confirm({
       title: `Hủy bỏ ${work.length} Unit Job?`,
       content:
-        "Không Apply. Xóa file đã gen dưới AItest/ (nếu còn trên đĩa) và dọn toàn bộ staging .ai-test/staging. Production src không bị đụng.",
+        "Không Update/Apply. Chỉ xóa Tool draft; source AItest/ không thay đổi.",
       okText: "Hủy bỏ & xóa file gen",
       okType: "danger",
       onOk: async () => {
@@ -556,6 +608,18 @@ export function BatchRunConsole({
   async function runApplyAll() {
     if (!isTauri()) return;
     const work = rows.filter((r) => r.verifyStatus === "pass");
+    const failedUnits = rows
+      .filter(
+        (r) =>
+          r.status === "fail" &&
+          !isBatchQueueNote(r.error) &&
+          r.error !== "Đã hủy bỏ"
+      )
+      .map((r) => ({
+        // row.key is the stable TestCase id stored in UnitWorkspaceManifest.
+        testCaseId: r.key,
+        packagePrefix: r.packagePrefix,
+      }));
     if (work.length === 0) {
       message.info("Chưa có dòng Verify PASS để Apply.");
       return;
@@ -563,7 +627,11 @@ export function BatchRunConsole({
     modal.confirm({
       title: `Apply ${work.length} job vào AItest/?`,
       content:
-        "Ghi đủ file vào AItest/, rồi dọn từng staging. Không đụng production src.",
+        `Update đủ file vào AItest/UnitTest, rồi dọn Tool draft. ` +
+        (failedUnits.length
+          ? `${failedUnits.length} TC Generate lỗi sẽ tự xóa file test cũ do chính TC đó sở hữu. `
+          : "") +
+        "File dùng chung với TC thành công được giữ nguyên. Không đụng production src.",
       okText: "Apply tất cả",
       onOk: async () => {
         const { preserveGeneratePause } = beginSidePhase();
@@ -596,7 +664,7 @@ export function BatchRunConsole({
                 map.set(row.key, {
                   ...cur,
                   applyStatus: "skipped",
-                  error: "Thiếu staging",
+                  error: "Thiếu Tool draft",
                 });
                 continue;
               }
@@ -607,14 +675,14 @@ export function BatchRunConsole({
               map.set(row.key, {
                 ...cur,
                 applyStatus: "skipped",
-                error: e instanceof Error ? e.message : "Load staging lỗi",
+                error: e instanceof Error ? e.message : "Load Tool draft lỗi",
               });
             }
           }
           onRowsChange([...map.values()]);
 
           if (toApply.length === 0) {
-            message.warning("Không có staging để Apply.");
+            message.warning("Không có Tool draft để Update.");
             return;
           }
 
@@ -625,7 +693,13 @@ export function BatchRunConsole({
             phase: "apply",
           });
 
-          const { results } = await applyManyWorkspacesToRepo(projectRoot, toApply);
+          const {
+            results,
+            deletedFailedPaths,
+            failedCleanupErrors,
+          } = await applyManyWorkspacesToRepo(projectRoot, toApply, {
+            failedUnits,
+          });
           for (const r of results) {
             const key = runKey.get(r.runId);
             if (!key) continue;
@@ -636,7 +710,7 @@ export function BatchRunConsole({
                 ...cur,
                 applyStatus: "done",
                 error: undefined,
-                // Staging removed with .ai-test — clear pointer so UI doesn't reload ghosts.
+                // Tool draft was removed — clear pointer so UI does not reload ghosts.
                 workspaceRunId: undefined,
               });
             } else {
@@ -649,9 +723,18 @@ export function BatchRunConsole({
           }
           onRowsChange([...map.values()]);
           const okN = results.filter((r) => r.ok).length;
-          message.success(
-            `Đã Apply ${okN}/${toApply.length} job vào AItest/ · đã xóa .ai-test staging`
-          );
+          if (failedCleanupErrors.length) {
+            message.warning(
+              `Đã Update ${okN}/${toApply.length} job; xóa ${deletedFailedPaths.length} file của TC lỗi, ` +
+                `${failedCleanupErrors.length} file chưa xóa được và sẽ thử lại ở lần Apply sau.`
+            );
+          } else {
+            message.success(
+              `Đã Update ${okN}/${toApply.length} job vào AItest/UnitTest · ` +
+                `xóa ${deletedFailedPaths.length} file của ${failedUnits.length} TC Generate lỗi · ` +
+                "đã dọn Tool draft"
+            );
+          }
         } catch (e) {
           message.error(e instanceof Error ? e.message : "Apply batch lỗi");
         } finally {
@@ -673,7 +756,7 @@ export function BatchRunConsole({
     let body = resolveErrorBody(r);
     if (r.errorLogRel && isTauri()) {
       try {
-        const fromDisk = await readTextFile(projectRoot, r.errorLogRel);
+        const fromDisk = await readErrorLogFile(projectRoot, r.errorLogRel);
         if (fromDisk?.trim()) body = fromDisk.trim();
       } catch {
         // keep in-memory body
@@ -831,6 +914,11 @@ export function BatchRunConsole({
         {" · "}
         Apply {applyDone}/{verifyDone || genOk}
       </Typography.Text>
+      {emptiedDrafts > 0 ? (
+        <Tooltip title="Đã xóa hết file gen trong Tool draft — Gen lại nếu vẫn cần test case này.">
+          <Tag color="warning">{emptiedDrafts} TC draft trống</Tag>
+        </Tooltip>
+      ) : null}
       {variant === "table" ? (
         <>
           <Button
@@ -950,7 +1038,7 @@ export function BatchRunConsole({
             <>
               <strong>Kiểm thử tất cả</strong> chạy <strong>một lệnh test</strong> cho toàn bộ unit
               Generate OK trong batch — không phụ thuộc bộ lọc bảng. Apply ghi từng job PASS vào
-              AItest/. Hủy bỏ = không Apply + xóa file gen + dọn staging.
+              AItest/UnitTest. Hủy bỏ = không Update + xóa Tool draft.
             </>
           )}
         </Typography.Paragraph>
@@ -1152,15 +1240,21 @@ export function BatchRunConsole({
       {statusSummary}
       <Table
         size="small"
+        className="batch-run-table"
         pagination={false}
         rowKey="key"
         dataSource={visible}
-        // Avoid fixed horizontal scroll width that can overflow the page layout.
-        // Let AntD calculate based on content.
+        // Content-sized so short rows never scroll; the text columns cap their
+        // own width so a long note cannot widen the page.
         scroll={{ x: "max-content" }}
         columns={[
           { title: "TC", dataIndex: "testCaseId", width: 90 },
-          { title: "Tiêu đề", dataIndex: "title", ellipsis: true },
+          {
+            title: "Tiêu đề",
+            dataIndex: "title",
+            width: 260,
+            render: (v: string) => <ClampedCell text={v || ""} lines={1} />,
+          },
           {
             title: "Generate",
             width: 90,
@@ -1206,7 +1300,7 @@ export function BatchRunConsole({
           {
             title: "Ghi chú",
             dataIndex: "error",
-            ellipsis: true,
+            width: 320,
             render: (v, r) => {
               if (r.error === BATCH_NOTE_PAUSED) {
                 return <Typography.Text type="warning">{BATCH_NOTE_PAUSED}</Typography.Text>;
@@ -1222,7 +1316,7 @@ export function BatchRunConsole({
                 return (
                   <Space size={0} wrap>
                     <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
-                      {r.workspaceRunId?.slice(0, 8) ?? "staging"}
+                      {r.workspaceRunId?.slice(0, 8) ?? "draft"}
                     </Typography.Text>
                     {perf?.cliTimeMs != null ? (
                       <Tag color="blue" style={{ fontSize: 11 }}>
@@ -1241,7 +1335,7 @@ export function BatchRunConsole({
                   </Space>
                 );
               }
-              return v;
+              return <ClampedCell text={String(v ?? "")} lines={2} />;
             },
           },
           actionColumn,

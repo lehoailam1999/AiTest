@@ -1,8 +1,12 @@
-import { runDotnetTest, runTestCommand, writeTextFile, readTextFile, deleteTextFile, type TestRunResult } from "../../tauri/bridge";
+import { runDotnetTest, runTestCommand, deleteTextFile, type TestRunResult } from "../../tauri/bridge";
 import { saveManifest } from "./manager";
 import { syncVerifyReport } from "./auditSync";
 import { syncCoverageAfterVerify } from "./coverageSync";
-import { preserveStagedOverlays, stageOverlayToTargets } from "./staging";
+import {
+  captureStagingBackups,
+  rollbackStaging,
+  stageOverlayToTargets,
+} from "./staging";
 import type {
   UnitWorkspaceManifest,
   VerifyReport,
@@ -12,6 +16,7 @@ import type {
 import { workspaceRunDir } from "./paths";
 import { pushTimeline } from "./unitJobEvents";
 import { recordUnitJobMetric } from "../unitJobMetrics";
+import { readDraftText, writeDraftText } from "./draftStore";
 import {
   buildAitestJestCommand,
   ensureAitestJestTsconfigInWorkspace,
@@ -164,6 +169,7 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
   await saveManifest(projectRoot, working);
 
   const stages: VerifyStageResult[] = [];
+  let verifyBackups: Awaited<ReturnType<typeof captureStagingBackups>> = [];
 
   try {
     // Refresh Jest scaffold + rewrite imports so verify works on any Nest/TS project.
@@ -184,19 +190,13 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
         for (const f of working.files) {
           if (f.op === "delete") continue;
           try {
-            let body = await readTextFile(projectRoot, f.workspaceRel);
+            let body = await readDraftText(projectRoot, f.workspaceRel);
             if (!looksLikeJestTsTest(f.targetRel, body)) continue;
             body = rewriteSutImports(body, {
               testRel: f.targetRel,
               sourceRel: srcName,
             });
-            await writeTextFile(projectRoot, f.workspaceRel, body);
-            // Persist rewrite on target before backup so rollback keeps fixed imports.
-            try {
-              await writeTextFile(projectRoot, f.targetRel, body);
-            } catch {
-              /* stage will still write */
-            }
+            await writeDraftText(projectRoot, f.workspaceRel, body);
           } catch {
             /* skip unreadable overlay */
           }
@@ -214,6 +214,7 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
       await saveManifest(projectRoot, working);
     }
 
+    verifyBackups = await captureStagingBackups(projectRoot, working);
     await stageOverlayToTargets(projectRoot, working);
 
     const csharpHost = manifestHasAitestCsharpTests(working);
@@ -317,7 +318,7 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
     });
 
     const logBody = stages.map((s) => `=== ${s.stage} (${s.success ? "PASS" : "FAIL"}) ===\n${s.logExcerpt}`).join("\n\n");
-    await writeTextFile(
+    await writeDraftText(
       projectRoot,
       `${workspaceRunDir(working.runId, working.packagePrefix)}/logs/verify.log`,
       logBody
@@ -325,7 +326,13 @@ export async function runWorkspaceVerify(input: RunVerifyInput): Promise<{
 
     return { manifest: working, report };
   } finally {
-    // Keep staged AItest on disk until Apply / Discard.
-    await preserveStagedOverlays(projectRoot, [working]);
+    // Verify may stage briefly so the native runner can see files, but source is
+    // restored immediately. Only Update/Apply persists the Tool draft.
+    await rollbackStaging(
+      projectRoot,
+      working.runId,
+      verifyBackups,
+      working.packagePrefix
+    );
   }
 }

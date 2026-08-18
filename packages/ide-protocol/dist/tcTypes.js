@@ -1,4 +1,4 @@
 /**
- * Approved TC → `.ai-test/test-cases/*.md` sync (Phase C).
+ * Approved TC → `AItest/test-cases/*.md` (+ `.grounding.json`) sync (Phase C).
  */
 export {};

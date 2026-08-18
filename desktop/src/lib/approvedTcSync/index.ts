@@ -1,18 +1,31 @@
 /**
- * Phase C — sync Approved TC markdown into project `.ai-test/test-cases/{UnitTest|E2ETest}/`.
+ * Phase C — sync Approved TC markdown into project `AItest/test-cases/{UnitTest|E2ETest}/`.
  * Renderer-safe: chỉ dùng Tauri writeTextFile (+ IDE). Không import node:fs.
  */
-import { parseBridgeDiscoveryJson } from "@aitest/ide-protocol";
+import {
+  AI_TEST_CASES_DIR,
+  LEGACY_AI_TEST_CASES_DIR,
+  parseBridgeDiscoveryJson,
+  type UnitApprovalDecision,
+} from "@aitest/ide-protocol";
 import { testcases } from "../../api";
 import type { TestCase } from "../../api/types";
-import { isTauri, listSourceFiles, readIdeBridgeDiscovery, readTextFile, writeTextFile } from "../../tauri/bridge";
+import {
+  deleteTextFile,
+  isTauri,
+  listSourceFiles,
+  readIdeBridgeDiscovery,
+  readTextFile,
+  writeTextFile,
+} from "../../tauri/bridge";
 import { getIdeRpcClientOrNull, useIdeBridgeSession } from "../ideBridge/session";
 import { newCodegenCommandId } from "../ideProtocol/codegenCommands";
 import {
   buildApprovedTcMarkdownFiles,
+  approvedTcMarkdownRelPath,
+  renderApprovedTestCaseMarkdown,
   type ApprovedTcMdFile,
 } from "./approvedTcMarkdown";
-import { enrichApprovedCasesWithUnitMarkers } from "./enrichUnitMarkersFromIndex";
 import { enrichApprovedCasesWithE2eMarkers } from "./enrichE2eMarkersFromIndex";
 import { mergeRequirementTitleFillGap } from "./requirementTitleFillGap";
 import { buildRequirementTitleByCaseKey } from "./resolveRequirementTitles";
@@ -20,9 +33,12 @@ import { createTauriProfileIo } from "../projectProfile/tauriIo";
 import { loadGenerateGroundingProfile } from "../e2eWorkspace/generateGrounding";
 import { loadOrBuildE2eRouteCatalog } from "../e2eWorkspace/e2eRouteCatalogCache";
 import type { E2eRouteCatalog } from "../e2eWorkspace/e2eRouteCatalog";
-import { loadIndexSnapshot } from "../codeIndex/indexStore";
-import { createTauriCodeIndexIo } from "../codeIndex/tauriIo";
-import { buildUnitGroundingContractFiles } from "./unitSourceGroundingContract";
+import { loadUnitEnrichProfileKnobs } from "./loadUnitEnrichProfile";
+import {
+  buildGroundingJsonFromDecision,
+  unitGroundingContractRelPath,
+} from "./unitSourceGroundingContract";
+import { isE2eTestCaseType } from "../testEngine";
 
 export {
   parseApprovedTcGrounding,
@@ -37,25 +53,13 @@ export {
 } from "./approvedTcMarkdown";
 
 export {
-  buildUnitSourceGroundingContract,
-  buildUnitGroundingContractFiles,
+  buildGroundingJsonFromDecision,
   unitGroundingContractRelPath,
   serializeUnitSourceGroundingContract,
-  parseConfidenceFromTestData,
   UNIT_GROUNDING_CONTRACT_SCHEMA,
   type UnitSourceGroundingContract,
-  type BuildUnitSourceGroundingContractInput,
+  type UnitDecisionGroundingJson,
 } from "./unitSourceGroundingContract";
-
-export {
-  enrichApprovedCasesWithUnitMarkers,
-  enrichTestDataWithUnitMarkers,
-  enrichTcTestDataFromIndex,
-  enrichTcTestDataFromIndexAsync,
-  hasUnitPathCodeMarkers,
-  pickConfidentUnitSeed,
-  UNIT_AUTO_MARKER,
-} from "./enrichUnitMarkersFromIndex";
 
 export {
   enrichApprovedCasesWithE2eMarkers,
@@ -93,7 +97,10 @@ async function persistEnrichedTestDataToDb(
     const prev = byId.get(tc.id);
     const nextTd = String(tc.testData || "").trim();
     const prevTd = String(prev?.testData || "").trim();
-    return Boolean(nextTd && nextTd !== prevTd);
+    return Boolean(
+      (nextTd && nextTd !== prevTd) ||
+        tc.automationReady !== prev?.automationReady
+    );
   });
   if (!toSync.length) return 0;
 
@@ -105,7 +112,10 @@ async function persistEnrichedTestDataToDb(
       chunk.map(async (tc) => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           try {
-            await testcases.update(tc.id, { testData: tc.testData });
+            await testcases.update(tc.id, {
+              testData: tc.testData ?? undefined,
+              automationReady: tc.automationReady,
+            });
             return true;
           } catch {
             if (attempt === 0) {
@@ -216,7 +226,8 @@ async function writeViaTauri(
 async function writeViaIde(
   projectId: string,
   root: string,
-  files: ApprovedTcMdFile[]
+  files: ApprovedTcMdFile[],
+  deletePaths?: string[]
 ): Promise<SyncApprovedTcMdResult> {
   const client = getIdeRpcClientOrNull();
   if (!client?.isConnected) {
@@ -234,9 +245,15 @@ async function writeViaIde(
     projectId,
     projectRoot: root,
     files: files.map((f) => ({ path: f.path, content: f.content })),
+    deletePaths,
   });
   const written = result.files
-    .filter((f) => f.status === "CREATED" || f.status === "UPDATED")
+    .filter(
+      (f) =>
+        f.status === "CREATED" ||
+        f.status === "UPDATED" ||
+        f.status === "DELETED"
+    )
     .map((f) => f.path);
   const errors = result.files
     .filter((f) => f.status === "REJECTED_JAIL" || f.status === "ERROR")
@@ -248,7 +265,7 @@ async function writeViaIde(
     written,
     errors,
     projectRoot: root,
-    message: `Đã ghi ${written.length} TC → ${root}/.ai-test/test-cases/{UnitTest|E2ETest}/ (IDE)`,
+    message: `Đã ghi ${written.length} TC → ${root}/AItest/test-cases/{UnitTest|E2ETest}/ (IDE)`,
   };
 }
 
@@ -324,6 +341,9 @@ export async function syncApprovedTestCasesMd(opts: {
   let e2eModuleMap: Record<string, string> = {};
   let e2eFallbackRole: string | null = null;
   let e2eRouteCatalog: E2eRouteCatalog | null = null;
+  let e2eSemanticAliases: Record<string, string | string[]> = {
+    ...(opts.codeAliases || {}),
+  };
   let catalogNote = "";
   try {
     if (isTauri() && root) {
@@ -335,6 +355,12 @@ export async function syncApprovedTestCasesMd(opts: {
       e2eFallbackRole =
         (projectProfile?.auth?.roles || []).find((r) => (r || "").trim())?.trim() ||
         null;
+      const aliasKnobs = await loadUnitEnrichProfileKnobs(root);
+      e2eSemanticAliases = {
+        ...(aliasKnobs.codeAliases || {}),
+        ...(aliasKnobs.fieldAliases || {}),
+        ...e2eSemanticAliases,
+      };
 
       // One catalog build/cache hit per Approve batch — routing files only (≤40).
       const hasE2e = approved.some((tc) => {
@@ -366,41 +392,23 @@ export async function syncApprovedTestCasesMd(opts: {
     /* profile optional */
   }
   try {
-    const enrichedUnit = await enrichApprovedCasesWithUnitMarkers({
-      projectId: opts.projectId,
-      projectRoot: root,
-      cases: approved,
-      requirementTitle: opts.requirementTitle,
-      requirementTitleByCaseKey,
-      codeAliases: opts.codeAliases,
-      allSourcePaths: opts.allSourcePaths,
-    });
-    casesToWrite = enrichedUnit.cases;
-
     const enrichedE2e = await enrichApprovedCasesWithE2eMarkers({
-      cases: casesToWrite,
+      cases: approved.filter((tc) => isE2eTestCaseType(tc.type)),
       moduleMap: e2eModuleMap,
       fallbackRole: e2eFallbackRole,
       requirementTitle: opts.requirementTitle,
       requirementTitleByCaseKey,
       routeCatalog: e2eRouteCatalog,
+      semanticAliases: e2eSemanticAliases,
     });
-    casesToWrite = enrichedE2e.cases;
+    const e2eById = new Map(enrichedE2e.cases.map((tc) => [tc.id, tc]));
+    casesToWrite = approved.map((tc) => e2eById.get(tc.id) || tc);
 
-    const totalEnriched = enrichedUnit.enrichedCount + enrichedE2e.enrichedCount;
-    if (totalEnriched > 0) {
-      const via = enrichedUnit.usedCodeIndex ? "index.db" : "path-index";
-      const retryNote =
-        (enrichedUnit.retryEnrichedCount || 0) > 0
-          ? `, retry:${enrichedUnit.retryEnrichedCount}`
-          : "";
+    if (enrichedE2e.enrichedCount > 0) {
       const mapNote = Object.keys(e2eModuleMap).length
         ? `, moduleMap:${Object.keys(e2eModuleMap).length}`
         : "";
-      enrichNote = ` · auto-enrich: ${totalEnriched}/${approved.length} (Unit:${enrichedUnit.enrichedCount}, E2E:${enrichedE2e.enrichedCount}${retryNote}${mapNote}${catalogNote}) via ${via}`;
-    } else if (enrichedUnit.indexFileCount > 0) {
-      const via = enrichedUnit.usedCodeIndex ? "index.db" : "path-index";
-      enrichNote = ` · ${via} ${enrichedUnit.indexFileCount} files (chưa đủ tin cậy để auto-marker)${catalogNote}`;
+      enrichNote = ` · auto-enrich E2E: ${enrichedE2e.enrichedCount}/${approved.length}${mapNote}${catalogNote}`;
     } else if (catalogNote) {
       enrichNote = ` · e2e-catalog${catalogNote}`;
     }
@@ -415,22 +423,20 @@ export async function syncApprovedTestCasesMd(opts: {
     fallbackRole: e2eFallbackRole,
   });
 
-  // Layer 5 — companion .grounding.json beside Unit MD (when path:/code: present)
-  let contractFiles: ApprovedTcMdFile[] = [];
-  try {
-    let snap = null;
-    if (isTauri() && root) {
-      snap = await loadIndexSnapshot(root, createTauriCodeIndexIo());
-    }
-    contractFiles = buildUnitGroundingContractFiles(casesToWrite, {
-      codeIndex: snap,
-    });
-  } catch {
-    contractFiles = buildUnitGroundingContractFiles(casesToWrite, {
-      codeIndex: null,
-    });
-  }
+  // Unit companions are written only by writeUnitDecisionArtifacts from the
+  // immutable IDE decision. This legacy sync path is E2E-only.
+  const contractFiles: ApprovedTcMdFile[] = [];
   const files = [...mdFiles, ...contractFiles];
+  const legacyDeletePaths = files
+    .map((file) =>
+      file.path.replace(
+        new RegExp(
+          `^${AI_TEST_CASES_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`
+        ),
+        LEGACY_AI_TEST_CASES_DIR
+      )
+    )
+    .filter((path, index, all) => path !== files[index]?.path && all.indexOf(path) === index);
   const contractNote =
     contractFiles.length > 0 ? ` · grounding:${contractFiles.length}` : "";
 
@@ -439,13 +445,20 @@ export async function syncApprovedTestCasesMd(opts: {
   if (isTauri()) {
     const disk = await writeViaTauri(root, files);
     if (disk.written.length > 0) {
+      for (const legacyPath of legacyDeletePaths) {
+        try {
+          await deleteTextFile(root, legacyPath);
+        } catch {
+          /* missing legacy artifact is expected */
+        }
+      }
       const dbSyncedCount = await persistEnrichedTestDataToDb(approved, casesToWrite);
       const dbNote =
         dbSyncedCount > 0 ? ` · DB markers ${dbSyncedCount}` : "";
       const client = getIdeRpcClientOrNull();
       if (client?.isConnected) {
         try {
-          await writeViaIde(opts.projectId, root, files);
+          await writeViaIde(opts.projectId, root, files, legacyDeletePaths);
         } catch {
           /* disk ok */
         }
@@ -459,14 +472,19 @@ export async function syncApprovedTestCasesMd(opts: {
         projectRoot: root,
         warning,
         dbSyncedCount,
-        message: `Đã ghi ${disk.written.length} file → ${root}/.ai-test/test-cases/{UnitTest|E2ETest}/${enrichNote}${contractNote}${dbNote}`,
+        message: `Đã ghi ${disk.written.length} file → ${root}/AItest/test-cases/{UnitTest|E2ETest}/${enrichNote}${contractNote}${dbNote}`,
       };
     }
     // Tauri failed — try IDE
     const client = getIdeRpcClientOrNull();
     if (client?.isConnected) {
       try {
-        const ide = await writeViaIde(opts.projectId, root, files);
+        const ide = await writeViaIde(
+          opts.projectId,
+          root,
+          files,
+          legacyDeletePaths
+        );
         if (ide.written.length) {
           const dbSyncedCount = await persistEnrichedTestDataToDb(
             approved,
@@ -521,7 +539,12 @@ export async function syncApprovedTestCasesMd(opts: {
   const client = getIdeRpcClientOrNull();
   if (client?.isConnected) {
     try {
-      const ide = await writeViaIde(opts.projectId, root, files);
+      const ide = await writeViaIde(
+        opts.projectId,
+        root,
+        files,
+        legacyDeletePaths
+      );
       if (ide.written.length) {
         const dbSyncedCount = await persistEnrichedTestDataToDb(
           approved,
@@ -592,4 +615,104 @@ export async function syncApprovedTestCasesMdBestEffort(opts: {
       message: msg,
     };
   }
+}
+
+/**
+ * Unit Approve v2 artifact writer. It never scans or re-resolves source: both
+ * markdown markers and the companion JSON are projections of one IDE decision.
+ */
+export async function writeUnitDecisionArtifacts(
+  decision: UnitApprovalDecision,
+  tc: TestCase,
+  opts: {
+    projectId: string;
+    projectRoot: string | null | undefined;
+    requirementTitle?: string | null;
+    deletePaths?: string[];
+  }
+): Promise<SyncApprovedTcMdResult> {
+  const { root, warning } = await resolveSyncProjectRoot(opts.projectRoot);
+  const mdPath = approvedTcMarkdownRelPath(tc);
+  const groundingPath = unitGroundingContractRelPath(mdPath);
+  const files: ApprovedTcMdFile[] = [
+    {
+      path: mdPath,
+      content: renderApprovedTestCaseMarkdown(tc, {
+        requirementTitle: opts.requirementTitle,
+        unitDecision: decision,
+      }),
+      testCaseId: tc.testCaseId,
+    },
+    {
+      path: groundingPath,
+      content: `${JSON.stringify(buildGroundingJsonFromDecision(decision), null, 2)}\n`,
+      testCaseId: tc.testCaseId,
+    },
+  ];
+  if (!root) {
+    return {
+      ok: false,
+      via: "skipped",
+      files,
+      written: [],
+      errors: [warning || "No project root"],
+      warning,
+    };
+  }
+  const currentPaths = new Set(files.map((file) => file.path.toLowerCase()));
+  const legacyMdPath = mdPath.replace(
+    new RegExp(`^${AI_TEST_CASES_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    LEGACY_AI_TEST_CASES_DIR
+  );
+  const legacyGroundingPath = unitGroundingContractRelPath(legacyMdPath);
+  const deletePaths = [
+    ...new Set([
+      ...(opts.deletePaths || []),
+      legacyMdPath,
+      legacyGroundingPath,
+    ]),
+  ].filter(
+    (path) => !currentPaths.has(path.replace(/\\/g, "/").toLowerCase())
+  );
+
+  if (isTauri()) {
+    const disk = await writeViaTauri(root, files);
+    for (const path of deletePaths) {
+      try {
+        await deleteTextFile(root, path);
+        disk.written.push(path.replace(/\\/g, "/"));
+      } catch (error) {
+        disk.errors.push(
+          `${path}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+    const client = getIdeRpcClientOrNull();
+    if (client?.isConnected) {
+      try {
+        await writeViaIde(opts.projectId, root, files, deletePaths);
+      } catch {
+        /* disk is authoritative for artifact persistence */
+      }
+    }
+    return {
+      ok: disk.errors.length === 0 && disk.written.length >= files.length,
+      via: "tauri",
+      files,
+      written: disk.written,
+      errors: disk.errors,
+      projectRoot: root,
+      warning,
+      message: `Đã ghi Unit approval decision → ${groundingPath}`,
+    };
+  }
+
+  const ide = await writeViaIde(opts.projectId, root, files, deletePaths);
+  return {
+    ...ide,
+    warning,
+    message: ide.ok
+      ? `Đã ghi Unit approval decision → ${groundingPath}`
+      : ide.message,
+  };
 }

@@ -15,7 +15,8 @@ import {
 describe("unitRuleEngine SoT", () => {
   it("exposes prompt rules and rank policy aligned with limits", () => {
     assert.ok(UNIT_PROMPT_RULES_CORE.length >= 5);
-    assert.ok(UNIT_PROMPT_RULES_CORE.some((l) => /FAIL_SUT_MISMATCH/i.test(l)));
+    assert.ok(UNIT_PROMPT_RULES_CORE.some((l) => /locked packet/i.test(l)));
+    assert.ok(UNIT_PROMPT_RULES_CORE.every((l) => !/FAIL_NEEDS_MARKER/i.test(l)));
     assert.equal(UNIT_RANK_POLICY.maxRelatedFiles, UNIT_GEN_LIMITS.maxRelatedFiles);
     assert.ok(UNIT_RANK_POLICY.retrieveTopKMin <= UNIT_RANK_POLICY.retrieveTopKDefault);
     assert.ok(UNIT_RANK_POLICY.weakClientAppAdminRe.test(

@@ -1,17 +1,16 @@
 /**
- * Gen fast-path: when Approve already emitted a HIGH .grounding.json that
- * matches MD markers, build the context packet from primary + deps without
- * re-running index retrieve / implementation-plan ranking.
+ * Consume-only Gen path: an authoritative .grounding.json that matches MD
+ * projections builds the context packet without any source re-resolution.
  */
 import {
   UNIT_GEN_LIMITS,
+  parseGroundingCompanion,
   primaryMatchesMarkers,
+  sameContentHash,
   stemOfPath,
+  validateApprovedGroundingDecision,
 } from "@aitest/ide-protocol";
-import {
-  UNIT_GROUNDING_CONTRACT_SCHEMA,
-  type UnitSourceGroundingContract,
-} from "../approvedTcSync/unitSourceGroundingContract";
+import { type UnitSourceGroundingContract } from "../approvedTcSync/unitSourceGroundingContract";
 import {
   CONTEXT_PACKET_VERSION,
   type AITestContextPacket,
@@ -28,55 +27,54 @@ function normPath(p: string): string {
   return (p || "").replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/**
+ * Approve persists the immutable v2 decision; `parseGroundingCompanion` yields
+ * its v1 projection so Gen never has to know which shape is on disk.
+ */
 export function parseUnitSourceGroundingContract(
   raw: string
 ): UnitSourceGroundingContract | null {
-  try {
-    const parsed = JSON.parse(raw) as UnitSourceGroundingContract;
-    if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.schema !== UNIT_GROUNDING_CONTRACT_SCHEMA) return null;
-    const pathRel = normPath(parsed.primary?.pathRel || "");
-    const code = String(parsed.primary?.code || "").trim();
-    if (!pathRel || !code) return null;
-    return {
-      ...parsed,
-      primary: {
-        ...parsed.primary,
-        pathRel,
-        code,
-        typeName: String(parsed.primary.typeName || code.split(".")[0] || "").trim(),
-      },
-    };
-  } catch {
-    return null;
-  }
+  const parsed = parseGroundingCompanion(raw);
+  if (!parsed) return null;
+  const pathRel = normPath(parsed.primary?.pathRel || "");
+  const code = String(parsed.primary?.code || "").trim();
+  // A refused v2 decision may legitimately have no primary. Keep it parseable
+  // so the Gen gate can display its persisted NO_PRIMARY/FEATURE_GAP reason;
+  // only authoritative decisions require executable source coordinates here.
+  if ((!pathRel || !code) && parsed.authoritative !== false) return null;
+  return {
+    ...parsed,
+    primary: {
+      ...parsed.primary,
+      pathRel,
+      code,
+      typeName: String(parsed.primary.typeName || code.split(".")[0] || "").trim(),
+    },
+  };
 }
 
 /**
- * Eligible when Approve contract is authoritative and agrees with MD markers.
- * Fall back to planner on LOW confidence, stale index, or marker mismatch.
+ * Eligible only when the IDE Approve decision is authoritative and agrees with
+ * MD projections. Every other state is blocked; there is no planner fallback.
+ * freshness=skipped is OK when primary contentHash exists because Gen re-hashes.
  */
 export function isUnitGroundingFastPathEligible(
   contract: UnitSourceGroundingContract | null | undefined,
   markers: TcSourceMarkers
 ): contract is UnitSourceGroundingContract {
   if (!contract) return false;
-  if (contract.authoritative !== true) return false;
-  if (contract.freshness !== "fresh") return false;
-  if (!contract.primary.contentHash) return false;
-  if (contract.confidence !== "HIGH" && contract.confidence !== "MEDIUM") return false;
+  if (
+    !validateApprovedGroundingDecision(contract, {
+      paths: markers.paths,
+      codes: markers.codes,
+    }).ok
+  ) {
+    return false;
+  }
   const primary = normPath(contract.primary.pathRel);
   if (!primary) return false;
   if (markers.paths.length + markers.codes.length === 0) return false;
   if (!primaryMatchesMarkers(primary, markers)) return false;
-  const code = String(contract.primary.code || "").trim().toLowerCase();
-  if (markers.codes.length && code) {
-    const codeOk = markers.codes.some((c) => {
-      const m = String(c || "").trim().toLowerCase();
-      return m === code || code.startsWith(`${m}.`) || m.startsWith(`${code}.`);
-    });
-    if (!codeOk) return false;
-  }
   return true;
 }
 
@@ -113,11 +111,24 @@ export async function buildPacketFromUnitGrounding(
     return null;
   }
   if (!primaryContent.trim()) return null;
-  if (await hashContent(primaryContent) !== opts.contract.primary.contentHash) {
+  // Always hash the FULL source before any prompt truncation.
+  if (
+    !sameContentHash(
+      await hashContent(primaryContent),
+      opts.contract.primary.contentHash
+    )
+  ) {
     return null;
   }
-  if (primaryContent.length > maxPrimary) {
-    primaryContent = primaryContent.slice(0, maxPrimary) + "\n/* …truncated… */";
+  // Verify related hashes when present (stale deps must force Re-Approve).
+  const relatedHashByPath = new Map(
+    (opts.contract.related || [])
+      .filter((r) => r.pathRel && r.contentHash)
+      .map((r) => [normPath(r.pathRel).toLowerCase(), String(r.contentHash)])
+  );
+  let promptPrimary = primaryContent;
+  if (promptPrimary.length > maxPrimary) {
+    promptPrimary = promptPrimary.slice(0, maxPrimary) + "\n/* …truncated… */";
   }
 
   const depCandidates = [
@@ -141,6 +152,10 @@ export async function buildPacketFromUnitGrounding(
       try {
         let content = await opts.readFile(opts.projectRoot, rel);
         if (!content.trim()) return null;
+        const expectHash = relatedHashByPath.get(rel.toLowerCase());
+        if (expectHash && !sameContentHash(await hashContent(content), expectHash)) {
+          return null;
+        }
         if (content.length > maxDep) {
           content = content.slice(0, maxDep) + "\n/* …truncated… */";
         }
@@ -197,7 +212,7 @@ export async function buildPacketFromUnitGrounding(
       {
         pathRel: primaryRel,
         role: "primary",
-        content: primaryContent,
+        content: promptPrimary,
         why: "grounding-contract-primary",
       },
       ...deps,

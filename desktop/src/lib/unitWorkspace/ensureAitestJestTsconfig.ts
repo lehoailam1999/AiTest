@@ -2,11 +2,12 @@
  * Scaffold [{pkg}/]AItest/tsconfig.json + jest.config so Jest finds tests under
  * AItest/ (Nest default only scans src/ + .spec.ts under src).
  */
-import { readTextFile, writeTextFile } from "../../tauri/bridge";
+import { readTextFile } from "../../tauri/bridge";
 import { AITEST_ROOT, aitestRootFromTarget } from "../testOutputLayout";
 import { overlayRelPath } from "./paths";
-import { textFileEquals, writeTextFileIfChanged } from "./contentDedup";
+import { textFileEquals } from "./contentDedup";
 import type { UnitWorkspaceManifest } from "./types";
+import { writeDraftText } from "./draftStore";
 
 async function pathExists(projectRoot: string, rel: string): Promise<boolean> {
   try {
@@ -209,9 +210,7 @@ export async function ensureAitestJestTsconfigInWorkspace(input: {
     }
 
     const workspaceRel = overlayRelPath(input.manifest.runId, w.rel, packagePrefix);
-    await writeTextFile(input.projectRoot, workspaceRel, w.content);
-    // Refresh on-disk scaffold when content changed (broken Nest-extends, etc.).
-    await writeTextFileIfChanged(input.projectRoot, w.rel, w.content);
+    await writeDraftText(input.projectRoot, workspaceRel, w.content);
 
     const exists = await pathExists(input.projectRoot, w.rel);
     files = files.filter((f) => f.targetRel !== w.rel);

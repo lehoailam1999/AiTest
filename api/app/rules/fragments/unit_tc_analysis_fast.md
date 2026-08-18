@@ -9,4 +9,4 @@ Scope IN|OUT|MIXED|UNKNOWN. MIXED→chỉ nhánh BE.
 `behaviorId`=`<reqId>-B<seq>`. Scenario chỉ chiều relevant. Dedup cùng BE. Cấm invent limit/HTTP/exception/class.  
 Title VN `[Feature]-[Hành động BE]-[Kết quả]`. Steps prepare/execute nghiệp vụ.  
 Approve markers: primaryBucket + behaviorId + target.field/constraint (VALIDATION) + observable BE.  
-JSON: testCases[] + coverage + gaps + unknownBehaviors + conflicts.
+JSON: testCases[] + coverage + gaps + unknownBehaviors + conflicts. TC đủ IR → `status=READY_FOR_GROUNDING`, `automationReady=false`; thiếu → `NOT_READY`. Cấm phát `READY_FOR_CODEGEN` trước Approve.

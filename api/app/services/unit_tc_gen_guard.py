@@ -200,21 +200,42 @@ def apply_unit_tc_readiness_to_draft(draft: Any) -> bool:
         steps=steps,
         expected_result=expected,
     )
+    def normalized_status(raw: str, status: str) -> str:
+        kept = [
+            line
+            for line in str(raw or "").splitlines()
+            if not re.match(r"(?i)^\s*status\s*:", line)
+        ]
+        kept.append(f"status: {status}")
+        return "\n".join(kept).strip()
+
     if ready:
+        # Generation never grants codegen authority. Even legacy model output
+        # claiming READY_FOR_CODEGEN is normalized to the pre-Approve state.
+        if isinstance(draft, dict):
+            td = str(draft.get("test_data") or draft.get("testData") or "")
+            next_td = normalized_status(td, "READY_FOR_GROUNDING")
+            draft["test_data"] = next_td
+            draft["testData"] = next_td
+            draft["automation_ready"] = False
+            draft["automationReady"] = False
+        else:
+            td = str(getattr(draft, "test_data", None) or "")
+            draft.test_data = normalized_status(td, "READY_FOR_GROUNDING")
+            draft.automation_ready = False
         return False
 
     if isinstance(draft, dict):
         draft["automation_ready"] = False
         draft["automationReady"] = False
         td = str(draft.get("test_data") or draft.get("testData") or "")
-        if "status: NOT_READY" not in td:
-            draft["test_data"] = f"{td}\nstatus: NOT_READY".strip()
-            draft["testData"] = draft["test_data"]
+        next_td = normalized_status(td, "NOT_READY")
+        draft["test_data"] = next_td
+        draft["testData"] = next_td
     else:
         draft.automation_ready = False
         td = str(getattr(draft, "test_data", None) or "")
-        if "status: NOT_READY" not in td:
-            draft.test_data = f"{td}\nstatus: NOT_READY".strip()
+        draft.test_data = normalized_status(td, "NOT_READY")
     return True
 
 

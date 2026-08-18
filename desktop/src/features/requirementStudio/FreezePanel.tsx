@@ -453,23 +453,23 @@ export default function FreezePanel({
               disabled={running || paused}
               aria-label="Target URL"
             />
-            <Checkbox
+            {/* <Checkbox
               checked={e2eFullCoverage}
               onChange={(e) => setE2eFullCoverage(e.target.checked)}
               disabled={running || paused}
             >
               Cover đủ tín hiệu Output (chậm hơn) — mặc định tắt = speed fast + trần ~10 TC/module
-            </Checkbox>
+            </Checkbox> */}
           </>
         ) : null}
 
-        <Input.TextArea
+        {/* <Input.TextArea
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="Ghi chú snapshot (tuỳ chọn)…"
           autoSize={{ minRows: 2, maxRows: 4 }}
           disabled={running || paused}
-        />
+        /> */}
         <Space wrap>
           {onOpenKnowledge ? (
             <Button onClick={onOpenKnowledge} disabled={running || paused}>

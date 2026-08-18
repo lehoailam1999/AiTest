@@ -8,6 +8,7 @@ import {
   IdeNotifications,
   assertSafeAitestTargetRel,
   assertSafeAiTestCasesRel,
+  assertSafeAiTestCasesReadRel,
   isAllowedE2eEnvKey,
   isAllowedUnitLayoutPath,
   type CodegenApplyFilesParams,
@@ -104,6 +105,10 @@ describe("ide-protocol codegen schema", () => {
     assert.equal(isAllowedUnitLayoutPath("AItest/AItest.UnitTests.csproj"), true);
     assert.equal(isAllowedUnitLayoutPath("backend/AItest/AItest.UnitTests.csproj"), true);
     assert.equal(isAllowedUnitLayoutPath("AItest/jest.config.cjs"), true);
+    assert.equal(
+      isAllowedUnitLayoutPath("AItest/test-cases/UnitTest/Mod/TC-1.md"),
+      false
+    );
     assert.equal(isAllowedUnitLayoutPath("AItest/src/evil.cs"), false);
     assert.equal(isAllowedUnitLayoutPath("AItest/Other/foo.cs"), false);
   });
@@ -114,15 +119,24 @@ describe("ide-protocol codegen schema", () => {
     assert.equal(isAllowedE2eEnvKey("E2E_SECRET_TOKEN"), false);
   });
 
-  it("exposes tc.syncApprovedMd and jails .ai-test/test-cases", () => {
+  it("exposes tc.syncApprovedMd and jails AItest/test-cases", () => {
     assert.equal(IdeMethods.tcSyncApprovedMd, "aitest/tc.syncApprovedMd");
     assert.equal(
-      assertSafeAiTestCasesRel(".ai-test/test-cases/UnitTest/account/TC-1.md"),
-      ".ai-test/test-cases/UnitTest/account/TC-1.md"
+      assertSafeAiTestCasesRel("AItest/test-cases/UnitTest/account/TC-1.md"),
+      "AItest/test-cases/UnitTest/account/TC-1.md"
     );
     assert.equal(
-      assertSafeAiTestCasesRel(".ai-test/test-cases/E2ETest/account/TC-1.md"),
-      ".ai-test/test-cases/E2ETest/account/TC-1.md"
+      assertSafeAiTestCasesRel("AItest/test-cases/E2ETest/account/TC-1.md"),
+      "AItest/test-cases/E2ETest/account/TC-1.md"
+    );
+    assert.equal(
+      assertSafeAiTestCasesReadRel(
+        ".ai-test/test-cases/UnitTest/account/TC-1.md"
+      ),
+      ".ai-test/test-cases/UnitTest/account/TC-1.md"
+    );
+    assert.throws(() =>
+      assertSafeAiTestCasesRel(".ai-test/test-cases/UnitTest/account/TC-1.md")
     );
     assert.throws(() => assertSafeAiTestCasesRel("AItest/E2ETest/x.md"));
     assert.throws(() => assertSafeAiTestCasesRel(".ai-test/evil.json"));

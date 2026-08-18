@@ -323,6 +323,10 @@ export type TestCase = {
   executionStatus: string;
   generatedFromHash?: string | null;
   generatedFromVersion?: number | null;
+  /** Revision stored by the last Unit Approve. */
+  unitContentRevision?: string | null;
+  /** Server-computed CAS revision of the current content; never recompute it. */
+  unitContentRevisionCurrent?: string | null;
   isStale?: boolean;
   needsReview?: boolean;
   createdAt: string;

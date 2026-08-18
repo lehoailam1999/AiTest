@@ -2,8 +2,8 @@
  * Shared Unit Gen conventions SoT — Desktop seeds `.ai-test/unit-conventions.md`;
  * Extension reads file or falls back to UNIT_CONVENTIONS_CORE.
  *
- * Gen-time only: do NOT paste Approve pipeline / shortlist / FAIL_UNGATED here —
- * Desktop already gated + resolved primary SUT before CLI runs.
+ * Gen-time only: IDE Repository Intelligence already locked an authoritative
+ * decision before CLI runs. Do not describe Desktop `index.db` resolve here.
  */
 
 /** Quantified limits (architecture invariants). */
@@ -34,19 +34,21 @@ export const UNIT_LOGIC_LAYERS = [
 export const UNIT_CONVENTIONS_CORE = `# Unit test conventions (AITest)
 
 > SoT for Extension Gen + Desktop Gen. Lives on the **target repo** at \`.ai-test/unit-conventions.md\`.
-> AITest orchestrates Approve/resolve; this file is **Gen policy only**.
+> This file is **Gen policy only**. Unit Approve / SUT resolve is owned by **IDE Repository Intelligence**;
+> Gen must **consume** an immutable authoritative decision — never re-resolve.
 
 ## Ownership (who does what)
 
 | Stage | Owner | AITest role |
 | --- | --- | --- |
-| Analyze + draft **Unit TCs** | API job + AI connection / AICLI | Trigger job, Review, Approve |
-| Ground \`path:\` / \`code:\` | Desktop Approve sync (\`index.db\`) | Write markers + TC MD |
-| Generate **unit test code** | IDE Extension → Cursor AI CLI | Packet + Desktop gate + collect staging |
-| Repair failing unit test | Same Extension AI CLI | Pass repairContext |
-| Verify + Apply | Desktop verifyEngine | Scaffold, overlay, path jail \`AItest/\` |
+| Analyze + draft **Unit TCs** | API job + AI connection / AICLI | Trigger job, Review |
+| Ground source + behavior | IDE Repository Intelligence during Approve | Read source/symbols and emit immutable decision |
+| Persist projections | Desktop + API | Project the IDE decision to DB + \`AItest/test-cases\`; never re-resolve |
+| Generate **unit test code** | IDE Extension → Cursor AI CLI | Packet + Desktop gate + Tool-internal draft |
+| Repair failing unit test | Same Extension AI CLI | Pass repairContext; update Tool draft |
+| Verify + Update | Desktop verifyEngine | Stage temporarily, restore source, then path-jailed Update to \`AItest/UnitTest/\` |
 
-- Extension does **not** fuzzy re-resolve SUT when Desktop packet + markers exist (\`unit.allowDiskReresolve\` default **false**).
+- Unit Gen is **consume-only**: it never searches for or replaces the primary SUT.
 - Never invent BR / MaxLength / product APIs in Gen or Repair.
 
 ## Limits (quantified)
@@ -55,21 +57,22 @@ export const UNIT_CONVENTIONS_CORE = `# Unit test conventions (AITest)
 - Max excerpt / TC MD / conventions chars in prompt: **${UNIT_GEN_LIMITS.maxExcerptChars}**
 - Gen timeout: **${UNIT_GEN_LIMITS.genTimeoutMs / 1000}s**
 - Approved TC markdown required before Extension Gen (written on Approve)
-- Gen requires Test Data \`path:\` + \`code:\` — unresolved → Desktop blocks with FAIL_NEEDS_MARKER (no CLI)
+- Gen requires an authoritative, hash-fresh companion \`.grounding.json\`; MD \`path:\` / \`code:\` are matching projections only.
+- \`NOT_READY\`, \`FEATURE_GAP\`, stale hashes, incomplete bindings, and missing decisions are blocked before Cursor Gen.
 
 ## 0. Gen grounding (primary SUT already decided)
 
-1. Primary SUT in the packet / Test Data \`path:\` + \`code:\` is **authoritative**. Do **not** re-resolve against \`index.db\`, pick another Handler, or invent a different primary.
+1. The authoritative companion \`.grounding.json\` is the source-grounding SoT. Do **not** search for, rerank, or invent another primary.
 2. Approved TC MD = **scenario intent**. Map it to the **closest observable behavior** already in the SUT (+ related) excerpts (throw/BadRequest, duplicate check, permission deny, happy-path create, etc.).
 3. **Prefer generate** when primary + related excerpts support the TC intent. Wizard/step/form wording in the TC title alone is **not** a refuse reason if the resolved Handler/Service (or related DTO/validator) has observable logic to exercise.
-4. For \`primaryBucket: VALIDATION_DATA\`: required / MaxLength / duplicate constraints must appear in **primary or related** excerpts (\`[Required]\`, \`[MaxLength]\`, throw/BadRequest, duplicate check). If absent → \`FAIL_FEATURE_GAP\` — **do not invent** validation asserts.
-5. Use \`FAIL_FEATURE_GAP\` / \`FAIL_SUT_MISMATCH\` **only** when excerpts contain **no** API/branch that can support any faithful assert for this TC — do not invent BR/MaxLength/stage machines absent from excerpts.
+4. For \`primaryBucket: VALIDATION_DATA\`, Approve already verified required / MaxLength / duplicate evidence. Gen consumes that evidence exactly.
+5. Missing production behavior is an Approve-time \`FEATURE_GAP\`; Cursor Gen is not invoked.
 6. Behavior TCs (validate / reject): never invent anemic entity/POCO behavior; exercise the provided \`*Handler\` / \`*Service\` (or DTO when layerHint=dto).
 
 ## 1. Approved Test Case markdown (required)
 
 - Gen **one TC → one unit test file**. Match the Sync MD artifact:
-  - Path: \`.ai-test/test-cases/UnitTest/{module}/{testCaseId}.md\` (E2E → \`E2ETest/\`)
+  - Path: \`AItest/test-cases/UnitTest/{module}/{testCaseId}.md\` (E2E → \`E2ETest/\`)
 - Treat frontmatter + Grounding + Steps / Expected / Precondition / Test Data as **scenario intent**.
 - Do **not** invent a different scenario. If the MD is missing, **fail** (Approve the TC first).
 
@@ -78,7 +81,8 @@ export const UNIT_CONVENTIONS_CORE = `# Unit test conventions (AITest)
 - Write **only** under:
   - \`${UNIT_LAYOUT_RULE}\`
 - \`RequirementOrModule\` = Requirement title when known, else TC \`module\`, else \`General\`.
-- \`TestFile\` = one test file for that TC (uniquified by TC id short hash when \`suggestedPath\` is supplied).
+- \`TestFile\` = one test file for that TC (uniquified by compact TC id when \`suggestedPath\` is supplied).
+- \`AItest/test-cases/**\` contains specifications only and must never be emitted, compiled, or run as test code.
 - **Forbidden:** \`src/\`, \`app/\`, \`__tests__/\`, \`test/\`, next to production files, or \`AItest/src/...\`.
 
 ## 3. Unit scope = logic layers only (SUT allow-list)
@@ -110,14 +114,12 @@ Unit tests target **production logic**, not UI shells or HTTP clients. Prefer SU
 - Import / exercise the primary SUT named in the prompt and markers.
 - Mock **ports** at lower tiers; do not invent BR/MaxLength outside excerpts.
 - Assertions must match **actual** APIs / attributes / constants in the SUT (+ related) excerpts.
-- Domain mismatch with the packet SUT → \`FAIL_DOMAIN_GUARD\` (Desktop usually gates first).
-- Unified refuse codes (empty fence + one line) — only when generation is impossible without invention:
-  \`FAIL_NEEDS_MARKER\` | \`FAIL_DOMAIN_GUARD\` | \`FAIL_FEATURE_GAP\` | \`FAIL_SUT_MISMATCH\`.
+- If packet and source excerpt disagree at Gen time, stop with a generation error; never resolve another SUT.
 
 ## 5. No invented production rules
 
 - **Forbidden in the test file:** local \`Br*\` validator classes, hardcoded \`AllowedExtensions\` / mime lists, invented \`MAX_LENGTH = N\` + Length asserts, unless those symbols exist in the SUT excerpt.
-- MaxLength / StringLength / allow-lists / BR rules must be **read from production code**. If absent from SUT, fail or skip that assertion — do not invent.
+- MaxLength / StringLength / allow-lists / BR rules must already exist in approved source evidence. If absent, Approve returns \`FEATURE_GAP\`.
 
 ## 6. Stack / extension match (fail-closed)
 
@@ -129,8 +131,7 @@ Unit tests target **production logic**, not UI shells or HTTP clients. Prefer SU
 ## 7. Output contract
 
 - Return **one** unit test source in a **single** markdown code fence. No prose outside the fence.
-- Refuse protocol: empty fence + single line refuse code only:
-  \`FAIL_NEEDS_MARKER\` | \`FAIL_DOMAIN_GUARD\` | \`FAIL_FEATURE_GAP\` | \`FAIL_SUT_MISMATCH\`.
+- If the locked packet cannot be exercised faithfully, return no source and report a generation error; do not choose another SUT.
 - Include Spec ID / TC code in a comment or test name when the framework allows.
 - Prefer naming \`{Action}_{Condition}_{Expected}\` when it fits the stack.
 - Structure Arrange / Act / Assert; mock dependencies for layer 8 scenarios.

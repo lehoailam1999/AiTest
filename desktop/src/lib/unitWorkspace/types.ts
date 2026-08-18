@@ -24,7 +24,7 @@ export type ManifestFileEntry = {
   op: WorkspaceFileOp;
   /** Path relative to project root (Apply target). */
   targetRel: string;
-  /** Path relative to project root (under overlay/). */
+  /** Opaque Tool-draft key (OS temp), never a source-tree path. */
   workspaceRel: string;
 };
 
@@ -47,7 +47,7 @@ export type UnitWorkspaceManifest = {
   artifactKind?: "unit" | "api";
   /**
    * Package owning the SUT (e.g. backend, frontend). Empty = apply root is the package.
-   * Staging lives under `{packagePrefix}/.ai-test/`; Apply under `{packagePrefix}/AItest/`.
+   * Tool draft lives in OS temp; Apply writes under `{packagePrefix}/AItest/`.
    */
   packagePrefix?: string;
   /** Step 5 — npm scope / gradle project name for coverage tagging */

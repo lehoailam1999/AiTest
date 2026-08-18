@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   App,
   Button,
+  Progress,
   Select,
   Space,
   Table,
@@ -30,8 +31,11 @@ import {
   typeLabel,
 } from "../../../i18n/labels";
 import { syncApprovedTestCasesMdBestEffort } from "../../../lib/approvedTcSync";
+import { approveUnitCases } from "../../../lib/unitApprove";
 import { normalizeFunctionLabel } from "../../../lib/normalizeFunctionLabel";
 import {
+  isE2eTestCaseType,
+  isUnitTestCaseType,
   resolveTestEngine,
 } from "../../../lib/testEngine";
 import { workspace } from "../../../workspace";
@@ -208,6 +212,13 @@ export function ReviewQueuePanel({
   );
   const [editing, setEditing] = useState<TestCase | null>(null);
   const [editBusy, setEditBusy] = useState(false);
+  const [approveProgress, setApproveProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+    failed: number;
+    activeId: string | null;
+  } | null>(null);
 
   useEffect(() => {
     if (!moduleFilter) return;
@@ -314,13 +325,78 @@ export function ReviewQueuePanel({
     const failReasons: string[] = [];
     const approved: TestCase[] = [];
     try {
+      const requested = ids
+        .map((id) => cases.find((tc) => tc.id === id))
+        .filter((tc): tc is TestCase => Boolean(tc));
+      const unitCases = requested.filter((tc) => isUnitTestCaseType(tc.type));
+      const e2eCases = requested.filter((tc) => isE2eTestCaseType(tc.type));
+      const otherCases = requested.filter(
+        (tc) =>
+          !isUnitTestCaseType(tc.type) && !isE2eTestCaseType(tc.type)
+      );
+
+      // Unit Approve resolves one TC at a time through the IDE and can take
+      // tens of seconds each, so the bar has to advance per TC, not per batch.
+      const total = requested.length;
+      let done = 0;
+      let failedSoFar = 0;
+      setApproveProgress({
+        current: 0,
+        total,
+        label: `Chuẩn bị duyệt ${total} test case…`,
+        failed: 0,
+        activeId: null,
+      });
+
+      const unitResults = await approveUnitCases({
+        projectId,
+        projectRoot: workspace.getLocalPath(projectId) || "",
+        cases: unitCases,
+        requirementTitle: workspaceTitle,
+        onProgress: (event) => {
+          if (event.phase === "start") {
+            setApproveProgress({
+              current: done,
+              total,
+              label: `Đang duyệt ${event.tc.testCaseId} · ${event.tc.title}`,
+              failed: failedSoFar,
+              activeId: event.tc.id,
+            });
+            return;
+          }
+          done += 1;
+          const settled = event.result;
+          if (settled && !settled.ok) failedSoFar += 1;
+          setApproveProgress({
+            current: done,
+            total,
+            label:
+              settled && !settled.ok
+                ? `Lỗi ${event.tc.testCaseId} — ${settled.error}`
+                : `Đã duyệt ${event.tc.testCaseId}`,
+            failed: failedSoFar,
+            activeId: null,
+          });
+        },
+      });
+      for (const result of unitResults) {
+        if (result.ok) {
+          approved.push(result.tc);
+          ok += 1;
+        } else {
+          fail += 1;
+          failReasons.push(result.error);
+        }
+      }
+
       const APPROVE_CONCURRENCY = 6;
-      for (let i = 0; i < ids.length; i += APPROVE_CONCURRENCY) {
-        const chunk = ids.slice(i, i + APPROVE_CONCURRENCY);
+      const legacyCases = [...e2eCases, ...otherCases];
+      for (let i = 0; i < legacyCases.length; i += APPROVE_CONCURRENCY) {
+        const chunk = legacyCases.slice(i, i + APPROVE_CONCURRENCY);
         const hits = await Promise.all(
-          chunk.map(async (id) => {
+          chunk.map(async (tc) => {
             try {
-              return { ok: true as const, tc: await testcases.approve(id) };
+              return { ok: true as const, tc: await testcases.approve(tc.id) };
             } catch (e) {
               return {
                 ok: false as const,
@@ -335,9 +411,18 @@ export function ReviewQueuePanel({
             ok += 1;
           } else {
             fail += 1;
+            failedSoFar += 1;
             if (h.reason) failReasons.push(h.reason);
           }
         }
+        done += chunk.length;
+        setApproveProgress({
+          current: done,
+          total,
+          label: `Đã duyệt ${done}/${total} test case`,
+          failed: failedSoFar,
+          activeId: null,
+        });
       }
       // Update cache in-memory immediately so UI updates without full API reload
       setSelected([]);
@@ -351,23 +436,26 @@ export function ReviewQueuePanel({
           }
         );
       }
-      if (approved.length) {
+      const approvedE2e = approved.filter((tc) =>
+        isE2eTestCaseType(tc.type)
+      );
+      if (approvedE2e.length) {
         const sync = await syncApprovedTestCasesMdBestEffort({
           projectId,
           projectRoot: workspace.getLocalPath(projectId),
-          cases: approved,
+          cases: approvedE2e,
           requirementTitle: workspaceTitle,
         });
         if (sync.ok && sync.written.length) {
           message.success(
             sync.message ||
-              `Đã duyệt và ghi ${sync.written.length} TC → .ai-test/test-cases/`
+              `Đã duyệt và ghi ${sync.written.length} TC → AItest/test-cases/`
           );
         } else if (!sync.ok || sync.via === "skipped") {
           message.warning(
             sync.errors[0] ||
               sync.message ||
-              "Duyệt OK nhưng chưa ghi .ai-test/test-cases — gắn project root hoặc Connect IDE"
+              "Duyệt OK nhưng chưa ghi AItest/test-cases — gắn project root hoặc Connect IDE"
           );
         } else if (fail === 0) {
           message.success(`Đã duyệt ${ok} test case.`);
@@ -380,11 +468,14 @@ export function ReviewQueuePanel({
         const first = Array.from(new Set(failReasons)).slice(0, 3).join(" | ");
         message.error(`Lý do từ chối: ${first}`);
       }
-      void queryClient.invalidateQueries({
+      await queryClient.invalidateQueries({
         queryKey: coverageBoardKeys.all,
-        refetchType: "none",
+        // Approve sync may enrich testData/status/automationReady after the
+        // immediate approve response; refresh active views from that DB state.
+        refetchType: "active",
       });
     } finally {
+      setApproveProgress(null);
       setBusy(false);
     }
   }
@@ -667,6 +758,24 @@ export function ReviewQueuePanel({
         </div>
       </div>
 
+      {approveProgress ? (
+        <div className="coverage-review-progress">
+          <Progress
+            percent={
+              approveProgress.total
+                ? Math.round((approveProgress.current / approveProgress.total) * 100)
+                : 0
+            }
+            status="active"
+            format={() => `${approveProgress.current}/${approveProgress.total}`}
+          />
+          <Typography.Text type="secondary" ellipsis>
+            {approveProgress.label}
+            {approveProgress.failed > 0 ? ` · lỗi ${approveProgress.failed}` : ""}
+          </Typography.Text>
+        </div>
+      ) : null}
+
       <div className="coverage-review-table">
         <Table
           rowKey="id"
@@ -681,6 +790,11 @@ export function ReviewQueuePanel({
               disabled: !isTcPendingReview(row.reviewStatus),
             }),
           }}
+          rowClassName={(row) =>
+            approveProgress?.activeId === row.id
+              ? "coverage-review-row--approving"
+              : ""
+          }
           scroll={{ x: 1180, y: "max(40vh, 240px)" }}
           tableLayout="fixed"
           pagination={{ pageSize: 20, showSizeChanger: true, responsive: true }}

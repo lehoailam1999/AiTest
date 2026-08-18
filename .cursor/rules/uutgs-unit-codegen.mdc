@@ -4,31 +4,10 @@ globs: api/app/llm/uutgs_rules.py,api/app/llm/base.py,api/app/routers/generate_u
 alwaysApply: false
 ---
 
-# UUTGS — Universal Unit Test Generation Specification
+# Unit code generation pointer
 
-> Runtime: [`api/app/llm/uutgs_rules.py`](api/app/llm/uutgs_rules.py) inject **một lần** trong `unit_system_prompt`.  
-> User prompt chỉ mang **data** (TC + source + stack) — không lặp Specification.
+- Active Desktop → IDE CLI policy: `packages/ide-protocol/src/unitConventions.ts`
+- Active transport only: `packages/ide-protocol/src/unitRuleEngine.ts`
+- Legacy API fallback only: `api/app/llm/uutgs_rules.py`
 
-Áp dụng cho **sinh code** Unit Test (mọi ngôn ngữ / framework). Khác với rule Sinh TC từ Phân tích (`unit-tc-from-analysis.mdc`).
-
-## Cốt lõi
-
-1. **Source = SoT** — hành vi lấy từ implementation; TC chỉ định *intent* kịch bản.
-2. **Analyze → Generate** — CFG/DFG/deps/exception trước khi emit.
-3. **Mock ngoài unit** — không mock pure/DTO/validator/utility.
-4. **Deterministic + isolated** — không flake, không phụ thuộc thứ tự.
-5. **Convention + stack detected** — match project samples.
-6. **Cấm bootstrap entrypoint** — test pipe/service/handler, không `import main`.
-7. **Portable mọi dự án** — không giả định Nest/Angular/Forensic; import chỉ từ SUT trong packet; layout `AItest/UnitTest/{Module}/` (UUTGS §10).
-
-## Phân tầng
-
-| Tầng | Nội dung |
-|------|----------|
-| UUTGS | Specification SHALL/MUST |
-| Language overlay | Import path AItest/, Jest types, C# usings |
-| User prompt | TC + SUT + related + samples (data only) |
-
-## Khi sửa
-
-Chỉ sửa contract trong `uutgs_rules.py` (+ file này). Giữ `unit_system_prompt` mỏng.
+Không lặp policy trong `.mdc` hoặc user prompt. Khi có project `unit-conventions`, legacy API không inject UUTGS lần hai. Output fence/no-fence phải do từng transport parser sở hữu, không đặt trong policy chung.

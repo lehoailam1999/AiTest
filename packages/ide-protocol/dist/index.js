@@ -1,12 +1,15 @@
 export { IDE_PROTOCOL_VERSION, IDE_BRIDGE_FILENAME, IDE_BRIDGE_DIR, IdeCommandLimits, } from "./constants.js";
-export { IdeCapabilities, EXTENSION_CAPABILITIES, DESKTOP_REQUIRED_UNIT_CAPS, DESKTOP_REQUIRED_E2E_CAPS, negotiateCapabilities, hasCapability, } from "./capabilities.js";
+export { IdeCapabilities, EXTENSION_CAPABILITIES, DESKTOP_REQUIRED_UNIT_CAPS, DESKTOP_REQUIRED_E2E_CAPS, DESKTOP_REQUIRED_UNIT_APPROVE_CAPS, negotiateCapabilities, hasCapability, } from "./capabilities.js";
 export { IdeMethods, IdeNotifications, } from "./methods.js";
 export { assertSafeAitestTargetRel, isAllowedUnitLayoutPath, isAllowedE2eEnvKey, filterAllowedEnv, } from "./codegenPathJail.js";
-export { assertSafeAiTestCasesRel, AI_TEST_CASES_DIR, } from "./tcPathJail.js";
+export { assertSafeAiTestCasesRel, assertSafeAiTestCasesReadRel, AI_TEST_CASES_DIR, LEGACY_AI_TEST_CASES_DIR, } from "./tcPathJail.js";
 export { UNIT_CONVENTIONS_CORE, UNIT_GEN_LIMITS, UNIT_LAYOUT_RULE, } from "./unitConventions.js";
+export { normalizeGroundingCompanion, parseGroundingCompanion, } from "./groundingCompanion.js";
+export { APPROVED_GROUNDING_SCHEMA, REQUIRED_GROUNDING_CHECKS, normalizeContentHash, sameContentHash, validateApprovedGroundingDecision, } from "./approvedGroundingDecision.js";
+export { UNIT_APPROVE_REQUEST_SCHEMA, UNIT_APPROVE_RESPONSE_SCHEMA, UNIT_APPROVE_DECISION_SCHEMA, UNIT_TC_IR_SCHEMA, DEFAULT_UNIT_APPROVE_LIMITS, validateUnitApprovalDecision, projectDecisionToV1Grounding, hashDecisionBody, } from "./unitApproveRpc.js";
 export { UNIT_RANK_POLICY, UNIT_PROMPT_RULES_CORE, estimateTokenCount, buildUnitGenPhaseMetrics, } from "./unitRuleEngine.js";
 export { UNIT_SUT_ALIGN_MIN, UNIT_SUT_ALIGN_MIN_NO_MARKER, PATH_RANK_STOP, unitSutAlignMin, isSutAlignedEnough, significantTokens, extractTcSourceMarkers, hasUnitSourceMarkers, isUnitSutResolveSkipped, sutTcAlignmentScore, expectedDomainTokensFromTc, extractPathDomainHints, sutDomainConflict, isPacketSutAcceptable, detectCodeStack, stackForPath, assertStackMatchesPath, findInventedRuleSmells, assertUnitGenQuality, detectCsharpPackagesFromTestCode, CSHARP_USING_TO_PACKAGE, } from "./unitGenGuards.js";
-export { decideUnitSutGate, applyProfileDomainGuards, isUnitGenRefuseOutput, detectFeatureGap, scenarioTextForFeatureGap, weakCommonPathTokenPenalty, UNIT_SUT_ALIGN_MIN_UNMARKED_STRICT, UNIT_SUT_ALIGN_HARD_FLOOR, UNIT_GEN_SCOPE_DEFAULT, UNIT_WEAK_COMMON_PATH_TOKENS, UNIT_WEAK_RANK_TOKENS, isWeakUnitRankToken, filterStrongRankTokens, } from "./unitSutGate.js";
+export { decideUnitSutGate, applyProfileDomainGuards, isUnitGenRefuseOutput, detectFeatureGap, scenarioTextForFeatureGap, constraintFamily, weakCommonPathTokenPenalty, UNIT_SUT_ALIGN_MIN_UNMARKED_STRICT, UNIT_SUT_ALIGN_HARD_FLOOR, UNIT_GEN_SCOPE_DEFAULT, UNIT_WEAK_COMMON_PATH_TOKENS, UNIT_WEAK_RANK_TOKENS, isWeakUnitRankToken, filterStrongRankTokens, } from "./unitSutGate.js";
 export { behaviorEvidenceInExcerpt, isValidationDataBucket, } from "./behaviorEvidenceInExcerpt.js";
 export { expandVietnameseToCodeTokens, expandCodeMatchTokens, matchingProjectAliasTokens, mergeCodeAliasMaps, normalizeAliasKey, GENERIC_VI_WORD_ALIASES, GENERIC_VI_PHRASE_ALIASES, } from "./viCodeAliases.js";
 export { expandTokensFromIndex, extractStemsFromIndexPaths, filterTokensHittingPaths, pathHitsIndexToken, pathHitsToken, clearIndexStemCache, } from "./expandTokensFromIndex.js";

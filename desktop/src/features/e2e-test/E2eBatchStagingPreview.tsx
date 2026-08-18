@@ -248,7 +248,7 @@ export function E2eBatchStagingPreview({
     setSaving(true);
     try {
       await onSaveFile(selected.path, draft);
-      message.success("Đã lưu staging + source (nếu đã có trên đĩa)");
+      message.success("Đã lưu staging + source");
       setEditing(false);
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
@@ -267,8 +267,8 @@ export function E2eBatchStagingPreview({
           <Typography.Text code style={{ fontSize: 12 }}>
             {selected.path}
           </Typography.Text>{" "}
-          khỏi kết quả Generate / staging và file dưới <code>AItest/E2ETest/</code>{" "}
-          (nếu đã có trên đĩa).
+          khỏi kết quả Generate / staging và file trên source dưới{" "}
+          <code>AItest/E2ETest/</code>.
         </Typography.Paragraph>
       ),
       okText: "Xóa",
@@ -277,7 +277,7 @@ export function E2eBatchStagingPreview({
       onOk: async () => {
         try {
           await onDeleteFile(selected.path);
-          message.success("Đã xóa file");
+          message.success("Đã xóa staging + source");
           setEditing(false);
           onSelectPath(null);
         } catch (e) {
@@ -318,8 +318,8 @@ export function E2eBatchStagingPreview({
             <Typography.Text code style={{ fontSize: 12 }}>
               {stagingDirHint(String(hintRun))}
             </Typography.Text>
-            . Nhóm «Dùng chung» + theo TC — <strong>Sửa/Xóa</strong> đồng bộ overlay và{" "}
-            <code>AItest/E2ETest/</code> nếu đã có trên đĩa.
+            . Nhóm «Dùng chung» + theo TC — <strong>Sửa/Xóa</strong> đồng bộ overlay và source{" "}
+            <code>AItest/E2ETest/</code>.
           </>
         }
       />

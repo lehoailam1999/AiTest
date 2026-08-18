@@ -19,7 +19,7 @@ import {
 import type { CodeIndexSnapshot } from "../codeIndex/types";
 import { listDependencies, lookupSymbol } from "../codeIndex/lookup";
 import { resolveImportSpecifier } from "../codeIndex/buildDependencyGraph";
-import { parseCodeMarker } from "../approvedTcSync/progressiveSeedFromCodeIndex";
+import { parseCodeMarker } from "../approvedTcSync/codeMarker";
 import {
   isExcludedFromUnitRetrieve,
   isUnsuitableUnitPrimary,

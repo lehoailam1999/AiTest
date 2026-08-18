@@ -117,6 +117,10 @@ def is_usable_feature_path(raw: str | None) -> bool:
         return False
     if re.search(r"[\[\]{}]|featurepath\s*$", low, re.I):
         return False
+    # Traceability ids from Analysis (`trace: BR/BR-4`, `ruleRef: BR-4`) are ASCII
+    # and would otherwise pass as a route.
+    if re.match(r"^/?(?:br|fr|ac|req)-\d[\w-]*$", low):
+        return False
     if re.match(r"^/?(login|signin|sign-in|auth|register)$", low):
         return False
     # ASCII path segments only — (?a:\w) / explicit class rejects VN slug invent

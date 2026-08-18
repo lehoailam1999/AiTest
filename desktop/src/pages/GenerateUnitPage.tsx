@@ -30,7 +30,6 @@ import type {
 } from "../api/types";
 import { CodegenResultPanel } from "../components/CodegenResultPanel";
 import { testRunnerAllowsGenerate } from "../components/EnsureTestRunnerPanel";
-import { IdeConnectPanel } from "../components/IdeConnectPanel";
 import { ReadyStrip } from "../components/ReadyStrip";
 import { UnitScopePanel } from "../components/UnitScopePanel";
 import {
@@ -92,6 +91,7 @@ import { generateTcUrl } from "../lib/testingJourney";
 import {
   GENERATED_TEST_FOLDERS,
   buildRequirementTcModule,
+  uniquifyKeyForTestCase,
   uniquifyTestTargetRel,
 } from "../lib/testOutputLayout";
 import type { TestFrameworkResolution } from "../lib/testRunnerEnsure";
@@ -107,6 +107,7 @@ import {
   loadManifest,
   loadWorkspacePreviews,
 } from "../lib/unitWorkspace/manager";
+import { draftEntryCounts } from "../lib/unitWorkspace/draftInventory";
 import type { UnitWorkspaceManifest, WorkspacePreviewFile } from "../lib/unitWorkspace/types";
 import { startUnitIdeGenJob } from "../lib/unitWorkspace/unitJobRunner";
 import {
@@ -289,36 +290,14 @@ function guessClassFromCode(code: string, fileName: string): string {
 function normalizeUnitGenErrorForUi(errMsg: string): string {
   const msg = (errMsg || "").trim();
 
-  // Phase 5 gates: require path:/code: before CLI. User-facing: must be explicit.
-  if (
-    /FAIL_NEEDS_MARKER|needs_marker/i.test(msg) ||
-    /\bpath\s*:\s*\+?\s*code\s*:/i.test(msg) ||
-    /chưa có path\s*:\s*\+?\s*code\s*:/i.test(msg)
-  ) {
-    return "Không tìm thấy path và code liên quan";
+  if (/MISSING_APPROVE_DECISION/i.test(msg)) {
+    return "Thiếu quyết định IDE Approve authoritative — hãy Re-Approve test case";
   }
-
-  if (/FAIL_FEATURE_GAP|feature_gap/i.test(msg)) {
-    const detail = msg.match(/FAIL_FEATURE_GAP\s*[—:-]\s*([^.]+(?:\.[^ ]+)*)/i)?.[1];
-    return detail
-      ? `Behavior không có trong source: ${detail.trim()}`
-      : "Behavior không có trong source — đổi TC hoặc sửa BE (FEATURE_GAP)";
+  if (/STALE_APPROVE_DECISION/i.test(msg)) {
+    return "Quyết định IDE Approve đã stale hoặc lệch projection/hash — hãy Re-Approve";
   }
-
-  if (/FAIL_FIELD_UNBOUND|field_unbound/i.test(msg)) {
-    return "Field chưa bind sang property BE — bổ sung code-aliases.fields hoặc target.property";
-  }
-
-  if (/FAIL_OP_CONTRADICT|op_contradict/i.test(msg)) {
-    return "Intent permission không khớp SUT — với duplicate hãy bỏ Permission tokens và dùng intent rule/sutMap";
-  }
-
-  if (/FAIL_SUT_MISMATCH|sut_mismatch/i.test(msg)) {
-    return "SUT không khớp intent (FAIL_SUT_MISMATCH)";
-  }
-
-  if (/FAIL_DOMAIN_GUARD|domain_guard/i.test(msg)) {
-    return "Bị chặn theo domain guard (DOMAIN_GUARD)";
+  if (/INVALID_APPROVE_DECISION/i.test(msg)) {
+    return "Không đọc được primary source đã khóa trong quyết định IDE Approve";
   }
 
   if (/FAIL_NEEDS_SOURCE/i.test(msg)) {
@@ -1188,7 +1167,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
       testCaseTitle: tc.title,
       packagePrefix,
     });
-    const targetPath = uniquifyTestTargetRel(feHint.relativePath, tc.id);
+    const targetPath = uniquifyTestTargetRel(feHint.relativePath, uniquifyKeyForTestCase(tc));
 
     let manifest = await createUnitWorkspaceRun({
       projectRoot: localPath,
@@ -1959,7 +1938,10 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         testCaseTitle: selectedTc?.title,
         packagePrefix,
       });
-      const targetPath = uniquifyTestTargetRel(feHint.relativePath, testCaseId || "");
+      const targetPath = uniquifyTestTargetRel(
+        feHint.relativePath,
+        uniquifyKeyForTestCase(selectedTc || { id: testCaseId })
+      );
       setWritePath(targetPath);
       if (localPath && isTauri() && targetPath) {
         let manifest = await createUnitWorkspaceRun({
@@ -2281,6 +2263,16 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
     (r) => r.status === "fail" && !isBatchQueueNote(r.error)
   ).length;
 
+  // Sửa/Xóa trong Tool draft đổi khối lượng việc còn lại, nên Verify/Update
+  // phải đếm theo manifest hiện tại thay vì theo trạng thái Gen lúc đầu.
+  const batchDraftCounts = useMemo(
+    () =>
+      draftEntryCounts(
+        batchJobs.map((job) => ({ key: job.row.key, manifest: job.manifest }))
+      ),
+    [batchJobs]
+  );
+
   function pauseUnitBatch() {
     batchControlRef.current.pause();
     setBatchResults((prev) => markBatchRowsPaused(prev));
@@ -2313,9 +2305,6 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         </Space>
       </header>
 
-      <div style={{ marginBottom: 12 }}>
-        <IdeConnectPanel compact projectPath={localPath ?? undefined} />
-      </div>
 
       <Space orientation="vertical" size={12} style={{ width: "100%", marginTop: 12 }}>
         <ReadyStrip
@@ -2420,7 +2409,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
         items={[
           { title: "Approve + IDE" },
           { title: "Unit Job" },
-          { title: "Verify" },
+          { title: "Execute" },
           { title: "Apply" },
         ]}
       />
@@ -2579,6 +2568,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 batchControl={batchControlRef.current}
                 batchRunStatus={batchRunStatus}
                 generateFailCount={batchFailCount}
+                draftEntryCounts={batchDraftCounts}
                 onRetryGenerateFails={() => void runRequirementBatch(true)}
               />
             ) : null}
@@ -2732,6 +2722,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
                 batchControl={batchControlRef.current}
                 batchRunStatus={batchRunStatus}
                 generateFailCount={batchFailCount}
+                draftEntryCounts={batchDraftCounts}
               />
             ) : null}
 
@@ -2879,6 +2870,7 @@ export default function GenerateUnitPage({ unitOnly = false }: { unitOnly?: bool
               batchControl={batchControlRef.current}
               batchRunStatus={batchRunStatus}
               generateFailCount={batchFailCount}
+              draftEntryCounts={batchDraftCounts}
               onRetryGenerateFails={
                 inputMode === "requirement" ? () => void runRequirementBatch(true) : undefined
               }

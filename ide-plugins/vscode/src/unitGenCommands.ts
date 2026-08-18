@@ -4,19 +4,16 @@
  */
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import {
+  AI_TEST_CASES_DIR,
   IdeNotifications,
+  LEGACY_AI_TEST_CASES_DIR,
   UNIT_GEN_LIMITS,
-  decideUnitSutGate,
-  expandUnitRelatedPaths,
   extractTcSourceMarkers,
   hasUnitSourceMarkers,
-  isBlockedUnitPrimaryPath,
-  isInterfaceLikePrimaryPath,
-  isValidationDataBucket,
-  pathsMatchMarker,
   primaryMatchesMarkers,
-  promoteImplementationPrimary,
+  sameContentHash,
   type CodegenFileDto,
   type CodegenGenerateUnitBatchParams,
   type CodegenGeneratedFileMeta,
@@ -24,26 +21,17 @@ import {
   type CodegenProgressNotification,
   type CodegenResultCallback,
   type CodegenUnitItem,
-  type UnitDomainGuardRule,
 } from "@aitest/ide-protocol";
 import { workspaceRoot } from "./semanticContext";
 import { EMBEDDED_UNIT_CONVENTIONS } from "./unitGenConventions";
 import { excerptFromContextPacket, toRepoRelativePath } from "./unitGenParse";
-import {
-  isNonProductionUnitPath,
-  isPacketSutAligned,
-  resolveRelatedSourcesFromDisk,
-  scopedFamilyReresolveFromDisk,
-} from "./unitGenRelatedSources";
 import { getUnitGenEngine, writeUnitGenDebugDump } from "./cursorAgentCliEngine";
 import { focusSutExcerpt } from "./focusSutExcerpt";
 import { slimTcMdForGen } from "./slimTcMdForGen";
 import {
   groundingRelatedPaths,
-  inferDtoCandidatePaths,
   isAuthoritativeUnitGrounding,
   loadUnitGroundingContract,
-  plainRelatedExcerpt,
   resolveTestDataForGen,
 } from "./unitGenPromptPrep";
 
@@ -114,14 +102,6 @@ function formatRelatedBlocks(
   })();
 }
 
-function canAlwaysGenerateOnFeatureGap(
-  tcBlob: string,
-  genMode: "strict_spec" | "always_generate"
-): boolean {
-  if (genMode !== "always_generate") return false;
-  return !isValidationDataBucket(tcBlob);
-}
-
 function prepareTcMdForGen(
   rawMd: string,
   codeAliases: Parameters<typeof resolveTestDataForGen>[1]
@@ -138,30 +118,6 @@ function notifyResult(notify: NotifyFn, result: CodegenResultCallback): void {
   notify(IdeNotifications.codegenResult, result);
 }
 
-function canSoftBypassGateForGroundedSource(opts: {
-  code: string;
-  primaryPath?: string;
-  source?: string;
-  markers: { paths: string[]; codes: string[] };
-  tcBlob?: string;
-  alignmentScore?: number;
-  minAlignment?: number;
-}): boolean {
-  if (!/FEATURE_GAP|SUT_MISMATCH/i.test(opts.code || "")) return false;
-  if (isValidationDataBucket(opts.tcBlob || "")) return false;
-  if (!opts.primaryPath || !opts.source?.trim()) return false;
-  if (isNonProductionUnitPath(opts.primaryPath)) return false;
-  if (isBlockedUnitPrimaryPath(opts.primaryPath, opts.markers)) return false;
-  const markersMatch =
-    !(opts.markers.paths.length > 0 || opts.markers.codes.length > 0) ||
-    primaryMatchesMarkers(opts.primaryPath, opts.markers);
-  if (!markersMatch) return false;
-  const highConf = /\bconfidence=HIGH\b/i.test(opts.tcBlob || "");
-  const min = opts.minAlignment ?? 50;
-  const score = opts.alignmentScore ?? 0;
-  return highConf || score >= min;
-}
-
 async function readTextIfExists(abs: string, maxChars = UNIT_GEN_LIMITS.maxConventionsChars): Promise<string> {
   try {
     const raw = await fs.readFile(abs, "utf8");
@@ -171,117 +127,13 @@ async function readTextIfExists(abs: string, maxChars = UNIT_GEN_LIMITS.maxConve
   }
 }
 
-/** Optional unit gate knobs from `.ai-test/project.profile.json`. */
-async function loadUnitProfileGate(root: string): Promise<{
-  domainGuards: UnitDomainGuardRule[];
-  requireMarkers: boolean | null;
-  unitScope: "backend" | "frontend" | "any";
-  minAlignment: number;
-  genMode: "strict_spec" | "always_generate";
-  /** When false (default), Extension never fuzzy-resolves SUT from disk. */
-  allowDiskReresolve: boolean;
-}> {
-  try {
-    const raw = await fs.readFile(path.join(root, ".ai-test", "project.profile.json"), "utf8");
-    const j = JSON.parse(raw) as {
-      unit?: {
-        domainGuards?: UnitDomainGuardRule[];
-        requireMarkers?: boolean | string[];
-        scope?: "backend" | "frontend" | "any";
-        minAlignment?: number;
-        genMode?: "strict_spec" | "always_generate";
-        allowDiskReresolve?: boolean;
-      };
-    };
-    const unit = j?.unit;
-    const domainGuards = Array.isArray(unit?.domainGuards) ? unit!.domainGuards! : [];
-    // Phase 5: default require path:+code: unless profile sets requireMarkers: false
-    let requireMarkers: boolean | null = true;
-    if (unit?.requireMarkers === false) requireMarkers = false;
-    else if (unit?.requireMarkers === true) requireMarkers = true;
-    else if (Array.isArray(unit?.requireMarkers) && unit!.requireMarkers!.length)
-      requireMarkers = true;
-    const scopeRaw = (unit?.scope || "backend").toLowerCase();
-    const unitScope: "backend" | "frontend" | "any" =
-      scopeRaw === "frontend" || scopeRaw === "any" || scopeRaw === "backend"
-        ? scopeRaw
-        : "backend";
-    const minAlignment =
-      typeof unit?.minAlignment === "number" && Number.isFinite(unit.minAlignment)
-        ? unit.minAlignment
-        : 50;
-    const genMode = unit?.genMode === "always_generate" ? "always_generate" : "strict_spec";
-    const allowDiskReresolve = unit?.allowDiskReresolve === true;
-    return {
-      domainGuards,
-      requireMarkers,
-      unitScope,
-      minAlignment,
-      genMode,
-      allowDiskReresolve,
-    };
-  } catch {
-    return {
-      domainGuards: [],
-      requireMarkers: true,
-      unitScope: "backend",
-      minAlignment: 50,
-      genMode: "strict_spec",
-      allowDiskReresolve: false,
-    };
-  }
-}
-
-function withGapFallbackInstruction(tcMd: string, detail: string): string {
-  const note = [
-    "## AITest Fallback Mode (Always Generate)",
-    "- Output fallback tests only; never fake pass for missing behavior.",
-    "- Use `test.skip` / trait-style marker for missing behavior.",
-    "- Add clear TODO with exact missing backend rule/signal.",
-    "- Prefer closest existing branch assertion from current source.",
-    `- Fallback reason: ${detail}`,
-  ].join("\n");
-  return `${tcMd}\n\n${note}`.trim();
-}
-
-function annotateGapFallbackCode(code: string, testCaseId: string, reason: string): string {
-  const trimmed = (code || "").trim();
-  if (!trimmed) return code;
-  const header = [
-    "// AITEST_FALLBACK_GAP",
-    `// fallbackFrom: ${testCaseId}`,
-    `// reason: ${reason}`,
-    "// mode: always_generate",
-  ].join("\n");
-  if (/^\s*using\s+/m.test(trimmed) || /\.cs$/i.test(testCaseId)) {
-    return `${header}\n${trimmed}`;
-  }
-  return `${header}\n${trimmed}`;
-}
-
-function withSoftBypassDiagnosticInstruction(
-  tcMd: string,
-  input: { code: string; reason: string; primaryPath?: string }
-): string {
-  const note = [
-    "## AITest Source Diagnostic",
-    "- Generation proceeded with soft-bypass (grounded TC + source).",
-    `- Gate code: ${input.code || "UNKNOWN"}`,
-    `- Gate reason: ${input.reason || "n/a"}`,
-    `- SUT: ${input.primaryPath || "unknown-sut"}`,
-    "- If verification fails, treat this as source-behavior gap and fix SUT/rules in source.",
-  ].join("\n");
-  return `${tcMd}\n\n${note}`.trim();
-}
-
-/** Walk `.ai-test/test-cases/**` for `{testCaseId}.md` (business code or UUID). */
+/** Walk canonical `AItest/test-cases`, then legacy `.ai-test/test-cases`. */
 export async function findApprovedTcMarkdown(
   root: string,
   testCaseId: string
 ): Promise<{ path: string; content: string } | null> {
   const code = (testCaseId || "").trim();
   if (!code || !root) return null;
-  const base = path.join(root, ".ai-test", "test-cases");
   const want = `${code}.md`.toLowerCase();
   async function walk(dir: string): Promise<{ path: string; content: string } | null> {
     let entries;
@@ -305,7 +157,11 @@ export async function findApprovedTcMarkdown(
     }
     return null;
   }
-  return walk(base);
+  for (const relBase of [AI_TEST_CASES_DIR, LEGACY_AI_TEST_CASES_DIR]) {
+    const hit = await walk(path.join(root, ...relBase.split("/")));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 async function genOneItem(
@@ -360,7 +216,7 @@ async function genOneItem(
         testCaseId: item.testCaseId,
         genOk: false,
         error:
-          `Missing Approved TC markdown for «${item.testCaseId}» under .ai-test/test-cases/UnitTest/. ` +
+          `Missing Approved TC markdown for «${item.testCaseId}» under AItest/test-cases/UnitTest/. ` +
           `Duyệt TC trong AITest (Approve ghi MD) trước khi Gen Unit.`,
       },
       meta: {
@@ -371,7 +227,8 @@ async function genOneItem(
     };
   }
 
-  // Phase 5 — fail-closed before disk resolve / CLI when path:+code: missing
+  // MD projections are required, but they are never accepted without the
+  // authoritative companion decision validated below.
   const markerBlob = [md.content, item.testData || ""].join("\n");
   if (!hasUnitSourceMarkers(markerBlob)) {
     const debugRel = await writeUnitGenDebugDump({
@@ -380,7 +237,7 @@ async function genOneItem(
       tcMdPath: md.path,
       suggestedPath: suggested,
       gateDecision: "block",
-      blockedReason: "FAIL_NEEDS_MARKER — missing path:/code: before Gen",
+      blockedReason: "MISSING_APPROVE_DECISION — missing path/code projections",
       domainGuard: "skip",
       resolvedSut: "unresolved",
       candidatesTop3: [],
@@ -390,14 +247,14 @@ async function genOneItem(
         testCaseId: item.testCaseId,
         genOk: false,
         error:
-          `FAIL_NEEDS_MARKER — «${item.testCaseId}» chưa có path: + code:. ` +
-          `Approve lại hoặc thêm marker thủ công, rồi Gen.` +
+          `MISSING_APPROVE_DECISION — «${item.testCaseId}» chưa có path/code projection. ` +
+          `Re-Approve để IDE đồng bộ lại decision và Markdown.` +
           (debugRel ? ` Debug: ${debugRel}` : ""),
       },
       meta: {
         path: suggested,
         status: "ERROR",
-        error: "FAIL_NEEDS_MARKER",
+        error: "MISSING_APPROVE_DECISION",
       },
     };
   }
@@ -428,8 +285,6 @@ async function genOneItem(
   const markers = extractTcSourceMarkers(tcBlob);
   const groundingContract = await loadUnitGroundingContract(root, md.path);
   const groundingPaths = groundingRelatedPaths(groundingContract);
-  const profileGate = await loadUnitProfileGate(root);
-  const allowDisk = profileGate.allowDiskReresolve;
   const groundingPrimary = groundingContract?.primary?.pathRel
     ? toRepoRelativePath(root, groundingContract.primary.pathRel)
     : "";
@@ -438,342 +293,91 @@ async function genOneItem(
     : "";
 
   // Prefer Desktop packet when it already matches authoritative grounding + markers.
+  // Always verify FULL on-disk primary hash — never hash a truncated packet excerpt.
+  let fullPrimaryBody = "";
+  let fullPrimaryHash = "";
+  if (groundingPrimary) {
+    try {
+      const onDisk = await fs.readFile(path.join(root, groundingPrimary), "utf8");
+      if (onDisk.trim()) {
+        fullPrimaryHash = createHash("sha256")
+          .update(onDisk, "utf8")
+          .digest("hex");
+        fullPrimaryBody =
+          onDisk.length > UNIT_GEN_LIMITS.maxExcerptChars
+            ? onDisk.slice(0, UNIT_GEN_LIMITS.maxExcerptChars) +
+              "\n/* …truncated… */"
+            : onDisk;
+      }
+    } catch {
+      fullPrimaryBody = "";
+      fullPrimaryHash = "";
+    }
+  }
+  const hashOk = sameContentHash(
+    fullPrimaryHash,
+    groundingContract?.primary?.contentHash
+  );
   const groundingAuthoritative =
-    isAuthoritativeUnitGrounding(groundingContract) &&
+    isAuthoritativeUnitGrounding(groundingContract, {
+      paths: markers.paths,
+      codes: markers.codes,
+    }) &&
     Boolean(groundingPrimary) &&
-    Boolean(fromPacket.source?.trim()) &&
+    hashOk &&
     (!packetPrimary ||
       packetPrimary.toLowerCase() === groundingPrimary.toLowerCase()) &&
     (markers.paths.length + markers.codes.length === 0 ||
       primaryMatchesMarkers(groundingPrimary, markers));
 
-  let markerResolved = false;
-  if (groundingAuthoritative) {
-    primaryPath = groundingPrimary;
-    source = fromPacket.source;
-    primarySource = "packet";
-    markerResolved = true;
-  } else {
-    // Exact marker/grounding path reads only (not fuzzy rank).
-    const preferPaths = [
-      groundingPrimary,
-      ...markers.paths.map((p) => toRepoRelativePath(root, p)),
-    ].filter(Boolean);
-    const seen = new Set<string>();
-    for (const want of preferPaths) {
-      const key = want.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (isNonProductionUnitPath(want)) continue;
-      const body = await readSourceExcerpt(root, want);
-      if (!body) continue;
-      primaryPath = want;
-      source = body;
-      primarySource = "marker";
-      markerResolved = true;
-      break;
-    }
-  }
-
-  // Reject non-production / Phase-2-denied packet primary (unless marker points there)
-  if (
-    !markerResolved &&
-    primaryPath &&
-    (isNonProductionUnitPath(primaryPath) ||
-      isBlockedUnitPrimaryPath(primaryPath, markers))
-  ) {
-    primaryPath = undefined;
-    source = undefined;
-    primarySource = undefined;
-  }
-
-  // Promote I* only within marker/packet/related pool — never invent disk siblings.
-  const promotePool = [
-    primaryPath || "",
-    ...markers.paths,
-    ...markers.related,
-  ]
-    .map((p) => toRepoRelativePath(root, p))
-    .filter(Boolean);
-  if (primaryPath && isInterfaceLikePrimaryPath(primaryPath)) {
-    const promoted = promoteImplementationPrimary(primaryPath, promotePool);
-    if (promoted && promoted !== primaryPath) {
-      const body = await readSourceExcerpt(root, promoted);
-      if (body) {
-        primaryPath = promoted;
-        source = body;
-        primarySource = markerResolved ? "marker" : "packet";
-      }
-    }
-  }
-
-  const packetMatchesMarkers =
-    Boolean(primaryPath?.trim() && source?.trim()) &&
-    (markers.paths.length + markers.codes.length === 0 ||
-      primaryMatchesMarkers(primaryPath || "", markers)) &&
-    isPacketSutAligned(tcBlob, primaryPath || "", source || "", paramsCodeAliases);
-
-  const packetOk =
-    markerResolved ||
-    (packetMatchesMarkers &&
-      !(
-        primaryPath &&
-        isInterfaceLikePrimaryPath(primaryPath) &&
-        !markers.paths.some((p) => pathsMatchMarker(primaryPath!, p))
-      ));
-
-  // Optional legacy disk fuzzy — off by default (Desktop owns resolve).
-  // Scoped family recovery: one shot when packet fails (not full allowDiskReresolve).
-  let disk: Awaited<ReturnType<typeof resolveRelatedSourcesFromDisk>> | null = null;
-  let scopedRecoveryUsed = false;
-  const familyAnchors = [
-    ...markers.paths,
-    fromPacket.primaryPath || "",
-    primaryPath || "",
-  ]
-    .map((p) => toRepoRelativePath(root, p))
-    .filter(Boolean);
-
-  if (!packetOk && allowDisk) {
-    disk = await resolveRelatedSourcesFromDisk(root, {
-      title: item.title,
-      module: item.module,
-      testCaseId: item.testCaseId,
-      testData: [item.testData, item.steps, item.expectedOutcome]
-        .filter(Boolean)
-        .join("\n"),
-      tcMd: md.content,
-      maxFiles: UNIT_GEN_LIMITS.maxRelatedFiles,
-      maxCharsEach: UNIT_GEN_LIMITS.maxExcerptChars,
-      codeAliases: paramsCodeAliases,
-    });
-    lastAlignScore = disk.alignmentScore;
-    if (disk.primaryPath && disk.source) {
-      const rel = toRepoRelativePath(root, disk.primaryPath);
-      const alignScore = disk.alignmentScore;
-      if (isNonProductionUnitPath(rel)) {
-        const debugRel = await writeUnitGenDebugDump({
-          workspaceRoot: root,
-          item,
-          tcMdPath: md.path,
-          suggestedPath: suggested,
-          gateDecision: "block",
-          blockedReason: `Non-production SUT «${rel}»`,
-          domainGuard: "skip",
-          resolvedSut: rel,
-          alignmentScore: alignScore,
-          candidatesTop3: (disk.candidates || []).slice(0, 3).map((p) => ({
-            path: p,
-            score: alignScore,
-            reason: "candidate",
-          })),
-        });
-        return {
-          perTc: {
-            testCaseId: item.testCaseId,
-            genOk: false,
-            error:
-              `SUT «${rel}» không phải production logic (migration/test). ` +
-              `Thêm path:/code: trỏ handler/service thật, Approve lại, rồi Gen.` +
-              (debugRel ? ` Debug: ${debugRel}` : ""),
-          },
-          meta: {
-            path: suggested,
-            status: "ERROR",
-            error: "Non-production SUT path",
-          },
-        };
-      }
-      primaryPath = rel;
-      source = disk.source;
-      primarySource = "disk";
-      related = disk.related || related;
-    }
-  } else if (!packetOk && !allowDisk) {
-    disk = await scopedFamilyReresolveFromDisk(root, {
-      title: item.title,
-      module: item.module,
-      testCaseId: item.testCaseId,
-      testData: [item.testData, item.steps, item.expectedOutcome]
-        .filter(Boolean)
-        .join("\n"),
-      tcMd: md.content,
-      familyAnchors,
-      codeAliases: paramsCodeAliases,
-    });
-    scopedRecoveryUsed = true;
-    lastAlignScore = disk.alignmentScore;
-    if (disk.primaryPath && disk.source) {
-      primaryPath = toRepoRelativePath(root, disk.primaryPath);
-      source = disk.source;
-      primarySource = "disk";
-      related = disk.related || related;
-    }
-  }
-
-  if (!packetOk && !primaryPath?.trim()) {
-    const hinted = fromPacket.primaryPath?.trim();
-    const debugRel = await writeUnitGenDebugDump({
-      workspaceRoot: root,
-      item,
-      primaryPath: hinted,
-      tcMdPath: md.path,
-      suggestedPath: suggested,
-      gateDecision: "block",
-      blockedReason:
-        "FAIL_NEEDS_MARKER — Extension verify-only; no packet/marker primary" +
-        (allowDisk ? " (disk reresolve also failed)" : " (disk reresolve disabled)"),
-      domainGuard: "skip",
-      resolvedSut: "unresolved",
-      alignmentScore: lastAlignScore ?? 0,
-      candidatesTop3: [],
-    });
+  if (groundingContract?.authoritative === true && !groundingAuthoritative) {
     return {
       perTc: {
         testCaseId: item.testCaseId,
         genOk: false,
         error:
-          `FAIL_NEEDS_MARKER — SUT unresolved cho «${item.testCaseId}»` +
-          (hinted ? ` (packet=${hinted})` : "") +
-          `. Desktop phải gửi packet + path:/code:; Extension không fuzzy resolve` +
-          (allowDisk ? "" : " (unit.allowDiskReresolve=false)") +
-          `. Approve lại, rồi Gen.` +
-          (debugRel ? ` Debug: ${debugRel}` : ""),
+          "STALE_APPROVE_DECISION — grounding contract/markers/source hash mismatch; Re-Approve required",
       },
       meta: {
         path: suggested,
         status: "ERROR",
-        error: "FAIL_NEEDS_MARKER",
+        error: "STALE_APPROVE_DECISION",
       },
     };
   }
 
-  primaryPath = primaryPath ? toRepoRelativePath(root, primaryPath) : undefined;
-
-  // Hard stop: markers present but primary still mismatches — one scoped recovery first
-  if (
-    (markers.paths.length > 0 || markers.codes.length > 0) &&
-    primaryPath &&
-    !primaryMatchesMarkers(primaryPath, markers)
-  ) {
-    if (!scopedRecoveryUsed) {
-      const recovered = await scopedFamilyReresolveFromDisk(root, {
-        title: item.title,
-        module: item.module,
-        testCaseId: item.testCaseId,
-        testData: [item.testData, item.steps, item.expectedOutcome]
-          .filter(Boolean)
-          .join("\n"),
-        tcMd: md.content,
-        familyAnchors: [
-          ...markers.paths,
-          primaryPath,
-          ...familyAnchors,
-        ],
-        codeAliases: paramsCodeAliases,
-      });
-      scopedRecoveryUsed = true;
-      if (
-        recovered.primaryPath &&
-        recovered.source &&
-        primaryMatchesMarkers(recovered.primaryPath, markers)
-      ) {
-        primaryPath = toRepoRelativePath(root, recovered.primaryPath);
-        source = recovered.source;
-        primarySource = "disk";
-        related = recovered.related || related;
-        disk = recovered;
-      }
-    }
-  }
-
-  if (
-    (markers.paths.length > 0 || markers.codes.length > 0) &&
-    primaryPath &&
-    !primaryMatchesMarkers(primaryPath, markers)
-  ) {
-    const debugRel = await writeUnitGenDebugDump({
-      workspaceRoot: root,
-      item,
-      primaryPath,
-      tcMdPath: md.path,
-      suggestedPath: suggested,
-      gateDecision: "block",
-      blockedReason: `FAIL_SUT_MISMATCH — Primary «${primaryPath}» ≠ Test Data path:/code:`,
-      domainGuard: "pass",
-      resolvedSut: primaryPath,
-      alignmentScore: lastAlignScore ?? 0,
-      candidatesTop3: (disk?.candidates || []).slice(0, 3).map((p) => ({
-        path: p,
-        score: disk?.alignmentScore,
-        reason: "candidate",
-      })),
-      relatedFiles: markers.related.slice(0, UNIT_GEN_LIMITS.maxRelatedFiles),
-    });
+  // Consume-only: no disk re-resolve / alternate-primary recovery.
+  if (!groundingAuthoritative) {
     return {
       perTc: {
         testCaseId: item.testCaseId,
         genOk: false,
         error:
-          `FAIL_SUT_MISMATCH — Primary «${primaryPath}» không khớp path:/code: trong Test Data. ` +
-          `Không gửi CLI.` +
-          (debugRel ? ` Debug: ${debugRel}` : ""),
-        sourceFileName: primaryPath,
+          "MISSING_APPROVE_DECISION — Unit Gen requires authoritative IDE Approve Decision; Re-Approve required",
       },
       meta: {
         path: suggested,
         status: "ERROR",
-        error: "FAIL_SUT_MISMATCH",
+        error: "MISSING_APPROVE_DECISION",
       },
     };
   }
 
-  candidatesTop3 = (disk?.candidates || [])
-    .slice(0, 3)
-    .map((p) => ({
-      path: p,
-      score: disk?.alignmentScore,
-      reason:
-        primaryPath && pathsMatchMarker(p, primaryPath)
-          ? `resolved-${primarySource || "primary"}`
-          : "candidate",
-    }));
-  if (!candidatesTop3.length && primaryPath) {
-    candidatesTop3 = [
-      {
-        path: primaryPath,
-        score: lastAlignScore,
-        reason: `resolved-${primarySource || "packet"}`,
-      },
-    ];
-  }
+  primaryPath = groundingPrimary;
+  source = fullPrimaryBody.trim() ? fullPrimaryBody : fromPacket.source;
+  primarySource = "packet";
+  lastAlignScore = 100;
+  candidatesTop3 = [
+    {
+      path: primaryPath,
+      score: 100,
+      reason: "approved-grounding-decision",
+    },
+  ];
 
-  // Related: prefer packet when grounding authoritative; else rebuild from paths
-  if (!(groundingAuthoritative && related?.trim())) {
-    const dtoBoost = primaryPath
-      ? inferDtoCandidatePaths(primaryPath, [
-          ...groundingPaths,
-          ...markers.related,
-          ...(disk?.candidates || []),
-        ])
-      : [];
-    const relatedRels = [
-      ...groundingPaths,
-      ...dtoBoost,
-      ...markers.related.map((p) => toRepoRelativePath(root, p)),
-      ...expandUnitRelatedPaths({
-        entryPathRel: primaryPath || "",
-        allPaths: [
-          ...(disk?.candidates || []),
-          ...markers.related,
-          ...markers.paths,
-          primaryPath || "",
-        ].map((p) => toRepoRelativePath(root, p)),
-        featureTokens: [...markers.codes, ...(item.module || "").split(/\s+/)],
-        maxRelated: PERF_MAX_RELATED_FILES,
-        preferDtoValidator: true,
-      }),
-    ]
+  // Related: prefer packet; else materialize from grounding contract deps only.
+  if (!(related?.trim())) {
+    const relatedRels = [...groundingPaths]
       .map(normRel)
       .filter((p) => p && p !== primaryPath);
     const uniqRelated = [...new Set(relatedRels)].slice(
@@ -788,19 +392,17 @@ async function genOneItem(
         tcBlob.match(/^\s*target\.property\s*:\s*(\S+)/im)?.[1]
       );
       if (merged.trim()) related = merged;
-    } else if (allowDisk && disk?.related?.trim()) {
-      related = disk.related;
     }
   }
 
-  if (!source?.trim() || !primaryPath?.trim()) {
+    if (!source?.trim() || !primaryPath?.trim()) {
     const debugRel = await writeUnitGenDebugDump({
       workspaceRoot: root,
       item,
       tcMdPath: md.path,
       suggestedPath: suggested,
       gateDecision: "block",
-      blockedReason: "FAIL_NEEDS_MARKER — unresolved SUT",
+      blockedReason: "INVALID_APPROVE_DECISION — primary source unavailable",
       domainGuard: "skip",
       resolvedSut: "unresolved",
       alignmentScore: lastAlignScore ?? 0,
@@ -811,14 +413,14 @@ async function genOneItem(
         testCaseId: item.testCaseId,
         genOk: false,
         error:
-          `FAIL_NEEDS_MARKER — Không resolve được SUT cho «${item.testCaseId}». ` +
-          `Thêm path:/code: vào Test Data, Approve lại, rồi Gen.` +
+          `INVALID_APPROVE_DECISION — Không đọc được primary source đã khóa cho «${item.testCaseId}». ` +
+          `Re-Approve để làm mới decision/hash.` +
           (debugRel ? ` Debug: ${debugRel}` : ""),
       },
       meta: {
         path: suggested,
         status: "ERROR",
-        error: "FAIL_NEEDS_MARKER",
+        error: "INVALID_APPROVE_DECISION",
       },
     };
   }
@@ -846,23 +448,6 @@ async function genOneItem(
     suggested = suggested.replace(/\.cs$/i, sutExt === ".tsx" ? ".tsx" : ".ts");
   }
 
-  const { domainGuards, requireMarkers, unitScope, minAlignment } = profileGate;
-  const relatedFileList = () => {
-    const fromBlocks = (related || "")
-      .split(/\n/)
-      .map((l) => l.match(/^###\s+(.+)\s*$/)?.[1]?.trim())
-      .filter((x): x is string => Boolean(x));
-    return [...new Set([...markers.related.map(normRel), ...fromBlocks])].slice(
-      0,
-      UNIT_GEN_LIMITS.maxRelatedFiles
-    );
-  };
-  let gapFallbackUsed = false;
-  let gapFallbackReason = "";
-  let softBypassUsed = false;
-  let softBypassReason = "";
-  let softBypassCode = "";
-
   if (source?.trim() && markers.codes[0]) {
     source = focusSutExcerpt(
       source,
@@ -870,166 +455,12 @@ async function genOneItem(
       UNIT_GEN_LIMITS.maxExcerptChars
     );
   }
-  const relatedExcerpt = plainRelatedExcerpt(related || "");
-
-  let gate = decideUnitSutGate({
-    tcText: tcBlob,
-    primaryPath,
-    sourceExcerpt: source,
-    relatedExcerpt,
-    codeAliases: paramsCodeAliases,
-    moduleText: [item.module, item.title, md.content.slice(0, 1500)].filter(Boolean).join("\n"),
-    domainGuards,
-    requireMarkers: requireMarkers !== false,
-    unitScope,
-    minAlignment,
-  });
-
-  if (gate.decision === "block") {
-    const code = gate.code || "FAIL_NEEDS_MARKER";
-    // One scoped recovery on FEATURE_GAP / SUT_MISMATCH then re-gate
-    if (
-      !scopedRecoveryUsed &&
-      /FEATURE_GAP|SUT_MISMATCH/i.test(code) &&
-      !isValidationDataBucket(tcBlob) &&
-      primaryPath
-    ) {
-      const recovered = await scopedFamilyReresolveFromDisk(root, {
-        title: item.title,
-        module: item.module,
-        testCaseId: item.testCaseId,
-        testData: [item.testData, item.steps, item.expectedOutcome]
-          .filter(Boolean)
-          .join("\n"),
-        tcMd: md.content,
-        familyAnchors: [...familyAnchors, primaryPath],
-        codeAliases: paramsCodeAliases,
-      });
-      scopedRecoveryUsed = true;
-      if (
-        recovered.primaryPath &&
-        recovered.source &&
-        recovered.primaryPath.replace(/\\/g, "/") !==
-          primaryPath.replace(/\\/g, "/")
-      ) {
-        primaryPath = toRepoRelativePath(root, recovered.primaryPath);
-        source = recovered.source;
-        primarySource = "disk";
-        related = recovered.related || related;
-        disk = recovered;
-        gate = decideUnitSutGate({
-          tcText: tcBlob,
-          primaryPath,
-          sourceExcerpt: source,
-          relatedExcerpt,
-          codeAliases: paramsCodeAliases,
-          moduleText: [item.module, item.title, md.content.slice(0, 1500)]
-            .filter(Boolean)
-            .join("\n"),
-          domainGuards,
-          requireMarkers: requireMarkers !== false,
-          unitScope,
-          minAlignment,
-        });
-      }
-    }
-  }
-
-  if (gate.decision === "block") {
-    const code = gate.code || "FAIL_NEEDS_MARKER";
-    if (/FEATURE_GAP/i.test(code) && canAlwaysGenerateOnFeatureGap(tcBlob, profileGate.genMode)) {
-      gapFallbackUsed = true;
-      gapFallbackReason = `${code} — ${gate.reason}`;
-      notifyProgress(notify, {
-        commandId,
-        phase: "generating",
-        current: index,
-        total,
-        message: "fallback mode: FEATURE_GAP → always_generate",
-      });
-    } else if (
-      canSoftBypassGateForGroundedSource({
-        code,
-        primaryPath,
-        source,
-        markers,
-        tcBlob,
-        alignmentScore: gate.alignmentScore,
-        minAlignment: gate.minAlignment,
-      })
-    ) {
-      softBypassUsed = true;
-      softBypassReason = gate.reason || "";
-      softBypassCode = code;
-      notifyProgress(notify, {
-        commandId,
-        phase: "generating",
-        current: index,
-        total,
-        message: `gate soft-bypass ${code} · SUT=${primaryPath || "unknown"} · ${gate.reason || ""}`,
-      });
-    } else {
-    const debugRel = await writeUnitGenDebugDump({
-      workspaceRoot: root,
-      item,
-      primaryPath,
-      tcMdPath: md.path,
-      suggestedPath: suggested,
-      gateDecision: "block",
-      blockedReason: `${code} — ${gate.reason}`,
-      domainGuard: gate.domainGuard,
-      resolvedSut: toRepoRelativePath(root, gate.resolvedSut || primaryPath || ""),
-      alignmentScore: gate.alignmentScore,
-      candidatesTop3,
-      relatedFiles: relatedFileList(),
-      intentClass: gate.intentClass,
-      intentClasses: gate.intentClasses,
-      minAlignment: gate.minAlignment,
-    });
-    notifyProgress(notify, {
-      commandId,
-      phase: "generating",
-      current: index,
-      total,
-      message: `gate block ${code}`,
-    });
-    return {
-      perTc: {
-        testCaseId: item.testCaseId,
-        genOk: false,
-        error:
-          `${code} — ${gate.reason}. ` +
-          (code === "FAIL_NEEDS_MARKER"
-            ? "Thêm path:/code: đúng domain, Approve lại, rồi Gen."
-            : code === "FAIL_FEATURE_GAP"
-              ? "Behavior không có trong source — đổi TC hoặc sửa BE rồi Re-Approve."
-              : "Re-Approve TC với SUT đúng intent rồi Gen.") +
-          (debugRel ? ` Debug: ${debugRel}` : ""),
-        sourceFileName: primaryPath,
-      },
-      meta: {
-        path: suggested,
-        status: "ERROR",
-        error: code,
-      },
-    };
-    }
-  }
+  // Approve already validated identity, bindings, and behavior evidence. Gen
+  // consumes the locked packet and does not run a second SUT/feature gate.
 
   try {
     const engine = getUnitGenEngine();
-    const genTcMd = prepareTcMdForGen(
-      gapFallbackUsed
-        ? withGapFallbackInstruction(md.content, gapFallbackReason || "FEATURE_GAP")
-        : softBypassUsed
-          ? withSoftBypassDiagnosticInstruction(md.content, {
-              code: softBypassCode || "SOFT_BYPASS",
-              reason: softBypassReason,
-              primaryPath,
-            })
-          : md.content,
-      paramsCodeAliases
-    );
+    const genTcMd = prepareTcMdForGen(md.content, paramsCodeAliases);
     const result = await engine.generate(item, {
       workspaceRoot: root,
       conventions,
@@ -1041,7 +472,7 @@ async function genOneItem(
       related,
       suggestedPath: suggested,
       commandId,
-      alignmentScore: gate.alignmentScore ?? lastAlignScore,
+      alignmentScore: lastAlignScore,
       candidatesTop3,
       onProgress: (s) => {
         notifyProgress(notify, {
@@ -1066,17 +497,7 @@ async function genOneItem(
         },
       };
     }
-    const fileOut =
-      gapFallbackUsed && file
-        ? {
-            ...file,
-            content: annotateGapFallbackCode(
-              file.content,
-              item.testCaseId,
-              gapFallbackReason || "FEATURE_GAP"
-            ),
-          }
-        : file;
+    const fileOut = file;
     return {
       file: fileOut,
       truncated: result.truncated,

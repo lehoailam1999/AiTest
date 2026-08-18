@@ -2,7 +2,7 @@
  * EX3 — E2E staging under `.ai-test/workspace/{runId}/` → Apply `AItest/E2ETest/…` → cleanup.
  * Choice: staging-first + Apply confirm (sandbox may write AItest for heal; FE rolls back then Apply).
  */
-import { readTextFile, writeTextFile, deleteTextFile, isTauri } from "../../tauri/bridge";
+import { readTextFile, writeTextFile, deleteTextFile, deleteDir, isTauri } from "../../tauri/bridge";
 import {
   overlayRelPath,
   workspaceRunDir,
@@ -13,6 +13,8 @@ import type { StagingBackup } from "../unitWorkspace/types";
 import {
   assertSafeAitestTargetRel,
   coerceAitestApplyPath,
+  compiledAitestArtifactRels,
+  emptyAitestParentRels,
 } from "../testOutputLayout";
 import { audit } from "../../api";
 import type { E2EFileDto } from "../../api";
@@ -336,7 +338,7 @@ function matchStagedPath(filePath: string, staged: E2eStagedFile): boolean {
 }
 
 /**
- * Edit one generated E2E file: memory DTO path + staging overlay + AItest target if on disk.
+ * Edit one generated E2E file: memory DTO path + staging overlay + AItest source.
  */
 export async function updateE2eStagedFileContent(
   projectRoot: string,
@@ -354,20 +356,15 @@ export async function updateE2eStagedFileContent(
 
   assertE2eTarget(hit.targetRel);
   await writeTextFile(projectRoot, hit.workspaceRel, content);
-
-  let syncedTarget: string | null = null;
-  if (await fileExists(projectRoot, hit.targetRel)) {
-    await writeTextFile(projectRoot, hit.targetRel, content);
-    syncedTarget = hit.targetRel;
-  }
+  await writeTextFile(projectRoot, hit.targetRel, content);
 
   const next: E2eStagingSession = { ...session, files: nextFiles };
   await writeE2eOverlay(projectRoot, next);
-  return { session: next, syncedTarget };
+  return { session: next, syncedTarget: hit.targetRel };
 }
 
 /**
- * Delete one generated E2E file from staging + AItest target if present.
+ * Delete one generated E2E file from staging overlay and AItest/ source.
  */
 export async function deleteE2eStagedFile(
   projectRoot: string,
@@ -386,13 +383,23 @@ export async function deleteE2eStagedFile(
     /* overlay may already be gone */
   }
 
-  let syncedTarget: string | null = null;
-  if (await fileExists(projectRoot, hit.targetRel)) {
+  try {
+    await deleteTextFile(projectRoot, hit.targetRel);
+  } catch {
+    /* missing is ok — still drop from session so Apply cannot resurrect */
+  }
+  for (const extra of compiledAitestArtifactRels(hit.targetRel)) {
     try {
-      await deleteTextFile(projectRoot, hit.targetRel);
-      syncedTarget = hit.targetRel;
+      await deleteTextFile(projectRoot, extra);
     } catch {
-      /* best-effort */
+      /* compiled artifact may not exist */
+    }
+  }
+  for (const dir of emptyAitestParentRels(hit.targetRel)) {
+    try {
+      await deleteDir(projectRoot, dir, { emptyOnly: true });
+    } catch {
+      /* sibling files remain */
     }
   }
 
@@ -401,5 +408,5 @@ export async function deleteE2eStagedFile(
     files: session.files.filter((f) => !matchStagedPath(filePath, f)),
   };
   await writeE2eOverlay(projectRoot, next);
-  return { session: next, syncedTarget };
+  return { session: next, syncedTarget: hit.targetRel };
 }

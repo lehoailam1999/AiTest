@@ -1,8 +1,8 @@
 /**
  * Pure Unit Gen preflight decisions (Node-testable).
- * Phase 5: after IDE + Approved MD, require path:+code: before CLI.
+ * Gen is consume-only: require an authoritative IDE Approve decision and its
+ * matching MD projection before CLI.
  */
-import { isUnitTcBlockedForGen } from "./parseUnitTcMarkers.ts";
 export type UnitGenGateOk = { ok: true; mdPath?: string };
 export type UnitGenGateFail = {
   ok: false;
@@ -11,7 +11,8 @@ export type UnitGenGateFail = {
     | "no_ide"
     | "no_sync_md"
     | "no_root"
-    | "needs_marker"
+    | "missing_decision"
+    | "projection_mismatch"
     | "needs_language"
     | "not_ready";
   message: string;
@@ -41,7 +42,7 @@ export function decideUnitLanguageGate(input: {
       ok: false,
       code: "needs_language",
       message:
-        "FAIL_NEEDS_LANGUAGE — repo có cả C# và TS/JS. Chọn Language (C# hoặc TypeScript) trước khi Gen Unit để map đúng source.",
+        "Repo có cả C# và TS/JS. Chọn Language (C# hoặc TypeScript) trước khi Gen Unit.",
     };
   }
   return { ok: true };
@@ -53,15 +54,13 @@ export function decideUnitGenGate(input: {
   ideReady: boolean;
   mdPath: string | null;
   tcLabel: string;
-  /**
-   * Phase 5 — when false, block Gen (missing path:/code:).
-   * Omit / undefined → skip marker check (legacy callers).
-   */
+  /** The companion `.grounding.json` passed authoritative decision validation. */
+  hasAuthoritativeDecision?: boolean;
+  /** Precise validation reason for a missing/stale/non-authoritative decision. */
+  decisionReason?: string;
+  /** MD path/code projections agree with the authoritative decision. */
+  projectionsMatch?: boolean;
   hasSourceMarkers?: boolean;
-  /** Approve wrote sut-resolve skipped without markers. */
-  sutResolveSkipped?: boolean;
-  /** Test Data + MD blob for NOT_READY / VALIDATION IR gate. */
-  markerBlob?: string | null;
 }): UnitGenGateResult {
   if (!input.isTauri) {
     return {
@@ -92,49 +91,28 @@ export function decideUnitGenGate(input: {
       ok: false,
       code: "no_sync_md",
       message:
-        `Thiếu TC markdown cho «${input.tcLabel}» dưới .ai-test/test-cases/. ` +
+        `Thiếu TC markdown cho «${input.tcLabel}» dưới AItest/test-cases/. ` +
         `Duyệt (Approve) TC trước khi Gen — file MD được ghi khi duyệt.`,
       cta: "sync_md",
     };
   }
-  // Preserve precise IR / Approve refusal before collapsing to missing markers.
-  const block = isUnitTcBlockedForGen(input.markerBlob);
-  if (block.blocked) {
+  if (input.hasAuthoritativeDecision !== true) {
     return {
       ok: false,
-      code: "not_ready",
-      message: `${block.reason} — «${input.tcLabel}». Sửa TC IR / Re-gen / Re-Approve trước khi Gen.`,
+      code: "missing_decision",
+      message:
+        `${input.decisionReason || "Thiếu quyết định IDE Approve authoritative"} — ` +
+        `«${input.tcLabel}». Re-Approve trước khi Gen.`,
       cta: "sync_md",
     };
   }
-  const skipCode = String(input.markerBlob || "").match(
-    /(?:sut-resolve\s+skipped|FAIL)[^ \n:—]*[:\s—-]+.*?\b(FAIL_FIELD_UNBOUND|FAIL_OP_CONTRADICT|FAIL_FEATURE_GAP)\b/i
-  )?.[1] ||
-    String(input.markerBlob || "").match(
-      /\b(FAIL_FIELD_UNBOUND|FAIL_OP_CONTRADICT|FAIL_FEATURE_GAP)\b/i
-    )?.[1];
-  if (input.sutResolveSkipped && skipCode) {
+  if (input.hasSourceMarkers !== true || input.projectionsMatch !== true) {
     return {
       ok: false,
-      code: "not_ready",
+      code: "projection_mismatch",
       message:
-        `${skipCode.toUpperCase()} — Approve đã từ chối writeBack cho «${input.tcLabel}». ` +
-        `Sửa aliases/intent hoặc BE behavior rồi Re-Approve.`,
-      cta: "sync_md",
-    };
-  }
-
-  // Phase 5: truly missing markers, or unclassified Approve skip-note
-  if (
-    input.hasSourceMarkers === false ||
-    (input.sutResolveSkipped === true && input.hasSourceMarkers !== true)
-  ) {
-    return {
-      ok: false,
-      code: "needs_marker",
-      message:
-        `FAIL_NEEDS_MARKER — «${input.tcLabel}» chưa có path: + code: đáng tin. ` +
-        `Approve lại (Connect IDE + index) hoặc thêm path:/code: thủ công vào Test Data, rồi Gen.`,
+        `TC Markdown của «${input.tcLabel}» không khớp primary trong quyết định IDE Approve. ` +
+        "Re-Approve để đồng bộ lại projection path/code.",
       cta: "sync_md",
     };
   }

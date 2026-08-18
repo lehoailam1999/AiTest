@@ -1,0 +1,52 @@
+/**
+ * One reader for the persisted `.grounding.json` companion.
+ *
+ * Approve writes the immutable v2 decision as the authority and embeds its
+ * deterministic v1 projection under `legacyV1`. Gen consumers read v1, so every
+ * reader must go through here: parsing the file as v1 only would silently reject
+ * a perfectly valid decision.
+ */
+import {
+  APPROVED_GROUNDING_SCHEMA,
+  type ApprovedGroundingDecision,
+} from "./approvedGroundingDecision.js";
+import {
+  UNIT_APPROVE_DECISION_SCHEMA,
+  projectDecisionToV1Grounding,
+  type UnitApprovalDecision,
+} from "./unitApproveRpc.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function normalizeGroundingCompanion(
+  parsed: unknown
+): ApprovedGroundingDecision | null {
+  if (!isRecord(parsed)) return null;
+  if (parsed.schema === APPROVED_GROUNDING_SCHEMA) {
+    return parsed as unknown as ApprovedGroundingDecision;
+  }
+  if (parsed.schema !== UNIT_APPROVE_DECISION_SCHEMA) return null;
+  const embedded = parsed.legacyV1;
+  if (isRecord(embedded) && embedded.schema === APPROVED_GROUNDING_SCHEMA) {
+    return embedded as unknown as ApprovedGroundingDecision;
+  }
+  try {
+    return projectDecisionToV1Grounding(
+      parsed as unknown as UnitApprovalDecision
+    ) as ApprovedGroundingDecision;
+  } catch {
+    return null;
+  }
+}
+
+export function parseGroundingCompanion(
+  raw: string
+): ApprovedGroundingDecision | null {
+  try {
+    return normalizeGroundingCompanion(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}

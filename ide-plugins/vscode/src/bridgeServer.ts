@@ -36,6 +36,7 @@ import {
   type CodegenOpenSessionParams,
   type CodegenCloseSessionParams,
   type TcSyncApprovedMdParams,
+  type UnitApproveResolveParams,
 } from "@aitest/ide-protocol/node";
 import {
   buildFocusSnapshot,
@@ -62,6 +63,7 @@ import {
 import { handleTcSyncApprovedMd } from "./tcSyncCommands";
 import { handleCodegenGenerateUnitBatch } from "./unitGenCommands";
 import { handleCodegenGenerateE2eBatch } from "./e2eGenCommands";
+import { handleUnitApproveResolve } from "./repositoryIntelligence/unitApproveCommands";
 
 export type BridgeHandle = {
   port: number;
@@ -163,6 +165,7 @@ export async function startIdeBridgeServer(opts?: {
               IdeMethods.codegenOpenSession,
               IdeMethods.codegenCloseSession,
               IdeMethods.tcSyncApprovedMd,
+              IdeMethods.unitApproveResolve,
             ],
           };
           reply(makeSuccess(msg.id, health));
@@ -404,6 +407,11 @@ export async function startIdeBridgeServer(opts?: {
             break;
           }
           reply(makeSuccess(msg.id, await handleTcSyncApprovedMd(p)));
+          break;
+        }
+        case IdeMethods.unitApproveResolve: {
+          const p = msg.params as UnitApproveResolveParams;
+          reply(makeSuccess(msg.id, await handleUnitApproveResolve(p)));
           break;
         }
         default:

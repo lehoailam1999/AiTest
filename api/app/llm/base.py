@@ -147,7 +147,7 @@ _VIETNAMESE_TC_EXAMPLE_UNIT = (
     '"testData":{"input":{},"target":{"field":"…","constraint":"…","boundary":"","value":""},'
     '"existingState":{}},'
     '"testDataHints":{"layerHint":null,"sourceSignal":null},'
-    '"status":"READY_FOR_CODEGEN","priority":"Cao","severity":"Nặng","automationReady":true}'
+    '"status":"READY_FOR_GROUNDING","priority":"Cao","severity":"Nặng","automationReady":false}'
     "],"
     '"coverage":{"VALIDATION_DATA":{"totalBehaviors":1,"coveredBehaviors":1,"missingBehaviors":0}},'
     '"gaps":[],"unknownBehaviors":[],"conflicts":[]}'
@@ -355,15 +355,15 @@ def system_prompt(ctx: GenerateContext | None = None) -> str:
             '"module":"[Tên FEATURES]",'
             '"trace":{"requirementIds":["…"],"behaviorId":"…-B01"},'
             '"preconditions":[],'
-            '"testData":{"input":{},"target":{"field":"…","constraint":"…",'
+            '"testData":{"input":{},"target":{"scope":"field|multi|aggregate","field":"…","constraint":"…",'
             '"boundary":"","value":""},"existingState":{}},'
             '"steps":{"prepare":["…"],"execute":["…"]},'
             '"expectedResult":{"type":"REJECT|ACCEPT|STATE|…",'
             '"observable":"create|update|query|validate|…","description":"…"},'
             '"testDataHints":{"layerHint":null,"sourceSignal":null},'
-            '"status":"READY_FOR_CODEGEN|NOT_READY",'
+            '"status":"READY_FOR_GROUNDING|NOT_READY",'
             '"priority":"Thấp|Trung bình|Cao|Nghiêm trọng",'
-            '"severity":"Nhẹ|Nặng|Nghiêm trọng","automationReady":true}],'
+            '"severity":"Nhẹ|Nặng|Nghiêm trọng","automationReady":false}],'
             '"coverage":{},"gaps":[],"unknownBehaviors":[],"conflicts":[]}\n\n'
             f"Ví dụ schema (placeholder — thay bằng nội dung PRIMARY BE):\n{example}\n"
         )

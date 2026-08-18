@@ -68,5 +68,6 @@ export function renderAllConventionFiles(profile: ProjectProfile): Record<string
   return {
     ".ai-test/e2e-conventions.md": renderE2eConventionsMd(profile),
     ".ai-test/unit-conventions.md": renderUnitConventionsMd(profile),
+    ".ai-test/.gitignore": ["staging/", "logs/", "workspace/", ""].join("\n"),
   };
 }

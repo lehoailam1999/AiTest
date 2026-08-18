@@ -561,7 +561,7 @@ export function isPacketSutAligned(
 
 /**
  * Accept disk re-resolve only inside marker/packet family + optional op-token hit.
- * Portable fail-closed — not full allowDiskReresolve.
+ * Portable fail-closed validation of the locked packet; never a SUT resolver.
  */
 export function acceptScopedFamilyPrimary(opts: {
   candidatePath: string;
@@ -609,7 +609,7 @@ export function acceptScopedFamilyPrimary(opts: {
 
 /**
  * One-shot scoped re-resolve (module/family lock) — used when packet/marker fail
- * FEATURE_GAP / SUT_MISMATCH without enabling global allowDiskReresolve.
+ * packet mismatch without enabling any disk re-resolution.
  */
 export async function scopedFamilyReresolveFromDisk(
   root: string,

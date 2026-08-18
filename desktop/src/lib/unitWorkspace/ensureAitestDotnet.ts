@@ -13,8 +13,12 @@
 import { listSourceFiles, readTextFile, writeTextFile } from "../../tauri/bridge";
 import { detectCsharpPackagesFromTestCode } from "@aitest/ide-protocol";
 import { overlayRelPath } from "./paths";
-import { writeTextFileIfChanged } from "./contentDedup";
 import type { UnitWorkspaceManifest } from "./types";
+import {
+  readDraftText,
+  writeDraftText,
+  writeDraftTextIfChanged,
+} from "./draftStore";
 
 function normPkg(packagePrefix?: string | null): string {
   return (packagePrefix || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
@@ -92,11 +96,13 @@ export function manifestHasAitestCsharpTests(manifest: UnitWorkspaceManifest): b
   );
 }
 
-/** Short id from uniquified file name: FooTests_abc12345.cs → abc12345 */
+/** Short id from uniquified file name: FooTests_TC032.cs → TC032 (UUID fallback: _a1b2c3d4). */
 export function csharpShortIdFromPath(rel: string): string {
   const base = rel.replace(/\\/g, "/").split("/").pop() || "";
-  const m = base.match(/_([a-f0-9]{6,12})\.cs$/i);
-  return m ? m[1].toLowerCase() : "";
+  const tc = base.match(/_(TC[A-Za-z0-9]{1,20})\.cs$/i);
+  if (tc) return tc[1].toUpperCase();
+  const hex = base.match(/_([a-f0-9]{6,12})\.cs$/i);
+  return hex ? hex[1].toLowerCase() : "";
 }
 
 /**
@@ -452,6 +458,12 @@ export function buildAitestUnitTestsCsproj(opts: {
     `  </ItemGroup>\n` +
     `\n` +
     `  <ItemGroup>\n` +
+    `    <Compile Remove="test-cases\\**\\*" />\n` +
+    `    <Content Remove="test-cases\\**\\*" />\n` +
+    `    <None Remove="test-cases\\**\\*" />\n` +
+    `  </ItemGroup>\n` +
+    `\n` +
+    `  <ItemGroup>\n` +
     `    <ProjectReference Include="${sut}" />\n` +
     `  </ItemGroup>\n` +
     `\n` +
@@ -634,16 +646,10 @@ export async function ensureAitestDotnetInWorkspace(input: {
     if (!/(?:^|\/)AItest\//i.test(f.targetRel.replace(/\\/g, "/"))) continue;
     const shortId = csharpShortIdFromPath(f.targetRel);
     try {
-      let body = await readTextFile(input.projectRoot, f.workspaceRel);
+      let body = await readDraftText(input.projectRoot, f.workspaceRel);
       const next = sanitizeCsharpAitestCode(body, shortId || "");
       if (next !== body) {
-        await writeTextFile(input.projectRoot, f.workspaceRel, next);
-        // Keep staged target in sync so verify compile sees the fix.
-        try {
-          await writeTextFile(input.projectRoot, f.targetRel, next);
-        } catch {
-          /* stage will write */
-        }
+        await writeDraftText(input.projectRoot, f.workspaceRel, next);
       }
     } catch {
       /* skip */
@@ -713,7 +719,8 @@ export async function ensureAitestDotnetInWorkspace(input: {
     }
   }
 
-  // 3) Scaffold AItest.UnitTests.csproj into overlay (+ disk target)
+  // 3) Scaffold AItest.UnitTests.csproj into the Tool draft; Verify stages it
+  // temporarily and Update/Apply is the only persistent write.
   const dirPackages = await findDirectoryPackagesProps(
     input.projectRoot,
     pkg || parentDir(sutRel || "") || ""
@@ -727,7 +734,7 @@ export async function ensureAitestDotnetInWorkspace(input: {
     if (f.op === "delete" || !/\.cs$/i.test(f.targetRel)) continue;
     if (!/(?:^|\/)AItest\//i.test(f.targetRel.replace(/\\/g, "/"))) continue;
     try {
-      const body = await readTextFile(input.projectRoot, f.workspaceRel);
+      const body = await readDraftText(input.projectRoot, f.workspaceRel);
       for (const p of detectCsharpPackagesFromTestCode(body)) extraPkgs.add(p);
     } catch {
       /* skip */
@@ -747,12 +754,8 @@ export async function ensureAitestDotnetInWorkspace(input: {
   });
 
   const workspaceRel = overlayRelPath(working.runId, unitProjRel, packagePrefix);
-  await writeTextFileIfChanged(input.projectRoot, workspaceRel, unitProjBody);
-  try {
-    await writeTextFileIfChanged(input.projectRoot, unitProjRel, unitProjBody);
-  } catch {
-    /* target may not exist yet — stage will write */
-  }
+  await writeDraftTextIfChanged(input.projectRoot, workspaceRel, unitProjBody);
+  const unitProjExists = await fileExists(input.projectRoot, unitProjRel);
 
   if (!working.files.some((f) => f.targetRel.replace(/\\/g, "/") === unitProjRel)) {
     working = {
@@ -760,7 +763,7 @@ export async function ensureAitestDotnetInWorkspace(input: {
       files: [
         ...working.files,
         {
-          op: "new",
+          op: unitProjExists ? "modify" : "new",
           targetRel: unitProjRel,
           workspaceRel,
         },

@@ -86,8 +86,8 @@ def test_resolve_e2e_file_paths_under_aitest():
     resolved = resolve_e2e_file_paths(files, module="Auth", journey_slug="login")
     by_kind = {f.kind: f for f in resolved if f.kind in ("page", "spec")}
     assert by_kind["page"].path == "AItest/E2ETest/_shared/pages/login.page.ts"
-    assert by_kind["spec"].path == "AItest/E2ETest/Auth/specs/login.spec.ts"
-    assert e2e_module_root("Auth") == "AItest/E2ETest/Auth"
+    assert by_kind["spec"].path == "AItest/E2ETest/auth/specs/login.spec.ts"
+    assert e2e_module_root("Auth") == "AItest/E2ETest/auth"
     assert any(f.path.endswith("_shared/types/playwright-shim.d.ts") for f in resolved)
 
 
@@ -114,14 +114,14 @@ def test_resolve_e2e_file_paths_with_requirement_tc():
     spec = next(f for f in resolved if f.kind == "spec")
     assert page.path == "AItest/E2ETest/_shared/pages/login.page.ts"
     assert spec.path == (
-        "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công/specs/login.spec.ts"
+        "AItest/E2ETest/dang-nhap/tc01-login-thanh-cong/specs/login.spec.ts"
     )
     assert "_shared/pages/login.page" in spec.content
     assert e2e_module_root(
         "Auth",
         requirement_title="Đăng nhập",
         test_case_title="TC01 - Login thành công",
-    ) == "AItest/E2ETest/Đăng-nhập/TC01-Login-thành-công"
+    ) == "AItest/E2ETest/dang-nhap/tc01-login-thanh-cong"
 
 
 def test_resolve_e2e_file_paths_overwrites_same_canonical_path():
@@ -185,7 +185,7 @@ def test_resolve_e2e_file_paths_rewrites_spec_storage_state_override():
 def test_e2e_module_plus_tc_uses_module_as_req():
     assert (
         e2e_module_root("Auth", test_case_title="Login OK")
-        == "AItest/E2ETest/Auth/Login-OK"
+        == "AItest/E2ETest/auth/login-ok"
     )
 
 
@@ -198,14 +198,14 @@ def test_e2e_shared_root():
 
 def test_e2e_module_root_fallback_module():
     """Without requirement/tc, fallback to legacy module."""
-    assert e2e_module_root("Auth") == "AItest/E2ETest/Auth"
-    assert e2e_module_root("", requirement_title="Req1") == "AItest/E2ETest/Req1"
+    assert e2e_module_root("Auth") == "AItest/E2ETest/auth"
+    assert e2e_module_root("", requirement_title="Req1") == "AItest/E2ETest/req1"
 
 
 def test_e2e_module_root_sanitizes_slashes_in_label():
     assert (
         e2e_module_root("[E2E-Auth/Permission]-Refresh")
-        == "AItest/E2ETest/E2E-Auth-Permission-Refresh"
+        == "AItest/E2ETest/e2e-auth-permission-refresh"
     )
 
 
@@ -220,7 +220,7 @@ def test_e2e_module_root_truncates_long_tc_title():
         test_case_title=long_title,
     )
     tc_seg = root.split("/")[-1]
-    assert len(tc_seg) <= 48
+    assert len(tc_seg) <= 40
     assert root.startswith("AItest/E2ETest/")
 
 

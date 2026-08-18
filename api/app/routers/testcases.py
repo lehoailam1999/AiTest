@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ from app.responses import errors, ok, page, page_params
 from app.serializers import testcase_dto
 from app.services.e2e_tc_pre_approve_enrich import enrich_e2e_tc_before_approve
 from app.services.requirement_content import source_content_hash
+from app.services.unit_tc_revision import unit_testcase_content_revision
 from app.services.vietnamese_labels import (
     normalize_engine_type,
     priority_order_expr,
@@ -82,6 +85,56 @@ def _uuid(value: str) -> uuid.UUID | None:
 
 def _is_e2e_case(tc: TestCase) -> bool:
     return normalize_engine_type(tc.type) == "E2E"
+
+
+_UNIT_DECISION_SCHEMA = "aitest-unit-approve-decision-v2"
+_UNIT_TC_IR_SCHEMA = "aitest-unit-tc-ir-v1"
+_SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$", re.I)
+
+
+def _validate_unit_approval_decision(
+    tc: TestCase, decision: object
+) -> tuple[str | None, dict | None]:
+    if not isinstance(decision, dict):
+        return "decision must be an object", None
+    if decision.get("schema") != _UNIT_DECISION_SCHEMA:
+        return f"decision.schema must be {_UNIT_DECISION_SCHEMA}", None
+    decision_id = decision.get("decisionId")
+    if not isinstance(decision_id, str) or not _SHA256_RE.fullmatch(decision_id):
+        return "decision.decisionId must be a sha256 digest", None
+
+    test_case = decision.get("testCase")
+    if not isinstance(test_case, dict):
+        return "decision.testCase must be an object", None
+    accepted_ids = {str(tc.id), tc.test_case_code}
+    if str(test_case.get("id") or "") not in accepted_ids:
+        return "decision.testCase.id does not match the test case", None
+    revision = test_case.get("revisionHash")
+    if not isinstance(revision, str) or not _SHA256_RE.fullmatch(revision):
+        return "decision.testCase.revisionHash must be a sha256 digest", None
+    ir = test_case.get("ir")
+    if not isinstance(ir, dict) or ir.get("schema") != _UNIT_TC_IR_SCHEMA:
+        return f"decision.testCase.ir.schema must be {_UNIT_TC_IR_SCHEMA}", None
+    if str(ir.get("testCaseId") or "") not in accepted_ids:
+        return "decision.testCase.ir.testCaseId does not match the test case", None
+
+    outcome = decision.get("outcome")
+    readiness = decision.get("readiness")
+    authoritative = decision.get("authoritative")
+    expected_readiness = {
+        "READY": "READY_FOR_CODEGEN",
+        "NOT_READY": "NOT_READY",
+        "FEATURE_GAP": "FEATURE_GAP",
+    }
+    if outcome not in expected_readiness or readiness != expected_readiness[outcome]:
+        return "decision outcome/readiness are inconsistent", None
+    if not isinstance(authoritative, bool):
+        return "decision.authoritative must be boolean", None
+    if authoritative and (
+        outcome != "READY" or readiness != "READY_FOR_CODEGEN"
+    ):
+        return "only READY_FOR_CODEGEN decisions may be authoritative", None
+    return None, ir
 
 
 def _has_actionable_step(steps: str) -> bool:
@@ -253,7 +306,6 @@ def apply_testcase_patch(tc: TestCase, body: dict) -> bool:
         tc.test_data = body.get("testData")
     if "automationReady" in body:
         tc.automation_ready = bool(body.get("automationReady"))
-        content_changed = True
     if "executionStatus" in body and body.get("executionStatus"):
         tc.execution_status = body["executionStatus"]
 
@@ -507,6 +559,10 @@ def _transition(
                     )
                 else:
                     tc.automation_ready = True
+            elif tc.type == "Unit":
+                # API approval precedes Desktop source grounding. Only the
+                # authoritative grounding write-back may promote this flag.
+                tc.automation_ready = False
     else:
         tc.reviewed_by = None
         tc.reviewed_at = None
@@ -532,6 +588,83 @@ def approve_testcase(
     user: Annotated[User, Depends(get_current_user)],
 ):
     return _transition(db, tc_id, C.REVIEW_APPROVED, user, None)
+
+
+@router.post("/testcases/{tc_id}/approve-unit")
+async def approve_unit_testcase(
+    tc_id: str,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    tid = _uuid(tc_id)
+    if tid is None:
+        return errors(400, "invalid id")
+    tc = (
+        db.query(TestCase)
+        .filter(TestCase.id == tid)
+        .with_for_update()
+        .first()
+    )
+    if tc is None:
+        return errors(404, "not found")
+    if normalize_engine_type(tc.type) != "Unit":
+        return errors(400, "approve-unit only supports Unit test cases")
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return errors(400, "invalid JSON body")
+    if not isinstance(body, dict):
+        return errors(400, "invalid body")
+    decision = body.get("decision", body)
+    validation_error, ir = _validate_unit_approval_decision(tc, decision)
+    if validation_error:
+        return errors(400, validation_error)
+    assert isinstance(decision, dict) and ir is not None
+
+    decision_revision = decision["testCase"]["revisionHash"]
+    explicit_revision = body.get("expectedRevision") or body.get(
+        "expectedContentRevision"
+    )
+    if explicit_revision is not None and explicit_revision != decision_revision:
+        return errors(
+            400, "expected revision does not match decision.testCase.revisionHash"
+        )
+    current_revision = unit_testcase_content_revision(tc)
+    if decision_revision != current_revision:
+        return errors(409, "test case content revision conflict")
+    if not C.can_transition_review(tc.review_status, C.REVIEW_APPROVED):
+        return errors(
+            400,
+            f"cannot transition from {tc.review_status} to {C.REVIEW_APPROVED}",
+        )
+
+    # Mutate only after every validation/CAS check; one commit makes the
+    # approval, decision, IR and marker projection atomic.
+    if "testData" in body:
+        test_data = body.get("testData")
+        if test_data is not None and not isinstance(test_data, str):
+            return errors(400, "testData must be a string or null")
+        tc.test_data = test_data
+    tc.unit_decision_json = json.dumps(
+        decision, ensure_ascii=False, separators=(",", ":")
+    )
+    tc.unit_tc_ir_json = json.dumps(ir, ensure_ascii=False, separators=(",", ":"))
+    tc.unit_decision_id = decision["decisionId"]
+    tc.review_status = C.REVIEW_APPROVED
+    tc.reviewed_by = user.id
+    tc.reviewed_at = datetime.now(timezone.utc)
+    tc.review_comment = None
+    tc.type = "Unit"
+    tc.automation_ready = bool(
+        decision["readiness"] == "READY_FOR_CODEGEN"
+        and decision["authoritative"] is True
+    )
+    tc.unit_content_revision = unit_testcase_content_revision(tc)
+    db.commit()
+    db.refresh(tc)
+    return ok(testcase_dto(tc))
 
 
 @router.post("/testcases/{tc_id}/reject")

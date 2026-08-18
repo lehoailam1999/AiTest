@@ -69,11 +69,6 @@ export type UnitProfile = {
   genMode?: "strict_spec" | "always_generate";
   /** Require path:/code: markers before Gen. Array form = require those keys. */
   requireMarkers?: boolean | string[];
-  /**
-   * When true, Extension may fuzzy-resolve SUT from disk if packet/markers fail.
-   * Default false — Desktop owns resolve; Extension verify-only.
-   */
-  allowDiskReresolve?: boolean;
   /** Optional TC-id / cue → primary path overrides (per-repo only). */
   sutMap?: Record<string, string>;
   /** Portable domain allow/deny by module cue. */

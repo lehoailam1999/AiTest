@@ -219,9 +219,14 @@ export class IdeRpcClient {
     codegenCloseSession(params) {
         return this.request(IdeMethods.codegenCloseSession, params);
     }
-    /** Phase C — write Approved TC markdown under `.ai-test/test-cases/` */
+    /** Phase C — write Approved TC markdown under `AItest/test-cases/` */
     tcSyncApprovedMd(params) {
         return this.request(IdeMethods.tcSyncApprovedMd, params, this.timeoutMs * 6);
+    }
+    /** Unit Approve v2 — IDE Repository Intelligence */
+    unitApproveResolve(params) {
+        const deadlineMs = Math.min(Math.max(params.limits?.deadlineMs ?? 150_000, 5_000), 180_000);
+        return this.request(IdeMethods.unitApproveResolve, params, Math.max(this.timeoutMs, deadlineMs + 5_000));
     }
 }
 export function rpcIdKey(id) {

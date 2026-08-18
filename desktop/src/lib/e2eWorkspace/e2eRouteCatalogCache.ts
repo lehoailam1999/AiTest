@@ -7,13 +7,14 @@ import {
   buildE2eRouteCatalog,
   isRoutingFilePath,
   type E2eRouteCatalog,
+  type RouteLabelIndex,
 } from "./e2eRouteCatalog";
 import { isUsableFeaturePath } from "./assertTcReadyForE2eGen";
 
 export const E2E_ROUTE_CATALOG_CACHE_REL = ".ai-test/e2e-route-catalog.json";
 
 /** Bump when extract/compose rules change so stale SUT caches rebuild. */
-export const E2E_ROUTE_CATALOG_CACHE_VERSION = 3 as const;
+export const E2E_ROUTE_CATALOG_CACHE_VERSION = 4 as const;
 
 export type E2eRouteCatalogCacheFile = {
   version: typeof E2E_ROUTE_CATALOG_CACHE_VERSION;
@@ -21,6 +22,10 @@ export type E2eRouteCatalogCacheFile = {
   fingerprint: string;
   routes: string[];
   sources: string[];
+  /** route → UI label term frequency (locale bridge for non-ASCII modules) */
+  labels?: RouteLabelIndex;
+  /** route → feature template/component files */
+  featureSources?: Record<string, string[]>;
   updatedAt: string;
 };
 
@@ -43,9 +48,17 @@ export function catalogFromCache(
     if (parsed.fingerprint !== fingerprint) return null;
     const routes = (parsed.routes || []).filter((r) => isUsableFeaturePath(r));
     if (!routes.length) return null;
+    const labels =
+      parsed.labels && typeof parsed.labels === "object" ? parsed.labels : undefined;
+    const featureSources =
+      parsed.featureSources && typeof parsed.featureSources === "object"
+        ? parsed.featureSources
+        : undefined;
     return {
       routes,
       sources: Array.isArray(parsed.sources) ? parsed.sources : [],
+      ...(labels ? { labels } : {}),
+      ...(featureSources ? { featureSources } : {}),
     };
   } catch {
     return null;
@@ -61,6 +74,12 @@ export function serializeCatalogCache(
     fingerprint,
     routes: catalog.routes.filter((r) => isUsableFeaturePath(r)),
     sources: catalog.sources.slice(0, 80),
+    ...(catalog.labels && Object.keys(catalog.labels).length
+      ? { labels: catalog.labels }
+      : {}),
+    ...(catalog.featureSources && Object.keys(catalog.featureSources).length
+      ? { featureSources: catalog.featureSources }
+      : {}),
     updatedAt: new Date().toISOString(),
   };
   return `${JSON.stringify(payload, null, 2)}\n`;

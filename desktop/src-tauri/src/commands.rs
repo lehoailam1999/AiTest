@@ -1278,6 +1278,71 @@ fn dirs_next_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn unit_draft_path(project_root: &str, draft_path: &str) -> Result<PathBuf, String> {
+    let rel = draft_path
+        .trim()
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_string();
+    if rel.is_empty() || Path::new(&rel).is_absolute() {
+        return Err("Draft path phải là đường dẫn tương đối".into());
+    }
+    if rel
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("Draft path không được chứa traversal".into());
+    }
+
+    // Stable FNV-1a key: isolates drafts belonging to different source roots.
+    let normalized_root = project_root.trim().replace('\\', "/").to_lowercase();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in normalized_root.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let base = std::env::temp_dir()
+        .join("aitest-desktop")
+        .join("unit-drafts")
+        .join(format!("{hash:016x}"));
+    Ok(rel
+        .split('/')
+        .fold(base, |path, segment| path.join(segment)))
+}
+
+/// Drafts belong to the Desktop Tool, not the user's source tree.
+#[tauri::command]
+pub fn read_unit_draft_text(project_root: String, draft_path: String) -> Result<String, String> {
+    let path = unit_draft_path(&project_root, &draft_path)?;
+    if !path.is_file() {
+        return Err("Draft không tồn tại".into());
+    }
+    fs::read_to_string(path).map_err(|e| format!("Đọc draft thất bại: {e}"))
+}
+
+#[tauri::command]
+pub fn write_unit_draft_text(
+    project_root: String,
+    draft_path: String,
+    content: String,
+) -> Result<(), String> {
+    let path = unit_draft_path(&project_root, &draft_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Tạo draft dir thất bại: {e}"))?;
+    }
+    fs::write(path, content.as_bytes()).map_err(|e| format!("Ghi draft thất bại: {e}"))
+}
+
+#[tauri::command]
+pub fn delete_unit_draft_dir(project_root: String, draft_path: String) -> Result<(), String> {
+    let path = unit_draft_path(&project_root, &draft_path)?;
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| format!("Xóa draft thất bại: {e}"))?;
+    } else if path.is_file() {
+        fs::remove_file(path).map_err(|e| format!("Xóa draft thất bại: {e}"))?;
+    }
+    Ok(())
+}
 
 /// Read UTF-8 text under project root.
 /// Deprecated for AI generate context — prefer FastAPI `POST /api/workspace/{id}/read`.
@@ -1325,7 +1390,7 @@ pub fn delete_text_file(project_root: String, relative_path: String) -> Result<(
     if rel.split('/').any(|s| s == "..") {
         return Err("Đường dẫn không được chứa ..".into());
     }
-    let path = resolve_under_root(&project_root, &rel, false)?;
+    let path = resolve_under_root(&project_root, &rel, true)?;
     if path.is_file() {
         fs::remove_file(&path).map_err(|e| format!("Xóa file thất bại: {e}"))?;
     }
@@ -1352,9 +1417,15 @@ pub fn delete_dir(
         return Err("Đường dẫn không được chứa ..".into());
     }
     let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-    let allowed = parts.iter().any(|s| s.eq_ignore_ascii_case(".ai-test"));
-    if !allowed {
-        return Err("Chỉ được xóa thư mục dưới .ai-test/ (staging)".into());
+    let empty_only_flag = empty_only.unwrap_or(false);
+    let allowed_staging = parts.iter().any(|s| s.eq_ignore_ascii_case(".ai-test"));
+    let allowed_aitest_empty = empty_only_flag
+        && parts.iter().any(|s| s.eq_ignore_ascii_case("aitest"));
+    if !allowed_staging && !allowed_aitest_empty {
+        return Err(
+            "Chỉ được xóa thư mục dưới .ai-test/ (staging) hoặc thư mục trống dưới AItest/"
+                .into(),
+        );
     }
     let path = resolve_under_root(&project_root, &rel, true)?;
     if !path.exists() {

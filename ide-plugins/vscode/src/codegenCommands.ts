@@ -301,7 +301,7 @@ export function handleCodegenGenerateStub(
     status: "FAILED",
     error:
       `Phase A/B: aitest/codegen.generate${kind === "unit" ? "Unit" : "E2e"}Batch not implemented — ` +
-      "Desktop/API still owns Gen + guards. Approved TC markdown may exist under `.ai-test/test-cases/` " +
+      "Desktop/API still owns Gen + guards. Approved TC markdown may exist under `AItest/test-cases/` " +
       "(Phase C sync) as supplemental artifact only. Use applyFiles/runTests.",
   };
 }

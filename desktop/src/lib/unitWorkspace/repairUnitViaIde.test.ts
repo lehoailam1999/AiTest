@@ -6,20 +6,10 @@ import { describe, it } from "node:test";
 import { normalizeUnitProfile } from "../projectProfile/loadSaveProfile";
 
 describe("unit flow declutter — Desktop profile + repair ownership", () => {
-  it("normalizeUnitProfile defaults allowDiskReresolve=false", () => {
+  it("normalizes Unit profile without a disk re-resolve escape hatch", () => {
     const u = normalizeUnitProfile({ runner: "", testFrameworks: [], mockHint: "" });
-    assert.equal(u.allowDiskReresolve, false);
     assert.equal(u.scope, "backend");
     assert.equal(u.minAlignment, 50);
-  });
-
-  it("normalizeUnitProfile can enable disk reresolve explicitly", () => {
-    const u = normalizeUnitProfile({
-      runner: "",
-      testFrameworks: [],
-      mockHint: "",
-      allowDiskReresolve: true,
-    });
-    assert.equal(u.allowDiskReresolve, true);
+    assert.equal("allowDiskReresolve" in u, false);
   });
 });

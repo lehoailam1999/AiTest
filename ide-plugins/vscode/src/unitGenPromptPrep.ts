@@ -1,22 +1,13 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import type { CodeAliasMap } from "@aitest/ide-protocol";
+import {
+  parseGroundingCompanion,
+  validateApprovedGroundingDecision,
+  type ApprovedGroundingDecision,
+  type CodeAliasMap,
+} from "@aitest/ide-protocol";
 
-export type UnitGroundingContract = {
-  schema?: string;
-  primary?: {
-    pathRel?: string;
-    code?: string;
-    line?: number;
-    endLine?: number;
-    contentHash?: string;
-  };
-  related?: Array<{ pathRel: string; contentHash?: string }>;
-  deps?: string[];
-  confidence?: "HIGH" | "MEDIUM" | "LOW";
-  freshness?: string;
-  authoritative?: boolean;
-};
+export type UnitGroundingContract = ApprovedGroundingDecision;
 
 export async function loadUnitGroundingContract(
   workspaceRoot: string,
@@ -26,8 +17,8 @@ export async function loadUnitGroundingContract(
   const jsonRel = rel.replace(/\.md$/i, ".grounding.json");
   const abs = path.join(workspaceRoot, jsonRel);
   try {
-    const raw = await fs.readFile(abs, "utf8");
-    return JSON.parse(raw) as UnitGroundingContract;
+    // The file holds the v2 decision; consume its v1 projection.
+    return parseGroundingCompanion(await fs.readFile(abs, "utf8"));
   } catch {
     return null;
   }
@@ -42,13 +33,10 @@ export function groundingRelatedPaths(contract: UnitGroundingContract | null): s
 
 /** True when companion contract can authoritatively pin primary without disk re-rank. */
 export function isAuthoritativeUnitGrounding(
-  contract: UnitGroundingContract | null | undefined
+  contract: UnitGroundingContract | null | undefined,
+  markers?: { paths?: string[]; codes?: string[] }
 ): boolean {
-  if (!contract?.primary?.pathRel?.trim()) return false;
-  if (contract.authoritative !== true) return false;
-  if (contract.freshness !== "fresh") return false;
-  if (!contract.primary.contentHash?.trim()) return false;
-  return contract.confidence === "HIGH" || contract.confidence === "MEDIUM";
+  return validateApprovedGroundingDecision(contract, markers).ok;
 }
 
 function extractMarker(blob: string, key: string): string {

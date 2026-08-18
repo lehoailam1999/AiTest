@@ -87,6 +87,18 @@ function sourcePreferScore(pathRel: string): number {
   return 0;
 }
 
+function nameMatchScore(name: string, query: string): number {
+  const candidate = name.toLowerCase();
+  const q = query.trim().toLowerCase();
+  if (!q) return 0.1;
+  if (candidate === q) return 1;
+  if (candidate.startsWith(q)) return 0.85;
+  if (candidate.includes(q)) return 0.7;
+  // Fuzzy provider match: the query never appears in the name, so it is only a
+  // weak signal and must not compete with a real substring match.
+  return 0.25;
+}
+
 function rankSymbolHits(hits: SymbolHit[], query: string): SymbolHit[] {
   const q = query.toLowerCase();
   return [...hits].sort((a, b) => {
@@ -185,7 +197,9 @@ export async function handleSearchSymbol(params: SearchSymbolParams): Promise<Se
         pathRel,
         containerName: s.containerName || undefined,
         range: rangeOf(s.location.range),
-        score: s.name.toLowerCase() === query.toLowerCase() ? 1 : 0.75,
+        // A flat score for every inexact hit makes downstream consumers see a
+        // tie between unrelated symbols, so grade how the name actually matched.
+        score: nameMatchScore(s.name, query),
       };
     });
 

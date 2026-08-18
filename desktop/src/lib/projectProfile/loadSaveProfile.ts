@@ -42,7 +42,6 @@ export function normalizeUnitProfile(
     domainGuards: Array.isArray(u.domainGuards) ? u.domainGuards : [],
     codeAliasesFile: u.codeAliasesFile || ".ai-test/code-aliases.json",
     intentRulesFile: u.intentRulesFile || ".ai-test/unit-intent-rules.json",
-    allowDiskReresolve: u.allowDiskReresolve === true,
   };
 }
 

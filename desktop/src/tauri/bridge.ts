@@ -221,6 +221,36 @@ export function writeTextFile(
   return invoke<string>("write_text_file", { projectRoot, relativePath, content });
 }
 
+/** Tool-internal Unit draft storage (OS temp), never written into the SUT source tree. */
+export function readUnitDraftText(
+  projectRoot: string,
+  draftPath: string
+): Promise<string> {
+  ensureTauri();
+  return invoke<string>("read_unit_draft_text", { projectRoot, draftPath });
+}
+
+export function writeUnitDraftText(
+  projectRoot: string,
+  draftPath: string,
+  content: string
+): Promise<void> {
+  ensureTauri();
+  return invoke<void>("write_unit_draft_text", {
+    projectRoot,
+    draftPath,
+    content,
+  });
+}
+
+export function deleteUnitDraftDir(
+  projectRoot: string,
+  draftPath: string
+): Promise<void> {
+  ensureTauri();
+  return invoke<void>("delete_unit_draft_dir", { projectRoot, draftPath });
+}
+
 export function deleteTextFile(projectRoot: string, relativePath: string): Promise<void> {
   ensureTauri();
   return invoke<void>("delete_text_file", { projectRoot, relativePath });

@@ -1,4 +1,4 @@
-import { readTextFile, writeTextFile } from "../../tauri/bridge";
+import { readTextFile } from "../../tauri/bridge";
 import { stripCodeFences } from "../stripCodeFences";
 import { manifestRelPath, newRunId, overlayRelPath } from "./paths";
 import type {
@@ -16,6 +16,7 @@ import {
   testFileNameFromSource,
 } from "../testOutputLayout";
 import { assertStackMatchesPath } from "@aitest/ide-protocol";
+import { readDraftText, writeDraftText } from "./draftStore";
 import { resolvePackagePrefix } from "../resolvePackagePrefix";
 import {
   ensureAitestJestTsconfigInWorkspace,
@@ -105,7 +106,7 @@ export async function saveManifest(
   manifest: UnitWorkspaceManifest
 ): Promise<void> {
   const rel = manifestRelPath(manifest.runId, manifest.packagePrefix);
-  await writeTextFile(projectRoot, rel, JSON.stringify(manifest, null, 2));
+  await writeDraftText(projectRoot, rel, JSON.stringify(manifest, null, 2));
 }
 
 export async function loadManifest(
@@ -114,7 +115,10 @@ export async function loadManifest(
   packagePrefix?: string | null
 ): Promise<UnitWorkspaceManifest | null> {
   try {
-    const raw = await readTextFile(projectRoot, manifestRelPath(runId, packagePrefix));
+    const raw = await readDraftText(
+      projectRoot,
+      manifestRelPath(runId, packagePrefix)
+    );
     const parsed = JSON.parse(raw) as UnitWorkspaceManifest;
     if (parsed?.version !== 1 || !parsed.runId) return null;
     return parsed;
@@ -191,7 +195,7 @@ export async function addArtifactToWorkspace(input: {
   const workspaceRel = overlayRelPath(input.manifest.runId, targetRel, packagePrefix);
   // Same content already in repo — still keep overlay for this run's preview, but
   // mark modify so Apply can no-op via writeTextFileIfChanged.
-  await writeTextFile(input.projectRoot, workspaceRel, content);
+  await writeDraftText(input.projectRoot, workspaceRel, content);
 
   const entry: ManifestFileEntry = { op, targetRel, workspaceRel };
   const files = input.manifest.files.filter((f) => f.targetRel !== targetRel);
@@ -241,7 +245,7 @@ export async function loadWorkspacePreviews(
   const out: WorkspacePreviewFile[] = [];
   for (const entry of manifest.files) {
     try {
-      const content = await readTextFile(projectRoot, entry.workspaceRel);
+      const content = await readDraftText(projectRoot, entry.workspaceRel);
       let baseContent: string | null | undefined;
       if (entry.op === "modify") {
         try {

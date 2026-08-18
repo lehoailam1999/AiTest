@@ -9,7 +9,7 @@ Cursor narrative: ``.cursor/rules/unit-tc-from-analysis.mdc`` — keep in sync.
 Injection (single place — do NOT restate essay in system_prompt / COMPACT / .mdc):
 ``tc_generation_rules.engine_generation_rules("unit")`` prepends this block.
 Cursor pointer only: ``.cursor/rules/unit-tc-from-analysis.mdc``.
-Approve path/code: Desktop ``resolveUnitPrimaryFromIndex`` + ``code-aliases-unit-gen.mdc`` (separate phase).
+Approve path/code: IDE Repository Intelligence (unitApproveResolve) + locked grounding decision; Gen consumes only.
 
 Contract: UNIVERSAL Backend TC IR — SRS-only; PRIMARY BR|VAL|ERROR|AC-BE; portable — no product nouns.
 """
@@ -89,14 +89,16 @@ Dedup cùng BE across buckets → một TC, gộp `requirementIds`.
 
 Root: `testCases`, `coverage` (per PRIMARY: total/covered/missing), `gaps`, `unknownBehaviors`, `conflicts`.
 
-Mỗi TC tối thiểu: `title`, `type=Unit`, `primaryBucket`, `scenario`, `trace.{requirementIds,behaviorId}`, `preconditions`, `testData.{input,target,existingState}`, `steps.{prepare,execute}`, `expectedResult.{type,observable,description}`, `testDataHints.{layerHint,sourceSignal}` (null nếu không biết), `status` READY_FOR_CODEGEN|NOT_READY.
+Mỗi TC tối thiểu: `title`, `type=Unit`, `primaryBucket`, `scenario`, `trace.{requirementIds,behaviorId}`, `preconditions`, `testData.{input,target,existingState}`, `steps.{prepare,execute}`, `expectedResult.{type,observable,description}`, `testDataHints.{layerHint,sourceSignal}` (null nếu không biết), `status` READY_FOR_GROUNDING|NOT_READY.
+Pha sinh TC cấm phát READY_FOR_CODEGEN; automationReady=false cho đến khi Approve source authoritative.
 
 **Nguồn cover:** chỉ BUSINESS_RULES · VALIDATION_DATA · ERROR_HANDLING · ACCEPTANCE(BE).  
 FEATURES = tên `module` — **cấm** pad TC từ FEATURES/FLOWS/useCases/UI.
 
 **Approve-ready (bắt buộc — không invent class/method):**  
 - `primaryBucket` + `behaviorId` + `requirementIds`  
-- VALIDATION → `target.field` + `target.constraint` (+ boundary/value khi có)  
+- `target.scope` = field|multi|aggregate; aggregate cho toàn command/entity, không bịa field chung chung.
+- VALIDATION field/multi → `target.field` + `target.constraint` (+ boundary/value khi có).
 - `expectedResult.observable` ∈ create|update|query|validate|reject|persist|authz|state  
 - Title VN: `[Feature] - [Hành động BE] - [Kết quả]` — động từ nghiệp vụ (tạo/cập nhật/từ chối/lọc/đọc/gán) — **cấm** Class.Method / click / điền form / màn hình.  
 Steps/expected: ngôn ngữ nghiệp vụ BE — không class/repo/HTTP invent.
@@ -119,7 +121,7 @@ Scope IN|OUT|MIXED|UNKNOWN. MIXED→chỉ nhánh BE.
 `behaviorId`=`<reqId>-B<seq>`. Scenario chỉ chiều relevant. Dedup cùng BE. Cấm invent limit/HTTP/exception/class.  
 Title VN `[Feature]-[Hành động BE]-[Kết quả]`. Steps prepare/execute nghiệp vụ.  
 Approve markers: primaryBucket + behaviorId + target.field/constraint (VALIDATION) + observable BE.  
-JSON: testCases[] + coverage + gaps + unknownBehaviors + conflicts.
+JSON: testCases[] + coverage + gaps + unknownBehaviors + conflicts. TC đủ IR → READY_FOR_GROUNDING + automationReady=false; cấm READY_FOR_CODEGEN trước Approve.
 """
 
 UNIT_TC_FROM_ANALYSIS_RULES = get_rule_text(

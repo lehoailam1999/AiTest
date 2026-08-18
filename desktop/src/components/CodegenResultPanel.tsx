@@ -28,7 +28,7 @@ export function CodegenResultPanel(props?: { title?: string }) {
       <Empty
         description={
           bridgeOk
-            ? "Chưa có Apply/Run qua IDE Extension — chạy Apply hoặc Verify khi bridge connected."
+            ? "Chưa có Apply/Run qua IDE Extension — chạy Apply hoặc Execute khi bridge connected."
             : "IDE bridge offline — kết nối Extension để xem cây file Apply/Run."
         }
       />

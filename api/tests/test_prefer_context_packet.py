@@ -115,6 +115,6 @@ def test_flat_aitest_path_with_tc_module():
         module="Forensic",
         package_prefix="",
     )
-    assert path == "AItest/UnitTest/Forensic/evidence-update-modal.component.test.ts"
+    assert path == "AItest/UnitTest/forensic/evidence-update-modal.component.test.ts"
     assert "ClientApp" not in path
     assert "/src/" not in path

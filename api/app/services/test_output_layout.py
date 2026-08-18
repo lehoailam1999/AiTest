@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import re
-import hashlib
+import unicodedata
 
 # Root folder at project path (Apply target)
 AITEST_ROOT = "AItest"
@@ -167,15 +167,13 @@ def _norm_rel(path: str | None) -> str:
 
 
 def sanitize_module_label(module: str | None) -> str:
-    """TC.module → safe short folder (no path traversal, no spaces for shell/pytest)."""
+    """TC.module → ASCII-safe short folder (no path traversal)."""
     mod = (module or "").replace("\\", "/").strip().strip("/")
-    mod = re.sub(r'[<>:"|?*]', "", mod)
     parts: list[str] = []
     for p in mod.split("/"):
         if not p or p in (".", ".."):
             continue
-        seg = re.sub(r"\s+", "-", p.strip())
-        seg = re.sub(r"-+", "-", seg).strip("-")
+        seg = sanitize_path_segment(p)
         if seg and seg not in (".", ".."):
             parts.append(seg)
     return "/".join(parts[:_MAX_MODULE_DEPTH])
@@ -183,7 +181,7 @@ def sanitize_module_label(module: str | None) -> str:
 
 # Windows MAX_PATH is 260; keep each title folder short so
 # {root}/AItest/E2ETest/{req}/{tc}/specs/{file}.spec.ts stays safe on any OS.
-_MAX_PATH_SEGMENT_LEN = 48
+_MAX_PATH_SEGMENT_LEN = 40
 
 # Keep Playwright/test + POM compound suffixes when truncating long filenames.
 _COMPOUND_FILE_EXTS = (
@@ -232,9 +230,16 @@ def split_e2e_filename(name: str) -> tuple[str, str]:
     return n, ""
 
 
+def _strip_diacritics(s: str) -> str:
+    s = (s or "").replace("đ", "d").replace("Đ", "D")
+    nfd = unicodedata.normalize("NFD", s)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
 def sanitize_path_segment(raw: str | None, *, max_len: int = _MAX_PATH_SEGMENT_LEN) -> str:
     """
     Safe single folder segment for title-like labels.
+    - ASCII slug (strip diacritics, lowercase)
     - never creates nested dirs from `/` or `\\`
     - strips shell/glob-sensitive brackets
     - caps length (Windows MAX_PATH; long Vietnamese TC titles)
@@ -242,10 +247,12 @@ def sanitize_path_segment(raw: str | None, *, max_len: int = _MAX_PATH_SEGMENT_L
     s = (raw or "").replace("\\", "/").strip()
     if not s:
         return ""
+    s = _strip_diacritics(s)
     s = re.sub(r'[<>:"|?*\[\]]', "", s)
     s = s.replace("/", "-")
-    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s)
     s = re.sub(r"-+", "-", s).strip("-")
+    s = s.lower()
     if s in {".", ".."}:
         return ""
     return truncate_path_segment(s, max_len=max_len)

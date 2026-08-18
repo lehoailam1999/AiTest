@@ -8,6 +8,7 @@ import {
   IdeMethods,
   IdeNotifications,
   IDE_PROTOCOL_VERSION,
+  EXTENSION_CAPABILITIES,
   createDiscovery,
   writeBridgeDiscovery,
   clearBridgeDiscovery,
@@ -27,6 +28,7 @@ import {
   type SearchTextParams,
   type SymbolPositionParams,
   type ReadFileParams,
+  type UnitApproveResolveParams,
 } from "@aitest/ide-protocol/node";
 import {
   buildFocusSnapshot,
@@ -45,6 +47,7 @@ import {
   handleSearchSymbol,
   handleSearchText,
 } from "./ideCommands";
+import { handleUnitApproveResolve } from "./unitApproveCommands";
 
 export type BridgeHandle = {
   port: number;
@@ -119,6 +122,7 @@ export async function startIdeBridgeServer(opts?: {
             protocolVersion: IDE_PROTOCOL_VERSION,
             workspaceRoot: workspaceRoot() || undefined,
             focus: snap?.focus,
+            capabilities: [...EXTENSION_CAPABILITIES],
             supportedMethods: [
               IdeMethods.getSemanticContext,
               IdeMethods.searchSymbol,
@@ -129,6 +133,7 @@ export async function startIdeBridgeServer(opts?: {
               IdeMethods.readFile,
               IdeMethods.createTestFile,
               IdeMethods.openFile,
+              IdeMethods.unitApproveResolve,
             ],
           };
           reply(makeSuccess(msg.id, health));
@@ -244,6 +249,11 @@ export async function startIdeBridgeServer(opts?: {
           const doc = await vscode.workspace.openTextDocument(uri);
           await vscode.window.showTextDocument(doc);
           reply(makeSuccess(msg.id, { ok: true }));
+          break;
+        }
+        case IdeMethods.unitApproveResolve: {
+          const p = msg.params as UnitApproveResolveParams;
+          reply(makeSuccess(msg.id, await handleUnitApproveResolve(p)));
           break;
         }
         case IdeMethods.runTest: {

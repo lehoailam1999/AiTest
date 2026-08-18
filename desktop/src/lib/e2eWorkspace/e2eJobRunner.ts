@@ -48,6 +48,7 @@ import {
 } from "./assertTcReadyForE2eGen";
 import {
   matchFeaturePathFromCatalog,
+  featureSourcesForPath,
   type E2eRouteCatalog,
 } from "./e2eRouteCatalog";
 import { loadOrBuildE2eRouteCatalog } from "./e2eRouteCatalogCache";
@@ -751,6 +752,19 @@ export async function generateE2eForTestCase(opts: {
     featurePath,
     inferredPathSource || "FE source"
   );
+  const routeFeatureSources = featureSourcesForPath(featurePath, opts.routeCatalog);
+  if (
+    routeFeatureSources.length &&
+    !/(?:^|\n)\s*featureSources\s*[:=]/i.test(tcForGate.testData || "")
+  ) {
+    const line = `featureSources: ${routeFeatureSources.join(", ")}`;
+    tcForGate = {
+      ...tcForGate,
+      testData: (tcForGate.testData || "").trim()
+        ? `${(tcForGate.testData || "").trim()}\n${line}`
+        : line,
+    };
+  }
   // WHO enrich into testData so API auth_hints see authRole even when DB TC lacks it
   if (authCtx.role && authCtx.roleSource && authCtx.roleSource !== "tc") {
     tcForGate = mergeTcWithAuthRole(

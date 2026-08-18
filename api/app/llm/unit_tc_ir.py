@@ -178,10 +178,18 @@ def build_unit_ir_test_data(obj: dict[str, Any]) -> str:
         td = obj.get("test_data")
     if isinstance(td, dict):
         target = td.get("target") if isinstance(td.get("target"), dict) else {}
+        scope = str(target.get("scope") or "").strip().lower()
+        if scope in ("field", "multi", "aggregate"):
+            lines.append(f"target.scope: {scope}")
         if target.get("field"):
             lines.append(f"target.field: {target.get('field')}")
         if target.get("property"):
             lines.append(f"target.property: {target.get('property')}")
+        properties = target.get("properties")
+        if isinstance(properties, list):
+            props = [str(p).strip() for p in properties if str(p).strip()]
+            if props:
+                lines.append(f"target.properties: {', '.join(props)}")
         if target.get("constraint"):
             lines.append(f"target.constraint: {target.get('constraint')}")
         if target.get("boundary"):
@@ -234,31 +242,36 @@ def flatten_unit_tc_ir(
     if not isinstance(obj, dict):
         return {}
 
-    from app.services.unit_tc_field_bind import bind_unit_tc_field
     from app.services.unit_tc_ir_ready import apply_unit_tc_ir_readiness
 
     out = dict(obj)
 
     if looks_like_unit_tc_ir(obj):
-        bind_unit_tc_field(out, field_aliases=field_aliases)
+        # Source-independent TC Gen preserves human labels/input. Backend
+        # properties are bound only by IDE Repository Intelligence during Approve.
         apply_unit_tc_ir_readiness(out)
-        out["steps"] = _join_steps(obj.get("steps"))
+        out["steps"] = _join_steps(out.get("steps"))
         out["expectedResult"] = _join_expected(
-            obj.get("expectedResult") or obj.get("expected_result") or obj.get("expected")
+            out.get("expectedResult")
+            or out.get("expected_result")
+            or out.get("expected")
         )
-        pre = _join_preconditions(obj)
+        pre = _join_preconditions(out)
         if pre:
             out["precondition"] = pre
-        out["testData"] = build_unit_ir_test_data(obj)
+        # Serialize the normalized object. Binding/readiness mutate `out`; using
+        # the original object loses property/input/status and creates dual status.
+        out["testData"] = build_unit_ir_test_data(out)
         # Prefer feature module from title bracket or leave module for caller
         if not out.get("module") and out.get("title"):
             title = str(out["title"])
             if title.startswith("[") and "]" in title:
                 out["module"] = title[1 : title.index("]")].strip() or out.get("module")
         out.setdefault("type", "Unit")
-        if not out.get("automationReady") and not out.get("automation_ready"):
-            status = str(obj.get("status") or "").upper()
-            out["automationReady"] = status == "READY_FOR_CODEGEN"
+        # TC generation can only be grounding-ready. Codegen readiness is
+        # derived after authoritative Approve source grounding.
+        out["automationReady"] = False
+        out["automation_ready"] = False
     elif obj.get("primaryBucket") or obj.get("behaviorId") or (
         isinstance(obj.get("trace"), dict)
     ):
